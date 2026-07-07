@@ -5,6 +5,7 @@ Visible endpoints (Swagger)
 ───────────────────────────
   POST   /run-linkedin-agent             trigger a LinkedIn harvest run now
   POST   /linkedin-setup-session         open Chrome profile for one-time manual login
+  GET    /linkedin-auth-status           check current LinkedIn session state (non-destructive)
   GET    /linkedin-results               list all saved LinkedIn result files
   GET    /linkedin-results/{run_id}      retrieve one saved result
 """
@@ -33,6 +34,22 @@ from app.services.linkedin_storage_service import LinkedInStorageService
 logger = structlog.get_logger(__name__)
 
 router = APIRouter(tags=["LinkedIn Harvest Agent"])
+
+# ── Auth-state detection constants ────────────────────────────────────────────
+
+_GATED     = ("/login", "/checkpoint", "/challenge", "/authwall", "/uas/")
+_MFA_PATHS = ("/checkpoint", "/challenge")
+
+
+def _detect_auth_state(url: str) -> str:
+    """Return a structured auth state string based on the current browser URL."""
+    if any(p in url for p in _MFA_PATHS):
+        return "mfa_required"
+    if any(p in url for p in ("/login", "/authwall", "/uas/")):
+        return "login_required"
+    if "linkedin.com" in url:
+        return "logged_in"
+    return "unknown"
 
 _config_svc  = ConfigService()
 _storage_svc = LinkedInStorageService()
@@ -197,60 +214,243 @@ async def run_linkedin_agent() -> Any:
 async def setup_linkedin_session() -> Any:
     """
     Opens Chrome with the dedicated harvest agent profile directory.
-    Log in to LinkedIn manually in the browser window that appears.
-    Close the browser when done — the session is persisted in the profile
-    directory and all future /run-linkedin-agent calls will reuse it.
+
+    **Session reuse**: if the Chrome profile already has a valid LinkedIn session
+    the endpoint returns immediately without opening a login page.
+
+    **MFA**: if LinkedIn requests multi-factor authentication, leave the browser
+    open, complete MFA in the window, and the session is saved automatically.
 
     Profile directory: data/chrome_profile (configurable in harvest_config.json)
     Times out after 10 minutes.
     """
     from app.scrapers.browser_manager import PersistentBrowserManager
+    from app.services.session_manager import SessionManager
 
     config         = ConfigService().load()
     chrome_profile = config.browser.chrome_profile
 
-    async def _open_for_login() -> str:
+    async def _open_for_login() -> dict:
+        from pathlib import Path as _Path
+
+        # ── Step 0: Clear Chrome profile lock files before launching ─────────
+        # Prevents "browser has been closed" crash when a previous Playwright
+        # instance left the profile locked (e.g. after a headless auth check).
+        _profile_path = _Path(chrome_profile)
+        for _lock in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+            _lf = _profile_path / _lock
+            if _lf.exists():
+                try:
+                    _lf.unlink()
+                    logger.info("chrome_profile_lock_cleared", lock=_lock)
+                except Exception:
+                    pass
+
         async with PersistentBrowserManager(
             profile_dir = chrome_profile,
             headless    = False,
         ) as pbm:
             page = await pbm.new_page()
+
+            # ── Step 1: Navigate to LinkedIn home — checks session in ONE pass ─
+            # LinkedIn redirects to /feed if already logged in, or to /login if not.
+            # This avoids a double-navigation (feed → login) that can cause a race.
+            logger.info(
+                "linkedin_browser_launched",
+                msg     = "Browser launched. Navigating to LinkedIn…",
+                profile = chrome_profile,
+            )
             await page.goto(
-                "https://www.linkedin.com/login",
+                "https://www.linkedin.com/",
                 wait_until = "domcontentloaded",
                 timeout    = 30_000,
             )
+            await page.wait_for_timeout(3_000)
+
+            state = _detect_auth_state(page.url)
+
+            if state == "logged_in":
+                # Verify li_at is actually present — URL alone can be a false positive
+                # when LinkedIn serves a cached shell without issuing an auth token.
+                ctx_cookies = await pbm.context.cookies()
+                li_at_ok    = any(c["name"] == "li_at" for c in ctx_cookies)
+                if li_at_ok:
+                    logger.info(
+                        "linkedin_session_valid",
+                        msg = "Session already valid — skipping login page.",
+                        url = page.url,
+                    )
+                    sm = SessionManager("linkedin")
+                    await sm.save_session(page)
+                    return {
+                        "auth_status": "logged_in",
+                        "action":      "session_reused",
+                        "profile":     chrome_profile,
+                    }
+                # li_at missing: LinkedIn served cached shell without auth token
+                logger.warning(
+                    "linkedin_session_false_positive",
+                    msg = "URL shows /feed but li_at is absent — session not valid. Forcing fresh login.",
+                    url = page.url,
+                )
+                state = "login_required"
+
+            # ── Step 2: Session expired — navigate to login if not already there
             logger.info(
-                "linkedin_setup_browser_opened",
-                msg     = "LinkedIn login page opened. Please log in manually.",
+                "linkedin_session_expired",
+                msg = "Session expired — opening LinkedIn login page.",
+                url = page.url[:80],
+            )
+            if state not in ("login_required", "mfa_required"):
+                await page.goto(
+                    "https://www.linkedin.com/login",
+                    wait_until = "domcontentloaded",
+                    timeout    = 30_000,
+                )
+                await page.wait_for_timeout(2_000)
+                state = _detect_auth_state(page.url)
+
+            logger.info(
+                "linkedin_login_page_opened",
+                msg     = "LinkedIn login page is open. Please enter your credentials in the browser window.",
                 profile = chrome_profile,
             )
 
-            _GATED = ("/login", "/checkpoint", "/challenge", "/authwall", "/uas/")
+            # ── Step 3: Poll for auth state transitions (10 min) ─────────────
+            prev_state = state
             for _ in range(300):   # 300 × 2 s = 10 min
                 await page.wait_for_timeout(2_000)
-                url = page.url
-                if "linkedin.com" in url and not any(p in url for p in _GATED):
-                    logger.info("linkedin_setup_login_detected", url=url)
-                    break
+                url   = page.url
+                state = _detect_auth_state(url)
+
+                if state != prev_state:
+                    if state == "mfa_required":
+                        logger.info(
+                            "linkedin_mfa_detected",
+                            msg         = "LinkedIn requested MFA. Complete authentication in the browser window.",
+                            url         = url[:80],
+                            next_action = "Enter the code from your authenticator app or SMS.",
+                        )
+                    elif state == "login_required":
+                        logger.info("linkedin_login_page", url=url[:80])
+                    elif state == "logged_in":
+                        logger.info(
+                            "linkedin_login_success",
+                            msg = "Authentication successful.",
+                            url = url[:80],
+                        )
+                    prev_state = state
+
+                if state == "logged_in":
+                    # Verify li_at is present before accepting the logged_in state
+                    ctx_cookies = await pbm.context.cookies()
+                    if any(c["name"] == "li_at" for c in ctx_cookies):
+                        break
+                    # li_at still absent — wait for it to be set
+                    state = prev_state
             else:
                 raise RuntimeError("Setup timed out — login not completed within 10 minutes")
 
-        return chrome_profile
+            # ── Step 4: Persist to Chrome profile (auto) + sessions JSON ────
+            sm = SessionManager("linkedin")
+            await sm.save_session(page)
+            logger.info(
+                "linkedin_session_saved",
+                profile      = chrome_profile,
+                session_file = str(sm.session_path),
+                msg          = "Session saved. Future runs will reuse it automatically.",
+            )
+
+        return {
+            "auth_status": "logged_in",
+            "action":      "logged_in_and_saved",
+            "profile":     chrome_profile,
+        }
 
     try:
         if needs_proactor():
-            profile: str = await run_in_proactor(_open_for_login)
+            result: dict = await run_in_proactor(_open_for_login)
         else:
-            profile = await _open_for_login()
+            result = await _open_for_login()
         return {
-            "status":   "ready",
-            "message":  "LinkedIn session saved in Chrome profile. Future /run-linkedin-agent calls will reuse it.",
-            "profile":  profile,
+            "status":  "ready",
+            "message": "LinkedIn session active. Future /run-linkedin-agent calls will reuse it automatically.",
+            **result,
         }
     except Exception as exc:
         logger.error("linkedin_setup_session_failed", error=str(exc))
         return _err("Failed to set up LinkedIn session", str(exc))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# GET /linkedin-auth-status
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/linkedin-auth-status", status_code=status.HTTP_200_OK)
+async def linkedin_auth_status() -> Any:
+    """
+    Check current LinkedIn session state.
+
+    Uses the saved session file (data/sessions/linkedin_session.json) with a
+    non-persistent browser — avoids locking the Chrome profile directory so
+    POST /linkedin-setup-session can always launch cleanly.
+
+    Returns one of:
+      `{"status": "logged_in"}`        — session is valid, harvesting can start
+      `{"status": "login_required"}`   — session expired, call POST /linkedin-setup-session
+      `{"status": "mfa_required"}`     — checkpoint page, call POST /linkedin-setup-session
+      `{"status": "no_session"}`       — no session file, call POST /linkedin-setup-session
+      `{"status": "error", ...}`       — browser failed to launch
+    """
+    from app.scrapers.browser_manager import BrowserManager
+    from app.services.session_manager import SessionManager
+
+    sm = SessionManager("linkedin")
+
+    if not sm.session_exists():
+        logger.info("linkedin_auth_status_no_session")
+        return {
+            "status":  "no_session",
+            "message": "No session file found. Call POST /linkedin-setup-session to log in.",
+        }
+
+    async def _check() -> dict:
+        # Use non-persistent BrowserManager with session file — never locks Chrome profile
+        async with BrowserManager(
+            headless      = True,
+            storage_state = sm.storage_state_arg(),
+        ) as bm:
+            page = await bm.new_page()
+            try:
+                await page.goto(
+                    "https://www.linkedin.com/feed/",
+                    wait_until = "domcontentloaded",
+                    timeout    = 25_000,
+                )
+                await page.wait_for_timeout(2_000)
+                url   = page.url
+                state = _detect_auth_state(url)
+                logger.info("linkedin_auth_status_checked", state=state, url=url[:80])
+                result: dict = {"status": state, "url": url}
+                if state == "logged_in":
+                    result["message"] = "Session valid — harvest agent can start immediately."
+                elif state == "mfa_required":
+                    result["message"] = "LinkedIn requested MFA. Call POST /linkedin-setup-session and complete MFA in the browser window."
+                else:
+                    result["message"] = "Session expired. Call POST /linkedin-setup-session to log in."
+                return result
+            except Exception as exc:
+                return {"status": "error", "error": str(exc)}
+
+    try:
+        if needs_proactor():
+            result: dict = await run_in_proactor(_check)
+        else:
+            result = await _check()
+        return result
+    except Exception as exc:
+        logger.error("linkedin_auth_status_error", error=str(exc))
+        return {"status": "error", "error": str(exc)}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
