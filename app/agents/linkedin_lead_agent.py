@@ -155,6 +155,41 @@ class LinkedInLeadAgent:
                 logger.warning("linkedin_page_load_failed", page_num=page_num, error=str(exc))
                 break
 
+            # Diagnose: log actual URL and page title to detect login redirects
+            try:
+                actual_url   = page.url
+                page_title   = await page.title()
+                is_auth_wall = any(p in actual_url for p in ("/login", "/authwall", "/checkpoint", "/uas/"))
+                logger.info("linkedin_page_landed", page_num=page_num, actual_url=actual_url[:80], title=page_title[:60], auth_wall=is_auth_wall)
+            except Exception:
+                pass
+
+            # Container-count diagnostic — written to file so it survives across the API boundary
+            try:
+                _diag = await page.evaluate("""() => {
+                    var r = {};
+                    r.url = location.href.slice(0, 120);
+                    r.title = document.title.slice(0, 80);
+                    r.listitem   = document.querySelectorAll('div[role="listitem"]').length;
+                    r.li_rsc     = document.querySelectorAll('li.reusable-search__result-container').length;
+                    r.data_urn   = document.querySelectorAll('[data-urn]').length;
+                    r.data_eurn  = document.querySelectorAll('[data-entity-urn]').length;
+                    r.feed_v2    = document.querySelectorAll('.feed-shared-update-v2').length;
+                    r.article    = document.querySelectorAll('article').length;
+                    r.in_links   = document.querySelectorAll('a[href*="/in/"]').length;
+                    r.span_dir   = document.querySelectorAll('span[dir]').length;
+                    var sample = document.querySelector('div[role="listitem"]');
+                    r.sample_text = sample ? sample.textContent.slice(0, 200) : '';
+                    return r;
+                }""")
+                import json as _json, pathlib as _pl
+                _pl.Path("data/results/lead_intelligence").mkdir(parents=True, exist_ok=True)
+                _pl.Path("data/results/lead_intelligence/li_diag.json").write_text(
+                    _json.dumps(_diag, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+                logger.info("linkedin_container_diagnostic", page_num=page_num, **_diag)
+            except Exception as _e:
+                logger.warning("linkedin_diag_failed", error=str(_e))
             raw_posts = await self._extract_posts_from_page(page)
             logger.info("linkedin_page_extracted", page_num=page_num, count=len(raw_posts))
 
@@ -176,6 +211,8 @@ class LinkedInLeadAgent:
                 headline   = raw.get("author_headline", "")
                 designation, company = _parse_company_from_headline(headline)
 
+                # Prefer mailto: email surfaced directly from DOM; fall back to text extraction
+                mailto_email = raw.get("raw_email", "").strip()
                 post = LinkedInPost(
                     post_url           = raw.get("post_url", ""),
                     author_name        = raw.get("author_name", "").strip(),
@@ -184,7 +221,7 @@ class LinkedInLeadAgent:
                     author_company     = company or raw.get("author_company", ""),
                     post_content       = post_text,
                     post_date          = raw.get("post_date", ""),
-                    raw_email          = _extract_email_from_text(post_text),
+                    raw_email          = mailto_email or _extract_email_from_text(post_text),
                     raw_phone          = _extract_phone_from_text(post_text),
                 )
 
@@ -305,102 +342,188 @@ class LinkedInLeadAgent:
         """
         try:
             return await page.evaluate("""() => {
-                const posts = [];
+                var posts = [];
 
-                // LinkedIn search results render posts inside <li> elements
-                // Multiple selector variants for robustness across LinkedIn DOM versions
-                const containers = Array.from(document.querySelectorAll(
+                // LinkedIn 2026 DOM: posts use div[role='listitem'] as containers.
+                // Legacy class-based selectors (.feed-shared-update-v2, etc.) are included
+                // as fallbacks for any remaining LinkedIn DOM variant.
+                var containers = Array.from(document.querySelectorAll(
+                    'div[role="listitem"], ' +
                     'li.reusable-search__result-container, ' +
                     'div.feed-shared-update-v2, ' +
                     'div[data-urn], ' +
                     '.occludable-update'
                 ));
 
-                for (const el of containers) {
-                    try {
-                        // Author name — multiple selector strategies
-                        const nameSelectors = [
-                            '.feed-shared-actor__name',
-                            '.update-components-actor__name',
-                            '.app-aware-link .artdeco-entity-lockup__title',
-                            '[data-anonymize="person-name"]',
-                            '.entity-result__title-text a span[aria-hidden="true"]',
-                        ];
-                        let authorName = '';
-                        for (const s of nameSelectors) {
-                            const n = el.querySelector(s);
-                            if (n && n.textContent.trim()) {
-                                authorName = n.textContent.trim();
-                                break;
-                            }
-                        }
+                // Deduplicate containers by their profile URL to avoid double-counting
+                var seenContainers = new Set();
 
-                        // Author profile URL — find any /in/ link
-                        const profileLinkEl = el.querySelector(
-                            'a[href*="/in/"], a.feed-shared-actor__container-link, a.update-components-actor__container-link'
-                        );
-                        const profileUrl = profileLinkEl
+                for (var ci = 0; ci < containers.length; ci++) {
+                    var el = containers[ci];
+                    try {
+                        // ── Author profile URL ────────────────────────────────
+                        // Find ALL /in/ links in the container, pick the one with the most text
+                        var inLinks = Array.from(el.querySelectorAll('a[href*="/in/"]'));
+                        var profileLinkEl = null;
+                        for (var li2 = 0; li2 < inLinks.length; li2++) {
+                            var t = (inLinks[li2].textContent || '').trim();
+                            if (t.length > 2) { profileLinkEl = inLinks[li2]; break; }
+                        }
+                        if (!profileLinkEl && inLinks.length > 0) { profileLinkEl = inLinks[0]; }
+
+                        var profileUrl = profileLinkEl
                             ? (profileLinkEl.href || profileLinkEl.getAttribute('href') || '')
                             : '';
 
-                        // Author headline / subtext
-                        const headlineSelectors = [
-                            '.feed-shared-actor__sub-description',
-                            '.update-components-actor__description',
-                            '.artdeco-entity-lockup__subtitle',
-                        ];
-                        let headline = '';
-                        for (const s of headlineSelectors) {
-                            const h = el.querySelector(s);
-                            if (h && h.textContent.trim()) {
-                                headline = h.textContent.trim();
-                                break;
+                        // Skip if already processed this profile
+                        var profileKey = profileUrl.split('?')[0];
+                        if (profileKey && seenContainers.has(profileKey)) continue;
+                        if (profileKey) seenContainers.add(profileKey);
+
+                        // ── Author name ───────────────────────────────────────
+                        // LinkedIn 2026: name is in the text of the /in/ link, may include
+                        // degree indicator (· 2nd, · 3rd+). Strip those.
+                        var authorName = '';
+                        if (profileLinkEl) {
+                            var rawName = (profileLinkEl.textContent || '').trim();
+                            // Remove degree indicators and extra whitespace
+                            authorName = rawName
+                                .replace(/[\\u00b7\\u2022].*$/, '')  // strip after · or •
+                                .replace(/\\s+/g, ' ')
+                                .trim();
+                        }
+                        // Fallback: legacy class-based name selectors
+                        if (!authorName) {
+                            var legacyNameSels = [
+                                '.feed-shared-actor__name', '.update-components-actor__name',
+                                '[data-anonymize="person-name"]',
+                                '.entity-result__title-text a span[aria-hidden="true"]',
+                            ];
+                            for (var ns = 0; ns < legacyNameSels.length; ns++) {
+                                var nn = el.querySelector(legacyNameSels[ns]);
+                                if (nn && nn.textContent.trim()) {
+                                    authorName = nn.textContent.trim(); break;
+                                }
                             }
                         }
 
-                        // Post content
-                        const contentSelectors = [
-                            '.feed-shared-update-v2__description',
-                            '.feed-shared-text-view',
-                            '.update-components-text',
-                            '.attributed-text-segment-list__content',
-                            '.commentary span[dir]',
-                        ];
-                        let content = '';
-                        for (const s of contentSelectors) {
-                            const c = el.querySelector(s);
-                            if (c && c.textContent.trim()) {
-                                content = c.textContent.trim();
-                                break;
+                        // ── Author headline ───────────────────────────────────
+                        // LinkedIn 2026: textContent has NO newlines (it's one long string).
+                        // Headline appears after the degree indicator and before the time stamp.
+                        // Pattern in textContent: "... NameText · 2ndHeadlineText1d • Follow..."
+                        var headline = '';
+                        var fullContainerText = el.textContent || '';
+                        if (authorName) {
+                            var namePos = fullContainerText.indexOf(authorName);
+                            if (namePos >= 0) {
+                                var afterName = fullContainerText.slice(namePos + authorName.length);
+                                // Strip leading degree indicator (· 2nd, · 3rd+, • 2nd, etc.)
+                                afterName = afterName.replace(/^[\s·•]+\d+(st|nd|rd|th)\+?[\s·•]*/i, '');
+                                // Headline ends at the time pattern (e.g. 1d, 2d, 1w, 3mo, 1yr)
+                                // followed optionally by • Edited, then • Follow or just Follow
+                                var timeRx = /\s*\d+[dwhmyo][a-z]*[\s·•]*(Edited[\s·•]*)?(Follow|Repost)/;
+                                var tIdx = afterName.search(timeRx);
+                                if (tIdx > 0) {
+                                    headline = afterName.slice(0, tIdx).trim();
+                                } else {
+                                    // No time marker — take up to 120 chars as best-effort headline
+                                    headline = afterName.slice(0, 120).trim();
+                                }
+                            }
+                        }
+                        // Fallback: legacy headline selectors
+                        if (!headline) {
+                            var legacyHlSels = [
+                                '.feed-shared-actor__sub-description',
+                                '.update-components-actor__description',
+                                '.artdeco-entity-lockup__subtitle',
+                            ];
+                            for (var hs = 0; hs < legacyHlSels.length; hs++) {
+                                var hh = el.querySelector(legacyHlSels[hs]);
+                                if (hh && hh.textContent.trim()) { headline = hh.textContent.trim(); break; }
                             }
                         }
 
-                        // Post URL — prefer /posts/ or /feed/update/ links
-                        let postUrl = '';
-                        const postLinkEl = el.querySelector(
-                            'a[href*="/posts/"], a[href*="/feed/update/"], a.feed-shared-meta__link'
-                        );
+                        // ── Post content ──────────────────────────────────────
+                        // LinkedIn 2026: span[dir] is absent; post body is in the container
+                        // textContent after the "Follow" button text (end of actor header).
+                        // Strategy: extract from full container text, strip the header section.
+                        var content = '';
+
+                        // Strategy 1: child div NOT containing the /in/ link (post content div)
+                        var elChildren = Array.from(el.children);
+                        var maxChildLen = 0;
+                        for (var dc = 0; dc < elChildren.length; dc++) {
+                            var child = elChildren[dc];
+                            if (child.querySelector('a[href*="/in/"]')) continue; // skip actor section
+                            var childTxt = (child.textContent || '').trim();
+                            if (childTxt.length > maxChildLen && childTxt.length > 20) {
+                                maxChildLen = childTxt.length;
+                                content = childTxt;
+                            }
+                        }
+
+                        // Strategy 2: container textContent after "Follow" keyword (header ends there)
+                        if (!content || content.length < 20) {
+                            var fullCt = el.textContent || '';
+                            var followIdx = fullCt.indexOf('Follow');
+                            if (followIdx >= 0 && followIdx + 8 < fullCt.length) {
+                                content = fullCt.slice(followIdx + 6).trim();
+                            }
+                        }
+
+                        // Strategy 3: legacy class-based selectors (pre-2026 fallback)
+                        if (!content || content.length < 20) {
+                            var legacyContentSels = [
+                                '.feed-shared-update-v2__description', '.feed-shared-text-view',
+                                '.update-components-text', '.attributed-text-segment-list__content',
+                                'span[dir="ltr"]', 'span[dir="rtl"]',
+                            ];
+                            for (var cs2 = 0; cs2 < legacyContentSels.length; cs2++) {
+                                var cc = el.querySelector(legacyContentSels[cs2]);
+                                if (cc && (cc.textContent || '').trim().length > 20) {
+                                    content = cc.textContent.trim(); break;
+                                }
+                            }
+                        }
+
+                        // Strategy 4: full container text as last resort
+                        if (!content || content.length < 20) {
+                            content = (el.textContent || '').trim().slice(0, 800);
+                        }
+
+                        // ── Post URL ──────────────────────────────────────────
+                        var postUrl = '';
+                        var postLinkEl = el.querySelector('a[href*="/posts/"]') ||
+                                         el.querySelector('a[href*="/feed/update/"]') ||
+                                         el.querySelector('a.feed-shared-meta__link');
                         if (postLinkEl) {
                             postUrl = postLinkEl.href || postLinkEl.getAttribute('href') || '';
                         }
 
-                        // Post date (relative, e.g. "2d", "1w")
-                        const dateEl = el.querySelector(
-                            '.feed-shared-actor__sub-description time, ' +
-                            '.update-components-actor__sub-description time, ' +
-                            'span.feed-shared-meta__item'
-                        );
-                        const postDate = dateEl ? dateEl.textContent.trim() : '';
+                        // ── Post date ─────────────────────────────────────────
+                        var dateEl = el.querySelector('time') ||
+                                     el.querySelector('[class*="time"]') ||
+                                     el.querySelector('span.feed-shared-meta__item');
+                        var postDate = dateEl ? dateEl.textContent.trim() : '';
+
+                        // ── Public email from mailto: links ───────────────────
+                        var mailtoLinks = Array.from(el.querySelectorAll('a[href^="mailto:"]'));
+                        var rawEmail = '';
+                        if (mailtoLinks.length > 0) {
+                            rawEmail = (mailtoLinks[0].href || '').replace('mailto:', '').trim();
+                        }
 
                         if (authorName || profileUrl) {
                             posts.push({
-                                author_name: authorName,
+                                author_name:        authorName,
                                 author_profile_url: profileUrl,
-                                author_headline: headline,
-                                author_company: '',   // parsed from headline in Python
-                                post_content: content,
-                                post_url: postUrl,
-                                post_date: postDate,
+                                author_headline:    headline,
+                                author_company:     '',
+                                post_content:       content,
+                                post_url:           postUrl,
+                                post_date:          postDate,
+                                raw_email:          rawEmail,
                             });
                         }
                     } catch (e) {

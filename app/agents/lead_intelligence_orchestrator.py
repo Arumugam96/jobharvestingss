@@ -58,8 +58,9 @@ from app.models.lead_models import (
     LeadRecord,
     LinkedInPost,
 )
-from app.scrapers.browser_manager import PersistentBrowserManager
+from app.scrapers.browser_manager import BrowserManager, PersistentBrowserManager
 from app.services.lead_config_service import LeadConfigService
+from app.services.session_manager import SessionManager as _SessionManager
 
 logger = structlog.get_logger(__name__)
 
@@ -126,21 +127,29 @@ class LeadIntelligenceOrchestrator:
             min_confidence      = min_confidence,
         )
 
-        # ── Open a shared persistent browser session ─────────────────────────
-        chrome_profile = cfg.get("browser", {}).get("chrome_profile", "data/chrome_profile")
+        # ── Browser configuration ─────────────────────────────────────────────
+        chrome_profile  = cfg.get("browser", {}).get("chrome_profile", "data/chrome_profile")
+        browser_headless = cfg.get("browser", {}).get("headless", True)
+        browser_slow_mo  = cfg.get("browser", {}).get("slow_mo_ms", 0)
 
-        async with PersistentBrowserManager(
-            profile_dir = chrome_profile,
-            headless    = cfg.get("browser", {}).get("headless", True),
-            slow_mo     = cfg.get("browser", {}).get("slow_mo_ms", 0),
-        ) as pbm:
-            linkedin_page = await pbm.new_page()
-            naukri_page   = await pbm.new_page()  # separate tab for Naukri
+        # ── Step 1: LinkedIn post search ─────────────────────────────────────
+        # Uses BrowserManager + storage_state (cookies + localStorage from session
+        # file) — identical to the /linkedin-auth-status endpoint, which confirms
+        # this approach reaches LinkedIn search without an auth wall.
+        linkedin_posts: list[LinkedInPost] = []
 
-            # ── Step 1: LinkedIn post search ─────────────────────────────────
-            linkedin_posts: list[LinkedInPost] = []
-
-            if "linkedin" in request.search_sources:
+        if "linkedin" in request.search_sources:
+            _sm = _SessionManager("linkedin")
+            async with BrowserManager(
+                headless      = browser_headless,
+                storage_state = _sm.storage_state_arg(),
+            ) as li_bm:
+                linkedin_page = await li_bm.new_page()
+                logger.info(
+                    "linkedin_browser_ready",
+                    session_file = str(_sm.session_path),
+                    session_ok   = _sm.session_exists(),
+                )
                 linkedin_agent = LinkedInLeadAgent(
                     max_posts    = max_posts,
                     max_pages    = li_cfg.get("max_pages", 5),
@@ -154,44 +163,51 @@ class LeadIntelligenceOrchestrator:
                 except Exception as exc:
                     logger.exception("linkedin_agent_error", error=str(exc))
 
-            result.linkedin_posts_found = len(linkedin_posts)
-            logger.info(
-                "linkedin_agent_completed",
-                posts_found = len(linkedin_posts),
-                with_email  = sum(1 for p in linkedin_posts if p.raw_email),
-                with_phone  = sum(1 for p in linkedin_posts if p.raw_phone),
-            )
+        result.linkedin_posts_found = len(linkedin_posts)
+        logger.info(
+            "linkedin_agent_completed",
+            posts_found = len(linkedin_posts),
+            with_email  = sum(1 for p in linkedin_posts if p.raw_email),
+            with_phone  = sum(1 for p in linkedin_posts if p.raw_phone),
+        )
 
-            # ── Step 2: Build initial LeadRecords from LinkedIn posts ────────
-            initial_records: list[LeadRecord] = []
-            for post in linkedin_posts:
-                if not post.author_name:
-                    continue
-                record = self._merger.build_from_linkedin(post)
-                initial_records.append(record)
-                if post.author_name:
-                    logger.info("recruiter_found", name=post.author_name, company=record.company)
-                if record.official_email or record.contact_number:
-                    logger.info(
-                        "contact_found",
-                        source    = "LinkedIn",
-                        recruiter = post.author_name,
-                        email     = record.official_email,
-                        phone     = record.contact_number,
-                    )
+        # ── Step 2: Build initial LeadRecords from LinkedIn posts ────────────
+        initial_records: list[LeadRecord] = []
+        for post in linkedin_posts:
+            if not post.author_name:
+                continue
+            record = self._merger.build_from_linkedin(post)
+            initial_records.append(record)
+            if post.author_name:
+                logger.info("recruiter_found", name=post.author_name, company=record.company)
+            if record.official_email or record.contact_number:
+                logger.info(
+                    "contact_found",
+                    source    = "LinkedIn",
+                    recruiter = post.author_name,
+                    email     = record.official_email,
+                    phone     = record.contact_number,
+                )
 
-            result.recruiters_extracted = len(initial_records)
+        result.recruiters_extracted = len(initial_records)
 
-            # ── Step 3: Premium Naukri fallback for leads without contact ────
-            if fallback_enabled and "premium_naukri" in request.search_sources:
-                naukri_agent = PremiumNaukriAgent(
+        # ── Step 3: Premium Naukri fallback for leads without contact ────────
+        # Uses PersistentBrowserManager with the Chrome profile for Naukri.
+        if fallback_enabled and "premium_naukri" in request.search_sources:
+            async with PersistentBrowserManager(
+                profile_dir = chrome_profile,
+                headless    = browser_headless,
+                slow_mo     = browser_slow_mo,
+            ) as pbm:
+                naukri_page   = await pbm.new_page()
+                naukri_agent  = PremiumNaukriAgent(
                     max_profiles = naukri_cfg.get("max_profiles", 3)
                 )
 
                 no_contact = [r for r in initial_records if not _has_contact(r)]
                 logger.info(
                     "premium_naukri_fallback_batch",
-                    total_leads  = len(initial_records),
+                    total_leads   = len(initial_records),
                     need_fallback = len(no_contact),
                 )
 
@@ -217,9 +233,6 @@ class LeadIntelligenceOrchestrator:
                             recruiter = record.recruiter_name,
                             error     = str(exc),
                         )
-
-            # ── Close browser ─────────────────────────────────────────────────
-            # (context manager handles cleanup)
 
         # ── Step 4: Deduplication ────────────────────────────────────────────
         merged_records = self._merger.deduplicate(initial_records)
