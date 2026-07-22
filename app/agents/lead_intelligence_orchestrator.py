@@ -208,28 +208,24 @@ class LeadIntelligenceOrchestrator:
             # This allows Chrome to keep running while Playwright reuses the session.
             _naukri_storage_state: str | None = None
             try:
-                from app.services.chrome_session_extractor import (
-                    extract_naukri_session as _extract_naukri,
-                    session_diagnostics    as _naukri_diag,
-                )
-                _diag = _naukri_diag()
-                logger.info(
-                    "chrome_session_diagnostics",
-                    chrome_executable    = _diag.get("chrome_executable"),
-                    chrome_profile_path  = _diag.get("chrome_profile_path"),
-                    profile_name         = _diag.get("profile_name"),
-                    browser_type         = _diag.get("browser_type"),
-                    persistent_context   = _diag.get("persistent_context"),
-                    cookies_db_exists    = _diag.get("cookies_db_exists"),
-                    naukri_cookies_found = _diag.get("naukri_cookies_found"),
-                    chrome_running       = _diag.get("chrome_running"),
-                )
-                _naukri_storage_state = _extract_naukri()
-                logger.info(
-                    "naukri_session_restored_successfully",
-                    session_file  = _naukri_storage_state,
-                    message       = "Naukri session restored successfully — reusing authenticated Chrome profile",
-                )
+                from app.services.chrome_session_extractor import extract_naukri_session as _extract_cdp
+                _cdp_result = await _extract_cdp()
+                if _cdp_result.get("status") == "ready":
+                    _naukri_storage_state = _cdp_result.get("session_file")
+                    logger.info(
+                        "naukri_session_restored_successfully",
+                        session_file  = _naukri_storage_state,
+                        cookies_found = _cdp_result.get("cookies_found"),
+                        message       = "Naukri session restored — reusing authenticated Chrome profile",
+                    )
+                else:
+                    # Not logged in or action required
+                    logger.warning(
+                        "naukri_cdp_not_authenticated",
+                        status  = _cdp_result.get("status"),
+                        message = _cdp_result.get("message"),
+                        reason  = _cdp_result.get("reason"),
+                    )
             except Exception as _ce:
                 logger.warning(
                     "chrome_cookie_extraction_failed",
