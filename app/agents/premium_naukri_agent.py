@@ -62,56 +62,81 @@ _NAUKRI_PROFILE_JS = """() => {
 
     const name = text([
         '.name-container .name', '.nameText', 'h1.bold',
-        '.candidate-name h1', '.candidate-detail h1'
+        '.candidate-name h1', '.candidate-detail h1',
+        '[class*="name"] h1', '[class*="candidateName"]',
+        'h1[class*="name"]', '.profileName',
     ]);
 
     const designation = text([
         '.designation', '.current-designation',
-        '.profile-headline .desig', '.candidate-headline'
+        '.profile-headline .desig', '.candidate-headline',
+        '[class*="designation"]', '[class*="currentDesig"]',
+        '.currentDesignation', '.headline',
     ]);
 
     const company = text([
         '.current-company', '.currComp',
-        '.profile-headline .comp', '.company-name'
+        '.profile-headline .comp', '.company-name',
+        '[class*="currentCompany"]', '[class*="company"]',
+        '.companyName', '.currCompany',
     ]);
 
     const location = text([
-        '.location-label', '.loc', '.candidate-location', '.city'
+        '.location-label', '.loc', '.candidate-location', '.city',
+        '[class*="location"]', '[class*="city"]',
+        '.candidateLocation', '.profileLocation',
     ]);
 
-    // Email — Naukri premium shows email in contact section
+    // Email — Naukri premium shows email in contact section or modal
     let email = '';
-    const emailEls = document.querySelectorAll(
-        '.email-value, .mail-id, [data-label="Email"], .contact-email, a[href^="mailto:"]'
-    );
-    for (const el of emailEls) {
-        const val = el.textContent.trim() || el.getAttribute('href')?.replace('mailto:', '') || '';
-        if (val && /[^@]+@[^@]+/.test(val)) { email = val; break; }
+    const emailSelectors = [
+        '.email-value', '.mail-id', '[data-label="Email"]',
+        '.contact-email', 'a[href^="mailto:"]',
+        '[class*="email"]', '[class*="mailId"]',
+        '.candidateEmail', '.contactEmail',
+        'span[id*="email"]', 'div[id*="email"]',
+    ];
+    for (const sel of emailSelectors) {
+        const els = document.querySelectorAll(sel);
+        for (const el of els) {
+            const val = el.textContent.trim() || el.getAttribute('href')?.replace('mailto:', '') || '';
+            if (val && /[^@\\s]+@[^@\\s]+\\.[^@\\s]+/.test(val)) { email = val.trim(); break; }
+        }
+        if (email) break;
     }
 
-    // Phone — Naukri premium shows phone in contact section
+    // Phone — Naukri premium shows phone in contact section or modal
     let phone = '';
-    const phoneEls = document.querySelectorAll(
-        '.phone-value, .mobile-no, [data-label="Mobile"], .contact-phone'
-    );
-    for (const el of phoneEls) {
-        const val = el.textContent.trim();
-        if (val && /[6-9]\\d{9}|\\+[1-9]\\d{6,14}/.test(val.replace(/[\\s\\-]/g, ''))) {
-            phone = val.replace(/[\\s\\-]/g, '');
-            break;
+    const phoneSelectors = [
+        '.phone-value', '.mobile-no', '[data-label="Mobile"]',
+        '.contact-phone', '[class*="phone"]', '[class*="mobile"]',
+        '.candidatePhone', '.contactPhone', '.mobileNo',
+        'span[id*="phone"]', 'div[id*="mobile"]',
+    ];
+    for (const sel of phoneSelectors) {
+        const els = document.querySelectorAll(sel);
+        for (const el of els) {
+            const val = el.textContent.trim().replace(/[\\s\\-\\(\\)]/g, '');
+            if (val && /^(?:\\+91|0091|91)?[6-9]\\d{9}$/.test(val)) {
+                phone = val;
+                break;
+            }
         }
+        if (phone) break;
     }
 
     // Employment history
     const expItems = Array.from(document.querySelectorAll(
         '.exp-container .exp-item, .experience-section .experience-item, ' +
-        '.work-exp-section .companyInfo, .workExperienceSection .designation-name'
+        '.work-exp-section .companyInfo, .workExperienceSection .designation-name, ' +
+        '[class*="experience"] [class*="company"], [class*="workExp"] [class*="comp"]'
     )).map(el => el.textContent.trim().replace(/\\s+/g, ' ')).filter(Boolean);
 
     // LinkedIn URL (if Naukri profile links it)
     let linkedinUrl = '';
     const liLink = document.querySelector(
-        'a[href*="linkedin.com/in/"], a[title*="LinkedIn"], a[data-label="LinkedIn"]'
+        'a[href*="linkedin.com/in/"], a[title*="LinkedIn"], a[data-label="LinkedIn"],' +
+        'a[href*="linkedin"]'
     );
     if (liLink) {
         linkedinUrl = liLink.href || liLink.getAttribute('href') || '';
@@ -144,6 +169,54 @@ class PremiumNaukriAgent:
 
     def __init__(self, max_profiles: int = 3) -> None:
         self._max_profiles = max_profiles
+        self._session_ok: bool | None = None  # cached per-agent-instance to avoid re-verifying
+
+    # ── Session verification ───────────────────────────────────────────────────
+
+    async def _verify_naukri_session(self, page: Any) -> bool:
+        """
+        Verify the Chrome profile has an active Naukri Premium session.
+
+        Navigates to recruit.naukri.com. If redirected to a login page, the
+        session is missing — caller should skip enrichment and log a hint
+        to run POST /naukri-setup-session.
+        """
+        _LOGIN_PATHS = ("/login", "/nlogin", "accounts.naukri.com", "/recruit/login")
+        try:
+            await page.goto(
+                "https://recruit.naukri.com/",
+                wait_until="domcontentloaded",
+                timeout=20_000,
+            )
+            await page.wait_for_timeout(1_500)
+            current_url = page.url
+            if any(p in current_url for p in _LOGIN_PATHS):
+                logger.warning(
+                    "naukri_not_authenticated",
+                    url  = current_url,
+                    hint = "Run POST /naukri-setup-session to log in and save the session",
+                )
+                return False
+            has_login_form = await page.evaluate("""() => {
+                return !!(
+                    document.querySelector('input[type="password"][name]') ||
+                    document.querySelector('form#loginform') ||
+                    document.querySelector('.loginPage') ||
+                    document.querySelector('[class*="loginForm"]')
+                );
+            }""")
+            if has_login_form:
+                logger.warning(
+                    "naukri_login_page_detected",
+                    url  = current_url,
+                    hint = "Run POST /naukri-setup-session to log in and save the session",
+                )
+                return False
+            logger.info("naukri_session_active", url=current_url)
+            return True
+        except Exception as exc:
+            logger.warning("naukri_session_check_failed", error=str(exc))
+            return False
 
     # ── Public entry point ─────────────────────────────────────────────────────
 
@@ -157,18 +230,29 @@ class PremiumNaukriAgent:
         """
         Find a recruiter's Naukri profile and extract contact details.
 
-        Tries three search strategies in order:
-          1. DuckDuckGo site search for naukri.com/mnjuser profile
-          2. Naukri recruiter search via internal search URL
-          3. Naukri keyword search for the profile
+        Verifies Naukri session first. Tries two search strategies:
+          1. DuckDuckGo site search → navigate to discovered Naukri profile URL
+          2. Naukri internal search via recruit.naukri.com / mnjuser
 
-        Returns a NaukriProfile if found, None otherwise.
+        Returns a NaukriProfile if found, None if session missing or no profile found.
         """
         logger.info(
             "fallback_to_premium_naukri",
             recruiter  = recruiter_name,
             company    = current_company,
         )
+
+        # Gate on active session — verified once per agent instance to avoid
+        # navigating to recruit.naukri.com before every single record lookup.
+        if self._session_ok is None:
+            self._session_ok = await self._verify_naukri_session(page)
+        if not self._session_ok:
+            logger.warning(
+                "premium_naukri_skipped_no_session",
+                recruiter = recruiter_name,
+                hint      = "POST /naukri-setup-session to authenticate the Chrome profile first",
+            )
+            return None
 
         companies = [current_company] + (previous_companies or [])
         companies = [c for c in companies if c]
@@ -225,7 +309,7 @@ class PremiumNaukriAgent:
         return None
 
     async def _extract_naukri_link_from_ddg(self, page: Any) -> str:
-        """Extract the first naukri.com/mnjuser URL from DuckDuckGo results."""
+        """Extract the first Naukri profile URL from DuckDuckGo results."""
         try:
             links = await page.evaluate("""() => {
                 const results = document.querySelectorAll(
@@ -233,8 +317,15 @@ class PremiumNaukriAgent:
                 );
                 return Array.from(results)
                     .map(a => a.href || a.getAttribute('href') || '')
-                    .filter(h => h.includes('naukri.com/mnjuser') ||
-                                 h.includes('naukri.com/recruiter'));
+                    .filter(h =>
+                        h.includes('naukri.com/mnjuser') ||
+                        h.includes('naukri.com/recruiter') ||
+                        h.includes('naukri.com/profile') ||
+                        (h.includes('naukri.com/') &&
+                         !h.includes('naukri.com/jobs') &&
+                         !h.includes('naukri.com/job-listings') &&
+                         !h.includes('naukri.com/company'))
+                    );
             }""")
             return links[0] if links else ""
         except Exception:
@@ -249,40 +340,58 @@ class PremiumNaukriAgent:
         company: str,
     ) -> NaukriProfile | None:
         """
-        Navigate to Naukri's recruiter search page and find the profile.
-        Uses Naukri Premium recruiter search portal.
+        Search Naukri for a recruiter profile using the authenticated session.
+        Tries recruit.naukri.com dashboard search, then mnjuser resdex fallback.
         """
-        try:
-            # Naukri premium resdex search (Resume Database eXchange)
-            search_query = urllib.parse.quote_plus(f"{name} {company}".strip())
-            search_url = f"https://www.naukri.com/mnjuser/homepage?search={search_query}"
+        _LOGIN_PATHS = ("/login", "/nlogin", "accounts.naukri.com")
+        search_query = urllib.parse.quote_plus(f"{name} {company}".strip())
 
-            logger.info("premium_naukri_internal_search", name=name, company=company)
+        # Ordered search URLs: recruit.naukri.com first (user's correct portal)
+        candidate_urls = [
+            f"https://www.naukri.com/mnjuser/homepage?search={search_query}",
+            f"https://recruit.naukri.com/searchCV?keywords={search_query}",
+        ]
 
-            await page.goto(search_url, wait_until="domcontentloaded", timeout=25_000)
-            await page.wait_for_timeout(2_500)
+        for search_url in candidate_urls:
+            try:
+                logger.info(
+                    "premium_naukri_internal_search",
+                    name=name, company=company, url=search_url,
+                )
+                await page.goto(search_url, wait_until="domcontentloaded", timeout=25_000)
+                await page.wait_for_timeout(2_500)
 
-            # Find the first matching profile link
-            profile_url = await page.evaluate("""(searchName) => {
-                const links = document.querySelectorAll(
-                    'a[href*="/mnjuser/"], .profile-card a, .candidate-name a'
-                );
-                const name = searchName.toLowerCase();
-                for (const a of links) {
-                    const text = (a.textContent || '').toLowerCase();
-                    if (text.includes(name.split(' ')[0])) {
-                        return a.href || a.getAttribute('href') || '';
+                # Skip if redirected to login
+                if any(p in page.url for p in _LOGIN_PATHS):
+                    logger.debug("premium_naukri_search_redirected_to_login", url=page.url)
+                    continue
+
+                # Find the first matching profile link
+                profile_url = await page.evaluate("""(searchName) => {
+                    const links = document.querySelectorAll(
+                        'a[href*="/mnjuser/"], a[href*="/profile"], ' +
+                        '.profile-card a, .candidate-name a, ' +
+                        'a.candidateName, [class*="candidateName"] a, ' +
+                        '[class*="profileName"] a'
+                    );
+                    const firstName = searchName.toLowerCase().split(' ')[0];
+                    for (const a of links) {
+                        const t = (a.textContent || '').toLowerCase();
+                        if (t.includes(firstName)) {
+                            return a.href || a.getAttribute('href') || '';
+                        }
                     }
-                }
-                // Fallback: take first profile link
-                return links[0]?.href || links[0]?.getAttribute('href') || '';
-            }""", name)
+                    return links[0]?.href || links[0]?.getAttribute('href') || '';
+                }""", name)
 
-            if profile_url and "naukri.com" in profile_url:
-                return await self._extract_profile(page, profile_url, name)
+                if profile_url and "naukri.com" in profile_url:
+                    return await self._extract_profile(page, profile_url, name)
 
-        except Exception as exc:
-            logger.debug("premium_naukri_internal_search_failed", error=str(exc))
+            except Exception as exc:
+                logger.debug(
+                    "premium_naukri_internal_search_failed",
+                    url=search_url, error=str(exc),
+                )
 
         return None
 
@@ -298,6 +407,30 @@ class PremiumNaukriAgent:
         try:
             await page.goto(profile_url, wait_until="domcontentloaded", timeout=25_000)
             await page.wait_for_timeout(2_000)
+
+            # Naukri Premium hides contact details behind a "View Contact" button.
+            # Click it first so email/phone appear in the DOM before extraction.
+            _REVEAL_SELECTORS = [
+                'button:has-text("View Contact")',
+                'button:has-text("Get Contact")',
+                'button:has-text("View Phone")',
+                'button:has-text("Contact Candidate")',
+                '[data-ga-category="get_contact"]',
+                '[class*="viewContact"]',
+                '[class*="getContact"]',
+                '.view-contact-btn',
+                '.getContactBtn',
+            ]
+            for sel in _REVEAL_SELECTORS:
+                try:
+                    btn = page.locator(sel).first
+                    if await btn.count() > 0:
+                        await btn.click(timeout=5_000)
+                        await page.wait_for_timeout(2_000)
+                        logger.info("naukri_contact_reveal_clicked", selector=sel)
+                        break
+                except Exception:
+                    continue
 
             data = await page.evaluate(_NAUKRI_PROFILE_JS)
 

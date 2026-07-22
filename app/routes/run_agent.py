@@ -376,17 +376,52 @@ async def save_linkedin_session() -> Any:
             msg="Credentials auto-filled. Handle any OTP/verification in the browser window.",
         )
 
-        # Wait up to 5 minutes for successful login (URL leaves all gated paths)
-        _GATED = ("/login", "/checkpoint", "/challenge", "/authwall", "/uas/")
-        for _ in range(150):
+        # Wait briefly for LinkedIn to respond to the credential submission
+        await page.wait_for_timeout(3_000)
+
+        # Detect MFA page immediately after credential submit
+        _GATED     = ("/login", "/checkpoint", "/challenge", "/authwall", "/uas/")
+        _MFA_PATHS = ("/checkpoint", "/challenge")
+        _mfa_logged = False
+
+        initial_url = page.url
+        if any(p in initial_url for p in _MFA_PATHS):
+            logger.info(
+                "linkedin_mfa_required",
+                status      = "mfa_required",
+                msg         = "LinkedIn requested MFA. Please complete authentication in the browser window.",
+                next_action = "Enter the code from your authenticator app or SMS.",
+                url         = initial_url[:80],
+            )
+            _mfa_logged = True
+
+        # Wait up to 10 minutes for successful login (URL leaves all gated paths)
+        for _ in range(300):   # 300 × 2 s = 10 min
             await page.wait_for_timeout(2_000)
             url = page.url
+
+            # Log MFA state the first time we see it (if not already logged above)
+            if not _mfa_logged and any(p in url for p in _MFA_PATHS):
+                logger.info(
+                    "linkedin_mfa_required",
+                    status      = "mfa_required",
+                    msg         = "LinkedIn requested MFA. Please complete authentication in the browser window.",
+                    next_action = "Enter the code from your authenticator app or SMS.",
+                    url         = url[:80],
+                )
+                _mfa_logged = True
+
             if not any(p in url for p in _GATED):
                 break
         else:
+            # Determine what state we timed out at so we can return a structured error
+            final_url    = page.url
+            timed_out_at = "mfa" if any(p in final_url for p in _MFA_PATHS) else "login"
             await browser.close()
             await pw.stop()
-            raise RuntimeError("Login timed out after 5 minutes — please try again")
+            if timed_out_at == "mfa":
+                raise RuntimeError("mfa_timeout: LinkedIn MFA was not completed within 10 minutes")
+            raise RuntimeError("Login timed out after 10 minutes — please try again")
 
         # Save session cookies + localStorage
         LINKEDIN_SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -408,5 +443,16 @@ async def save_linkedin_session() -> Any:
             "saved_to": saved_to,
         }
     except Exception as exc:
-        logger.error("linkedin_save_session_failed", error=str(exc))
-        return _error_json("Failed to save LinkedIn session", str(exc))
+        err_msg = str(exc)
+        if err_msg.startswith("mfa_timeout:"):
+            logger.warning("linkedin_mfa_timeout", error=err_msg)
+            return {
+                "status":      "mfa_required",
+                "message":     "LinkedIn requested multi-factor authentication.",
+                "next_action": (
+                    "Complete authentication once manually via POST /linkedin-setup-session. "
+                    "The authenticated session will then be saved and reused in future executions."
+                ),
+            }
+        logger.error("linkedin_save_session_failed", error=err_msg)
+        return _error_json("Failed to save LinkedIn session", err_msg)
