@@ -206,6 +206,10 @@ async def setup_naukri_session() -> Any:
     chrome_profile = config.browser.chrome_profile
 
     async def _open_for_login() -> str:
+        import os
+        naukri_email    = os.environ.get("NAUKRI_EMAIL", "")
+        naukri_password = os.environ.get("NAUKRI_PASSWORD", "")
+
         async with PersistentBrowserManager(
             profile_dir = chrome_profile,
             headless    = False,
@@ -216,13 +220,85 @@ async def setup_naukri_session() -> Any:
                 wait_until = "domcontentloaded",
                 timeout    = 30_000,
             )
-            logger.info(
-                "naukri_setup_browser_opened",
-                msg     = "Naukri login page opened. Please log in manually.",
-                profile = chrome_profile,
-            )
+            await page.wait_for_timeout(2_000)
 
             _LOGIN_PATHS = ("/recruit/login", "/nlogin/login", "/nlogin/")
+            current_url  = page.url
+
+            # Auto-fill credentials if on a login page and creds are available
+            if naukri_email and naukri_password and any(p in current_url for p in _LOGIN_PATHS):
+                logger.info(
+                    "naukri_setup_autofill",
+                    email   = naukri_email,
+                    profile = chrome_profile,
+                )
+                _EMAIL_SELS = [
+                    'input[type="email"]',
+                    'input[name="username"]',
+                    'input[name="emailId"]',
+                    'input[id*="email" i]',
+                    'input[placeholder*="email" i]',
+                    'input[placeholder*="username" i]',
+                ]
+                _PASS_SELS = [
+                    'input[type="password"]',
+                    'input[name="password"]',
+                    'input[id*="password" i]',
+                    'input[placeholder*="password" i]',
+                ]
+                _SUBMIT_SELS = [
+                    'button[type="submit"]',
+                    'input[type="submit"]',
+                    'button:has-text("Login")',
+                    'button:has-text("Sign in")',
+                    'button:has-text("Log in")',
+                    '.loginBtn',
+                    '[class*="loginBtn"]',
+                ]
+
+                # Fill email
+                for sel in _EMAIL_SELS:
+                    try:
+                        el = page.locator(sel).first
+                        if await el.count() > 0:
+                            await el.click()
+                            await el.fill(naukri_email)
+                            logger.info("naukri_autofill_email_entered")
+                            break
+                    except Exception:
+                        continue
+
+                # Fill password
+                for sel in _PASS_SELS:
+                    try:
+                        el = page.locator(sel).first
+                        if await el.count() > 0:
+                            await el.click()
+                            await el.fill(naukri_password)
+                            logger.info("naukri_autofill_password_entered")
+                            break
+                    except Exception:
+                        continue
+
+                # Click submit
+                for sel in _SUBMIT_SELS:
+                    try:
+                        btn = page.locator(sel).first
+                        if await btn.count() > 0:
+                            await btn.click()
+                            logger.info("naukri_autofill_submitted")
+                            await page.wait_for_timeout(4_000)
+                            break
+                    except Exception:
+                        continue
+            else:
+                logger.info(
+                    "naukri_setup_browser_opened",
+                    msg     = "Naukri login page opened — waiting for manual login or already authenticated.",
+                    profile = chrome_profile,
+                )
+
+            # Wait for navigation away from login (up to 10 min for manual completion)
             for _ in range(300):   # 300 × 2 s = 10 min
                 await page.wait_for_timeout(2_000)
                 url = page.url
