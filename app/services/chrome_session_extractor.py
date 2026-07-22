@@ -65,6 +65,69 @@ def _cdp_is_available(port: int = _CDP_PORT) -> bool:
         return False
 
 
+def start_cdp_chrome(user_data_dir: Path | str | None = None) -> dict[str, Any]:
+    """
+    Kill any existing Chrome, start a fresh one with --remote-debugging-port=9222,
+    and wait for the CDP endpoint to become ready.
+
+    After calling this, the user should click "Open in Browser" in the Naukri Launcher.
+    The Launcher's auto-login URL will open as a new tab in this CDP-enabled Chrome.
+    Then call POST /naukri-extract-session to capture the authenticated session.
+    """
+    if user_data_dir is None:
+        user_data_dir = _CHROME_USER_DATA
+    user_data_dir = Path(user_data_dir)
+
+    chrome = _find_chrome_exe()
+    if not chrome:
+        raise RuntimeError("Chrome executable not found")
+
+    # Kill any existing Chrome (clean slate)
+    subprocess.run(["taskkill", "/F", "/IM", "chrome.exe"], capture_output=True, timeout=5)
+    time.sleep(1.5)
+
+    # Remove SingletonLock so Chrome starts cleanly
+    for lock in [user_data_dir / "SingletonLock", user_data_dir / "Default" / "SingletonLock"]:
+        lock.unlink(missing_ok=True)
+
+    proc = subprocess.Popen(
+        [
+            str(chrome),
+            f"--remote-debugging-port={_CDP_PORT}",
+            "--remote-allow-origins=*",
+            f"--user-data-dir={user_data_dir}",
+            "--profile-directory=Default",
+            "--no-first-run",
+            "--no-default-browser-check",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    # Wait for CDP endpoint (up to 12 s)
+    deadline = time.time() + 12
+    while time.time() < deadline:
+        if _cdp_is_available():
+            logger.info("cdp_chrome_started", pid=proc.pid, port=_CDP_PORT)
+            return {
+                "status":  "ready",
+                "message": "Chrome started with remote debugging enabled.",
+                "pid":     proc.pid,
+                "cdp_url": f"http://127.0.0.1:{_CDP_PORT}",
+                "next_step": [
+                    "Click 'Open in Browser' in the Naukri Recruiter Launcher.",
+                    "The Naukri login URL will open as a new tab in this Chrome window.",
+                    "Wait ~3 seconds for the dashboard to load.",
+                    "Then call POST /naukri-extract-session to capture the session.",
+                ],
+            }
+        time.sleep(0.5)
+
+    raise RuntimeError(
+        f"Chrome started (PID {proc.pid}) but CDP port {_CDP_PORT} did not become available."
+    )
+
+
 def _build_diagnostics(
     logged_in: bool | None = None,
     current_url: str = "",
@@ -110,17 +173,32 @@ async def extract_naukri_session_cdp(
                 f"Could not connect to Chrome CDP on port {cdp_port}: {exc}"
             ) from exc
 
-        ctx  = browser.contexts[0] if browser.contexts else await browser.new_context()
-        page = await ctx.new_page()
+        ctx = browser.contexts[0] if browser.contexts else await browser.new_context()
 
-        try:
-            await page.goto("https://recruit.naukri.com/", wait_until="domcontentloaded", timeout=20_000)
-            await page.wait_for_timeout(2_000)
-        except Exception as exc:
-            logger.warning("cdp_navigate_failed", error=str(exc))
+        # ── Check existing tabs first (Naukri Launcher may have already opened a tab) ──
+        current_url = ""
+        logged_in   = False
+        for existing_page in ctx.pages:
+            try:
+                url = existing_page.url
+                if "naukri.com" in url and not any(p in url for p in _LOGIN_PATHS):
+                    logged_in   = True
+                    current_url = url
+                    logger.info("cdp_found_authenticated_tab", url=url)
+                    break
+            except Exception:
+                continue
 
-        current_url = page.url
-        logged_in   = not any(p in current_url for p in _LOGIN_PATHS)
+        # ── If no authenticated tab found, navigate in a new tab ──────────────
+        if not logged_in:
+            page = await ctx.new_page()
+            try:
+                await page.goto("https://recruit.naukri.com/", wait_until="domcontentloaded", timeout=20_000)
+                await page.wait_for_timeout(2_000)
+            except Exception as exc:
+                logger.warning("cdp_navigate_failed", error=str(exc))
+            current_url = page.url
+            logged_in   = not any(p in current_url for p in _LOGIN_PATHS)
 
         _log_diagnostics(logged_in, current_url, method="CDP")
 

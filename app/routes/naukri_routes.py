@@ -329,6 +329,25 @@ async def setup_naukri_session() -> Any:
 # POST /naukri-extract-session
 # ══════════════════════════════════════════════════════════════════════════════
 
+@router.post("/naukri-start-cdp-browser", status_code=status.HTTP_200_OK)
+async def naukri_start_cdp_browser() -> Any:
+    """
+    Step 1 of Naukri session capture:
+    Kills any existing Chrome and starts a fresh Chrome with --remote-debugging-port=9222.
+
+    After this returns, click "Open in Browser" in the Naukri Recruiter Launcher.
+    The Launcher's auto-login URL will open as a new tab in this CDP-enabled Chrome.
+    Wait ~5 seconds, then call POST /naukri-extract-session to capture the session.
+    """
+    try:
+        from app.services.chrome_session_extractor import start_cdp_chrome
+        result = start_cdp_chrome()
+        return result
+    except Exception as exc:
+        logger.error("naukri_start_cdp_browser_failed", error=str(exc))
+        return {"status": "failed", "message": str(exc)}
+
+
 @router.post("/naukri-extract-session", status_code=status.HTTP_200_OK)
 async def naukri_extract_session() -> Any:
     """
