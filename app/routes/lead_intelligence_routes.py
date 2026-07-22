@@ -97,25 +97,52 @@ async def _run_lead_intelligence_background(
     from app.core.proactor import run_in_proactor
 
     _lead_jobs[job_id]["progress"] = 10
-    _lead_jobs[job_id]["message"]  = "Running LinkedIn + Naukri pipeline…"
+    _lead_jobs[job_id]["message"]  = "LinkedIn harvest started…"
 
     try:
         orch = LeadIntelligenceOrchestrator()
         result: LeadIntelligenceResult = await run_in_proactor(
             lambda: orch.run(request)
         )
-        _lead_jobs[job_id].update({
-            "status":     "success",
-            "progress":   100,
-            "message":    f"Completed — {result.total_leads} leads found",
-            "total":      result.total_leads,
-            "high":       result.high_confidence,
-            "medium":     result.medium_confidence,
-            "low":        result.low_confidence,
-            "json_path":  result.json_path,
-            "excel_path": result.excel_path,
-        })
-        logger.info("lead_intelligence_run_completed", job_id=job_id, total=result.total_leads)
+
+        if result.naukri_session_required:
+            _lead_jobs[job_id].update({
+                "status":   "action_required",
+                "progress": 50,
+                "message":  "Naukri Premium session not authenticated",
+                "action":   result.naukri_session_hint,
+                "next_step": "Run POST /naukri-setup-session, log in at recruit.naukri.com, close the browser, then retry.",
+                "total":    result.total_leads,
+                "high":     result.high_confidence,
+                "medium":   result.medium_confidence,
+                "low":      result.low_confidence,
+                "json_path":  result.json_path,
+                "excel_path": result.excel_path,
+            })
+            logger.warning(
+                "lead_intelligence_naukri_session_required",
+                job_id  = job_id,
+                action  = "POST /naukri-setup-session",
+            )
+        else:
+            _lead_jobs[job_id].update({
+                "status":               "success",
+                "progress":             100,
+                "message":              f"Completed — {result.total_leads} leads found",
+                "total":                result.total_leads,
+                "high":                 result.high_confidence,
+                "medium":               result.medium_confidence,
+                "low":                  result.low_confidence,
+                "recruiters_enriched":  result.recruiters_enriched,
+                "emails_added":         result.emails_added,
+                "phones_added":         result.phones_added,
+                "locations_added":      result.locations_added,
+                "companies_updated":    result.companies_updated,
+                "confidence_improved":  result.confidence_improved,
+                "json_path":            result.json_path,
+                "excel_path":           result.excel_path,
+            })
+            logger.info("lead_intelligence_run_completed", job_id=job_id, total=result.total_leads)
 
     except Exception as exc:
         logger.exception("lead_intelligence_run_failed", job_id=job_id, error=str(exc))

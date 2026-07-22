@@ -200,6 +200,18 @@ class LeadIntelligenceResult:
         self.started_at:               datetime | None = None
         self.completed_at:             datetime | None = None
 
+        # ── Enrichment detail metrics ─────────────────────────────────────────
+        self.recruiters_enriched:  int  = 0   # sent to Naukri agent
+        self.emails_added:         int  = 0   # email populated by Naukri
+        self.phones_added:         int  = 0   # phone populated by Naukri
+        self.locations_added:      int  = 0   # location populated by Naukri
+        self.companies_updated:    int  = 0   # company filled by Naukri
+        self.confidence_improved:  int  = 0   # records whose score rose after enrichment
+
+        # ── Session state ─────────────────────────────────────────────────────
+        self.naukri_session_required: bool = False
+        self.naukri_session_hint:     str  = ""
+
     @property
     def runtime_minutes(self) -> float:
         if self.started_at and self.completed_at:
@@ -210,18 +222,25 @@ class LeadIntelligenceResult:
 
     def to_summary_dict(self) -> dict[str, Any]:
         return {
-            "run_id":                   self.run_id,
-            "executed_at":              self.executed_at,
-            "keyword":                  self.keyword,
-            "total_leads":              self.total_leads,
-            "high_confidence":          self.high_confidence,
-            "medium_confidence":        self.medium_confidence,
-            "low_confidence":           self.low_confidence,
-            "sources_used":             self.sources_used,
-            "linkedin_posts_found":     self.linkedin_posts_found,
-            "recruiters_extracted":     self.recruiters_extracted,
-            "premium_naukri_fallbacks": self.premium_naukri_fallbacks,
-            "json_path":                self.json_path,
-            "excel_path":               self.excel_path,
-            "runtime_minutes":          self.runtime_minutes,
+            "run_id":                    self.run_id,
+            "executed_at":               self.executed_at,
+            "keyword":                   self.keyword,
+            "total_leads":               self.total_leads,
+            "high_confidence":           self.high_confidence,
+            "medium_confidence":         self.medium_confidence,
+            "low_confidence":            self.low_confidence,
+            "sources_used":              self.sources_used,
+            "linkedin_posts_found":      self.linkedin_posts_found,
+            "recruiters_extracted":      self.recruiters_extracted,
+            "premium_naukri_fallbacks":  self.premium_naukri_fallbacks,
+            "recruiters_enriched":       self.recruiters_enriched,
+            "emails_added":              self.emails_added,
+            "phones_added":              self.phones_added,
+            "locations_added":           self.locations_added,
+            "companies_updated":         self.companies_updated,
+            "confidence_improved":       self.confidence_improved,
+            "naukri_session_required":   self.naukri_session_required,
+            "json_path":                 self.json_path,
+            "excel_path":                self.excel_path,
+            "runtime_minutes":           self.runtime_minutes,
         }

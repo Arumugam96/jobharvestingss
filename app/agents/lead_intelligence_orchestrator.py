@@ -71,9 +71,13 @@ def _make_run_id() -> str:
     return "li_" + datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
 
-def _has_contact(record: LeadRecord) -> bool:
-    """True when at least email OR phone is present after LinkedIn extraction."""
-    return bool(record.official_email or record.contact_number)
+def _needs_enrichment(record: LeadRecord) -> bool:
+    """True when any contact or location field is missing — attempt Naukri enrichment."""
+    return (
+        not record.official_email
+        or not record.contact_number
+        or not record.location
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -191,48 +195,116 @@ class LeadIntelligenceOrchestrator:
 
         result.recruiters_extracted = len(initial_records)
 
-        # ── Step 3: Premium Naukri fallback for leads without contact ────────
-        # Uses PersistentBrowserManager with the Chrome profile for Naukri.
+        # Baseline confidence map — populated inside enrichment block when session is OK
+        pre_scores: dict[str, float] = {}
+
+        # ── Step 3: Premium Naukri enrichment for records with any missing field ─
+        # Trigger: email missing OR phone missing OR location missing.
+        # Gate:    verify Naukri session once before the loop; if absent, set
+        #          naukri_session_required=True on the result and skip enrichment
+        #          so the caller knows to run POST /naukri-setup-session first.
         if fallback_enabled and "premium_naukri" in request.search_sources:
             async with PersistentBrowserManager(
                 profile_dir = chrome_profile,
                 headless    = browser_headless,
                 slow_mo     = browser_slow_mo,
             ) as pbm:
-                naukri_page   = await pbm.new_page()
-                naukri_agent  = PremiumNaukriAgent(
+                naukri_page  = await pbm.new_page()
+                naukri_agent = PremiumNaukriAgent(
                     max_profiles = naukri_cfg.get("max_profiles", 3)
                 )
 
-                no_contact = [r for r in initial_records if not _has_contact(r)]
-                logger.info(
-                    "premium_naukri_fallback_batch",
-                    total_leads   = len(initial_records),
-                    need_fallback = len(no_contact),
-                )
+                # ── One-time session check before the loop ────────────────────
+                session_ok = await naukri_agent._verify_naukri_session(naukri_page)
+                naukri_agent._session_ok = session_ok   # pre-cache so per-call check is skipped
 
-                for record in no_contact:
-                    if not record.recruiter_name:
-                        continue
-                    try:
-                        naukri_profile = await naukri_agent.search_recruiter(
-                            page            = naukri_page,
-                            recruiter_name  = record.recruiter_name,
-                            current_company = record.current_company or record.company,
-                        )
-                        if naukri_profile:
-                            result.premium_naukri_fallbacks += 1
-                            self._merger.enrich_with_naukri(
-                                record,
-                                naukri_profile,
-                                company = record.current_company or record.company,
+                if not session_ok:
+                    _hint = (
+                        "Naukri Premium session not found in Chrome profile. "
+                        "Run POST /naukri-setup-session, log in at recruit.naukri.com, "
+                        "close the browser, then re-run this workflow."
+                    )
+                    result.naukri_session_required = True
+                    result.naukri_session_hint     = _hint
+                    logger.warning(
+                        "naukri_session_required",
+                        action = "Run POST /naukri-setup-session",
+                        hint   = _hint,
+                    )
+                else:
+                    logger.info("naukri_session_verified", url=naukri_page.url)
+
+                    to_enrich = [r for r in initial_records if _needs_enrichment(r)]
+                    logger.info(
+                        "naukri_search_started",
+                        total_leads    = len(initial_records),
+                        to_enrich      = len(to_enrich),
+                        reason         = "email_missing OR phone_missing OR location_missing",
+                    )
+
+                    # Baseline confidence before enrichment (for improvement tracking)
+                    from app.agents.confidence_validator import _score as _conf_score
+                    pre_scores = {r.lead_id: _conf_score(r) for r in to_enrich}
+
+                    result.recruiters_enriched = len(to_enrich)
+
+                    for record in to_enrich:
+                        if not record.recruiter_name:
+                            continue
+                        # Snapshot pre-enrichment values
+                        _pre_email   = record.official_email
+                        _pre_phone   = record.contact_number
+                        _pre_loc     = record.location
+                        _pre_company = record.current_company
+
+                        try:
+                            naukri_profile = await naukri_agent.search_recruiter(
+                                page            = naukri_page,
+                                recruiter_name  = record.recruiter_name,
+                                current_company = record.current_company or record.company,
                             )
-                    except Exception as exc:
-                        logger.warning(
-                            "premium_naukri_record_error",
-                            recruiter = record.recruiter_name,
-                            error     = str(exc),
-                        )
+                            if naukri_profile:
+                                result.premium_naukri_fallbacks += 1
+                                self._merger.enrich_with_naukri(
+                                    record,
+                                    naukri_profile,
+                                    company = record.current_company or record.company,
+                                )
+
+                                # Track which fields were newly populated
+                                if not _pre_email and record.official_email:
+                                    result.emails_added += 1
+                                    logger.info(
+                                        "email_added",
+                                        recruiter = record.recruiter_name,
+                                        email     = record.official_email,
+                                        source    = "Premium Naukri",
+                                    )
+                                if not _pre_phone and record.contact_number:
+                                    result.phones_added += 1
+                                    logger.info(
+                                        "phone_added",
+                                        recruiter = record.recruiter_name,
+                                        phone     = record.contact_number,
+                                        source    = "Premium Naukri",
+                                    )
+                                if not _pre_loc and record.location:
+                                    result.locations_added += 1
+                                    logger.info(
+                                        "location_added",
+                                        recruiter = record.recruiter_name,
+                                        location  = record.location,
+                                        source    = "Premium Naukri",
+                                    )
+                                if not _pre_company and record.current_company:
+                                    result.companies_updated += 1
+
+                        except Exception as exc:
+                            logger.warning(
+                                "premium_naukri_record_error",
+                                recruiter = record.recruiter_name,
+                                error     = str(exc),
+                            )
 
         # ── Step 4: Deduplication ────────────────────────────────────────────
         merged_records = self._merger.deduplicate(initial_records)
@@ -240,6 +312,13 @@ class LeadIntelligenceOrchestrator:
 
         # ── Step 5: Confidence validation + filtering ────────────────────────
         validated = self._validator.validate_batch(merged_records, min_confidence)
+        logger.info("confidence_updated", total_validated=len(validated))
+
+        # Count records whose confidence improved after Naukri enrichment
+        result.confidence_improved = sum(
+            1 for r in validated
+            if r.confidence_value > pre_scores.get(r.lead_id, 0.0)
+        )
 
         result.leads              = validated[:request.max_leads]
         result.total_leads        = len(result.leads)
@@ -274,6 +353,12 @@ class LeadIntelligenceOrchestrator:
             medium                   = result.medium_confidence,
             low                      = result.low_confidence,
             premium_naukri_fallbacks = result.premium_naukri_fallbacks,
+            recruiters_enriched      = result.recruiters_enriched,
+            emails_added             = result.emails_added,
+            phones_added             = result.phones_added,
+            locations_added          = result.locations_added,
+            confidence_improved      = result.confidence_improved,
+            naukri_session_required  = result.naukri_session_required,
             runtime_minutes          = result.runtime_minutes,
         )
         return result
@@ -286,19 +371,33 @@ class LeadIntelligenceOrchestrator:
         path = _OUTPUT_DIR / f"{run_id}_{ts}_leads.json"
 
         payload = {
-            "run_id":                   result.run_id,
-            "executed_at":              result.executed_at,
-            "keyword":                  result.keyword,
+            "run_id":       result.run_id,
+            "executed_at":  result.executed_at,
+            "keyword":      result.keyword,
             "summary": {
-                "total_leads":              result.total_leads,
-                "high_confidence":          result.high_confidence,
-                "medium_confidence":        result.medium_confidence,
-                "low_confidence":           result.low_confidence,
-                "sources_used":             result.sources_used,
-                "linkedin_posts_found":     result.linkedin_posts_found,
-                "recruiters_extracted":     result.recruiters_extracted,
-                "premium_naukri_fallbacks": result.premium_naukri_fallbacks,
-                "runtime_minutes":          result.runtime_minutes,
+                "total_linkedin_recruiters":  result.recruiters_extracted,
+                "total_leads":                result.total_leads,
+                "high_confidence":            result.high_confidence,
+                "medium_confidence":          result.medium_confidence,
+                "low_confidence":             result.low_confidence,
+                "sources_used":               result.sources_used,
+                "linkedin_posts_found":       result.linkedin_posts_found,
+                "recruiters_extracted":       result.recruiters_extracted,
+                "recruiters_enriched":        result.recruiters_enriched,
+                "premium_naukri_fallbacks":   result.premium_naukri_fallbacks,
+                "emails_added":               result.emails_added,
+                "phones_added":               result.phones_added,
+                "locations_added":            result.locations_added,
+                "companies_updated":          result.companies_updated,
+                "confidence_improved":        result.confidence_improved,
+                "with_email":                 sum(1 for r in result.leads if r.official_email),
+                "with_phone":                 sum(1 for r in result.leads if r.contact_number),
+                "with_complete_contact":      sum(
+                    1 for r in result.leads if r.official_email and r.contact_number
+                ),
+                "naukri_session_required":    result.naukri_session_required,
+                "naukri_session_hint":        result.naukri_session_hint,
+                "runtime_minutes":            result.runtime_minutes,
             },
             "leads": [lead.to_output_dict() for lead in result.leads],
         }
