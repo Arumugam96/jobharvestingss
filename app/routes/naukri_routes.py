@@ -326,6 +326,105 @@ async def setup_naukri_session() -> Any:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# POST /naukri-extract-session
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.post("/naukri-extract-session", status_code=status.HTTP_200_OK)
+async def naukri_extract_session() -> Any:
+    """
+    Extract Naukri authentication cookies from the user's currently running Chrome browser
+    and save them as a Playwright-compatible session file (data/sessions/naukri_session.json).
+
+    Chrome must be running and logged into recruit.naukri.com for this to succeed.
+    The saved session is automatically reused by POST /run-lead-intelligence.
+
+    Returns diagnostics: Chrome path, profile, cookie count, session file location.
+    """
+    try:
+        from app.services.chrome_session_extractor import (
+            extract_naukri_session,
+            session_diagnostics,
+        )
+
+        diag = session_diagnostics()
+        logger.info(
+            "naukri_extract_session_started",
+            chrome_executable    = diag.get("chrome_executable"),
+            chrome_profile_path  = diag.get("chrome_profile_path"),
+            naukri_cookies_found = diag.get("naukri_cookies_found"),
+        )
+
+        # Chrome is running — cookies are locked, cannot be read
+        if diag.get("chrome_running") and not diag.get("cookies_readable", False):
+            return {
+                "status":      "action_required",
+                "message":     "Chrome is running — cookies database is locked",
+                "reason":      "Chrome exclusively locks its SQLite cookies database while it runs.",
+                "diagnostics": diag,
+                "next_step": [
+                    "1. Close ALL Chrome windows completely.",
+                    "2. Call POST /naukri-extract-session again (takes < 5 seconds).",
+                    "3. Re-open Chrome — your Naukri login will still be active.",
+                    "Chrome will NOT lose your login session when you close it.",
+                ],
+            }
+
+        if not diag.get("cookies_readable", False) or diag.get("naukri_cookies_found", 0) == 0:
+            return {
+                "status":      "action_required",
+                "message":     "Authenticated Chrome profile not detected",
+                "reason":      (
+                    "No Naukri cookies found in Chrome Default profile. "
+                    "Make sure you are logged into recruit.naukri.com in Chrome."
+                ),
+                "diagnostics": diag,
+                "next_step": [
+                    "1. Open Chrome and navigate to https://recruit.naukri.com/",
+                    "2. Log in with your Naukri Premium credentials.",
+                    "3. Close ALL Chrome windows.",
+                    "4. Call POST /naukri-extract-session again.",
+                ],
+            }
+
+        session_path = extract_naukri_session()
+        diag_after   = session_diagnostics()
+
+        return {
+            "status":          "ready",
+            "message":         "Naukri session restored successfully — reusing authenticated Chrome profile",
+            "session_file":    session_path,
+            "diagnostics":     diag_after,
+        }
+
+    except Exception as exc:
+        err_msg = str(exc)
+        logger.error("naukri_extract_session_failed", error=err_msg)
+
+        if "chrome is currently running" in err_msg.lower() or "winError 32" in err_msg:
+            return {
+                "status":    "action_required",
+                "message":   "Chrome is running — cookies database is locked",
+                "reason":    err_msg,
+                "next_step": [
+                    "1. Close ALL Chrome windows completely.",
+                    "2. Call POST /naukri-extract-session again.",
+                    "3. Re-open Chrome — your Naukri login will still be active.",
+                ],
+            }
+
+        return {
+            "status":    "failed",
+            "message":   "Authenticated Chrome profile not detected",
+            "reason":    err_msg,
+            "next_step": [
+                "1. Ensure Chrome is closed.",
+                "2. Ensure you are logged into recruit.naukri.com in Chrome.",
+                "3. Retry POST /naukri-extract-session.",
+            ],
+        }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # GET /naukri-results
 # ══════════════════════════════════════════════════════════════════════════════
 

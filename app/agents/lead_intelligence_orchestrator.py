@@ -204,12 +204,56 @@ class LeadIntelligenceOrchestrator:
         #          naukri_session_required=True on the result and skip enrichment
         #          so the caller knows to run POST /naukri-setup-session first.
         if fallback_enabled and "premium_naukri" in request.search_sources:
-            async with PersistentBrowserManager(
-                profile_dir = chrome_profile,
-                headless    = browser_headless,
-                slow_mo     = browser_slow_mo,
-            ) as pbm:
-                naukri_page  = await pbm.new_page()
+            # ── Try to extract Naukri cookies from the user's Chrome session ─
+            # This allows Chrome to keep running while Playwright reuses the session.
+            _naukri_storage_state: str | None = None
+            try:
+                from app.services.chrome_session_extractor import (
+                    extract_naukri_session as _extract_naukri,
+                    session_diagnostics    as _naukri_diag,
+                )
+                _diag = _naukri_diag()
+                logger.info(
+                    "chrome_session_diagnostics",
+                    chrome_executable    = _diag.get("chrome_executable"),
+                    chrome_profile_path  = _diag.get("chrome_profile_path"),
+                    profile_name         = _diag.get("profile_name"),
+                    browser_type         = _diag.get("browser_type"),
+                    persistent_context   = _diag.get("persistent_context"),
+                    cookies_db_exists    = _diag.get("cookies_db_exists"),
+                    naukri_cookies_found = _diag.get("naukri_cookies_found"),
+                    chrome_running       = _diag.get("chrome_running"),
+                )
+                _naukri_storage_state = _extract_naukri()
+                logger.info(
+                    "naukri_session_restored_successfully",
+                    session_file  = _naukri_storage_state,
+                    message       = "Naukri session restored successfully — reusing authenticated Chrome profile",
+                )
+            except Exception as _ce:
+                logger.warning(
+                    "chrome_cookie_extraction_failed",
+                    error  = str(_ce),
+                    action = "Falling back to PersistentBrowserManager with data/chrome_profile",
+                )
+
+            # ── Open Naukri browser context ───────────────────────────────────
+            # Preferred path: BrowserManager + storage_state (Chrome stays running)
+            # Fallback path:  PersistentBrowserManager with dedicated profile
+            if _naukri_storage_state:
+                _naukri_ctx = BrowserManager(
+                    headless      = browser_headless,
+                    storage_state = _naukri_storage_state,
+                )
+            else:
+                _naukri_ctx = PersistentBrowserManager(
+                    profile_dir = chrome_profile,
+                    headless    = browser_headless,
+                    slow_mo     = browser_slow_mo,
+                )
+
+            async with _naukri_ctx as bm:
+                naukri_page  = await bm.new_page()
                 naukri_agent = PremiumNaukriAgent(
                     max_profiles = naukri_cfg.get("max_profiles", 3)
                 )
