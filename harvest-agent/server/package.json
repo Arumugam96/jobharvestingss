@@ -1,0 +1,14 @@
+{
+  "name": "harvest-agent-server",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "harvest": "node harvest.js",
+    "seed": "node seed.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "mongoose": "^8.4.1",
+    "puppeteer": "^22.10.0"
+  }
+}
