@@ -119,7 +119,7 @@ async def run_naukri_agent() -> Any:
         agent = NaukriAgent()
         return await agent.harvest(
             filters  = f,
-            headless = config.browser.headless,
+            headless = config.browser.resolved_headless,
             slow_mo  = config.browser.slow_mo_ms,
         )
 

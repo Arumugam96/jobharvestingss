@@ -126,7 +126,7 @@ async def run_linkedin_agent() -> Any:
         agent = LinkedInAgent()
         return await agent.harvest(
             filters  = f,
-            headless = config.browser.headless,
+            headless = config.browser.resolved_headless,
             slow_mo  = config.browser.slow_mo_ms,
         )
 

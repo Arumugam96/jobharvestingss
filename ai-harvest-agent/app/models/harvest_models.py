@@ -9,6 +9,7 @@ from the saved config that the UI Rule Engine writes.
 """
 from __future__ import annotations
 
+import os
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -108,6 +109,20 @@ class BrowserConfig(BaseModel):
     headless:       bool = False
     slow_mo_ms:     int  = Field(0, ge=0, le=3000)
     chrome_profile: str  = "data/chrome_profile"
+
+    @property
+    def resolved_headless(self) -> bool:
+        """
+        Effective headless value for this run.
+
+        SHOW_BROWSER, when set in the environment, overrides the JSON config
+        so ops can force visible-browser mode (e.g. under Xvfb/x11vnc on a
+        headless EC2 host) without editing harvest_config.json.
+        """
+        show_browser = os.getenv("SHOW_BROWSER")
+        if show_browser is not None:
+            return show_browser.strip().lower() not in ("1", "true", "yes", "on")
+        return self.headless
 
 
 # ══════════════════════════════════════════════════════════════════════════════
