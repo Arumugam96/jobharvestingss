@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import {
   SlidersHorizontal, Table2, History, Send, BarChart3, Radar, UserSearch,
-  Play, Save, Clock, Info, AlertTriangle, ChevronDown, Check, Loader2, LogIn,
+  Play, Save, Clock, Info, AlertTriangle, ChevronDown, Check, Loader2, LogIn, Eye,
 } from "lucide-react";
 import {
   getHarvestConfig, saveHarvestConfig, runHarvestAgent,
@@ -394,7 +394,11 @@ export default function RuleEngineConfig({
 
       {liveViewSource && (
         <LiveBrowserView
-          title={liveViewSource === "linkedin" ? "LinkedIn login — live browser" : "Naukri login — live browser"}
+          title={
+            liveViewSource === "linkedin" ? "LinkedIn login — live browser" :
+            liveViewSource === "naukri"   ? "Naukri login — live browser" :
+            "Harvest in progress — live browser"
+          }
           onClose={() => setLiveViewSource(null)}
         />
       )}
@@ -462,6 +466,11 @@ export default function RuleEngineConfig({
               <span className="rec-validation"><AlertTriangle size={14} /> Complete required fields</span>
             )}
             {saveError && <span className="rec-validation"><AlertTriangle size={14} /> {saveError}</span>}
+            {(runState === "running" || harvestRunning) && (
+              <button className="rec-btn rec-btn--watch" onClick={() => setLiveViewSource("harvest")}>
+                <Eye size={16} /> Watch Live Browser
+              </button>
+            )}
             <button className="rec-btn rec-btn--run" onClick={handleRun} disabled={runState === "running" || configLoading || harvestRunning}
               title={harvestRunning && runState !== "running" ? "Another harvest is already running elsewhere" : undefined}>
               {runState === "running" ? <Loader2 size={16} className="rec-spin" /> : <Play size={16} fill="currentColor" />}
@@ -729,6 +738,8 @@ const styles = `
   .rec-btn--run:hover:not(:disabled) { background:#15803D; }
   .rec-btn--save { background:var(--primary); color:#fff; box-shadow:0 1px 2px rgba(37,99,235,.35); }
   .rec-btn--save:hover { background:var(--secondary); }
+  .rec-btn--watch { background:#fff; color:var(--primary); border:1px solid var(--primary); }
+  .rec-btn--watch:hover { background:#EFF6FF; }
 
   /* Tabs */
   .rec-tabs { display:flex; gap:26px; padding:0 28px; background:#fff; border-bottom:1px solid var(--line); }
