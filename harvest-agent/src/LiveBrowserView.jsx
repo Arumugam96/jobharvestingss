@@ -30,8 +30,15 @@ export default function LiveBrowserView({ title, onClose }) {
     };
   }, []);
 
+  useEffect(() => {
+    if (!onClose) return;
+    const onKeyDown = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
   return (
-    <div className="lbv-overlay">
+    <div className="lbv-overlay" onClick={(e) => { if (e.target === e.currentTarget && onClose) onClose(); }}>
       <style>{styles}</style>
       <div className="lbv-panel">
         <div className="lbv-bar">
@@ -43,7 +50,7 @@ export default function LiveBrowserView({ title, onClose }) {
           </span>
           {onClose && (
             <button type="button" className="lbv-close" onClick={onClose} aria-label="Close live view">
-              <X size={16} />
+              <X size={16} /> Close
             </button>
           )}
         </div>
@@ -59,14 +66,18 @@ const styles = `
     background: rgba(15, 23, 42, 0.55);
     display: flex; align-items: center; justify-content: center;
     padding: 24px;
+    overflow-y: auto;
   }
   .lbv-panel {
-    width: min(1024px, 100%); background: #0F172A; border-radius: 12px;
+    width: min(1024px, 100%);
+    height: 80vh;
+    max-height: calc(100vh - 48px);
+    background: #0F172A; border-radius: 12px;
     overflow: hidden; box-shadow: 0 20px 60px rgba(0,0,0,.45);
     display: flex; flex-direction: column;
   }
   .lbv-bar {
-    display: flex; align-items: center; gap: 12px;
+    display: flex; align-items: center; gap: 12px; flex-shrink: 0;
     padding: 10px 14px; background: #1E293B; color: #E2E8F0;
     font-size: 13px; font-weight: 600;
   }
@@ -75,12 +86,16 @@ const styles = `
   .lbv-status--connected { color: #4ADE80; }
   .lbv-status--error { color: #F87171; }
   .lbv-close {
-    background: transparent; border: none; color: #94A3B8; cursor: pointer;
-    display: flex; align-items: center; padding: 4px; border-radius: 6px;
+    background: transparent; border: 1px solid #475569; color: #E2E8F0; cursor: pointer;
+    display: flex; align-items: center; gap: 5px; padding: 6px 10px; border-radius: 6px;
+    font-size: 12.5px; font-weight: 600;
   }
   .lbv-close:hover { background: rgba(148,163,184,.15); color: #fff; }
-  .lbv-canvas { width: 100%; aspect-ratio: 1366 / 900; background: #000; }
-  .lbv-canvas canvas { width: 100% !important; height: 100% !important; }
+  .lbv-canvas {
+    width: 100%; flex: 1 1 auto; min-height: 0;
+    background: #000;
+  }
+  .lbv-canvas canvas { width: 100% !important; height: 100% !important; object-fit: contain; }
   .lbv-spin { animation: lbv-rot 0.9s linear infinite; }
   @keyframes lbv-rot { to { transform: rotate(360deg); } }
 `;
