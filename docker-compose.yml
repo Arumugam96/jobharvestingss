@@ -1,8 +1,8 @@
 version: "3.9"
 
-# Backend-only stack, for local dev without the frontend. For the full
-# EC2 deployment (frontend + nginx + live browser view), use the
-# docker-compose.yml at the repo root instead.
+# Full-stack deployment (backend + frontend + live browser view) — intended
+# for the EC2 target. For backend-only local dev, ai-harvest-agent/docker-compose.yml
+# still works standalone.
 #
 # No Postgres/Redis/Celery here — the app doesn't use them. The only DB-backed
 # route (app/routes/harvest.py) is a legacy CRUD API the frontend never calls,
@@ -12,12 +12,20 @@ version: "3.9"
 
 services:
   api:
-    build: .
+    build: ./ai-harvest-agent
     ports:
       - "8000:8000"
       - "6080:6080"   # noVNC/websockify — live view of the manual LinkedIn/Naukri login browser
-    env_file: .env
+    env_file: ./ai-harvest-agent/.env
     volumes:
       - ./data:/app/data
     restart: unless-stopped
     shm_size: "1gb"   # Chromium under Xvfb needs more than Docker's 64MB default /dev/shm
+
+  frontend:
+    build: ./harvest-agent
+    ports:
+      - "80:80"
+    depends_on:
+      - api
+    restart: unless-stopped

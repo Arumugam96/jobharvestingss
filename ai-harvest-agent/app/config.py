@@ -4,7 +4,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import AnyHttpUrl, field_validator
+from pydantic import AnyHttpUrl
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -82,14 +82,14 @@ class Settings(BaseSettings):
     s3_bucket: str = "harvest-results"
 
     # ── CORS ─────────────────────────────────────────────────────────────────────
-    cors_origins: list[str] = ["http://localhost:3000", "http://localhost:8080"]
+    # Kept as a plain str (not list[str]) — pydantic-settings' env source treats
+    # list-typed fields as JSON and raises SettingsError on a comma-separated
+    # value like "http://a,http://b" before any field_validator ever runs.
+    cors_origins: str = "http://localhost:3000,http://localhost:8080"
 
-    @field_validator("cors_origins", mode="before")
-    @classmethod
-    def parse_cors(cls, v: str | list[str]) -> list[str]:
-        if isinstance(v, str):
-            return [o.strip() for o in v.split(",")]
-        return v
+    @property
+    def cors_origins_list(self) -> list[str]:
+        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
 
     @property
     def is_production(self) -> bool:
