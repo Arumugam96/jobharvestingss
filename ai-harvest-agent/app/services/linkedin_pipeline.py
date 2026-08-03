@@ -244,7 +244,7 @@ class LinkedInPipelineService:
 def _backfill_from_card(
     parsed: "ParsedJobDescription",  # type: ignore[name-defined]
     card: LinkedInJobCard,
-) -> "ParsedJobDescription":
+) -> "ParsedJobDescription":     # type: ignore
     """
     Fill Gemini gaps with data already present on the LinkedIn card.
 

@@ -1,4 +1,6 @@
-const API_BASE = process.env.REACT_APP_API_BASE_URL || "http://localhost:8001";
+// `??` (not `||`) so an explicit empty string — same-origin deployment behind
+// nginx, see harvest-agent/Dockerfile — isn't overridden by the dev default.
+const API_BASE = process.env.REACT_APP_API_BASE_URL ?? "http://localhost:8001";
 
 class ApiError extends Error {
   constructor(message, status, body) {

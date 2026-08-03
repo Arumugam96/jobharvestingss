@@ -8,6 +8,7 @@ import {
   getRunHistory, getRunHistoryEntry, setupLinkedinSession, setupNaukriSession, ApiError,
 } from "./api";
 import HealthBadge from "./HealthBadge";
+import LiveBrowserView from "./LiveBrowserView";
 
 const NaukriIcon = () => (
   <svg width="34" height="34" viewBox="0 0 34 34" aria-hidden="true">
@@ -353,24 +354,31 @@ export default function RuleEngineConfig({
 
   const [linkedinSetup, setLinkedinSetup] = useState({ loading: false, message: "" });
   const [naukriSetup, setNaukriSetup] = useState({ loading: false, message: "" });
+  const [liveViewSource, setLiveViewSource] = useState(null); // "linkedin" | "naukri" | null
 
   const handleLinkedinSetup = async () => {
-    setLinkedinSetup({ loading: true, message: "Chrome window opening — log in to LinkedIn there. Waiting up to 10 minutes…" });
+    setLinkedinSetup({ loading: true, message: "Log in below — this is the live browser. Waiting up to 10 minutes…" });
+    setLiveViewSource("linkedin");
     try {
       const res = await setupLinkedinSession();
       setLinkedinSetup({ loading: false, message: res.status === "ready" ? (res.message || "LinkedIn session saved.") : (res.reason || res.message || "Could not confirm login.") });
     } catch (err) {
       setLinkedinSetup({ loading: false, message: err instanceof ApiError ? err.message : "Could not reach the harvest backend." });
+    } finally {
+      setLiveViewSource(null);
     }
   };
 
   const handleNaukriSetup = async () => {
-    setNaukriSetup({ loading: true, message: "Chrome window opening — log in to Naukri there. Waiting up to 10 minutes…" });
+    setNaukriSetup({ loading: true, message: "Log in below — this is the live browser. Waiting up to 10 minutes…" });
+    setLiveViewSource("naukri");
     try {
       const res = await setupNaukriSession();
       setNaukriSetup({ loading: false, message: res.status === "ready" ? (res.message || "Naukri session saved.") : (res.reason || res.message || "Could not confirm login.") });
     } catch (err) {
       setNaukriSetup({ loading: false, message: err instanceof ApiError ? err.message : "Could not reach the harvest backend." });
+    } finally {
+      setLiveViewSource(null);
     }
   };
 
@@ -383,6 +391,13 @@ export default function RuleEngineConfig({
   return (
     <div className="rec-root">
       <style>{styles}</style>
+
+      {liveViewSource && (
+        <LiveBrowserView
+          title={liveViewSource === "linkedin" ? "LinkedIn login — live browser" : "Naukri login — live browser"}
+          onClose={() => setLiveViewSource(null)}
+        />
+      )}
 
       {/* Sidebar */}
       <aside className="rec-sidebar">
