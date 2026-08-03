@@ -90,29 +90,37 @@ def start_cdp_chrome(user_data_dir: Path | str | None = None) -> dict[str, Any]:
     for lock in [user_data_dir / "SingletonLock", user_data_dir / "Default" / "SingletonLock"]:
         lock.unlink(missing_ok=True)
 
-    proc = subprocess.Popen(
-        [
-            str(chrome),
-            f"--remote-debugging-port={_CDP_PORT}",
-            "--remote-allow-origins=*",
-            f"--user-data-dir={user_data_dir}",
-            "--profile-directory=Default",
-            "--no-first-run",
-            "--no-default-browser-check",
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+    # subprocess.Popen does not bind the CDP port on Windows (Chrome runs but 9222 never opens).
+    # PowerShell Start-Process creates a fully-detached process; CDP is ready in ~1 second.
+    _chrome_args = [
+        f"--remote-debugging-port={_CDP_PORT}",
+        "--remote-allow-origins=*",
+        f"--user-data-dir={user_data_dir}",
+        "--profile-directory=Default",
+        "--no-first-run",
+        "--no-default-browser-check",
+    ]
+    _args_ps = ", ".join(f"'{a}'" for a in _chrome_args)
+    _ps_cmd  = (
+        f"$p = Start-Process -FilePath '{chrome}' "
+        f"-ArgumentList @({_args_ps}) -PassThru; Write-Output $p.Id"
     )
+    _ps_result = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", _ps_cmd],
+        capture_output=True, text=True, timeout=15,
+    )
+    chrome_pid = _ps_result.stdout.strip() or "unknown"
+    logger.info("cdp_chrome_launch_via_ps", pid=chrome_pid, port=_CDP_PORT)
 
-    # Wait for CDP endpoint (up to 12 s)
-    deadline = time.time() + 12
+    # Wait for CDP endpoint (up to 15 s)
+    deadline = time.time() + 15
     while time.time() < deadline:
         if _cdp_is_available():
-            logger.info("cdp_chrome_started", pid=proc.pid, port=_CDP_PORT)
+            logger.info("cdp_chrome_started", pid=chrome_pid, port=_CDP_PORT)
             return {
                 "status":  "ready",
                 "message": "Chrome started with remote debugging enabled.",
-                "pid":     proc.pid,
+                "pid":     chrome_pid,
                 "cdp_url": f"http://127.0.0.1:{_CDP_PORT}",
                 "next_step": [
                     "Click 'Open in Browser' in the Naukri Recruiter Launcher.",
@@ -124,7 +132,8 @@ def start_cdp_chrome(user_data_dir: Path | str | None = None) -> dict[str, Any]:
         time.sleep(0.5)
 
     raise RuntimeError(
-        f"Chrome started (PID {proc.pid}) but CDP port {_CDP_PORT} did not become available."
+        f"Chrome started (PID {chrome_pid}) but CDP port {_CDP_PORT} did not become available. "
+        f"PowerShell exit code: {_ps_result.returncode}. Stderr: {_ps_result.stderr.strip()[:200]}"
     )
 
 
