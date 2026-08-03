@@ -1,5 +1,3 @@
-version: "3.9"
-
 # Backend-only stack, for local dev without the frontend. For the full
 # EC2 deployment (frontend + nginx + live browser view), use the
 # docker-compose.yml at the repo root instead.

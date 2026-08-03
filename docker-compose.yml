@@ -1,5 +1,3 @@
-version: "3.9"
-
 # Full-stack deployment (backend + frontend + live browser view) — intended
 # for the EC2 target. For backend-only local dev, ai-harvest-agent/docker-compose.yml
 # still works standalone.
@@ -13,9 +11,14 @@ version: "3.9"
 services:
   api:
     build: ./ai-harvest-agent
-    ports:
-      - "8000:8000"
-      - "6080:6080"   # noVNC/websockify — live view of the manual LinkedIn/Naukri login browser
+    # No host port publishing — nginx (the "frontend" service) reaches this
+    # container over the internal Docker network (http://api:8000, /vnc/ ->
+    # http://api:6080) regardless. Not publishing to the host avoids ever
+    # colliding with something else already using 8000/6080 on the host,
+    # and keeps both ports unreachable from outside Docker entirely.
+    expose:
+      - "8000"
+      - "6080"
     env_file: ./ai-harvest-agent/.env
     volumes:
       - ./data:/app/data
@@ -25,7 +28,7 @@ services:
   frontend:
     build: ./harvest-agent
     ports:
-      - "80:80"
+      - "8080:80"   # host port 80 was already taken on this instance — app is served on 8080 instead
     depends_on:
       - api
     restart: unless-stopped
