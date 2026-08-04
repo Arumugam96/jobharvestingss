@@ -96,6 +96,7 @@ def _load_lead_records() -> list[dict]:
         logger.warning("lead_load_error", error=str(exc))
         return []
 
+    # Support multiple possible record-list keys in the JSON structure
     for key in ("recruiters", "records", "contacts", "prospects", "leads", "results"):
         if isinstance(data.get(key), list):
             records = data[key]
@@ -210,35 +211,58 @@ def _latest_json() -> Path | None:
 @router.get(
     "/jobs",
     status_code = status.HTTP_200_OK,
-    summary     = "List harvested jobs",
+    summary     = "List jobs",
     description = (
         "Returns a paginated, filterable, sortable list of harvested jobs "
         "from the most recent combined harvest run."
     ),
 )
 async def list_jobs(
-    page:          int = Query(1,    ge=1,          description="Page number (1-based)"),
-    page_size:     int = Query(50,   ge=1,  le=500, description="Results per page (max 500)"),
-    sort_by:       str = Query("posted_date",        description="Sort field: posted_date | company | job_title | source | hiring_entity | location"),
-    sort_order:    str = Query("desc",               description="asc | desc"),
-    keyword:       str = Query("",                   description="Search in job_title, job_description, company"),
-    company:       str = Query("",                   description="Filter by company name (partial match)"),
-    source:        str = Query("",                   description="LinkedIn | Naukri | Dice"),
-    hiring_entity: str = Query("",                   description="Direct Client | GCC | Staffing Firm | Ambiguous"),
-    work_mode:     str = Query("",                   description="Remote | Hybrid | Onsite"),
-    date_from:     str = Query("",                   description="Posted on or after YYYY-MM-DD"),
-    date_to:       str = Query("",                   description="Posted on or before YYYY-MM-DD"),
+    page:          int = Query(1,    ge=1,               description="Page number (1-based)"),
+    page_size:     int = Query(50,   ge=1,  le=500,      description="Results per page (max 500)"),
+    sort_by:       str = Query("posted_date",             description="Sort field: posted_date | company | job_title | source | hiring_entity | location"),
+    sort_order:    str = Query("desc",                    description="Sort direction: asc | desc"),
+    keyword:       str = Query("",                        description="Search in job_title, job_description, company"),
+    company:       str = Query("",                        description="Filter by company name (partial match)"),
+    source:        str = Query("",                        description="Filter by source: LinkedIn | Naukri | Dice"),
+    hiring_entity: str = Query("",                        description="Filter: Direct Client | GCC | Staffing Firm | Ambiguous"),
+    work_mode:     str = Query("",                        description="Filter: Remote | Hybrid | Onsite"),
+    date_from:     str = Query("",                        description="Filter jobs posted on or after this date (YYYY-MM-DD)"),
+    date_to:       str = Query("",                        description="Filter jobs posted on or before this date (YYYY-MM-DD)"),
 ) -> dict:
-    logger.info("jobs_request", page=page, page_size=page_size, keyword=keyword, source=source)
+    """
+    Paginated job list from the most recent harvest.
+
+    **Filtering** (all optional, combinable):
+    - `keyword` — searches job_title, job_description, company
+    - `company`  — company name partial match
+    - `source`   — LinkedIn | Naukri | Dice
+    - `hiring_entity` — Direct Client | GCC | Staffing Firm | Ambiguous
+    - `work_mode` — Remote | Hybrid | Onsite
+    - `date_from` / `date_to` — ISO date YYYY-MM-DD
+
+    **Sorting** — set `sort_by` and `sort_order`.
+    """
+    logger.info(
+        "jobs_request",
+        page=page, page_size=page_size,
+        keyword=keyword, company=company, source=source,
+    )
 
     all_jobs = _load_all_jobs()
+
     filtered = _apply_job_filters(
         all_jobs,
-        keyword=keyword, company=company, source=source,
-        hiring_entity=hiring_entity, work_mode=work_mode,
-        date_from=date_from or None, date_to=date_to or None,
+        keyword       = keyword,
+        company       = company,
+        source        = source,
+        hiring_entity = hiring_entity,
+        work_mode     = work_mode,
+        date_from     = date_from or None,
+        date_to       = date_to   or None,
     )
-    sorted_jobs = _apply_sort(filtered, sort_by, sort_order)
+
+    sorted_jobs  = _apply_sort(filtered, sort_by, sort_order)
     page_items, total, total_pages = _paginate(sorted_jobs, page, page_size)
 
     return {
@@ -255,27 +279,35 @@ async def list_jobs(
             "date_from":     date_from     or None,
             "date_to":       date_to       or None,
         },
-        "sort":  {"by": sort_by, "order": sort_order},
-        "jobs":  page_items,
+        "sort": {"by": sort_by, "order": sort_order},
+        "jobs": page_items,
     }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# GET /jobs/{job_id}
+# GET /jobs/{id}
 # ══════════════════════════════════════════════════════════════════════════════
 
 @router.get(
     "/jobs/{job_id}",
     status_code = status.HTTP_200_OK,
-    summary     = "Single job detail",
+    summary     = "Job detail",
+    description = "Returns the complete record for a single harvested job by its stable id.",
     responses   = {404: {"description": "Job not found"}},
 )
 async def get_job(job_id: str) -> dict:
-    """Returns one job record by its 16-char stable `id` (hash of job_url)."""
-    for job in _load_all_jobs():
+    """
+    Returns one job record by `id` (a 16-char hex stable hash of the job URL).
+    The `id` field is included in every record returned by **GET /jobs**.
+    """
+    all_jobs = _load_all_jobs()
+    for job in all_jobs:
         if job.get("id") == job_id:
             return job
-    raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
+    raise HTTPException(
+        status_code = 404,
+        detail      = f"Job '{job_id}' not found. Run a harvest first or check the id.",
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -286,7 +318,10 @@ async def get_job(job_id: str) -> dict:
     "/lead-intelligence",
     status_code = status.HTTP_200_OK,
     summary     = "Lead intelligence records",
-    description = "Returns paginated recruiter intelligence records from the most recent discovery run.",
+    description = (
+        "Returns recruiter intelligence records from the most recent "
+        "recruiter discovery run.  Run **POST /run-recruiter-discovery** first."
+    ),
 )
 async def list_lead_intelligence(
     page:      int = Query(1,   ge=1,          description="Page number (1-based)"),
@@ -295,6 +330,33 @@ async def list_lead_intelligence(
     company:   str = Query("",                  description="Filter by company name"),
     source:    str = Query("",                  description="Filter by source"),
 ) -> dict:
+    """
+    Paginated recruiter intelligence records.
+
+    Each record includes (when available):
+
+    | Field               | Description                          |
+    |---------------------|--------------------------------------|
+    | name                | Recruiter full name                  |
+    | designation         | Job title / designation              |
+    | department          | HR / Talent Acquisition / Leadership |
+    | position_level      | Recruiter → Manager → Director → VP  |
+    | location            | City / region                        |
+    | current_company     | Employer name                        |
+    | linkedin_profile_url| LinkedIn profile URL                 |
+    | email_id            | Official email (scraped only)        |
+    | email_status        | VERIFIED / PUBLIC / NOT_FOUND        |
+    | contact_number      | Phone (scraped only)                 |
+    | phone_status        | VERIFIED / PUBLIC / NOT_FOUND        |
+    | hiring_domain       | AI/ML, Cloud/DevOps, Java, SAP, …   |
+    | company_industry    | LinkedIn industry taxonomy           |
+    | company_size        | Employee band (e.g. 1,001–5,000)    |
+    | years_in_company    | Tenure in current role               |
+    | overall_experience  | Total career years                   |
+    | reporting_manager   | Direct manager (if public)           |
+    | confidence_score    | High / Medium / Low                  |
+    | source              | Enrichment sources used              |
+    """
     records = _load_lead_records()
 
     if keyword:
@@ -312,7 +374,10 @@ async def list_lead_intelligence(
             if co in (r.get("company") or r.get("current_company") or "").lower()
         ]
     if source:
-        records = [r for r in records if (r.get("source") or "").lower() == source.lower()]
+        records = [
+            r for r in records
+            if (r.get("source") or "").lower() == source.lower()
+        ]
 
     page_items, total, total_pages = _paginate(records, page, page_size)
 
@@ -321,26 +386,39 @@ async def list_lead_intelligence(
         "page":        page,
         "page_size":   page_size,
         "total_pages": total_pages,
-        "records":     page_items,
+        "filters": {
+            "keyword": keyword or None,
+            "company": company or None,
+            "source":  source  or None,
+        },
+        "records": page_items,
     }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# GET /lead-intelligence/{lead_id}
+# GET /lead-intelligence/{id}
 # ══════════════════════════════════════════════════════════════════════════════
 
 @router.get(
     "/lead-intelligence/{lead_id}",
     status_code = status.HTTP_200_OK,
     summary     = "Single recruiter profile",
+    description = "Returns the full recruiter intelligence profile by its stable id.",
     responses   = {404: {"description": "Lead not found"}},
 )
 async def get_lead(lead_id: str) -> dict:
-    """Returns one recruiter record by its stable `id`."""
-    for r in _load_lead_records():
+    """
+    Returns one recruiter profile by `id` (hash of linkedin_profile_url or name+company).
+    The `id` field is included in every record returned by **GET /lead-intelligence**.
+    """
+    records = _load_lead_records()
+    for r in records:
         if r.get("id") == lead_id:
             return r
-    raise HTTPException(status_code=404, detail=f"Lead '{lead_id}' not found.")
+    raise HTTPException(
+        status_code = 404,
+        detail      = f"Lead '{lead_id}' not found. Run recruiter discovery first or check the id.",
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -351,18 +429,28 @@ async def get_lead(lead_id: str) -> dict:
     "/download/json",
     summary     = "Download latest harvest JSON",
     description = "Returns the most recent combined harvest JSON as a file download.",
-    responses   = {404: {"description": "No harvest results found — run a harvest first"}},
+    responses   = {
+        200: {"description": "JSON file download"},
+        404: {"description": "No harvest results found"},
+    },
 )
 async def download_json() -> FileResponse:
+    """
+    Downloads the latest `*_combined.json` from `data/results/combined/`.
+    Run a harvest first if no file is found.
+    """
     path = _latest_json()
     if path is None:
-        raise HTTPException(status_code=404, detail="No harvest JSON found. Run POST /run-harvest-agent first.")
+        raise HTTPException(
+            status_code = 404,
+            detail      = "No harvest JSON found. Run POST /run-harvest-agent first.",
+        )
     logger.info("download_json", path=str(path))
     return FileResponse(
-        path       = str(path),
-        media_type = "application/json",
-        filename   = path.name,
-        headers    = {"Content-Disposition": f'attachment; filename="{path.name}"'},
+        path         = str(path),
+        media_type   = "application/json",
+        filename     = path.name,
+        headers      = {"Content-Disposition": f'attachment; filename="{path.name}"'},
     )
 
 
@@ -374,16 +462,26 @@ async def download_json() -> FileResponse:
     "/download/excel",
     summary     = "Download latest harvest Excel",
     description = "Returns the most recent harvest Excel report (.xlsx) as a file download.",
-    responses   = {404: {"description": "No Excel report found — run a harvest first"}},
+    responses   = {
+        200: {"description": "Excel file download"},
+        404: {"description": "No Excel report found"},
+    },
 )
 async def download_excel() -> FileResponse:
+    """
+    Downloads the latest `.xlsx` file from `data/results/`.
+    Run a harvest first if no file is found.
+    """
     path = _latest_excel()
     if path is None:
-        raise HTTPException(status_code=404, detail="No Excel report found. Run POST /run-harvest-agent first.")
+        raise HTTPException(
+            status_code = 404,
+            detail      = "No Excel report found. Run POST /run-harvest-agent first.",
+        )
     logger.info("download_excel", path=str(path))
     return FileResponse(
-        path       = str(path),
-        media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        filename   = path.name,
-        headers    = {"Content-Disposition": f'attachment; filename="{path.name}"'},
+        path         = str(path),
+        media_type   = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename     = path.name,
+        headers      = {"Content-Disposition": f'attachment; filename="{path.name}"'},
     )

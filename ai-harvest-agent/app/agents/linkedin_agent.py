@@ -415,13 +415,35 @@ class LinkedInAgent:
             max_jobs       = filters.max_jobs,
             chrome_profile = chrome_profile,
         )
-        try:
-            async with PersistentBrowserManager(
+        # Prefer session JSON (portable, always up to date after /linkedin-setup-session).
+        # Fall back to profile directory only when no session file exists.
+        from app.scrapers.browser_manager import BrowserManager
+        from app.services.session_manager import SessionManager
+        sm = SessionManager("linkedin")
+        storage_state_arg = sm.storage_state_arg()
+
+        if storage_state_arg:
+            logger.info("linkedin_using_session_file", session_file=storage_state_arg)
+            browser_ctx = BrowserManager(
+                headless      = headless,
+                slow_mo       = slow_mo,
+                storage_state = storage_state_arg,
+            )
+        else:
+            logger.warning(
+                "linkedin_no_session_file",
+                hint="No data/sessions/linkedin_session.json found — falling back to Chrome profile. "
+                     "Call POST /linkedin-setup-session to create the session file.",
+            )
+            browser_ctx = PersistentBrowserManager(
                 profile_dir = chrome_profile,
                 headless    = headless,
                 slow_mo     = slow_mo,
-            ) as pbm:
-                page = await pbm.new_page()
+            )
+
+        try:
+            async with browser_ctx as bm:
+                page = await bm.new_page()
                 jobs = await self._run(page, filters)
         except Exception as exc:
             logger.exception("agent_failed", source="linkedin", error=str(exc))
