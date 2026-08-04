@@ -1,5 +1,6 @@
 # ── Environment & Secrets ─────────────────────────────────────────────────────
 .env
+.env.*
 .env.local
 .env.production
 *.env
@@ -27,12 +28,15 @@ htmlcov/
 .mypy_cache/
 
 # ── Browser Sessions & Chrome Profiles (sensitive runtime data) ───────────────
-data/sessions/*.json
+data/sessions/
+!data/sessions/.gitkeep
 data/chrome_profile/
 data/chrome_profile_test/
 data/chrome_profile_test2/
 data/chrome_profile*/
 storage_state/
+*cookies*.json
+*storage_state*.json
 *.json.lock
 
 # ── Generated Harvest Results (runtime output — never commit) ─────────────────
@@ -54,6 +58,8 @@ data/prospects/input/
 server.err
 server_stderr.log
 server_stdout.log
+server_out.txt
+server_err.txt
 uvicorn_out.txt
 uvicorn_err.txt
 logs/
@@ -76,11 +82,17 @@ Thumbs.db
 *.sqlite3
 
 # ── Generated Documents & Temp Files ─────────────────────────────────────────
+*.docx
+*.xlsx
+*.csv
 data/*.docx
 data/*.xlsx
 data/*.csv
 ~*.tmp
 *.tmp
+
+# ── Runtime / Generated Directories ──────────────────────────────────────────
+architecture_diagram_files/
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 output/

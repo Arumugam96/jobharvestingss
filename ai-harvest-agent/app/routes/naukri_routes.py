@@ -206,6 +206,10 @@ async def setup_naukri_session() -> Any:
     chrome_profile = config.browser.chrome_profile
 
     async def _open_for_login() -> str:
+        import os
+        naukri_email    = os.environ.get("NAUKRI_EMAIL", "")
+        naukri_password = os.environ.get("NAUKRI_PASSWORD", "")
+
         async with PersistentBrowserManager(
             profile_dir = chrome_profile,
             headless    = False,
@@ -216,13 +220,85 @@ async def setup_naukri_session() -> Any:
                 wait_until = "domcontentloaded",
                 timeout    = 30_000,
             )
-            logger.info(
-                "naukri_setup_browser_opened",
-                msg     = "Naukri login page opened. Please log in manually.",
-                profile = chrome_profile,
-            )
+            await page.wait_for_timeout(2_000)
 
             _LOGIN_PATHS = ("/recruit/login", "/nlogin/login", "/nlogin/")
+            current_url  = page.url
+
+            # Auto-fill credentials if on a login page and creds are available
+            if naukri_email and naukri_password and any(p in current_url for p in _LOGIN_PATHS):
+                logger.info(
+                    "naukri_setup_autofill",
+                    email   = naukri_email,
+                    profile = chrome_profile,
+                )
+                _EMAIL_SELS = [
+                    'input[type="email"]',
+                    'input[name="username"]',
+                    'input[name="emailId"]',
+                    'input[id*="email" i]',
+                    'input[placeholder*="email" i]',
+                    'input[placeholder*="username" i]',
+                ]
+                _PASS_SELS = [
+                    'input[type="password"]',
+                    'input[name="password"]',
+                    'input[id*="password" i]',
+                    'input[placeholder*="password" i]',
+                ]
+                _SUBMIT_SELS = [
+                    'button[type="submit"]',
+                    'input[type="submit"]',
+                    'button:has-text("Login")',
+                    'button:has-text("Sign in")',
+                    'button:has-text("Log in")',
+                    '.loginBtn',
+                    '[class*="loginBtn"]',
+                ]
+
+                # Fill email
+                for sel in _EMAIL_SELS:
+                    try:
+                        el = page.locator(sel).first
+                        if await el.count() > 0:
+                            await el.click()
+                            await el.fill(naukri_email)
+                            logger.info("naukri_autofill_email_entered")
+                            break
+                    except Exception:
+                        continue
+
+                # Fill password
+                for sel in _PASS_SELS:
+                    try:
+                        el = page.locator(sel).first
+                        if await el.count() > 0:
+                            await el.click()
+                            await el.fill(naukri_password)
+                            logger.info("naukri_autofill_password_entered")
+                            break
+                    except Exception:
+                        continue
+
+                # Click submit
+                for sel in _SUBMIT_SELS:
+                    try:
+                        btn = page.locator(sel).first
+                        if await btn.count() > 0:
+                            await btn.click()
+                            logger.info("naukri_autofill_submitted")
+                            await page.wait_for_timeout(4_000)
+                            break
+                    except Exception:
+                        continue
+            else:
+                logger.info(
+                    "naukri_setup_browser_opened",
+                    msg     = "Naukri login page opened — waiting for manual login or already authenticated.",
+                    profile = chrome_profile,
+                )
+
+            # Wait for navigation away from login (up to 10 min for manual completion)
             for _ in range(300):   # 300 × 2 s = 10 min
                 await page.wait_for_timeout(2_000)
                 url = page.url
@@ -247,6 +323,78 @@ async def setup_naukri_session() -> Any:
     except Exception as exc:
         logger.error("naukri_setup_session_failed", error=str(exc))
         return _err("Failed to set up Naukri session", str(exc))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# POST /naukri-extract-session
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.post("/naukri-start-cdp-browser", status_code=status.HTTP_200_OK)
+async def naukri_start_cdp_browser() -> Any:
+    """
+    Step 1 of Naukri session capture:
+    Kills any existing Chrome and starts a fresh Chrome with --remote-debugging-port=9222.
+
+    After this returns, click "Open in Browser" in the Naukri Recruiter Launcher.
+    The Launcher's auto-login URL will open as a new tab in this CDP-enabled Chrome.
+    Wait ~5 seconds, then call POST /naukri-extract-session to capture the session.
+    """
+    try:
+        from app.services.chrome_session_extractor import start_cdp_chrome
+        result = start_cdp_chrome()
+        return result
+    except Exception as exc:
+        logger.error("naukri_start_cdp_browser_failed", error=str(exc))
+        return {"status": "failed", "message": str(exc)}
+
+
+@router.post("/naukri-extract-session", status_code=status.HTTP_200_OK)
+async def naukri_extract_session() -> Any:
+    """
+    Extract Naukri authentication cookies from the user's Chrome browser via CDP.
+
+    How it works:
+    - If Chrome is running with --remote-debugging-port=9222: connects and extracts cookies.
+    - If Chrome is NOT running with CDP: starts Chrome with CDP automatically.
+    - Navigates to recruit.naukri.com to verify login status.
+    - If logged in: saves cookies to data/sessions/naukri_session.json and returns "ready".
+    - If NOT logged in: returns "action_required" — Chrome window is open, log in there.
+
+    After calling this once when logged in, future /run-lead-intelligence calls reuse the
+    saved session file automatically.
+    """
+    from app.services.chrome_session_extractor import extract_naukri_session
+    from app.core.proactor import needs_proactor, run_in_proactor
+
+    async def _extract() -> dict:
+        return await extract_naukri_session()
+
+    try:
+        if needs_proactor():
+            result: dict = await run_in_proactor(_extract)
+        else:
+            result = await _extract()
+
+        logger.info(
+            "naukri_extract_session_result",
+            status       = result.get("status"),
+            logged_in    = result.get("logged_in"),
+            cookies_found= result.get("cookies_found"),
+        )
+        return result
+
+    except Exception as exc:
+        err_msg = str(exc)
+        logger.error("naukri_extract_session_failed", error=err_msg)
+        return {
+            "status":    "failed",
+            "message":   "Authenticated Chrome profile not detected",
+            "reason":    err_msg,
+            "next_step": [
+                "Make sure Chrome is installed at the standard path.",
+                "Call POST /naukri-extract-session again.",
+            ],
+        }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
