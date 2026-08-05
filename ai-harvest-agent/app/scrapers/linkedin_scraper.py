@@ -188,6 +188,27 @@ class _Sel:
         'button:has-text("Show more")',
     ]
 
+    # "Meet the hiring team" recruiter card (visible when authenticated)
+    RECRUITER_NAME = [
+        ".hirer-card .artdeco-entity-lockup__title a",
+        ".hirer-card .artdeco-entity-lockup__title",
+        ".jobs-poster__name",
+        ".hirer-card__hirer-information a",
+        "[class*='hirer-card'] a[href*='/in/']",
+    ]
+    RECRUITER_TITLE = [
+        ".hirer-card .artdeco-entity-lockup__subtitle",
+        ".jobs-poster__occupation",
+        ".hirer-card__hirer-information span",
+        "[class*='hirer-card'] span.t-14",
+    ]
+    RECRUITER_URL = [
+        ".hirer-card .artdeco-entity-lockup__title a",
+        ".hirer-card a[href*='/in/']",
+        ".jobs-poster__name a",
+        "[class*='hirer-card'] a[href*='linkedin.com/in/']",
+    ]
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Stealth — anti-bot patches applied at context level
@@ -653,6 +674,31 @@ class _DescriptionPage:
         logger.warning("description_not_found", url=clean_url)
         return None
 
+    async def extract_recruiter(self) -> dict:
+        """
+        Extract point-of-contact info from the "Meet the hiring team" card on
+        the job-detail page currently loaded in this page object.
+
+        Must be called right after extract() (same navigation) since it reads
+        from the page already on the job-detail URL — no extra navigation.
+        """
+        result: dict = {}
+        try:
+            name = await _first_text(self._page, _Sel.RECRUITER_NAME)
+            if name:
+                result["job_poster_name"] = _clean(name)
+
+            title = await _first_text(self._page, _Sel.RECRUITER_TITLE)
+            if title:
+                result["job_poster_designation"] = _clean(title)
+
+            url = await _first_text(self._page, _Sel.RECRUITER_URL, attr="href")
+            if url and "/in/" in url:
+                result["linkedin_profile_url"] = url.split("?")[0]
+        except Exception as exc:
+            logger.debug("recruiter_extract_failed", error=str(exc))
+        return result
+
     async def _expand_show_more(self) -> None:
         """Click 'Show more' to reveal the full description if truncated."""
         for sel in _Sel.SHOW_MORE_BTN:
@@ -915,6 +961,25 @@ class LinkedInScraper:
         async with self._pool.borrow() as page:
             fetcher = _DescriptionPage(page, screenshot_dir=self._ss_dir)
             return await fetcher.extract(job_url)
+
+    async def fetch_description_and_contact(self, job_url: str) -> tuple[str | None, dict]:
+        """
+        Open the LinkedIn job-detail page once and return both the cleaned
+        description text and the point-of-contact (hiring-team) info found
+        on the same page — (description, {job_poster_name, job_poster_designation,
+        linkedin_profile_url}).
+
+        Point-of-contact fields are only present in the dict when found; the
+        "Meet the hiring team" card is only rendered when authenticated and
+        when the poster chose to show it, so an empty dict is expected often.
+        """
+        assert self._pool, "Use LinkedInScraper as an async context manager"
+
+        async with self._pool.borrow() as page:
+            fetcher = _DescriptionPage(page, screenshot_dir=self._ss_dir)
+            description = await fetcher.extract(job_url)
+            contact = await fetcher.extract_recruiter()
+            return description, contact
 
     # ── Convenience: search + fetch all descriptions ──────────────────────────
 
