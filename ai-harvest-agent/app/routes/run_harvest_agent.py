@@ -174,6 +174,7 @@ async def _run_harvest_background(
                 completed_at = datetime.now(timezone.utc),
                 status       = "failed",
                 jobs_found   = 0,
+                error        = str(exc),
             )
         )
         JobTracker.update(

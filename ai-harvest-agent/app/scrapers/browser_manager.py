@@ -192,8 +192,22 @@ class PersistentBrowserManager:
         self._context:     BrowserContext | None = None
 
     async def __aenter__(self) -> "PersistentBrowserManager":
-        from pathlib import Path as _Path
         self._profile_dir.mkdir(parents=True, exist_ok=True)
+
+        # Clear stale lock files before launching. If a previous process (e.g.
+        # a container that was killed/rebuilt) left the persistent context open,
+        # launch_persistent_context() fails immediately with "user data directory
+        # is already in use" — these locks are safe to remove once that process
+        # is gone, which it always is by the time a new container starts.
+        for lock_name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+            lock_path = self._profile_dir / lock_name
+            if lock_path.exists():
+                try:
+                    lock_path.unlink()
+                    logger.info("chrome_profile_lock_cleared", lock=lock_name, profile_dir=str(self._profile_dir))
+                except Exception as exc:
+                    logger.debug("chrome_profile_lock_clear_failed", lock=lock_name, error=str(exc))
+
         self._pw = await async_playwright().start()
 
         # channel="chromium" → use Playwright's bundled Chromium (not system Chrome).

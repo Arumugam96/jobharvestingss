@@ -84,6 +84,7 @@ class RunHistoryService:
         gcc:             int = 0,
         staffing_firms:  int = 0,
         ambiguous:       int = 0,
+        error:           str | None = None,
     ) -> dict[str, Any]:
         return {
             "run_id":         run_id,
@@ -97,4 +98,5 @@ class RunHistoryService:
             "gcc":            gcc,
             "staffing_firms": staffing_firms,
             "ambiguous":      ambiguous,
+            "error":          error,
         }
