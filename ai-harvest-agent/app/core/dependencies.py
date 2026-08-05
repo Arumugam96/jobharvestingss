@@ -22,6 +22,10 @@ logger = structlog.get_logger(__name__)
 
 
 def _build_engine(settings: Settings):  # type: ignore[return]
+    # SQLite's async dialect (aiosqlite) uses NullPool and rejects pool_size /
+    # max_overflow entirely — those only apply to pooled dialects (Postgres, MySQL).
+    if settings.database_url.startswith("sqlite"):
+        return create_async_engine(settings.database_url, echo=settings.db_echo)
     return create_async_engine(
         settings.database_url,
         pool_size=settings.db_pool_size,
