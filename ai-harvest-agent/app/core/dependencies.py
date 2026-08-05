@@ -4,10 +4,15 @@ from __future__ import annotations
 from typing import AsyncGenerator
 
 import structlog
-from fastapi import Depends, Request
+from fastapi import Depends, HTTPException, Request, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.config import Settings, get_settings
+from app.core.security import InvalidTokenError, decode_access_token
+from app.models.auth import AuthenticatedUser, UserORM
+from app.services.email_service import EmailSender
 from app.services.llm_service import LLMService
 from app.services.playwright_service import PlaywrightService
 
@@ -71,3 +76,48 @@ def get_playwright_service(request: Request) -> PlaywrightService:
     """Return the shared Playwright service from app state."""
     service: PlaywrightService = request.app.state.playwright
     return service
+
+
+# ── Email (OTP delivery) ─────────────────────────────────────────────────────────
+
+
+def get_email_sender(settings: Settings = Depends(get_settings)) -> EmailSender:
+    return EmailSender(settings)
+
+
+# ── Current user (OTP/JWT email login) ───────────────────────────────────────────
+
+_bearer_scheme = HTTPBearer(auto_error=False)
+
+
+async def get_current_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+    db: AsyncSession = Depends(get_db_session),
+    settings: Settings = Depends(get_settings),
+) -> AuthenticatedUser:
+    """Validate the bearer JWT and return the authenticated user.
+
+    Use as ``current_user: AuthenticatedUser = Depends(get_current_user)`` on
+    any route that requires a logged-in user.
+    """
+    unauthorized = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Not authenticated",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    if credentials is None:
+        raise unauthorized
+
+    try:
+        payload = decode_access_token(credentials.credentials, settings)
+    except InvalidTokenError as exc:
+        unauthorized.detail = "Invalid or expired token"
+        raise unauthorized from exc
+
+    result = await db.execute(select(UserORM).where(UserORM.id == payload.get("sub")))
+    user = result.scalar_one_or_none()
+    if user is None or not user.is_active:
+        unauthorized.detail = "User not found or inactive"
+        raise unauthorized
+
+    return AuthenticatedUser.model_validate(user)

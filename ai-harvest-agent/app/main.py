@@ -15,9 +15,13 @@ from typing import AsyncGenerator
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import get_settings
+from app.core.dependencies import get_engine
 from app.core.exceptions import HarvestException, harvest_exception_handler
 from app.core.middleware import LoggingMiddleware, RateLimitMiddleware
+import app.models.auth  # noqa: F401 — registers users / otp_verifications on Base.metadata
+from app.models.harvest import Base
 from app.routes import harvest, agents, tasks, health, job_parser, linkedin_harvest
+from app.routes.auth_routes import router as auth_router
 from app.routes.harvest_routes import router as harvest_agent_router
 from app.routes.linkedin_routes import router as linkedin_agent_router
 from app.routes.naukri_routes import router as naukri_agent_router
@@ -42,6 +46,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Restore any in-flight job states from the previous process
     JobTracker.load_from_disk()
+
+    # ── Database tables ────────────────────────────────────────────────────────
+    # No migration tool — SQLAlchemy's create_all is idempotent (skips tables
+    # that already exist), so this is safe to run on every startup.
+    engine = get_engine(settings)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
 
     # ── Playwright pool (optional — demo routes create their own browser) ─────
     # On Windows with --reload, uvicorn forces SelectorEventLoop which cannot
@@ -154,6 +165,7 @@ def create_app() -> FastAPI:
     app.include_router(linkedin_harvest.router,  prefix=f"{prefix}/jobs/linkedin",  tags=["LinkedIn Harvest"], include_in_schema=False)
 
     # ── Public endpoints (Swagger-visible) ────────────────────────────────────
+    app.include_router(auth_router)                   # POST /auth/request-otp, /auth/verify-otp, GET /auth/me
     app.include_router(frontend_router)               # GET /jobs, /lead-intelligence, /download/*, /health
     app.include_router(run_harvest_agent_router)      # POST /run-harvest-agent, GET /harvest-status/{id}, /run-history
     app.include_router(linkedin_agent_router)         # POST /run-linkedin-agent  +  results endpoints

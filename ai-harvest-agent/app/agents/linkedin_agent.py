@@ -233,6 +233,11 @@ class _Sel:
     DETAIL_SALARY:     list[str] = [".jobs-unified-top-card__job-insight--highlight", "[class*='salary']", "[class*='compensation']"]
     DETAIL_SKILLS:     list[str] = [".job-details-skill-match-status-list li", ".jobs-unified-top-card__job-insight ul li"]
     DETAIL_DESC:       list[str] = ["#job-details", "div.jobs-description__content", "div.jobs-description"]
+    SHOW_MORE_BTN:     list[str] = [
+        'button[aria-label="Show more, visually expands previously read content"]',
+        'button.show-more-less-html__button',
+        'button:has-text("Show more")',
+    ]
 
     # "Meet the hiring team" recruiter card (visible when authenticated)
     RECRUITER_NAME: list[str] = [
@@ -963,10 +968,12 @@ class LinkedInAgent:
 
             # Wait for detail panel — 2 s per selector (reduced from 8 s to keep runs fast)
             panel_found = False
+            panel_sel:   str | None = None
             for sel in _Sel.DETAIL_PANEL:
                 try:
                     await page.wait_for_selector(sel, timeout=2_000)
                     panel_found = True
+                    panel_sel   = sel
                     logger.debug("linkedin_detail_panel_found", selector=sel, idx=idx)
                     break
                 except Exception:
@@ -975,6 +982,18 @@ class LinkedInAgent:
             if not panel_found:
                 logger.debug("linkedin_detail_panel_not_found", idx=idx)
                 return detail
+
+            # Expand truncated description ("Show more") before reading text —
+            # some LinkedIn layouts only render the full description after this click.
+            for sel in _Sel.SHOW_MORE_BTN:
+                try:
+                    btn = page.locator(sel).first
+                    if await btn.is_visible(timeout=1_000):
+                        await btn.click()
+                        await _delay(page, 400, 700)
+                        break
+                except Exception:
+                    continue
 
             detail["title"]       = await _first_text(page, _Sel.DETAIL_TITLE)
             detail["company"]     = await _first_text(page, _Sel.DETAIL_COMPANY)
@@ -998,6 +1017,20 @@ class LinkedInAgent:
                             break
                 except Exception:
                     continue
+
+            # Fallback: none of the narrow DETAIL_DESC selectors matched, but the
+            # panel itself was found — read its full text rather than losing the
+            # description entirely (LinkedIn drifts its description markup often).
+            if not detail.get("description") and panel_sel:
+                try:
+                    panel_el = await page.query_selector(panel_sel)
+                    if panel_el:
+                        panel_text = _clean(await panel_el.inner_text())
+                        if len(panel_text) >= 100:
+                            detail["description"] = panel_text[:5000]
+                            logger.debug("linkedin_description_fallback_used", idx=idx, selector=panel_sel)
+                except Exception:
+                    pass
 
             # Skills list
             skills: list[str] = []

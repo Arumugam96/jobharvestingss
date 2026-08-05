@@ -19,6 +19,7 @@ TEST_DB_URL = "sqlite+aiosqlite:///:memory:"
 async def engine():
     from sqlalchemy.ext.asyncio import create_async_engine
     from app.models.harvest import Base
+    import app.models.auth  # noqa: F401 — registers users / otp_verifications on Base.metadata
 
     eng = create_async_engine(TEST_DB_URL, echo=False)
     async with eng.begin() as conn:
@@ -86,12 +87,37 @@ class MockLLMService:
         return ""
 
 
+class MockEmailSender:
+    """Captures OTP emails instead of sending them, so tests can read the
+    plaintext OTP that would otherwise only ever exist in the real email."""
+
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, str]] = []
+
+    async def send_otp(self, recipient: str, otp: str) -> None:
+        self.sent.append((recipient, otp))
+
+    @property
+    def last_otp(self) -> str:
+        return self.sent[-1][1]
+
+
 # ── FastAPI test client ───────────────────────────────────────────────────────
 
 @pytest_asyncio.fixture
-async def client(db_session):
+async def mock_email_sender():
+    return MockEmailSender()
+
+
+@pytest_asyncio.fixture
+async def client(db_session, mock_email_sender):
     from httpx import ASGITransport, AsyncClient
-    from app.core.dependencies import get_db_session, get_llm_service, get_playwright_service
+    from app.core.dependencies import (
+        get_db_session,
+        get_email_sender,
+        get_llm_service,
+        get_playwright_service,
+    )
     from app.main import create_app
 
     app = create_app()
@@ -102,6 +128,7 @@ async def client(db_session):
     app.dependency_overrides[get_db_session]         = lambda: db_session
     app.dependency_overrides[get_playwright_service] = lambda: mock_pw
     app.dependency_overrides[get_llm_service]        = lambda: mock_llm
+    app.dependency_overrides[get_email_sender]       = lambda: mock_email_sender
 
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://test"

@@ -105,6 +105,9 @@ class LinkedInJob(BaseModel):
     company_url:     str       = ""
     employment_type: str       = ""
     source:          str       = "LinkedIn"
+    job_poster_name:        str | None = None
+    job_poster_designation: str | None = None
+    linkedin_profile_url:   str | None = None
 
 
 class LinkedInRunResponse(BaseModel):

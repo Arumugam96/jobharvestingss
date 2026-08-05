@@ -161,6 +161,11 @@ class EnrichedLinkedInJob(BaseModel):
     description_length:      int        = 0
     description_fetch_error: str | None = None
 
+    # ── Phase 2: point of contact (hiring team card on the job-detail page) ────
+    job_poster_name:        str | None = None
+    job_poster_designation: str | None = None
+    linkedin_profile_url:   str | None = None
+
     # ── Phase 3: Gemini parse ─────────────────────────────────────────────────
     parsed:      ParsedJobDescription | None = None
     parse_error: str | None = None
@@ -216,6 +221,9 @@ class EnrichedLinkedInJob(BaseModel):
             "job_url":              self.job_url,
             "posted_time":          self.posted_time,
             "confidence_score":     self.parsed.confidence_score if self.parsed else None,
+            "job_poster_name":         self.job_poster_name,
+            "job_poster_designation":  self.job_poster_designation,
+            "linkedin_profile_url":    self.linkedin_profile_url,
         }
 
 

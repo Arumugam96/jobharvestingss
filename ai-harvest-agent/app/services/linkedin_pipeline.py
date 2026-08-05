@@ -183,15 +183,17 @@ class LinkedInPipelineService:
         desc_error: str | None = None
         parsed_result          = None
         parse_error: str | None = None
+        contact:    dict       = {}
 
-        # ── Phase 2: description fetch ────────────────────────────────────────
+        # ── Phase 2: description + point-of-contact fetch ────────────────────
         if config.fetch_descriptions and card.job_url:
             try:
-                raw_desc = await scraper.fetch_description(card.job_url)
+                raw_desc, contact = await scraper.fetch_description_and_contact(card.job_url)
                 logger.debug(
                     "description_fetched",
-                    job_id = card.job_id,
-                    chars  = len(raw_desc) if raw_desc else 0,
+                    job_id  = card.job_id,
+                    chars   = len(raw_desc) if raw_desc else 0,
+                    poster  = contact.get("job_poster_name"),
                 )
             except Exception as exc:
                 desc_error = str(exc)
@@ -234,6 +236,9 @@ class LinkedInPipelineService:
             description_fetch_error = desc_error,
             parsed                  = parsed_result,
             parse_error             = parse_error,
+            job_poster_name         = contact.get("job_poster_name"),
+            job_poster_designation  = contact.get("job_poster_designation"),
+            linkedin_profile_url    = contact.get("linkedin_profile_url"),
         )
 
 

@@ -81,6 +81,26 @@ class Settings(BaseSettings):
     aws_secret_access_key: str = ""
     s3_bucket: str = "harvest-results"
 
+    # ── Auth / OTP ───────────────────────────────────────────────────────────────
+    allowed_email_domain: str = "sightspectrum.com"
+    otp_length: int = 6
+    otp_expiry_seconds: int = 300
+    otp_max_attempts: int = 5
+    otp_resend_cooldown_seconds: int = 60
+
+    # ── JWT ──────────────────────────────────────────────────────────────────────
+    jwt_secret_key: str = "change-me-in-production"
+    jwt_algorithm: str = "HS256"
+    access_token_expire_minutes: int = 30
+
+    # ── SMTP ─────────────────────────────────────────────────────────────────────
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_from_email: str = ""
+    smtp_use_tls: bool = True
+
     # ── CORS ─────────────────────────────────────────────────────────────────────
     # Kept as a plain str (not list[str]) — pydantic-settings' env source treats
     # list-typed fields as JSON and raises SettingsError on a comma-separated
