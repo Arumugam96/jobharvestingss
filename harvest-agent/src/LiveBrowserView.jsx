@@ -65,13 +65,13 @@ const styles = `
     position: fixed; inset: 0; z-index: 1000;
     background: rgba(15, 23, 42, 0.55);
     display: flex; align-items: center; justify-content: center;
-    padding: 24px;
+    padding: 12px;
     overflow-y: auto;
   }
   .lbv-panel {
-    width: min(1024px, 100%);
-    height: 80vh;
-    max-height: calc(100vh - 48px);
+    width: min(1600px, 96vw);
+    height: 92vh;
+    max-height: calc(100vh - 24px);
     background: #0F172A; border-radius: 12px;
     overflow: hidden; box-shadow: 0 20px 60px rgba(0,0,0,.45);
     display: flex; flex-direction: column;

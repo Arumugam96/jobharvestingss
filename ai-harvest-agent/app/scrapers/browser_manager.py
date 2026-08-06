@@ -13,6 +13,11 @@ Usage::
 """
 from __future__ import annotations
 
+import asyncio
+import os
+import signal
+import socket
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -25,6 +30,76 @@ from playwright.async_api import (
 )
 
 logger = structlog.get_logger(__name__)
+
+# One asyncio.Lock per resolved profile directory, shared across every
+# PersistentBrowserManager instance in this process. Chromium's own
+# process-singleton check (process_singleton_posix.cc) correctly refuses to
+# launch a second instance against a profile that's genuinely in use — but by
+# then it's already a hard crash for whichever caller lost the race (e.g. a
+# double-clicked "Run Now", or a manual run overlapping a scheduled one).
+# Serializing access here means the second caller queues and waits instead.
+#
+# This lock only coordinates requests *within this process* though — it can't
+# help if a PREVIOUS process crashed (or was force-killed) after spawning
+# Chromium but before Playwright's context.close() ran, leaving an orphaned
+# Chromium subprocess that will hold the lock forever since nothing will ever
+# release it. _reclaim_stale_chrome_lock() below handles that separately by
+# reading who actually holds the OS-level lock and killing it if it's dead
+# weight from this same container.
+_profile_locks: dict[str, asyncio.Lock] = {}
+
+
+def _get_profile_lock(profile_key: str) -> asyncio.Lock:
+    lock = _profile_locks.get(profile_key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _profile_locks[profile_key] = lock
+    return lock
+
+
+async def _reclaim_stale_chrome_lock(profile_dir: Path) -> None:
+    """
+    Chromium's SingletonLock is a symlink whose target literally encodes
+    "<hostname>-<pid>" (see process_singleton_posix.cc). If that PID belongs
+    to this same container/host and is dead or truly orphaned (e.g. left
+    behind by a crash that killed the Python process without giving
+    Playwright a chance to close the browser), kill it — otherwise the lock
+    can never be released and every future launch fails forever.
+
+    Never touches a lock written by a different host — that would mean a
+    genuinely different machine/container legitimately owns the profile.
+    """
+    lock_path = profile_dir / "SingletonLock"
+    if not lock_path.exists():
+        return
+
+    try:
+        target = os.readlink(str(lock_path))
+        host, _, pid_str = target.rpartition("-")
+        pid = int(pid_str)
+    except (OSError, ValueError) as exc:
+        logger.debug("chrome_profile_lock_unreadable", error=str(exc))
+        return
+
+    if host != socket.gethostname():
+        logger.warning(
+            "chrome_profile_lock_foreign_host",
+            lock_host=host, this_host=socket.gethostname(),
+            hint="SingletonLock belongs to a different host — leaving it alone.",
+        )
+        return
+
+    try:
+        os.kill(pid, signal.SIGKILL)
+        logger.warning(
+            "chrome_profile_stale_process_killed", pid=pid, profile_dir=str(profile_dir),
+            hint="Killed an orphaned Chromium process holding this profile's lock.",
+        )
+        await asyncio.sleep(0.5)   # give the OS a moment to actually release the lock
+    except ProcessLookupError:
+        logger.debug("chrome_profile_stale_process_already_gone", pid=pid)
+    except PermissionError as exc:
+        logger.error("chrome_profile_stale_process_kill_failed", pid=pid, error=str(exc))
 
 
 # ── Browser fingerprint constants ─────────────────────────────────────────────
@@ -183,70 +258,96 @@ class PersistentBrowserManager:
         slow_mo:     int  = 0,
         channel:     str  = "chromium",
     ) -> None:
-        from pathlib import Path as _Path
-        self._profile_dir: "Path"            = _Path(profile_dir)
+        self._profile_dir: Path              = Path(profile_dir)
         self._headless:    bool              = headless
         self._slow_mo:     int               = slow_mo
         self._channel:     str               = channel
         self._pw:          Playwright | None = None
         self._context:     BrowserContext | None = None
+        self._lock                            = _get_profile_lock(str(self._profile_dir.resolve()))
+        self._lock_acquired:  bool            = False
 
     async def __aenter__(self) -> "PersistentBrowserManager":
-        self._profile_dir.mkdir(parents=True, exist_ok=True)
+        if self._lock.locked():
+            logger.info(
+                "chrome_profile_lock_wait",
+                profile_dir = str(self._profile_dir),
+                hint        = "Another harvest is already using this Chrome profile — waiting for it to finish.",
+            )
+        await self._lock.acquire()
+        self._lock_acquired = True
 
-        # Clear stale lock files before launching. If a previous process (e.g.
-        # a container that was killed/rebuilt) left the persistent context open,
-        # launch_persistent_context() fails immediately with "user data directory
-        # is already in use" — these locks are safe to remove once that process
-        # is gone, which it always is by the time a new container starts.
-        for lock_name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
-            lock_path = self._profile_dir / lock_name
-            if lock_path.exists():
-                try:
-                    lock_path.unlink()
-                    logger.info("chrome_profile_lock_cleared", lock=lock_name, profile_dir=str(self._profile_dir))
-                except Exception as exc:
-                    logger.debug("chrome_profile_lock_clear_failed", lock=lock_name, error=str(exc))
+        try:
+            self._profile_dir.mkdir(parents=True, exist_ok=True)
 
-        self._pw = await async_playwright().start()
+            # Kill a genuinely orphaned Chromium process still holding the OS-level
+            # singleton lock (e.g. left behind by a crash that killed this app
+            # without giving Playwright a chance to close the browser). This is
+            # only reached while we hold _lock, so it can never race with a
+            # concurrent request from this process — only with dead weight from
+            # a previous, now-gone process.
+            await _reclaim_stale_chrome_lock(self._profile_dir)
 
-        # channel="chromium" → use Playwright's bundled Chromium (not system Chrome).
-        # System Chrome (channel="chrome") exits immediately via --remote-debugging-pipe
-        # on Windows when the profile directory is new — confirmed by runtime test.
-        self._context = await self._pw.chromium.launch_persistent_context(
-            user_data_dir       = str(self._profile_dir),
-            headless            = self._headless,
-            slow_mo             = self._slow_mo,
-            args                = [
-                "--disable-blink-features=AutomationControlled",
-                "--no-first-run",
-                "--no-default-browser-check",
-                "--disable-infobars",
-                "--disable-background-timer-throttling",
-                "--disable-backgrounding-occluded-windows",
-                "--disable-renderer-backgrounding",
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-            ],
-            ignore_https_errors = True,
-            viewport            = {"width": 1366, "height": 900},
-            user_agent          = _USER_AGENT,
-            locale              = "en-US",
-            timezone_id         = "Europe/London",
-            color_scheme        = "light",
-            java_script_enabled = True,
-        )
+            # Clear stale lock files before launching. This is only reached
+            # while we hold _lock, so any SingletonLock found here can only be
+            # left by a process outside this app entirely (e.g. a previous
+            # container that was killed/rebuilt) — never by a concurrent
+            # request from this process, which the lock above already
+            # serializes. Chromium's own process-singleton check would still
+            # correctly refuse to launch against a genuinely live process
+            # regardless of this cleanup.
+            for lock_name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+                lock_path = self._profile_dir / lock_name
+                if lock_path.exists():
+                    try:
+                        lock_path.unlink()
+                        logger.info("chrome_profile_lock_cleared", lock=lock_name, profile_dir=str(self._profile_dir))
+                    except Exception as exc:
+                        logger.debug("chrome_profile_lock_clear_failed", lock=lock_name, error=str(exc))
 
-        for script in _STEALTH_SCRIPTS:
-            await self._context.add_init_script(script)
+            self._pw = await async_playwright().start()
 
-        logger.info(
-            "persistent_browser_started",
-            profile_dir = str(self._profile_dir),
-            headless    = self._headless,
-            channel     = "chromium",
-        )
-        return self
+            # channel="chromium" → use Playwright's bundled Chromium (not system Chrome).
+            # System Chrome (channel="chrome") exits immediately via --remote-debugging-pipe
+            # on Windows when the profile directory is new — confirmed by runtime test.
+            self._context = await self._pw.chromium.launch_persistent_context(
+                user_data_dir       = str(self._profile_dir),
+                headless            = self._headless,
+                slow_mo             = self._slow_mo,
+                args                = [
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "--disable-infobars",
+                    "--disable-background-timer-throttling",
+                    "--disable-backgrounding-occluded-windows",
+                    "--disable-renderer-backgrounding",
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                ],
+                ignore_https_errors = True,
+                viewport            = {"width": 1366, "height": 900},
+                user_agent          = _USER_AGENT,
+                locale              = "en-US",
+                timezone_id         = "Europe/London",
+                color_scheme        = "light",
+                java_script_enabled = True,
+            )
+
+            for script in _STEALTH_SCRIPTS:
+                await self._context.add_init_script(script)
+
+            logger.info(
+                "persistent_browser_started",
+                profile_dir = str(self._profile_dir),
+                headless    = self._headless,
+                channel     = "chromium",
+            )
+            return self
+        except Exception:
+            self._lock.release()
+            self._lock_acquired = False
+            raise
 
     async def __aexit__(self, *_: Any) -> None:
         if self._context:
@@ -259,6 +360,9 @@ class PersistentBrowserManager:
                 await self._pw.stop()
             except Exception:
                 pass
+        if self._lock_acquired:
+            self._lock.release()
+            self._lock_acquired = False
         logger.info("persistent_browser_stopped")
 
     async def new_page(self) -> Page:

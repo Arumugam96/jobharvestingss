@@ -158,12 +158,25 @@ async def _run_harvest_background(
 
     orch = OrchestratorAgent(config)
 
+    async def _on_status(msg: str) -> None:
+        # Surfaces live progress (e.g. "waiting for LinkedIn login…") to
+        # GET /harvest-status/{job_id} while the run is still in flight.
+        JobTracker.update(job_id, message=msg)
+        log.info("harvest_status_update", message=msg)
+
     try:
+        # wait_for_login=True: this is a manually-triggered run (POST
+        # /run-harvest-agent), so if LinkedIn isn't authenticated, pause and
+        # wait for a human to log in via "Watch Live Browser" instead of
+        # failing immediately — unlike the scheduled/unattended path, someone
+        # is expected to be present to complete it.
         if needs_proactor():
             log.debug("using_proactor_thread")
-            result: OrchestratorResult = await run_in_proactor(orch.run_all)
+            result: OrchestratorResult = await run_in_proactor(
+                lambda: orch.run_all(wait_for_login=True, on_status=_on_status)
+            )
         else:
-            result = await orch.run_all()
+            result = await orch.run_all(wait_for_login=True, on_status=_on_status)
     except Exception as exc:
         log.exception("harvest_background_error", error=str(exc))
         _history_svc.append(
@@ -368,6 +381,6 @@ async def get_run_history_entry(run_id: str) -> Any:
     if entry is None:
         return JSONResponse(
             status_code=404,
-            content={"detail": f"No run history entry found for run_id '{run_id}'"},
+            content={"detail": f"No result found for run_id '{run_id}'"},
         )
     return entry

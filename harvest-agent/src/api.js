@@ -70,6 +70,11 @@ export function getRunHistory() {
   return request("/run-history");
 }
 
+/** GET /harvest-status/{jobId} — live progress for an in-flight background harvest job. */
+export function getHarvestStatus(jobId) {
+  return request(`/harvest-status/${jobId}`);
+}
+
 /** GET /run-history/{runId} — a single run's summary. */
 export function getRunHistoryEntry(runId) {
   return request(`/run-history/${runId}`);

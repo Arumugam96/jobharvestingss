@@ -30,7 +30,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import structlog
 
@@ -332,10 +332,24 @@ class OrchestratorAgent:
 
     # ── Full pipeline (POST /run-harvest-agent) ───────────────────────────────
 
-    async def run_all(self) -> OrchestratorResult:
+    async def run_all(
+        self,
+        wait_for_login: bool = False,
+        on_status: Callable[[str], Awaitable[None]] | None = None,
+    ) -> OrchestratorResult:
         """
         Execute all enabled sources in priority order, apply business filters,
         deduplicate cross-source, save combined results, and return OrchestratorResult.
+
+        wait_for_login  Passed through to LinkedInAgent — when True, a run that
+                        finds no authenticated LinkedIn session pauses and waits
+                        for a human to log in via the live browser view instead
+                        of failing immediately. Only appropriate for manually-
+                        triggered runs (POST /run-harvest-agent); leave False for
+                        unattended/scheduled runs where no one can log in.
+        on_status       Optional async callback for human-readable progress
+                        messages (e.g. "waiting for login…"), forwarded to
+                        JobTracker by the caller.
         """
         config      = self._config
         started_at  = datetime.now(timezone.utc)
@@ -344,7 +358,7 @@ class OrchestratorAgent:
         result      = OrchestratorResult(started_at=started_at)
 
         # ── Step 1: collect raw jobs from all enabled sources ─────────────────
-        raw_by_source = await self._collect_all(config)
+        raw_by_source = await self._collect_all(config, wait_for_login=wait_for_login, on_status=on_status)
 
         # ── Step 2: convert to UnifiedJob ─────────────────────────────────────
         all_unified: list[UnifiedJob] = []
@@ -603,6 +617,8 @@ class OrchestratorAgent:
     async def _collect_all(
         self,
         config: HarvestConfig,
+        wait_for_login: bool = False,
+        on_status: Callable[[str], Awaitable[None]] | None = None,
     ) -> dict[str, list[UnifiedJob]]:
         """
         Run all enabled source agents IN PARALLEL using a single shared browser
@@ -659,7 +675,9 @@ class OrchestratorAgent:
                 logger.info("linkedin_agent_started")
                 try:
                     agent   = LinkedInAgent()
-                    scraped: list[LinkedInScrapedJob] = await agent._run(page, config.filters)
+                    scraped: list[LinkedInScrapedJob] = await agent._run(
+                        page, config.filters, wait_for_login=wait_for_login, on_status=on_status,
+                    )
                     # ── Checkpoint 2: jobs received by orchestrator ────────────
                     logger.info("linkedin_jobs_received_by_orchestrator", count=len(scraped))
                     unified = [_linkedin_to_unified(j, config.filters.job_type) for j in scraped]

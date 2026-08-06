@@ -29,6 +29,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Awaitable, Callable
 from urllib.parse import quote_plus
 
 import structlog
@@ -41,6 +42,13 @@ logger = structlog.get_logger(__name__)
 
 LINKEDIN_SESSION_FILE = Path("data/sessions/linkedin_session.json")
 _DEBUG_DIR            = Path("data/debug/linkedin")
+
+# How long to pause a manually-triggered harvest waiting for a human to
+# complete LinkedIn login via the live browser view before giving up.
+_LOGIN_WAIT_TIMEOUT_S = 600
+_LOGIN_WAIT_POLL_S    = 2
+
+StatusCallback = Callable[[str], Awaitable[None]]
 
 _LINKEDIN_SEARCH_URL = "https://www.linkedin.com/jobs/search/?"
 
@@ -450,6 +458,8 @@ class LinkedInAgent:
             async with browser_ctx as bm:
                 page = await bm.new_page()
                 jobs = await self._run(page, filters)
+        except LinkedInLoginError:
+            raise
         except Exception as exc:
             logger.exception("agent_failed", source="linkedin", error=str(exc))
             return []
@@ -472,8 +482,25 @@ class LinkedInAgent:
 
     # ── Internal flow ──────────────────────────────────────────────────────────
 
-    async def _run(self, page: Page, f: FiltersConfig) -> list[LinkedInScrapedJob]:
-        """Navigate directly to LinkedIn Jobs search — no login step."""
+    async def _run(
+        self,
+        page: Page,
+        f: FiltersConfig,
+        wait_for_login: bool = False,
+        on_status: StatusCallback | None = None,
+    ) -> list[LinkedInScrapedJob]:
+        """
+        Navigate directly to LinkedIn Jobs search.
+
+        wait_for_login  When True and the session turns out to be unauthenticated,
+                        pause here and poll for a human to complete manual login
+                        via the live browser view instead of failing immediately.
+                        Only meaningful for manually-triggered runs — a scheduled/
+                        unattended run should keep failing fast (default False).
+        on_status       Optional async callback fired with human-readable progress
+                        messages (e.g. "waiting for login…") — lets the caller
+                        surface live status to JobTracker / the frontend.
+        """
         search_url = self._build_search_url(f, start=0)
         logger.info("search_started", source="linkedin", keyword=f.keyword, location=f.location)
         logger.info("search_url_generated", source="linkedin", url=search_url)
@@ -489,6 +516,31 @@ class LinkedInAgent:
 
         await page.wait_for_timeout(3_000)
 
+        await self._ensure_authenticated(page, search_url, wait_for_login, on_status)
+
+        current_url = page.url
+        page_title  = await page.title()
+        logger.info("results_page_loaded", source="linkedin", url=current_url, title=page_title)
+        logger.info("linkedin_session_active", url=current_url)
+        await _screenshot(page, "02_after_search")
+        jobs = await self._paginate_and_collect(page, f)
+        logger.info("linkedin_jobs_returned", count=len(jobs))
+        return jobs
+
+    async def _ensure_authenticated(
+        self,
+        page: Page,
+        search_url: str,
+        wait_for_login: bool,
+        on_status: StatusCallback | None,
+    ) -> None:
+        """
+        Verify the current page is on an authenticated LinkedIn session.
+
+        Raises LinkedInLoginError if authentication can't be established
+        (immediately when wait_for_login=False, or after the manual-login
+        wait times out when wait_for_login=True).
+        """
         page_title  = await page.title()
         current_url = page.url
         logger.info("search_page_opened", source="linkedin", url=current_url, title=page_title)
@@ -509,12 +561,11 @@ class LinkedInAgent:
                 await page.wait_for_timeout(2_000)
                 await page.goto(search_url, wait_until="domcontentloaded", timeout=30_000)
                 await page.wait_for_timeout(3_000)
-                page_title  = await page.title()
                 current_url = page.url
-                logger.info("search_page_opened", source="linkedin", url=current_url, title=page_title)
+                logger.info("search_page_opened", source="linkedin", url=current_url, title=await page.title())
             except Exception as exc:
                 logger.error("linkedin_auth_retry_failed", error=str(exc))
-                return []
+                raise LinkedInLoginError(f"LinkedIn navigation failed during auth retry: {exc}") from exc
 
             if any(p in current_url for p in _GATED_PATHS):
                 logger.error(
@@ -523,15 +574,88 @@ class LinkedInAgent:
                     hint = "LinkedIn requires authentication. "
                            "Call POST /linkedin-setup-session to log in once.",
                 )
-                logger.info("linkedin_jobs_returned", count=0, reason="authwall")
-                return []
+                if not wait_for_login:
+                    logger.info("linkedin_jobs_returned", count=0, reason="authwall")
+                    raise LinkedInLoginError(f"LinkedIn redirected to a gated page: {current_url}")
+                await self._wait_for_manual_login(page, search_url, on_status)
+                return
 
-        logger.info("results_page_loaded", source="linkedin", url=current_url, title=page_title)
-        logger.info("linkedin_session_active", url=current_url)
-        await _screenshot(page, "02_after_search")
-        jobs = await self._paginate_and_collect(page, f)
-        logger.info("linkedin_jobs_returned", count=len(jobs))
-        return jobs
+        # The URL-shape check above is not sufficient on its own: LinkedIn lets
+        # logged-out guests browse the search RESULTS listing without a hard
+        # authwall redirect (only individual job-detail pages gate more
+        # aggressively), so a retry can "succeed" by this check while still
+        # running as an unauthenticated guest — silently violating the
+        # "NEVER fall back to guest/anonymous mode" rule documented at the top
+        # of this file. Verify the li_at session cookie directly instead, the
+        # same way /linkedin-auth-status and /linkedin-setup-session already do.
+        cookies = await page.context.cookies()
+        if any(c["name"] == "li_at" for c in cookies):
+            return
+
+        await _screenshot(page, "linkedin_no_li_at_cookie")
+        logger.error(
+            "linkedin_not_authenticated",
+            url  = current_url,
+            hint = "No li_at session cookie — browsing as a logged-out guest. "
+                   "Call POST /linkedin-setup-session to log in.",
+        )
+        if not wait_for_login:
+            raise LinkedInLoginError(
+                "LinkedIn session is not authenticated (no li_at cookie). "
+                "Call POST /linkedin-setup-session to log in."
+            )
+        await self._wait_for_manual_login(page, search_url, on_status)
+
+    async def _wait_for_manual_login(
+        self,
+        page: Page,
+        search_url: str,
+        on_status: StatusCallback | None,
+    ) -> None:
+        """
+        Pause the harvest and poll for a human to complete LinkedIn login.
+
+        The same non-headless browser session backs the "Watch Live Browser"
+        view in the UI, so the user can click into it and type credentials
+        while this loop is waiting. Raises LinkedInLoginError on timeout.
+        """
+        wait_minutes = _LOGIN_WAIT_TIMEOUT_S // 60
+        if on_status:
+            await on_status(
+                f"LinkedIn requires login — open 'Watch Live Browser' and log in "
+                f"(waiting up to {wait_minutes} minutes)…"
+            )
+        logger.info("linkedin_waiting_for_manual_login", timeout_s=_LOGIN_WAIT_TIMEOUT_S)
+
+        try:
+            await page.goto("https://www.linkedin.com/login", wait_until="domcontentloaded", timeout=20_000)
+        except Exception as exc:
+            logger.debug("linkedin_login_page_nav_failed", error=str(exc))
+
+        waited = 0
+        while waited < _LOGIN_WAIT_TIMEOUT_S:
+            await page.wait_for_timeout(_LOGIN_WAIT_POLL_S * 1_000)
+            waited += _LOGIN_WAIT_POLL_S
+            try:
+                cookies = await page.context.cookies()
+            except Exception:
+                continue
+            if any(c["name"] == "li_at" for c in cookies):
+                logger.info("linkedin_manual_login_detected", waited_s=waited)
+                if on_status:
+                    await on_status("Login detected — resuming harvest…")
+                try:
+                    await page.goto(search_url, wait_until="domcontentloaded", timeout=30_000)
+                    await page.wait_for_timeout(3_000)
+                except Exception as exc:
+                    logger.error("linkedin_post_login_nav_failed", error=str(exc))
+                    raise LinkedInLoginError(f"Post-login navigation failed: {exc}") from exc
+                return
+
+        logger.error("linkedin_manual_login_timeout", timeout_s=_LOGIN_WAIT_TIMEOUT_S)
+        raise LinkedInLoginError(
+            f"Timed out after {wait_minutes} minutes waiting for manual LinkedIn login."
+        )
 
     async def _paginate_and_collect(
         self, page: Page, f: FiltersConfig
@@ -844,8 +968,9 @@ class LinkedInAgent:
                 if norm_url and norm_url in seen_urls:
                     continue
 
-                # ── Click card to open detail panel ───────────────────────────────
-                detail_data = await self._open_detail_panel(page, card_el, idx)
+                # ── Fetch job detail by navigating directly to its own URL ─────────
+                # (not by clicking the card — see _fetch_job_detail for why)
+                detail_data = await self._fetch_job_detail(page, url, idx)
 
                 # ── Merge list + detail data ──────────────────────────────────────
                 title    = detail_data.get("title") or list_data.get("title") or ""
@@ -956,60 +1081,92 @@ class LinkedInAgent:
             logger.debug("linkedin_list_view_parse_error", error=str(exc))
             return None
 
-    async def _open_detail_panel(self, page: Page, card_el: ElementHandle, idx: int) -> dict:
-        """Click a card and extract data from the right-side detail panel."""
-        detail: dict = {}
-        try:
-            await card_el.scroll_into_view_if_needed()
-            await _delay(page, 300, 600)
-            await card_el.click(force=True)
-            await _delay(page, 1_200, 2_000)
-            logger.info("job_opened", source="linkedin", index=idx, url=page.url)
+    async def _fetch_job_detail(self, page: Page, url: str, idx: int) -> dict:
+        """
+        Open the job's own /jobs/view/<id>/ page in a separate tab and extract
+        detail fields there.
 
-            # Wait for detail panel — 2 s per selector (reduced from 8 s to keep runs fast)
+        Deliberately does NOT click the card in the split-view search results
+        list — that approach was found to fail 100% of the time in production
+        (no detail panel ever matched within the wait timeout, for every job in
+        the run), most likely due to click/render timing under Xvfb. Navigating
+        directly to the job's own URL sidesteps that entirely — same technique
+        already proven working in app/scrapers/linkedin_scraper.py.
+        """
+        detail: dict = {}
+        detail_page: Page | None = None
+        try:
+            detail_page = await page.context.new_page()
+            try:
+                # A brand-new tab navigating cold (no Referer) gets served a
+                # different page than a natural click-through would — LinkedIn
+                # appears to render a plain SEO shell (no #job-details) or an
+                # authwall for referrer-less navigation even on a valid,
+                # authenticated session. Passing the search-results page's own
+                # URL as the referer makes this look like what it actually is:
+                # a click-through from that search.
+                await detail_page.goto(
+                    url, wait_until="domcontentloaded", timeout=25_000, referer=page.url,
+                )
+            except Exception as exc:
+                logger.info("linkedin_detail_page_nav_failed", idx=idx, url=url, error=str(exc))
+                return detail
+
+            await _delay(detail_page, 1_500, 2_500)
+            await self._dismiss_overlays(detail_page)
+            logger.info(
+                "job_opened", source="linkedin", index=idx,
+                requested_url=url, landed_url=detail_page.url,
+            )
+
             panel_found = False
             panel_sel:   str | None = None
             for sel in _Sel.DETAIL_PANEL:
                 try:
-                    await page.wait_for_selector(sel, timeout=2_000)
+                    await detail_page.wait_for_selector(sel, timeout=3_000)
                     panel_found = True
                     panel_sel   = sel
-                    logger.debug("linkedin_detail_panel_found", selector=sel, idx=idx)
+                    logger.info("linkedin_detail_panel_found", selector=sel, idx=idx)
                     break
                 except Exception:
                     continue
 
             if not panel_found:
-                logger.debug("linkedin_detail_panel_not_found", idx=idx)
+                logger.info(
+                    "linkedin_detail_panel_not_found", idx=idx, url=url,
+                    landed_url=detail_page.url, title=await detail_page.title(),
+                )
+                await _screenshot(detail_page, f"detail_fail_{idx:03d}")
+                await _save_html(detail_page, f"detail_fail_{idx:03d}")
                 return detail
 
             # Expand truncated description ("Show more") before reading text —
             # some LinkedIn layouts only render the full description after this click.
             for sel in _Sel.SHOW_MORE_BTN:
                 try:
-                    btn = page.locator(sel).first
+                    btn = detail_page.locator(sel).first
                     if await btn.is_visible(timeout=1_000):
                         await btn.click()
-                        await _delay(page, 400, 700)
+                        await _delay(detail_page, 400, 700)
                         break
                 except Exception:
                     continue
 
-            detail["title"]       = await _first_text(page, _Sel.DETAIL_TITLE)
-            detail["company"]     = await _first_text(page, _Sel.DETAIL_COMPANY)
-            detail["company_url"] = await _first_attr(page, _Sel.DETAIL_COMPANY_URL, "href")
-            detail["location"]    = await _first_text(page, _Sel.DETAIL_LOCATION)
+            detail["title"]       = await _first_text(detail_page, _Sel.DETAIL_TITLE)
+            detail["company"]     = await _first_text(detail_page, _Sel.DETAIL_COMPANY)
+            detail["company_url"] = await _first_attr(detail_page, _Sel.DETAIL_COMPANY_URL, "href")
+            detail["location"]    = await _first_text(detail_page, _Sel.DETAIL_LOCATION)
             detail["posted"]      = (
-                await _first_attr(page, _Sel.DETAIL_POSTED, "datetime")
-                or await _first_text(page, _Sel.DETAIL_POSTED)
+                await _first_attr(detail_page, _Sel.DETAIL_POSTED, "datetime")
+                or await _first_text(detail_page, _Sel.DETAIL_POSTED)
             )
-            detail["emp_type"]    = await _first_text(page, _Sel.DETAIL_EMP_TYPE)
-            detail["salary"]      = await _first_text(page, _Sel.DETAIL_SALARY)
+            detail["emp_type"]    = await _first_text(detail_page, _Sel.DETAIL_EMP_TYPE)
+            detail["salary"]      = await _first_text(detail_page, _Sel.DETAIL_SALARY)
 
             # Description — inner text of the whole panel
             for sel in _Sel.DETAIL_DESC:
                 try:
-                    desc_el = await page.query_selector(sel)
+                    desc_el = await detail_page.query_selector(sel)
                     if desc_el:
                         raw_desc = await desc_el.inner_text()
                         if raw_desc and raw_desc.strip():
@@ -1023,20 +1180,25 @@ class LinkedInAgent:
             # description entirely (LinkedIn drifts its description markup often).
             if not detail.get("description") and panel_sel:
                 try:
-                    panel_el = await page.query_selector(panel_sel)
+                    panel_el = await detail_page.query_selector(panel_sel)
                     if panel_el:
                         panel_text = _clean(await panel_el.inner_text())
                         if len(panel_text) >= 100:
                             detail["description"] = panel_text[:5000]
-                            logger.debug("linkedin_description_fallback_used", idx=idx, selector=panel_sel)
+                            logger.info("linkedin_description_fallback_used", idx=idx, selector=panel_sel)
                 except Exception:
                     pass
+
+            if not detail.get("description"):
+                logger.info("linkedin_description_still_empty", idx=idx, url=url, panel_selector=panel_sel)
+                await _screenshot(detail_page, f"desc_empty_{idx:03d}")
+                await _save_html(detail_page, f"desc_empty_{idx:03d}")
 
             # Skills list
             skills: list[str] = []
             for sel in _Sel.DETAIL_SKILLS:
                 try:
-                    skill_els = await page.query_selector_all(sel)
+                    skill_els = await detail_page.query_selector_all(sel)
                     for s in skill_els:
                         t = await s.inner_text()
                         if t and t.strip():
@@ -1048,11 +1210,17 @@ class LinkedInAgent:
             detail["skills"] = skills[:20]
 
             # Recruiter / "Meet the hiring team" (visible when authenticated)
-            recruiter = await self._extract_recruiter(page)
+            recruiter = await self._extract_recruiter(detail_page)
             detail.update(recruiter)
 
         except Exception as exc:
-            logger.debug("linkedin_detail_panel_error", idx=idx, error=str(exc))
+            logger.info("linkedin_detail_page_error", idx=idx, url=url, error=str(exc))
+        finally:
+            if detail_page:
+                try:
+                    await detail_page.close()
+                except Exception:
+                    pass
 
         return detail
 

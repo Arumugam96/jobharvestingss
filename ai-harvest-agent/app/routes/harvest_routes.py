@@ -268,10 +268,14 @@ async def _apply_schedule(scheduler, config: HarvestConfig) -> None:
         run_id  = _make_run_id(cfg.filters.keyword, cfg.filters.location)
         now_iso = datetime.now(timezone.utc).isoformat()
         orch    = OrchestratorAgent(cfg)
-        if needs_proactor():
-            jobs, src_label = await run_in_proactor(orch.run)
-        else:
-            jobs, src_label = await orch.run()
+        try:
+            if needs_proactor():
+                jobs, src_label = await run_in_proactor(orch.run)
+            else:
+                jobs, src_label = await orch.run()
+        except Exception as exc:
+            logger.exception("scheduled_harvest_failed", run_id=run_id, error=str(exc))
+            return
         payload = {
             "run_id":      run_id,
             "executed_at": now_iso,

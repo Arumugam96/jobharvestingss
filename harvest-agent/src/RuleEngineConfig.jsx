@@ -4,7 +4,7 @@ import {
   Play, Save, Clock, Info, AlertTriangle, ChevronDown, Check, Loader2, LogIn, Eye,
 } from "lucide-react";
 import {
-  getHarvestConfig, saveHarvestConfig, runHarvestAgent,
+  getHarvestConfig, saveHarvestConfig, runHarvestAgent, getHarvestStatus,
   getRunHistory, getRunHistoryEntry, setupLinkedinSession, setupNaukriSession, ApiError,
 } from "./api";
 import HealthBadge from "./HealthBadge";
@@ -286,32 +286,56 @@ export default function RuleEngineConfig({
     }
   };
 
-  // GET /run-history/{run_id} only returns an entry once the run has fully
-  // finished — there is no live progress percentage. A 404 just means the
-  // run is still in flight, so we keep polling.
-  function pollRunHistory(runId) {
+  // GET /harvest-status/{job_id} carries live progress — including a
+  // human-readable `message` that changes to a "waiting for login…" prompt
+  // if LinkedIn isn't authenticated (see LinkedInAgent._wait_for_manual_login).
+  // Falls back to run-history for the final result once status stops "running".
+  function pollHarvestStatus(jobId, runId) {
     const tick = async () => {
       try {
-        const entry = await getRunHistoryEntry(runId);
-        if (entry.status === "failed") {
+        const status = await getHarvestStatus(jobId);
+        if (status.status === "running") {
+          setRunMessage(status.message || "Running…");
+          pollTimer.current = setTimeout(tick, 3000);
+          return;
+        }
+        if (status.status === "failed") {
           setRunState("failed");
-          setRunMessage(`Harvest run ${runId} failed — check server logs.`);
+          setRunMessage(status.error || status.message || `Harvest run ${runId} failed — check server logs.`);
           setHarvestRunning(false);
           return;
         }
+        // success | no_results
         setRunState("success");
-        setHarvested(entry.jobs_found ?? harvested);
-        setLastRun(fmtRunDate(entry.completed_at));
+        setHarvested(status.combined ?? harvested);
+        setLastRun(fmtRunDate(status.completed_at));
         setHarvestRunning(false);
         onRunComplete();
       } catch (err) {
         if (err instanceof ApiError && err.status === 404) {
-          setRunMessage("Harvest running — no live progress available; checking run history…");
-          pollTimer.current = setTimeout(tick, 5000);
+          // JobTracker entry not found (e.g. server restarted) — fall back
+          // to run-history, which is the durable record.
+          try {
+            const entry = await getRunHistoryEntry(runId);
+            if (entry.status === "failed") {
+              setRunState("failed");
+              setRunMessage(entry.error || `Harvest run ${runId} failed — check server logs.`);
+            } else {
+              setRunState("success");
+              setHarvested(entry.jobs_found ?? harvested);
+              setLastRun(fmtRunDate(entry.completed_at));
+              onRunComplete();
+            }
+          } catch {
+            setRunMessage("Harvest running — no live status available yet; retrying…");
+            pollTimer.current = setTimeout(tick, 5000);
+            return;
+          }
+          setHarvestRunning(false);
           return;
         }
         setRunState("failed");
-        setRunMessage(err instanceof ApiError ? err.message : "Lost connection while checking run history.");
+        setRunMessage(err instanceof ApiError ? err.message : "Lost connection while checking harvest status.");
         setHarvestRunning(false);
       }
     };
@@ -344,7 +368,7 @@ export default function RuleEngineConfig({
         setHarvestRunning(false);
         return;
       }
-      pollRunHistory(res.run_id);
+      pollHarvestStatus(res.job_id, res.run_id);
     } catch (err) {
       setRunState("failed");
       setRunMessage(err instanceof ApiError ? err.message : "Could not reach the harvest backend.");
@@ -387,6 +411,11 @@ export default function RuleEngineConfig({
     { key: "linkedin", name: "LinkedIn Jobs",  priority: 2, Icon: LinkedInIcon },
     { key: "dice",     name: "Dice.com",       priority: 3, Icon: DiceIcon },
   ];
+
+  // The backend pauses a running harvest and waits for manual LinkedIn login
+  // (see LinkedInAgent._wait_for_manual_login) — surface that clearly so the
+  // user knows to click "Watch Live Browser" instead of just waiting.
+  const needsLogin = runState === "running" && /log ?in/i.test(runMessage || "");
 
   return (
     <div className="rec-root">
@@ -467,8 +496,12 @@ export default function RuleEngineConfig({
             )}
             {saveError && <span className="rec-validation"><AlertTriangle size={14} /> {saveError}</span>}
             {(runState === "running" || harvestRunning) && (
-              <button className="rec-btn rec-btn--watch" onClick={() => setLiveViewSource("harvest")}>
-                <Eye size={16} /> Watch Live Browser
+              <button
+                className={"rec-btn rec-btn--watch" + (needsLogin ? " rec-btn--watch-attention" : "")}
+                onClick={() => setLiveViewSource("harvest")}
+                title={needsLogin ? "LinkedIn needs you to log in — click to open the live browser" : undefined}
+              >
+                <Eye size={16} /> {needsLogin ? "Log in now — Watch Live Browser" : "Watch Live Browser"}
               </button>
             )}
             <button className="rec-btn rec-btn--run" onClick={handleRun} disabled={runState === "running" || configLoading || harvestRunning}
@@ -740,6 +773,15 @@ const styles = `
   .rec-btn--save:hover { background:var(--secondary); }
   .rec-btn--watch { background:#fff; color:var(--primary); border:1px solid var(--primary); }
   .rec-btn--watch:hover { background:#EFF6FF; }
+  .rec-btn--watch-attention {
+    background:#F59E0B; color:#1E293B; border:1px solid #F59E0B;
+    animation: rec-pulse 1.4s ease-in-out infinite;
+  }
+  .rec-btn--watch-attention:hover { background:#D97706; }
+  @keyframes rec-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(245,158,11,.55); }
+    50%      { box-shadow: 0 0 0 6px rgba(245,158,11,0); }
+  }
 
   /* Tabs */
   .rec-tabs { display:flex; gap:26px; padding:0 28px; background:#fff; border-bottom:1px solid var(--line); }
