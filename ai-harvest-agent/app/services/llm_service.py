@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import time
+from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +23,45 @@ _PROVIDER_OLLAMA = "ollama"
 
 # Ollama can be slow on CPU-only hosts — generous timeout vs. Claude's default.
 _LOCAL_LLM_TIMEOUT_S = 120.0
+
+# Tracks tenacity's attempt count for the retry-decorated call made by the
+# current extract_json() invocation. A ContextVar (not an instance attribute)
+# keeps this race-free across concurrent asyncio tasks (LinkedIn/Naukri/Dice
+# scrape concurrently; LinkedIn's own detail pages fetch concurrently too).
+_retry_attempts: ContextVar[int] = ContextVar("llm_retry_attempts", default=0)
+
+
+def _track_attempt(retry_state: Any) -> None:
+    _retry_attempts.set(retry_state.attempt_number)
+
+
+# ── Token usage tracking ──────────────────────────────────────────────────────
+
+@dataclass
+class _ProviderUsage:
+    """Cumulative token counters for one provider (Claude or Ollama)."""
+    calls:         int = 0
+    input_tokens:  int = 0
+    output_tokens: int = 0
+
+    @property
+    def total_tokens(self) -> int:
+        return self.input_tokens + self.output_tokens
+
+    def as_dict(self) -> dict[str, int]:
+        return {
+            "calls":         self.calls,
+            "input_tokens":  self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "total_tokens":  self.total_tokens,
+        }
+
+
+def empty_usage_summary() -> dict[str, dict[str, int]]:
+    """Zeroed usage summary shape — used by callers that never touched an
+    LLMService instance (e.g. a harvest run that hit no LLM fallback)."""
+    zero = _ProviderUsage().as_dict()
+    return {"claude": dict(zero), "ollama": dict(zero), "total": dict(zero)}
 
 
 # ── Tool definitions the LLM can call ────────────────────────────────────────────
@@ -163,11 +204,48 @@ class LLMService:
         self._local_llm_url = settings.local_llm_url
         self._local_llm_model = settings.local_llm_model
         self._debug_seq = 0
+        self._usage: dict[str, _ProviderUsage] = {
+            _PROVIDER_CLAUDE: _ProviderUsage(),
+            _PROVIDER_OLLAMA: _ProviderUsage(),
+        }
+        self._call_log: list[dict[str, Any]] = []
+
+    def get_call_log(self) -> list[dict[str, Any]]:
+        """Per-call audit log recorded by extract_json() so far (this instance's
+        lifetime) — provider, model, prompt/response text, tokens, latency,
+        success/error, retry count. Independent of the file-based debug
+        artifact, which only exists when a debug_dir is passed."""
+        return list(self._call_log)
+
+    def _record_usage(self, provider: str, input_tokens: int, output_tokens: int) -> None:
+        bucket = self._usage.setdefault(provider, _ProviderUsage())
+        bucket.calls += 1
+        bucket.input_tokens += input_tokens or 0
+        bucket.output_tokens += output_tokens or 0
+
+    def get_usage_summary(self) -> dict[str, dict[str, int]]:
+        """Cumulative token usage recorded by this LLMService instance so far,
+        broken down per provider (claude / ollama) plus a combined total.
+        Scoped to this instance's lifetime — callers that create one
+        LLMService per harvest run get a per-run total for free."""
+        claude = self._usage.get(_PROVIDER_CLAUDE, _ProviderUsage())
+        ollama = self._usage.get(_PROVIDER_OLLAMA, _ProviderUsage())
+        return {
+            "claude": claude.as_dict(),
+            "ollama": ollama.as_dict(),
+            "total": {
+                "calls":         claude.calls + ollama.calls,
+                "input_tokens":  claude.input_tokens + ollama.input_tokens,
+                "output_tokens": claude.output_tokens + ollama.output_tokens,
+                "total_tokens":  claude.total_tokens + ollama.total_tokens,
+            },
+        }
 
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
         reraise=True,
+        after=_track_attempt,
     )
     async def complete(
         self,
@@ -188,6 +266,11 @@ class LLMService:
             if tools:
                 kwargs["tools"] = tools
             response = await self._client.messages.create(**kwargs)
+            self._record_usage(
+                _PROVIDER_CLAUDE,
+                response.usage.input_tokens,
+                response.usage.output_tokens,
+            )
             logger.debug(
                 "llm_response",
                 stop_reason=response.stop_reason,
@@ -238,9 +321,10 @@ class LLMService:
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
         reraise=True,
+        after=_track_attempt,
     )
-    async def _complete_text_local(self, prompt: str, system: str, model: str) -> str:
-        """Call a locally-deployed Ollama model and return its plain-text response."""
+    async def _complete_text_local(self, prompt: str, system: str, model: str) -> tuple[str, int, int]:
+        """Call a locally-deployed Ollama model. Returns (text, prompt_eval_count, eval_count)."""
         url = f"{self._local_llm_url.rstrip('/')}/api/generate"
         payload: dict[str, Any] = {
             "model": model,
@@ -270,11 +354,15 @@ class LLMService:
             raise LLMError(f"Local LLM returned HTTP {exc.response.status_code}: {exc.response.text[:300]}") from exc
 
         data = response.json()
+        prompt_eval_count = data.get("prompt_eval_count", 0)
+        eval_count = data.get("eval_count", 0)
+        self._record_usage(_PROVIDER_OLLAMA, prompt_eval_count, eval_count)
         logger.info(
             "local_llm_request_succeeded", url=url, model=model,
-            eval_count=data.get("eval_count"), total_duration_ns=data.get("total_duration"),
+            prompt_eval_count=prompt_eval_count,
+            eval_count=eval_count, total_duration_ns=data.get("total_duration"),
         )
-        return data.get("response", "")
+        return data.get("response", ""), prompt_eval_count, eval_count
 
     def _save_extraction_debug_artifact(
         self, debug_dir: str | Path | None, provider: str, model: str, prompt: str, response_text: str,
@@ -315,11 +403,16 @@ class LLMService:
         schema_description: str,
         system: str = "",
         debug_dir: str | Path | None = None,
+        job_url: str | None = None,
     ) -> dict[str, Any]:
         """
         Ask the configured extraction LLM (Claude or a local Ollama model,
         selected via EXTRACTION_LLM_MODEL) to extract structured JSON from
         arbitrary content. Returns the same dict shape regardless of provider.
+
+        job_url is an optional correlation key (e.g. the LinkedIn job this
+        call is extracting for) recorded on the call-log entry — see
+        get_call_log().
         """
         provider, model = self._resolve_extraction_target()
         prompt = (
@@ -333,41 +426,72 @@ class LLMService:
             content_chars=len(content), prompt_chars=len(prompt),
         )
 
+        retry_token = _retry_attempts.set(0)
+        start = time.monotonic()
+        text: str | None = None
+        input_tokens: int | None = None
+        output_tokens: int | None = None
+        error_message: str | None = None
+        success = False
         try:
-            if provider == _PROVIDER_OLLAMA:
-                text = await self._complete_text_local(prompt, system, model)
-            else:
-                text = await self.complete_text(prompt, system=system, model=model)
-        except LLMError:
-            raise
-        except Exception as exc:
-            logger.error("llm_extraction_request_failed", provider=provider, model=model, error=str(exc))
-            raise LLMError(f"{provider} extraction request failed: {exc}") from exc
+            try:
+                if provider == _PROVIDER_OLLAMA:
+                    text, input_tokens, output_tokens = await self._complete_text_local(prompt, system, model)
+                else:
+                    response = await self.complete(messages=[LLMMessage.user(prompt)], system=system, model=model)
+                    text = self.get_text(response)
+                    input_tokens, output_tokens = response.usage.input_tokens, response.usage.output_tokens
+            except LLMError:
+                raise
+            except Exception as exc:
+                logger.error("llm_extraction_request_failed", provider=provider, model=model, error=str(exc))
+                raise LLMError(f"{provider} extraction request failed: {exc}") from exc
 
-        logger.info(
-            "llm_extraction_response_received", provider=provider, model=model,
-            response_chars=len(text),
-        )
-        self._save_extraction_debug_artifact(debug_dir, provider, model, prompt, text)
-
-        # Strip markdown code fences if present
-        cleaned = text.strip()
-        if cleaned.startswith("```"):
-            cleaned = cleaned.split("\n", 1)[1].rsplit("```", 1)[0]
-        try:
-            parsed = json.loads(cleaned)
-        except json.JSONDecodeError as exc:
-            logger.warning(
-                "llm_extraction_json_parse_failed", provider=provider, model=model,
-                error=str(exc), raw_preview=cleaned[:300],
+            logger.info(
+                "llm_extraction_response_received", provider=provider, model=model,
+                response_chars=len(text),
             )
-            raise LLMError(f"LLM returned invalid JSON: {exc}") from exc
+            self._save_extraction_debug_artifact(debug_dir, provider, model, prompt, text)
 
-        logger.info(
-            "llm_extraction_succeeded", provider=provider, model=model,
-            extracted_fields=list(parsed.keys()),
-        )
-        return parsed
+            # Strip markdown code fences if present
+            cleaned = text.strip()
+            if cleaned.startswith("```"):
+                cleaned = cleaned.split("\n", 1)[1].rsplit("```", 1)[0]
+            try:
+                parsed = json.loads(cleaned)
+            except json.JSONDecodeError as exc:
+                logger.warning(
+                    "llm_extraction_json_parse_failed", provider=provider, model=model,
+                    error=str(exc), raw_preview=cleaned[:300],
+                )
+                raise LLMError(f"LLM returned invalid JSON: {exc}") from exc
+
+            logger.info(
+                "llm_extraction_succeeded", provider=provider, model=model,
+                extracted_fields=list(parsed.keys()),
+            )
+            success = True
+            return parsed
+        except LLMError as exc:
+            error_message = str(exc)
+            raise
+        finally:
+            self._call_log.append({
+                "provider": provider,
+                "model": model,
+                "prompt": prompt,
+                "response": text,
+                "prompt_chars": len(prompt),
+                "response_chars": len(text) if text else 0,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "latency_ms": int((time.monotonic() - start) * 1000),
+                "success": success,
+                "error_message": error_message,
+                "retry_count": max(0, _retry_attempts.get() - 1),
+                "job_url": job_url,
+            })
+            _retry_attempts.reset(retry_token)
 
     def get_tool_use(
         self, response: anthropic.types.Message

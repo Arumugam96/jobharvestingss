@@ -21,8 +21,16 @@ from fastapi.responses import JSONResponse
 from app.agents.naukri_agent import NaukriAgent, NaukriScrapedJob
 from app.core.proactor import needs_proactor, run_in_proactor
 from app.models.harvest_models import FiltersConfig
+from app.models.harvest_run import HarvestRunORM, ScrapedJobORM
 from app.models.response_models import NaukriJob, NaukriRunResponse
 from app.services.config_service import ConfigService
+from app.services.harvest_run_service import (
+    HarvestRunService,
+    db_read,
+    db_write,
+    filters_view,
+    run_to_result_summary,
+)
 from app.services.naukri_storage_service import NaukriStorageService
 
 logger = structlog.get_logger(__name__)
@@ -94,6 +102,60 @@ def _build_payload(
     }
 
 
+def _to_scraped_job_dict(j: NaukriScrapedJob) -> dict[str, Any]:
+    """NaukriScrapedJob -> ScrapedJobORM's canonical dict shape. Naukri's own
+    dataclass names recruiter fields differently from LinkedIn's (recruiter_name/
+    recruiter_company vs. job_poster_name/job_poster_company) — translate here."""
+    return {
+        "source":                 "Naukri",
+        "job_title":              j.job_title,
+        "company":                j.company,
+        "location":               j.location,
+        "salary":                 j.salary,
+        "experience":             j.experience,
+        "posted_date":            j.posted_date,
+        "job_url":                j.job_url,
+        "job_description":        j.job_description,
+        "skills":                 j.skills,
+        "work_mode":              j.work_mode,
+        "job_poster_name":        j.recruiter_name,
+        "job_poster_designation": j.job_poster_designation,
+        "current_company":        j.recruiter_company,
+        "email_id":               j.email_id,
+        "contact_number":         j.contact_number,
+    }
+
+
+def _scraped_job_to_naukri_dict(j: ScrapedJobORM) -> dict[str, Any]:
+    """ScrapedJobORM -> the exact dict shape NaukriJob.model_dump() produces."""
+    return {
+        "job_title":       j.job_title,
+        "company":         j.company,
+        "location":        j.location,
+        "salary":          j.salary,
+        "experience":      j.experience,
+        "posted_date":     j.posted_date,
+        "job_url":         j.job_url,
+        "job_description": j.job_description,
+        "skills":          j.skills,
+        "source":          j.source,
+    }
+
+
+def _run_to_naukri_payload(run: HarvestRunORM) -> dict[str, Any]:
+    """HarvestRunORM (+ its ScrapedJobORM rows) -> the exact payload shape
+    _build_payload()/_storage_svc.save_results() already produces."""
+    return {
+        "run_id":      run.run_id,
+        "executed_at": run.started_at.isoformat() if run.started_at else "",
+        "status":      run.status,
+        "source":      "Naukri",
+        "total_found": run.combined_count,
+        "filters":     filters_view(run.filters_snapshot),
+        "jobs":        [_scraped_job_to_naukri_dict(j) for j in run.jobs],
+    }
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # POST /run-naukri-agent
 # ══════════════════════════════════════════════════════════════════════════════
@@ -146,6 +208,27 @@ async def run_naukri_agent() -> Any:
 
     jobs = [_to_naukri_job(j) for j in scraped]
 
+    async def _mirror_run_to_db(response: NaukriRunResponse) -> None:
+        run_pk = await db_write(lambda db: HarvestRunService(db).create_run(
+            run_id           = run_id,
+            source           = "Naukri",
+            sources          = ["Naukri"],
+            filters_snapshot = f.model_dump(),
+            started_at       = datetime.now(timezone.utc),
+        ))
+        if not run_pk:
+            return
+        await db_write(lambda db: HarvestRunService(db).update_run(
+            run_pk,
+            status         = response.status,
+            completed_at   = datetime.now(timezone.utc),
+            json_path      = response.saved_to or None,
+            combined_count = response.total_found,
+        ))
+        await db_write(lambda db: HarvestRunService(db).bulk_insert_scraped_jobs(
+            run_pk, [_to_scraped_job_dict(j) for j in scraped],
+        ))
+
     # ── No results ────────────────────────────────────────────────────────────
     if not jobs:
         response = NaukriRunResponse(
@@ -162,6 +245,7 @@ async def run_naukri_agent() -> Any:
             response.saved_to = _storage_svc.save_results(payload)
         except Exception:
             pass
+        await _mirror_run_to_db(response)
         return response.model_dump()
 
     # ── Success ───────────────────────────────────────────────────────────────
@@ -182,6 +266,7 @@ async def run_naukri_agent() -> Any:
     except Exception as exc:
         log.warning("naukri_save_failed", error=str(exc))
 
+    await _mirror_run_to_db(response)
     return response.model_dump()
 
 
@@ -404,6 +489,11 @@ async def naukri_extract_session() -> Any:
 @router.get("/naukri-results", status_code=status.HTTP_200_OK)
 async def list_naukri_results() -> Any:
     """List all saved Naukri harvest run files, newest first."""
+    runs = await db_read(lambda db: HarvestRunService(db).list_runs(source="Naukri"))
+    if runs:
+        results = [run_to_result_summary(r) for r in runs]
+        return {"total_runs": len(results), "results": results}
+
     results = _storage_svc.list_results()
     return {"total_runs": len(results), "results": results}
 
@@ -415,6 +505,10 @@ async def list_naukri_results() -> Any:
 @router.get("/naukri-results/{run_id}", status_code=status.HTTP_200_OK)
 async def get_naukri_result(run_id: str) -> Any:
     """Return the full JSON payload for a single saved Naukri run."""
+    run = await db_read(lambda db: HarvestRunService(db).get_by_run_id(run_id, source="Naukri"))
+    if run is not None:
+        return _run_to_naukri_payload(run)
+
     data = _storage_svc.get_result(run_id)
     if data is None:
         raise HTTPException(

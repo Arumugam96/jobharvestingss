@@ -3,7 +3,23 @@ Pydantic response models for the Harvest Agent API.
 """
 from __future__ import annotations
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+
+class ProviderTokenUsage(BaseModel):
+    """Token usage accumulated for one LLM provider during a harvest run."""
+    calls:         int = 0
+    input_tokens:  int = 0
+    output_tokens: int = 0
+    total_tokens:  int = 0
+
+
+class TokenUsageSummary(BaseModel):
+    """Total LLM token usage for a harvest run, broken down by provider
+    (claude / ollama — see LLMService.get_usage_summary())."""
+    claude: ProviderTokenUsage = Field(default_factory=ProviderTokenUsage)
+    ollama: ProviderTokenUsage = Field(default_factory=ProviderTokenUsage)
+    total:  ProviderTokenUsage = Field(default_factory=ProviderTokenUsage)
 
 
 class HarvestJob(BaseModel):
@@ -122,6 +138,7 @@ class LinkedInRunResponse(BaseModel):
     executed_at: str
     saved_to:    str
     jobs:        list[LinkedInJob]
+    token_usage: TokenUsageSummary = Field(default_factory=TokenUsageSummary)
 
 
 class DiceJob(BaseModel):

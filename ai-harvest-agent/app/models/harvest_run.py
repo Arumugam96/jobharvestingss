@@ -1,0 +1,115 @@
+"""Harvest workflow ORM models: run tracking, scraped jobs, and LLM call audit log.
+
+Covers the LinkedIn/Naukri/Dice job-board pipeline (both the multi-source
+orchestrator flow and the three standalone single-source flows) — distinct
+from the unrelated generic web-harvester tables in app/models/harvest.py.
+"""
+from __future__ import annotations
+
+import uuid
+from datetime import datetime
+
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, Integer, String, Text, func
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.models.harvest import Base  # shared metadata — one Base.metadata.create_all() for all tables
+
+
+# ── ORM Models ───────────────────────────────────────────────────────────────────
+
+class HarvestRunORM(Base):
+    __tablename__ = "harvest_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    job_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    run_id: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    # NULL = multi-source orchestrator run; "LinkedIn" | "Naukri" | "Dice" = single-source run
+    source: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="running")
+    sources: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    filters_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    progress: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    linkedin_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    naukri_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    dice_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    combined_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    verified_jobs: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    direct_clients: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    gcc: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    staffing_firms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    ambiguous: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    excel_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    json_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    token_usage: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    jobs: Mapped[list["ScrapedJobORM"]] = relationship(back_populates="run", lazy="selectin")
+
+
+class ScrapedJobORM(Base):
+    __tablename__ = "scraped_jobs"
+    __table_args__ = (Index("ix_scraped_jobs_run_source", "run_id", "source"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    run_id: Mapped[str] = mapped_column(ForeignKey("harvest_runs.id"), nullable=False, index=True)
+    source: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    job_title: Mapped[str] = mapped_column(String(500), nullable=False)
+    company: Mapped[str] = mapped_column(String(500), nullable=False)
+    location: Mapped[str] = mapped_column(String(500), nullable=False)
+    salary: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    experience: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    posted_date: Mapped[str] = mapped_column(String(100), nullable=False, default="")
+    job_url: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    job_description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    skills: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    work_mode: Mapped[str] = mapped_column(String(20), nullable=False, default="not_specified")
+    # Present on LinkedIn/Dice's own scraped dataclasses (and their *Job response
+    # models) but not on UnifiedJob — kept here so /linkedin-results and
+    # /dice-results don't lose data relative to the file-based responses.
+    company_url: Mapped[str] = mapped_column(String(500), nullable=False, default="")
+    employment_type: Mapped[str] = mapped_column(String(100), nullable=False, default="")
+    job_type: Mapped[str] = mapped_column(String(50), nullable=False, default="")
+    domain: Mapped[str] = mapped_column(String(50), nullable=False, default="Any")
+    hiring_entity: Mapped[str] = mapped_column(String(50), nullable=False, default="Any")
+    is_gcc: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    verification_status: Mapped[str] = mapped_column(String(30), nullable=False, default="pending")
+    job_poster_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    job_poster_designation: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    linkedin_profile_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    current_company: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    email_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    contact_number: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    run: Mapped[HarvestRunORM] = relationship(back_populates="jobs")
+
+
+class LlmCallORM(Base):
+    __tablename__ = "llm_calls"
+    __table_args__ = (Index("ix_llm_calls_run_called_at", "run_id", "called_at"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    run_id: Mapped[str] = mapped_column(ForeignKey("harvest_runs.id"), nullable=False, index=True)
+    # Denormalized correlation key, not a hard FK — the LLM fallback fires mid-scrape,
+    # before ScrapedJobORM rows exist for the run's final deduped job list.
+    job_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    provider: Mapped[str] = mapped_column(String(20), nullable=False)
+    model: Mapped[str] = mapped_column(String(100), nullable=False)
+    prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    response: Mapped[str | None] = mapped_column(Text, nullable=True)
+    prompt_chars: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    response_chars: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    success: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    called_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

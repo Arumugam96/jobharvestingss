@@ -46,8 +46,10 @@ from pydantic import BaseModel
 
 from app.agents.orchestrator_agent import OrchestratorAgent, OrchestratorResult
 from app.core.proactor import needs_proactor, run_in_proactor
+from app.models.harvest_run import HarvestRunORM
 from app.models.unified_job import UnifiedJob
 from app.services.config_service import ConfigService
+from app.services.harvest_run_service import HarvestRunService, db_read, db_write
 from app.services.job_tracker import JobTracker
 from app.services.run_history_service import RunHistoryService
 
@@ -106,6 +108,47 @@ def _filters_snapshot(cfg) -> dict:
     }
 
 
+def _run_to_job_status_dict(run: HarvestRunORM) -> dict[str, Any]:
+    """Maps a HarvestRunORM row onto the exact shape JobStatus.to_dict()
+    already returns, so GET /harvest-status/{job_id} is unchanged for callers."""
+    return {
+        "job_id":       run.job_id or "",
+        "run_id":       run.run_id,
+        "status":       run.status,
+        "progress":     run.progress,
+        "message":      run.message or "",
+        "linkedin":     run.linkedin_count,
+        "naukri":       run.naukri_count,
+        "dice":         run.dice_count,
+        "combined":     run.combined_count,
+        "started_at":   run.started_at.isoformat() if run.started_at else "",
+        "completed_at": run.completed_at.isoformat() if run.completed_at else "",
+        "excel_path":   run.excel_path or "",
+        "json_path":    run.json_path or "",
+        "error":        run.error or "",
+        "token_usage":  run.token_usage or {},
+    }
+
+
+def _run_to_history_entry(run: HarvestRunORM) -> dict[str, Any]:
+    """Maps a HarvestRunORM row onto the exact shape RunHistoryService.make_entry()
+    already returns, so GET /run-history[/{run_id}] is unchanged for callers."""
+    return {
+        "run_id":         run.run_id,
+        "sources":        run.sources or [],
+        "started_at":     run.started_at.isoformat() if run.started_at else "",
+        "completed_at":   run.completed_at.isoformat() if run.completed_at else "",
+        "status":         run.status,
+        "jobs_found":     run.combined_count,
+        "verified_jobs":  run.verified_jobs,
+        "direct_clients": run.direct_clients,
+        "gcc":            run.gcc,
+        "staffing_firms": run.staffing_firms,
+        "ambiguous":      run.ambiguous,
+        "error":          run.error,
+    }
+
+
 def _save_source_results(
     run_id:      str,
     executed_at: str,
@@ -149,6 +192,7 @@ async def _run_harvest_background(
     config:   Any,
     now_iso:  str,
     enabled:  list[str],
+    run_pk:   str | None = None,
 ) -> None:
     """Runs the full harvest in a background asyncio task, updating JobTracker."""
     log = logger.bind(job_id=job_id, run_id=run_id, sources=enabled)
@@ -198,6 +242,15 @@ async def _run_harvest_background(
             error        = str(exc),
             completed_at = datetime.now(timezone.utc).isoformat(),
         )
+        if run_pk:
+            await db_write(lambda db: HarvestRunService(db).update_run(
+                run_pk,
+                status       = "failed",
+                progress     = 100,
+                message      = f"Harvest failed: {exc}",
+                error        = str(exc),
+                completed_at = datetime.now(timezone.utc),
+            ))
         return
 
     JobTracker.update(
@@ -209,6 +262,16 @@ async def _run_harvest_background(
         dice     = len(result.jobs_by_source.get("Dice",     [])),
         combined = result.total_jobs,
     )
+    if run_pk:
+        await db_write(lambda db: HarvestRunService(db).update_run(
+            run_pk,
+            progress       = 70,
+            message        = "Saving results",
+            linkedin_count = len(result.jobs_by_source.get("LinkedIn", [])),
+            naukri_count   = len(result.jobs_by_source.get("Naukri",   [])),
+            dice_count     = len(result.jobs_by_source.get("Dice",     [])),
+            combined_count = result.total_jobs,
+        ))
 
     # ── Save per-source result files ──────────────────────────────────────────
     filters_snap = _filters_snapshot(config)
@@ -218,6 +281,12 @@ async def _run_harvest_background(
             _save_source_results(run_id, now_iso, source, jobs, filters_snap)
         except Exception as exc:
             log.warning("source_save_failed", source=source, error=str(exc))
+
+    # ── Mirror the final deduped/filtered/verified job list + LLM call log ────
+    if run_pk:
+        scraped_dicts = [j.to_dict() for j in result.all_jobs]
+        await db_write(lambda db: HarvestRunService(db).bulk_insert_scraped_jobs(run_pk, scraped_dicts))
+        await db_write(lambda db: HarvestRunService(db).bulk_insert_llm_calls(run_pk, result.llm_calls))
 
     # ── Update run history ────────────────────────────────────────────────────
     status_str = "success" if result.total_jobs > 0 else "no_results"
@@ -252,6 +321,7 @@ async def _run_harvest_background(
         sources        = result.sources_executed,
         runtime_min    = round(elapsed_seconds / 60, 1),
         combined_path  = result.combined_path,
+        token_usage    = result.token_usage.get("total", {}),
     )
 
     JobTracker.update(
@@ -262,7 +332,25 @@ async def _run_harvest_background(
         completed_at = result.completed_at.isoformat(),
         excel_path   = result.excel_path   or "",
         json_path    = result.combined_path or "",
+        token_usage  = result.token_usage,
     )
+    if run_pk:
+        await db_write(lambda db: HarvestRunService(db).update_run(
+            run_pk,
+            status          = status_str,
+            progress        = 100,
+            message         = f"Harvest complete — {result.total_jobs} jobs found",
+            completed_at    = result.completed_at,
+            excel_path      = result.excel_path or None,
+            json_path       = result.combined_path or None,
+            token_usage     = result.token_usage,
+            verified_jobs   = result.verified_jobs,
+            direct_clients  = result.direct_clients,
+            gcc             = result.gcc,
+            staffing_firms  = result.staffing_firms,
+            ambiguous       = result.ambiguous,
+            sources         = result.sources_executed,
+        ))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -312,6 +400,15 @@ async def run_harvest_agent(body: HarvestAgentRequest = HarvestAgentRequest()) -
     job_id = uuid4().hex
     JobTracker.create(job_id, run_id)
 
+    run_pk = await db_write(lambda db: HarvestRunService(db).create_run(
+        run_id           = run_id,
+        job_id           = job_id,
+        source           = None,
+        sources          = enabled,
+        filters_snapshot = _filters_snapshot(config),
+        started_at       = datetime.now(timezone.utc),
+    ))
+
     logger.info(
         "harvest_agent_queued",
         job_id    = job_id,
@@ -322,7 +419,7 @@ async def run_harvest_agent(body: HarvestAgentRequest = HarvestAgentRequest()) -
     )
 
     asyncio.create_task(
-        _run_harvest_background(job_id, run_id, config, now_iso, enabled),
+        _run_harvest_background(job_id, run_id, config, now_iso, enabled, run_pk),
         name = f"harvest-{job_id}",
     )
 
@@ -355,6 +452,12 @@ async def get_harvest_status(job_id: str) -> Any:
     - `no_results` — harvest completed but found no matching jobs
     - `failed`     — harvest error (check `error` field)
     """
+    run = await db_read(lambda db: HarvestRunService(db).get_by_job_id(job_id))
+    if run is not None:
+        return _run_to_job_status_dict(run)
+
+    # Fall back to JobTracker for runs that predate the DB mirror, or if the
+    # DB is temporarily unavailable.
     js = JobTracker.get(job_id)
     if js is None:
         return JSONResponse(
@@ -371,12 +474,23 @@ async def get_harvest_status(job_id: str) -> Any:
 @router.get("/run-history", status_code=status.HTTP_200_OK)
 async def get_run_history() -> Any:
     """Return all harvest run history entries, newest first."""
+    runs = await db_read(lambda db: HarvestRunService(db).list_runs(source=None))
+    if runs:
+        entries = [_run_to_history_entry(r) for r in runs]
+        return {"total_runs": len(entries), "runs": entries}
+
+    # Fall back to the JSON file for history predating the DB mirror, or if
+    # the DB has no rows yet (e.g. nothing has run since this shipped).
     return {"total_runs": len(_history_svc.list_all()), "runs": _history_svc.list_all()}
 
 
 @router.get("/run-history/{run_id}", status_code=status.HTTP_200_OK)
 async def get_run_history_entry(run_id: str) -> Any:
     """Return a single run history entry by run_id."""
+    run = await db_read(lambda db: HarvestRunService(db).get_by_run_id(run_id, source=None))
+    if run is not None:
+        return _run_to_history_entry(run)
+
     entry = _history_svc.get(run_id)
     if entry is None:
         return JSONResponse(

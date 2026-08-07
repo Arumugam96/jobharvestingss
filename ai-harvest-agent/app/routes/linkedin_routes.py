@@ -27,8 +27,16 @@ from app.agents.linkedin_agent import (
 )
 from app.core.proactor import needs_proactor, run_in_proactor
 from app.models.harvest_models import FiltersConfig
+from app.models.harvest_run import HarvestRunORM, ScrapedJobORM
 from app.models.response_models import LinkedInJob, LinkedInRunResponse
 from app.services.config_service import ConfigService
+from app.services.harvest_run_service import (
+    HarvestRunService,
+    db_read,
+    db_write,
+    filters_view,
+    run_to_result_summary,
+)
 from app.services.linkedin_storage_service import LinkedInStorageService
 
 logger = structlog.get_logger(__name__)
@@ -122,6 +130,73 @@ def _build_payload(
             "include_undisclosed_salary": f.include_undisclosed_salary,
         },
         "jobs": [j.model_dump() for j in response.jobs],
+        "token_usage": response.token_usage.model_dump(),
+    }
+
+
+def _to_scraped_job_dict(j: LinkedInScrapedJob) -> dict[str, Any]:
+    """LinkedInScrapedJob -> ScrapedJobORM's canonical dict shape (see
+    HarvestRunService.bulk_insert_scraped_jobs)."""
+    return {
+        "source":                 "LinkedIn",
+        "job_title":              j.job_title,
+        "company":                j.company,
+        "location":               j.location,
+        "salary":                 j.salary,
+        "experience":             j.experience,
+        "posted_date":            j.posted_date,
+        "job_url":                j.job_url,
+        "job_description":        j.job_description,
+        "skills":                 j.skills,
+        "work_mode":              j.work_mode,
+        "company_url":            j.company_url,
+        "employment_type":        j.employment_type,
+        "job_poster_name":        j.job_poster_name,
+        "job_poster_designation": j.job_poster_designation,
+        "linkedin_profile_url":   j.linkedin_profile_url,
+        "current_company":        j.job_poster_company,
+        "email_id":               j.job_poster_email,
+        "contact_number":         j.job_poster_phone,
+    }
+
+
+def _scraped_job_to_linkedin_dict(j: ScrapedJobORM) -> dict[str, Any]:
+    """ScrapedJobORM -> the exact dict shape LinkedInJob.model_dump() produces."""
+    return {
+        "job_title":              j.job_title,
+        "company":                j.company,
+        "location":               j.location,
+        "salary":                 j.salary,
+        "experience":             j.experience,
+        "posted_date":            j.posted_date,
+        "job_url":                j.job_url,
+        "job_description":        j.job_description,
+        "skills":                 j.skills,
+        "work_mode":              j.work_mode,
+        "company_url":            j.company_url,
+        "employment_type":        j.employment_type,
+        "source":                 j.source,
+        "job_poster_name":        j.job_poster_name,
+        "job_poster_designation": j.job_poster_designation,
+        "linkedin_profile_url":   j.linkedin_profile_url,
+        "job_poster_company":     j.current_company,
+        "job_poster_email":       j.email_id,
+        "job_poster_phone":       j.contact_number,
+    }
+
+
+def _run_to_linkedin_payload(run: HarvestRunORM) -> dict[str, Any]:
+    """HarvestRunORM (+ its ScrapedJobORM rows) -> the exact payload shape
+    _build_payload()/_storage_svc.save_results() already produces."""
+    return {
+        "run_id":      run.run_id,
+        "executed_at": run.started_at.isoformat() if run.started_at else "",
+        "status":      run.status,
+        "source":      "LinkedIn",
+        "total_found": run.combined_count,
+        "filters":     filters_view(run.filters_snapshot),
+        "jobs":        [_scraped_job_to_linkedin_dict(j) for j in run.jobs],
+        "token_usage": run.token_usage or {},
     }
 
 
@@ -145,20 +220,21 @@ async def run_linkedin_agent() -> Any:
     log = logger.bind(run_id=run_id, keyword=f.keyword, location=f.location)
     log.info("linkedin_search_started", max_jobs=f.max_jobs)
 
-    async def _do_harvest() -> list[LinkedInScrapedJob]:
+    async def _do_harvest() -> tuple[list[LinkedInScrapedJob], dict, list[dict]]:
         agent = LinkedInAgent()
-        return await agent.harvest(
+        jobs = await agent.harvest(
             filters  = f,
             headless = config.browser.resolved_headless,
             slow_mo  = config.browser.slow_mo_ms,
         )
+        return jobs, agent.get_token_usage(), agent.get_llm_call_log()
 
     try:
         if needs_proactor():
             log.debug("using_proactor_thread")
-            scraped: list[LinkedInScrapedJob] = await run_in_proactor(_do_harvest)
+            scraped, token_usage, llm_calls = await run_in_proactor(_do_harvest)
         else:
-            scraped = await _do_harvest()
+            scraped, token_usage, llm_calls = await _do_harvest()
 
     except LinkedInLoginError as exc:
         log.error("linkedin_login_failed", error=str(exc))
@@ -171,6 +247,30 @@ async def run_linkedin_agent() -> Any:
     log.info("linkedin_jobs_extracted", total=len(scraped))
 
     jobs = [_to_linkedin_job(j) for j in scraped]
+    log.info("linkedin_token_usage", **token_usage["total"])
+
+    async def _mirror_run_to_db(response: LinkedInRunResponse) -> None:
+        run_pk = await db_write(lambda db: HarvestRunService(db).create_run(
+            run_id           = run_id,
+            source           = "LinkedIn",
+            sources          = ["LinkedIn"],
+            filters_snapshot = f.model_dump(),
+            started_at       = datetime.now(timezone.utc),
+        ))
+        if not run_pk:
+            return
+        await db_write(lambda db: HarvestRunService(db).update_run(
+            run_pk,
+            status         = response.status,
+            completed_at   = datetime.now(timezone.utc),
+            json_path      = response.saved_to or None,
+            combined_count = response.total_found,
+            token_usage    = token_usage,
+        ))
+        await db_write(lambda db: HarvestRunService(db).bulk_insert_scraped_jobs(
+            run_pk, [_to_scraped_job_dict(j) for j in scraped],
+        ))
+        await db_write(lambda db: HarvestRunService(db).bulk_insert_llm_calls(run_pk, llm_calls))
 
     # ── No results ────────────────────────────────────────────────────────────
     if not jobs:
@@ -182,12 +282,14 @@ async def run_linkedin_agent() -> Any:
             executed_at = now_iso,
             saved_to    = "",
             jobs        = [],
+            token_usage = token_usage,
         )
         try:
             payload = _build_payload(run_id, now_iso, f, response)
             response.saved_to = _storage_svc.save_results(payload)
         except Exception:
             pass
+        await _mirror_run_to_db(response)
         return response.model_dump()
 
     # ── Success ───────────────────────────────────────────────────────────────
@@ -199,6 +301,7 @@ async def run_linkedin_agent() -> Any:
         executed_at = now_iso,
         saved_to    = "",
         jobs        = jobs,
+        token_usage = token_usage,
     )
 
     try:
@@ -209,6 +312,7 @@ async def run_linkedin_agent() -> Any:
     except Exception as exc:
         log.warning("linkedin_save_failed", error=str(exc))
 
+    await _mirror_run_to_db(response)
     return response.model_dump()
 
 
@@ -466,6 +570,13 @@ async def linkedin_auth_status() -> Any:
 @router.get("/linkedin-results", status_code=status.HTTP_200_OK)
 async def list_linkedin_results() -> Any:
     """List all saved LinkedIn harvest run files, newest first."""
+    runs = await db_read(lambda db: HarvestRunService(db).list_runs(source="LinkedIn"))
+    if runs:
+        results = [run_to_result_summary(r) for r in runs]
+        return {"total_runs": len(results), "results": results}
+
+    # Fall back to the JSON files for runs that predate the DB mirror, or if
+    # the DB has no rows yet.
     results = _storage_svc.list_results()
     return {"total_runs": len(results), "results": results}
 
@@ -477,6 +588,10 @@ async def list_linkedin_results() -> Any:
 @router.get("/linkedin-results/{run_id}", status_code=status.HTTP_200_OK)
 async def get_linkedin_result(run_id: str) -> Any:
     """Return the full JSON payload for a single saved LinkedIn run."""
+    run = await db_read(lambda db: HarvestRunService(db).get_by_run_id(run_id, source="LinkedIn"))
+    if run is not None:
+        return _run_to_linkedin_payload(run)
+
     data = _storage_svc.get_result(run_id)
     if data is None:
         raise HTTPException(

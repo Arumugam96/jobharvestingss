@@ -19,6 +19,7 @@ from app.core.dependencies import get_engine
 from app.core.exceptions import HarvestException, harvest_exception_handler
 from app.core.middleware import LoggingMiddleware, RateLimitMiddleware
 import app.models.auth  # noqa: F401 — registers users / otp_verifications on Base.metadata
+import app.models.harvest_run  # noqa: F401 — registers harvest_runs / scraped_jobs / llm_calls on Base.metadata
 from app.models.harvest import Base
 from app.routes import harvest, agents, tasks, health, job_parser, linkedin_harvest
 from app.routes.auth_routes import router as auth_router

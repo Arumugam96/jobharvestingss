@@ -37,6 +37,7 @@ from urllib.parse import quote_plus
 import structlog
 from playwright.async_api import ElementHandle, Page
 
+from app.core.text_formatting import format_job_description
 from app.models.harvest_models import FiltersConfig
 from app.scrapers.browser_manager import PersistentBrowserManager
 
@@ -437,6 +438,24 @@ class LinkedInAgent:
             from app.services.llm_service import LLMService
             self._llm_service = LLMService(get_settings())
         return self._llm_service
+
+    def get_token_usage(self) -> dict:
+        """Cumulative Claude/Ollama token usage from the LLM fallback calls
+        made during this agent's lifetime (one LinkedInAgent per harvest run).
+        Returns a zeroed summary if the LLM fallback was never triggered —
+        i.e. every description was recovered via direct DOM selectors."""
+        if self._llm_service is None:
+            from app.services.llm_service import empty_usage_summary
+            return empty_usage_summary()
+        return self._llm_service.get_usage_summary()
+
+    def get_llm_call_log(self) -> list[dict]:
+        """Per-call audit log (provider, model, prompt/response, tokens,
+        latency, success/error) from the LLM fallback calls made during this
+        agent's lifetime. Empty if the fallback was never triggered."""
+        if self._llm_service is None:
+            return []
+        return self._llm_service.get_call_log()
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -1054,7 +1073,7 @@ class LinkedInAgent:
                         detail_data.get("posted") or list_data.get("posted") or ""
                     ),
                     job_url                 = url,
-                    job_description         = detail_data.get("description", ""),
+                    job_description         = format_job_description(detail_data.get("description", "")),
                     skills                  = detail_data.get("skills", []),
                     work_mode               = work_mode,
                     company_url             = detail_data.get("company_url", ""),
@@ -1217,6 +1236,24 @@ class LinkedInAgent:
                 requested_url=url, landed_url=detail_page.url,
             )
 
+            # Expand truncated description ("Show more" / "… more") BEFORE any
+            # text capture below — including the LLM-fallback branch a few lines
+            # down, which reads document.body.innerText directly. The button
+            # selectors are matched by visible text, not by (obfuscated) class
+            # names, so this works whether or not DETAIL_PANEL matches. Doing
+            # this unconditionally, before the panel_found check, is what makes
+            # the fallback see the complete description instead of the
+            # collapsed "…more" preview.
+            for sel in _Sel.SHOW_MORE_BTN:
+                try:
+                    btn = detail_page.locator(sel).first
+                    if await btn.is_visible(timeout=1_000):
+                        await btn.click()
+                        await _delay(detail_page, 400, 700)
+                        break
+                except Exception:
+                    continue
+
             panel_found = False
             panel_sel:   str | None = None
             for sel in _Sel.DETAIL_PANEL:
@@ -1246,18 +1283,6 @@ class LinkedInAgent:
                 detail.update(llm_detail)
                 return detail
 
-            # Expand truncated description ("Show more") before reading text —
-            # some LinkedIn layouts only render the full description after this click.
-            for sel in _Sel.SHOW_MORE_BTN:
-                try:
-                    btn = detail_page.locator(sel).first
-                    if await btn.is_visible(timeout=1_000):
-                        await btn.click()
-                        await _delay(detail_page, 400, 700)
-                        break
-                except Exception:
-                    continue
-
             detail["title"]       = await _first_text(detail_page, _Sel.DETAIL_TITLE)
             detail["company"]     = await _first_text(detail_page, _Sel.DETAIL_COMPANY)
             detail["company_url"] = await _first_attr(detail_page, _Sel.DETAIL_COMPANY_URL, "href")
@@ -1276,7 +1301,7 @@ class LinkedInAgent:
                     if desc_el:
                         raw_desc = await desc_el.inner_text()
                         if raw_desc and raw_desc.strip():
-                            detail["description"] = raw_desc.strip()[:5000]
+                            detail["description"] = raw_desc.strip()[:20_000]
                             break
                 except Exception:
                     continue
@@ -1290,7 +1315,7 @@ class LinkedInAgent:
                     if panel_el:
                         panel_text = _clean(await panel_el.inner_text())
                         if len(panel_text) >= 100:
-                            detail["description"] = panel_text[:5000]
+                            detail["description"] = panel_text[:20_000]
                             logger.info("linkedin_description_fallback_used", idx=idx, selector=panel_sel)
                 except Exception:
                     pass
@@ -1448,6 +1473,7 @@ class LinkedInAgent:
                     "text. Return only the fields in the schema, no commentary."
                 ),
                 debug_dir=_DEBUG_DIR,
+                job_url=url,
             )
         except Exception as exc:
             logger.warning("linkedin_llm_fallback_failed", idx=idx, url=url, error=str(exc))
@@ -1455,7 +1481,7 @@ class LinkedInAgent:
 
         result: dict = {}
         if extracted.get("description"):
-            result["description"] = str(extracted["description"]).strip()[:8000]
+            result["description"] = str(extracted["description"]).strip()[:20_000]
         if extracted.get("employment_type"):
             result["emp_type"] = str(extracted["employment_type"]).strip()
         if extracted.get("salary"):

@@ -12,7 +12,7 @@ restart because their background tasks don't survive process termination).
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -36,6 +36,7 @@ class JobStatus:
     excel_path:   str = ""
     json_path:    str = ""
     error:        str = ""
+    token_usage:  dict = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

@@ -283,6 +283,13 @@ class OrchestratorResult:
     completed_at:     datetime                    = field(default_factory=lambda: datetime.now(timezone.utc))
     combined_path:    str                         = ""
     excel_path:       str                         = ""
+    # Cumulative Claude/Ollama token usage from the LinkedIn LLM fallback
+    # (see LinkedInAgent.get_token_usage()) — {} until _collect_all() runs.
+    token_usage:      dict                         = field(default_factory=dict)
+    # Per-call LLM audit log from the LinkedIn LLM fallback (see
+    # LinkedInAgent.get_llm_call_log()) — [] if LinkedIn wasn't run or never
+    # triggered the fallback. Naukri/Dice never call an LLM.
+    llm_calls:        list[dict]                   = field(default_factory=list)
 
     @property
     def total_jobs(self) -> int:
@@ -361,7 +368,9 @@ class OrchestratorAgent:
         result      = OrchestratorResult(started_at=started_at)
 
         # ── Step 1: collect raw jobs from all enabled sources ─────────────────
-        raw_by_source = await self._collect_all(config, wait_for_login=wait_for_login, on_status=on_status)
+        raw_by_source, result.token_usage, result.llm_calls = await self._collect_all(
+            config, wait_for_login=wait_for_login, on_status=on_status
+        )
 
         # ── Step 2: convert to UnifiedJob ─────────────────────────────────────
         all_unified: list[UnifiedJob] = []
@@ -622,24 +631,33 @@ class OrchestratorAgent:
         config: HarvestConfig,
         wait_for_login: bool = False,
         on_status: Callable[[str], Awaitable[None]] | None = None,
-    ) -> dict[str, list[UnifiedJob]]:
+    ) -> tuple[dict[str, list[UnifiedJob]], dict, list[dict]]:
         """
         Run all enabled source agents IN PARALLEL using a single shared browser
         context (one page per source).  Using a single PersistentBrowserManager
         avoids Chrome profile-lock conflicts that arise when launching multiple
         browser instances against the same profile directory.
 
-        Returns {source_name: [UnifiedJob, …]}.
+        Returns ({source_name: [UnifiedJob, …]}, token_usage, llm_calls) —
+        token_usage/llm_calls are the LinkedIn LLM fallback's cumulative
+        Claude/Ollama usage and per-call audit log (Naukri and Dice never hit
+        the LLM), empty if LinkedIn wasn't enabled or never triggered the
+        fallback.
         """
         from app.scrapers.browser_manager import PersistentBrowserManager
         from app.scrapers.dice_scraper import DiceScrapedJob, DiceScraper
+        from app.services.llm_service import empty_usage_summary
 
         results:  dict[str, list[UnifiedJob]] = {}
+        # Populated by _harvest_linkedin so token usage survives even if that
+        # coroutine raises — the LinkedInAgent instance is created before any
+        # of its login/scrape work that could fail.
+        linkedin_agent_holder: dict[str, LinkedInAgent] = {}
         enabled = [s for s in _SOURCE_PRIORITY if getattr(config.sources, s, False)]
 
         if not enabled:
             logger.warning("orchestrator_no_sources_enabled")
-            return results
+            return results, empty_usage_summary(), []
 
         logger.info("orchestrator_parallel_start", sources=enabled)
 
@@ -678,6 +696,7 @@ class OrchestratorAgent:
                 logger.info("linkedin_agent_started")
                 try:
                     agent   = LinkedInAgent()
+                    linkedin_agent_holder["agent"] = agent
                     scraped: list[LinkedInScrapedJob] = await agent._run(
                         page, config.filters, wait_for_login=wait_for_login, on_status=on_status,
                     )
@@ -764,4 +783,16 @@ class OrchestratorAgent:
                 total_so_far = min(i + _BATCH, len(all_so_far)),
             )
 
-        return results
+        token_usage = (
+            linkedin_agent_holder["agent"].get_token_usage()
+            if "agent" in linkedin_agent_holder
+            else empty_usage_summary()
+        )
+        llm_calls = (
+            linkedin_agent_holder["agent"].get_llm_call_log()
+            if "agent" in linkedin_agent_holder
+            else []
+        )
+        logger.info("orchestrator_token_usage", **token_usage["total"])
+
+        return results, token_usage, llm_calls
