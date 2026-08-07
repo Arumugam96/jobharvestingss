@@ -70,7 +70,12 @@ async def _reclaim_stale_chrome_lock(profile_dir: Path) -> None:
     genuinely different machine/container legitimately owns the profile.
     """
     lock_path = profile_dir / "SingletonLock"
-    if not lock_path.exists():
+    # Path.exists() follows the symlink and checks whether its TARGET exists
+    # on disk — but SingletonLock's target is just an encoded "hostname-pid"
+    # string, never a real path, so exists() is always False here and this
+    # function silently no-ops on every call. os.path.lexists() checks for
+    # the symlink itself instead.
+    if not os.path.lexists(lock_path):
         return
 
     try:
@@ -119,6 +124,15 @@ _LAUNCH_ARGS: list[str] = [
     "--disable-background-timer-throttling",
     "--disable-backgrounding-occluded-windows",
     "--disable-renderer-backgrounding",
+    # Headed Chromium under Xvfb has no real GPU. Without this it tries to
+    # init hardware-accelerated rendering anyway, which is unstable here —
+    # observed as either a solid-black window or the browser process dying
+    # outright shortly after launch (CRBrowser disconnects, driver crashes
+    # with TargetClosedError). This forces the SwiftShader software-rendering
+    # fallback instead. Do NOT also pass --disable-software-rasterizer — that
+    # removes the SwiftShader fallback itself, leaving headed Chromium with
+    # no rasterizer to paint with, which crashes it on launch every time.
+    "--disable-gpu",
 ]
 
 _STEALTH_SCRIPTS: list[str] = [
@@ -298,7 +312,10 @@ class PersistentBrowserManager:
             # regardless of this cleanup.
             for lock_name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
                 lock_path = self._profile_dir / lock_name
-                if lock_path.exists():
+                # lexists(), not exists() — these are symlinks to encoded
+                # strings/socket paths that don't themselves resolve, so
+                # exists() (which follows the link) is always False here.
+                if os.path.lexists(lock_path):
                     try:
                         lock_path.unlink()
                         logger.info("chrome_profile_lock_cleared", lock=lock_name, profile_dir=str(self._profile_dir))
@@ -324,6 +341,11 @@ class PersistentBrowserManager:
                     "--disable-renderer-backgrounding",
                     "--no-sandbox",
                     "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    # See _LAUNCH_ARGS above — avoids headed Chromium crashing/
+                    # rendering black under Xvfb's lack of a real GPU. Do NOT
+                    # add --disable-software-rasterizer alongside this.
+                    "--disable-gpu",
                 ],
                 ignore_https_errors = True,
                 viewport            = {"width": 1366, "height": 900},

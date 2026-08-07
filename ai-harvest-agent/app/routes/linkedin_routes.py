@@ -88,6 +88,9 @@ def _to_linkedin_job(j: LinkedInScrapedJob) -> LinkedInJob:
         job_poster_name         = j.job_poster_name,
         job_poster_designation  = j.job_poster_designation,
         linkedin_profile_url    = j.linkedin_profile_url,
+        job_poster_company      = j.job_poster_company,
+        job_poster_email        = j.job_poster_email,
+        job_poster_phone        = j.job_poster_phone,
     )
 
 

@@ -41,6 +41,17 @@ class Settings(BaseSettings):
     anthropic_max_tokens: int = 8096
     anthropic_temperature: float = 0.0
 
+    # ── HTML extraction LLM provider ──────────────────────────────────────────────
+    # Selects which model LLMService.extract_json() uses (the LinkedIn HTML
+    # extraction fallback and any other extract_json() caller).
+    #   ""  or "claude" / "claude-*"  -> Anthropic Claude (anthropic_model, or the
+    #                                    specific claude-* id given here)
+    #   "ollama"                      -> local LLM at local_llm_url, model = local_llm_model
+    #   any other value               -> local LLM at local_llm_url, used as the model name
+    extraction_llm_model: str = "claude"
+    local_llm_url:        str = "http://localhost:11434"
+    local_llm_model:      str = "llama3.1:8b"
+
     # ── Google Gemini ────────────────────────────────────────────────────────────
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.0-flash"

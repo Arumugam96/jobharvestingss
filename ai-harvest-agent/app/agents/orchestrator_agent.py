@@ -242,6 +242,9 @@ def _linkedin_to_unified(j: LinkedInScrapedJob, job_type: str) -> UnifiedJob:
         job_poster_name         = getattr(j, "job_poster_name", None),
         job_poster_designation  = getattr(j, "job_poster_designation", None),
         linkedin_profile_url    = getattr(j, "linkedin_profile_url", None),
+        current_company         = getattr(j, "job_poster_company", None),
+        email_id                = getattr(j, "job_poster_email", None),
+        contact_number          = getattr(j, "job_poster_phone", None),
     )
 
 

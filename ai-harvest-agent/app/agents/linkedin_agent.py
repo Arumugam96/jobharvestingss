@@ -24,12 +24,14 @@ date       24h → r86400  |  week → r604800  |  month → r2592000
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import random
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import TYPE_CHECKING, Awaitable, Callable
 from urllib.parse import quote_plus
 
 import structlog
@@ -37,6 +39,9 @@ from playwright.async_api import ElementHandle, Page
 
 from app.models.harvest_models import FiltersConfig
 from app.scrapers.browser_manager import PersistentBrowserManager
+
+if TYPE_CHECKING:
+    from app.services.llm_service import LLMService
 
 logger = structlog.get_logger(__name__)
 
@@ -106,6 +111,9 @@ class LinkedInScrapedJob:
     job_poster_name:        str | None = None
     job_poster_designation: str | None = None
     linkedin_profile_url:   str | None = None
+    job_poster_company:     str | None = None
+    job_poster_email:       str | None = None
+    job_poster_phone:       str | None = None
 
 
 # ── CSS selector fallback chains ──────────────────────────────────────────────
@@ -303,6 +311,24 @@ def _format_posted(raw: str) -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
+def _test_mode_max_jobs() -> int | None:
+    """
+    Optional testing cap read from LINKEDIN_TEST_MAX_JOBS in the environment
+    (.env). When set to a positive integer, it overrides FiltersConfig.max_jobs
+    with a lower value so a test run doesn't harvest the full result set.
+    Unset/blank/non-positive → no override (normal max_jobs behaviour).
+    """
+    raw = os.getenv("LINKEDIN_TEST_MAX_JOBS", "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("linkedin_test_max_jobs_invalid", value=raw)
+        return None
+    return value if value > 0 else None
+
+
 async def _delay(page: Page, lo: int, hi: int) -> None:
     await page.wait_for_timeout(random.randint(lo, hi))
 
@@ -388,8 +414,29 @@ class LinkedInAgent:
     destroyed inside harvest().
     """
 
-    def __init__(self) -> None:
-        pass
+    # Safety valve: LinkedIn sometimes serves a build of the job-detail page
+    # with every CSS class replaced by an opaque hash (anti-scraping
+    # countermeasure) — none of the selectors in _Sel match it, even though
+    # the page is fully authenticated and the description text is right
+    # there in the DOM. When that happens we fall back to an LLM extraction
+    # over the page's visible text instead of guessing new selectors. Capped
+    # per-run so a fully-flagged session can't run up unbounded LLM cost.
+    _LLM_FALLBACK_MAX_CALLS_PER_RUN     = 50
+    _LLM_FALLBACK_TEXT_MAX_CHARS        = 16_000
+    _LLM_FALLBACK_CARD_TEXT_MAX_CHARS   = 2_000
+
+    def __init__(self, llm_service: "LLMService | None" = None) -> None:
+        self._llm_service        = llm_service
+        self._llm_fallback_calls = 0
+
+    def _get_llm_service(self) -> "LLMService":
+        """Lazily build an LLMService from Settings if one wasn't injected —
+        keeps existing no-arg `LinkedInAgent()` call sites working unchanged."""
+        if self._llm_service is None:
+            from app.config import get_settings
+            from app.services.llm_service import LLMService
+            self._llm_service = LLMService(get_settings())
+        return self._llm_service
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -674,6 +721,15 @@ class LinkedInAgent:
         batch_size:  int                      = 25
         safety_cap:  int                      = f.max_jobs if f.max_jobs > 0 else 5_000
         empty_pages: int                      = 0
+
+        test_cap = _test_mode_max_jobs()
+        if test_cap is not None:
+            logger.warning(
+                "linkedin_test_mode_max_jobs_active",
+                test_cap=test_cap, configured_max_jobs=f.max_jobs,
+                hint="LINKEDIN_TEST_MAX_JOBS is set in .env — remove it to harvest normally.",
+            )
+            safety_cap = min(safety_cap, test_cap)
 
         logger.info(
             "linkedin_search_started",
@@ -970,7 +1026,11 @@ class LinkedInAgent:
 
                 # ── Fetch job detail by navigating directly to its own URL ─────────
                 # (not by clicking the card — see _fetch_job_detail for why)
-                detail_data = await self._fetch_job_detail(page, url, idx)
+                detail_data = await self._fetch_job_detail(
+                    page, url, idx,
+                    card_text  = list_data.get("card_text", ""),
+                    card_links = list_data.get("card_links", []),
+                )
 
                 # ── Merge list + detail data ──────────────────────────────────────
                 title    = detail_data.get("title") or list_data.get("title") or ""
@@ -1003,6 +1063,9 @@ class LinkedInAgent:
                     job_poster_name         = detail_data.get("recruiter_name") or None,
                     job_poster_designation  = detail_data.get("recruiter_title") or None,
                     linkedin_profile_url    = detail_data.get("recruiter_url") or None,
+                    job_poster_company      = detail_data.get("recruiter_company") or None,
+                    job_poster_email        = detail_data.get("recruiter_email") or None,
+                    job_poster_phone        = detail_data.get("recruiter_phone") or None,
                 )
                 jobs.append(job)
                 logger.info(
@@ -1067,6 +1130,26 @@ class LinkedInAgent:
             if clean_url.startswith("/"):
                 clean_url = "https://www.linkedin.com" + clean_url
 
+            # Grab the card's own visible text + any /in/ profile links it
+            # contains — recruiter/poster info is sometimes only shown on the
+            # search-results card and not repeated on the detail page. Kept
+            # alongside the detail page's text for the LLM fallback extraction
+            # (see LinkedInAgent._llm_fallback_extract).
+            card_text  = ""
+            card_links: list[dict] = []
+            try:
+                card_eval = await el.evaluate(
+                    "(node) => ({"
+                    "  text: node.innerText || '',"
+                    "  links: Array.from(node.querySelectorAll(\"a[href*='/in/']\"))"
+                    "    .slice(0, 10).map(a => ({text: (a.innerText||'').trim(), href: a.href}))"
+                    "})"
+                )
+                card_text  = card_eval.get("text", "") if card_eval else ""
+                card_links = card_eval.get("links", []) if card_eval else []
+            except Exception as exc:
+                logger.debug("linkedin_card_text_read_failed", error=str(exc))
+
             return {
                 "title":    title,
                 "company":  _clean(await _first_text(el, _Sel.COMPANY)),
@@ -1075,16 +1158,31 @@ class LinkedInAgent:
                     await _first_attr(el, _Sel.POSTED, "datetime")
                     or await _first_text(el, _Sel.POSTED)
                 ),
-                "url": clean_url,
+                "url":         clean_url,
+                "card_text":   card_text,
+                "card_links":  card_links,
             }
         except Exception as exc:
             logger.debug("linkedin_list_view_parse_error", error=str(exc))
             return None
 
-    async def _fetch_job_detail(self, page: Page, url: str, idx: int) -> dict:
+    async def _fetch_job_detail(
+        self,
+        page: Page,
+        url: str,
+        idx: int,
+        card_text:  str        = "",
+        card_links: list[dict] | None = None,
+    ) -> dict:
         """
         Open the job's own /jobs/view/<id>/ page in a separate tab and extract
         detail fields there.
+
+        card_text / card_links  Visible text + /in/ profile links captured from
+                                 this job's search-results card (see
+                                 _parse_card_list_view). Forwarded to the LLM
+                                 fallback so it has both pages' content when the
+                                 detail page's own selectors fail to match.
 
         Deliberately does NOT click the card in the split-view search results
         list — that approach was found to fail 100% of the time in production
@@ -1138,6 +1236,14 @@ class LinkedInAgent:
                 )
                 await _screenshot(detail_page, f"detail_fail_{idx:03d}")
                 await _save_html(detail_page, f"detail_fail_{idx:03d}")
+                # Selectors matched nothing — most likely LinkedIn served an
+                # obfuscated-CSS build of this page (see linkedin_detail_panel_not_found
+                # docs above _Sel). Fall back to LLM extraction over the page's
+                # visible text, which doesn't depend on class names at all.
+                llm_detail = await self._llm_fallback_extract(
+                    detail_page, idx, url, card_text=card_text, card_links=card_links,
+                )
+                detail.update(llm_detail)
                 return detail
 
             # Expand truncated description ("Show more") before reading text —
@@ -1223,6 +1329,160 @@ class LinkedInAgent:
                     pass
 
         return detail
+
+    async def _llm_fallback_extract(
+        self,
+        page:       Page,
+        idx:        int,
+        url:        str,
+        card_text:  str        = "",
+        card_links: list[dict] | None = None,
+    ) -> dict:
+        """
+        LLM fallback for when LinkedIn serves an obfuscated-CSS build of the
+        job-detail page and none of the _Sel.DETAIL_* selectors match.
+
+        Sends the page's *visible text* only (never raw HTML — the hashed
+        classes are meaningless noise and would bloat the prompt for nothing),
+        capped at _LLM_FALLBACK_TEXT_MAX_CHARS, combined with the search-results
+        card's own visible text (recruiter/poster info is sometimes only shown
+        there, not on the detail page), plus a de-duplicated list of `/in/`
+        profile links gathered from *both* pages by href pattern (not by class,
+        so it survives the same obfuscation) so the LLM can pick out a
+        recruiter/poster URL that innerText alone wouldn't contain.
+
+        Routed through LLMService.extract_json(), which itself picks Claude or
+        a local Ollama model per EXTRACTION_LLM_MODEL — this method doesn't
+        care which provider actually answers.
+        """
+        if self._llm_fallback_calls >= self._LLM_FALLBACK_MAX_CALLS_PER_RUN:
+            logger.warning(
+                "linkedin_llm_fallback_cap_reached",
+                idx=idx, cap=self._LLM_FALLBACK_MAX_CALLS_PER_RUN,
+            )
+            return {}
+
+        try:
+            raw_text = await page.evaluate("() => document.body.innerText")
+        except Exception as exc:
+            logger.info("linkedin_llm_fallback_text_read_failed", idx=idx, error=str(exc))
+            return {}
+
+        detail_text = _clean(raw_text or "")[: self._LLM_FALLBACK_TEXT_MAX_CHARS]
+        if len(detail_text) < 100:
+            logger.info("linkedin_llm_fallback_text_too_short", idx=idx, chars=len(detail_text))
+            return {}
+
+        card_text_clean = _clean(card_text or "")[: self._LLM_FALLBACK_CARD_TEXT_MAX_CHARS]
+
+        profile_links: list[dict] = list(card_links or [])
+        try:
+            detail_links = await page.eval_on_selector_all(
+                "a[href*='/in/']",
+                "els => els.slice(0, 15).map(e => ({text: e.innerText.trim(), href: e.href}))",
+            )
+            profile_links.extend(detail_links)
+        except Exception as exc:
+            logger.debug("linkedin_llm_fallback_links_failed", idx=idx, error=str(exc))
+
+        seen_hrefs: set[str] = set()
+        deduped_links: list[dict] = []
+        for link in profile_links:
+            href = link.get("href")
+            if href and href not in seen_hrefs:
+                seen_hrefs.add(href)
+                deduped_links.append(link)
+        profile_links = deduped_links[:20]
+
+        self._llm_fallback_calls += 1
+        logger.info(
+            "linkedin_llm_fallback_started",
+            idx=idx, url=url,
+            detail_text_chars=len(detail_text), card_text_chars=len(card_text_clean),
+            profile_link_candidates=len(profile_links),
+            call_number=self._llm_fallback_calls,
+        )
+
+        schema_description = (
+            "{\"description\": str (the COMPLETE job description / \"About the job\" "
+            "text — include every paragraph and bullet point verbatim, do not "
+            "summarize or shorten it; empty string if not present), "
+            "\"employment_type\": str (e.g. Full-time, Contract; empty if not stated), "
+            "\"salary\": str (empty if not disclosed), "
+            "\"skills\": list[str] (empty list if none listed), "
+            "\"recruiter_name\": str or null (name of the recruiter / hiring "
+            "manager / job poster — check both the search-card text and the "
+            "detail-page text, e.g. a \"Meet the hiring team\" section or a "
+            "poster byline on the card; null if none mentioned), "
+            "\"recruiter_title\": str or null (their job title/designation, null if unknown), "
+            "\"recruiter_company\": str or null (the recruiter's own company, only if "
+            "explicitly stated and different from the hiring company; null otherwise), "
+            "\"recruiter_url\": str or null (pick the matching href from the "
+            "candidate profile links below by matching the name, null if no match), "
+            "\"recruiter_email\": str or null (ONLY if an email address is written "
+            "verbatim in the text — never guess or construct one; null otherwise), "
+            "\"recruiter_phone\": str or null (ONLY if a phone number is written "
+            "verbatim in the text — never guess or construct one; null otherwise)}"
+        )
+        content = (
+            f"Candidate LinkedIn profile links found on the search card and/or "
+            f"detail page (name → url):\n{json.dumps(profile_links, ensure_ascii=False)}\n\n"
+            f"Visible text from the search-results CARD for this job "
+            f"(may be empty if none was captured):\n{card_text_clean or '(none captured)'}\n\n"
+            f"Visible text from the job's own DETAIL page:\n{detail_text}"
+        )
+
+        try:
+            extracted = await self._get_llm_service().extract_json(
+                content=content,
+                schema_description=schema_description,
+                system=(
+                    "You are extracting structured job-posting data from the "
+                    "raw visible text of LinkedIn pages (a search-result card "
+                    "and/or the job's detail page). The page's CSS classes are "
+                    "obfuscated so selectors can't be used — work from the text "
+                    "content only. Prioritize returning the COMPLETE job "
+                    "description and any recruiter contact details that are "
+                    "explicitly present. Never fabricate an email, phone number, "
+                    "or any other field that is not literally present in the "
+                    "text. Return only the fields in the schema, no commentary."
+                ),
+                debug_dir=_DEBUG_DIR,
+            )
+        except Exception as exc:
+            logger.warning("linkedin_llm_fallback_failed", idx=idx, url=url, error=str(exc))
+            return {}
+
+        result: dict = {}
+        if extracted.get("description"):
+            result["description"] = str(extracted["description"]).strip()[:8000]
+        if extracted.get("employment_type"):
+            result["emp_type"] = str(extracted["employment_type"]).strip()
+        if extracted.get("salary"):
+            result["salary"] = str(extracted["salary"]).strip()
+        if extracted.get("skills"):
+            result["skills"] = [str(s).strip() for s in extracted["skills"] if str(s).strip()][:20]
+        if extracted.get("recruiter_name"):
+            result["recruiter_name"] = str(extracted["recruiter_name"]).strip()
+        if extracted.get("recruiter_title"):
+            result["recruiter_title"] = str(extracted["recruiter_title"]).strip()
+        if extracted.get("recruiter_company"):
+            result["recruiter_company"] = str(extracted["recruiter_company"]).strip()
+        if extracted.get("recruiter_url"):
+            result["recruiter_url"] = str(extracted["recruiter_url"]).strip()
+        if extracted.get("recruiter_email"):
+            result["recruiter_email"] = str(extracted["recruiter_email"]).strip()
+        if extracted.get("recruiter_phone"):
+            result["recruiter_phone"] = str(extracted["recruiter_phone"]).strip()
+
+        logger.info(
+            "linkedin_llm_fallback_succeeded",
+            idx=idx, url=url,
+            recovered_description=bool(result.get("description")),
+            recovered_recruiter=bool(result.get("recruiter_name")),
+            recovered_recruiter_contact=bool(result.get("recruiter_email") or result.get("recruiter_phone")),
+        )
+        return result
 
     async def _extract_recruiter(self, page: Page) -> dict:
         """Extract recruiter / hiring manager info from the detail panel."""

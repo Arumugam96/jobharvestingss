@@ -74,7 +74,7 @@ class MockLLMService:
     async def complete_text(self, prompt, system=""):
         return "Mock strategy: navigate, extract, finish."
 
-    async def extract_json(self, content, schema_description, system=""):
+    async def extract_json(self, content, schema_description, system="", debug_dir=None):
         return {"mock_field": "mock_value"}
 
     def get_tool_use(self, response):
