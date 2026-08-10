@@ -259,6 +259,9 @@ async def toggle_schedule(request: Request) -> Any:
 async def _apply_schedule(scheduler, config: HarvestConfig) -> None:
     """Wire up the APScheduler job for the automatic harvest run."""
     from app.agents.orchestrator_agent import OrchestratorAgent  # avoid circular at import time
+    from app.config import get_settings
+    from app.services.email_service import EmailSender
+    from app.services.harvest_notification_service import send_harvest_report
     from app.services.harvest_storage_service import HarvestStorageService
 
     storage = HarvestStorageService()
@@ -269,24 +272,55 @@ async def _apply_schedule(scheduler, config: HarvestConfig) -> None:
         now_iso = datetime.now(timezone.utc).isoformat()
         orch    = OrchestratorAgent(cfg)
         try:
+            # wait_for_login=False: this is an unattended scheduled run — no
+            # one is present to complete a LinkedIn login if the saved
+            # session has expired, so fail fast instead of hanging.
             if needs_proactor():
-                jobs, src_label = await run_in_proactor(orch.run)
+                result = await run_in_proactor(lambda: orch.run_all(wait_for_login=False))
             else:
-                jobs, src_label = await orch.run()
+                result = await orch.run_all(wait_for_login=False)
         except Exception as exc:
             logger.exception("scheduled_harvest_failed", run_id=run_id, error=str(exc))
+            # ── Alert configured recipients that the scheduled run failed ────────
+            enabled = [
+                src for src in ["naukri", "linkedin", "dice"]
+                if getattr(cfg.sources, src, False)
+            ]
+            await send_harvest_report(
+                EmailSender(get_settings()),
+                cfg.notifications,
+                run_id     = run_id,
+                status     = "failed",
+                total_jobs = 0,
+                sources    = enabled,
+                error      = str(exc),
+            )
             return
+
+        status_str = "success" if result.total_jobs else "no_results"
         payload = {
             "run_id":      run_id,
             "executed_at": now_iso,
-            "status":      "success" if jobs else "no_results",
-            "total_found": len(jobs),
-            "source":      src_label,
+            "status":      status_str,
+            "total_found": result.total_jobs,
+            "source":      ", ".join(result.sources_executed),
             "filters":     cfg.filters.model_dump(),
-            "jobs":        [j.model_dump() for j in jobs],
+            "jobs":        [j.to_dict() for j in result.all_jobs],
         }
         storage.save_results(payload)
-        logger.info("scheduled_harvest_complete", run_id=run_id, total=len(jobs))
+        logger.info("scheduled_harvest_complete", run_id=run_id, total=result.total_jobs)
+
+        # ── Email the report to configured recipients (best-effort) ──────────
+        await send_harvest_report(
+            EmailSender(get_settings()),
+            cfg.notifications,
+            run_id      = run_id,
+            status      = status_str,
+            total_jobs  = result.total_jobs,
+            sources     = result.sources_executed,
+            excel_path  = result.excel_path,
+            json_path   = result.combined_path,
+        )
 
     scheduler.schedule_harvest(
         job_fn    = _auto_harvest,

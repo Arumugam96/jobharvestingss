@@ -107,6 +107,7 @@ class LinkedInScrapedJob:
     work_mode:       str       = "not_specified"
     company_url:     str       = ""
     employment_type: str       = ""
+    industry_hint:   str       = ""   # raw "Industries" job-insight text, if scraped
     source:          str       = "LinkedIn"
     # Lead intelligence
     job_poster_name:        str | None = None
@@ -247,6 +248,13 @@ class _Sel:
     ]
     DETAIL_POSTED:     list[str] = ["span.jobs-unified-top-card__posted-date", ".topcard__flavor--metadata time", "time"]
     DETAIL_EMP_TYPE:   list[str] = [".jobs-unified-top-card__job-insight span", ".jobs-unified-top-card__workplace-type"]
+    # Every "job insight" bullet under the title (employment type, seniority,
+    # company size, industry, …) — used to pull the Industries tag natively
+    # instead of guessing domain from the description.
+    DETAIL_JOB_INSIGHTS: list[str] = [
+        ".job-details-jobs-unified-top-card__job-insight",
+        ".jobs-unified-top-card__job-insight",
+    ]
     DETAIL_SALARY:     list[str] = [".jobs-unified-top-card__job-insight--highlight", "[class*='salary']", "[class*='compensation']"]
     DETAIL_SKILLS:     list[str] = [".job-details-skill-match-status-list li", ".jobs-unified-top-card__job-insight ul li"]
     DETAIL_DESC:       list[str] = ["#job-details", "div.jobs-description__content", "div.jobs-description"]
@@ -345,6 +353,20 @@ async def _first_text(root: Page | ElementHandle, selectors: list[str]) -> str:
         except Exception:
             continue
     return ""
+
+
+async def _all_texts(root: Page | ElementHandle, selectors: list[str]) -> list[str]:
+    """Like _first_text, but returns every matching element's text for the
+    first selector in the chain that matches anything (not just one element)."""
+    for sel in selectors:
+        try:
+            els = await root.query_selector_all(sel)
+            texts = [t.strip() for e in els if (t := await e.inner_text()) and t.strip()]
+            if texts:
+                return texts
+        except Exception:
+            continue
+    return []
 
 
 async def _first_attr(root: Page | ElementHandle, selectors: list[str], attr: str) -> str:
@@ -1078,6 +1100,7 @@ class LinkedInAgent:
                     work_mode               = work_mode,
                     company_url             = detail_data.get("company_url", ""),
                     employment_type         = _clean(detail_data.get("emp_type", "")),
+                    industry_hint           = _clean(detail_data.get("job_insights", "")),
                     source                  = "LinkedIn",
                     job_poster_name         = detail_data.get("recruiter_name") or None,
                     job_poster_designation  = detail_data.get("recruiter_title") or None,
@@ -1293,6 +1316,7 @@ class LinkedInAgent:
             )
             detail["emp_type"]    = await _first_text(detail_page, _Sel.DETAIL_EMP_TYPE)
             detail["salary"]      = await _first_text(detail_page, _Sel.DETAIL_SALARY)
+            detail["job_insights"] = " | ".join(await _all_texts(detail_page, _Sel.DETAIL_JOB_INSIGHTS))
 
             # Description — inner text of the whole panel
             for sel in _Sel.DETAIL_DESC:

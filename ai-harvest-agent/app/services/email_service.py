@@ -1,15 +1,19 @@
-"""SMTP delivery for OTP emails.
+"""SMTP delivery for OTP and harvest-report emails.
 
 Uses the stdlib ``smtplib`` (run off the event loop via ``asyncio.to_thread``)
 rather than a third-party async SMTP client, since the project has no such
 dependency today and this keeps the login flow dependency-free. AuthService
-depends on the ``EmailSender`` interface only — it never touches smtplib.
+depends on ``send_otp``; the harvest report flow (see
+app/services/harvest_notification_service.py) depends on
+``send_email_with_attachments`` — both share the same SMTP transport/settings.
 """
 from __future__ import annotations
 
 import asyncio
+import mimetypes
 import smtplib
 from email.message import EmailMessage
+from pathlib import Path
 
 import structlog
 
@@ -42,20 +46,97 @@ class EmailSender:
 
     async def send_otp(self, recipient: str, otp: str) -> None:
         settings = self._settings
+        log = logger.bind(recipient=recipient)
+        log.debug("otp_email_build_start")
         message = EmailMessage()
         message["Subject"] = OTP_EMAIL_SUBJECT
         message["From"] = settings.smtp_from_email
         message["To"] = recipient
         message.set_content(render_otp_email(otp, settings.otp_expiry_seconds))
 
-        await asyncio.to_thread(self._send_sync, message)
-        logger.info("otp_email_sent", recipient=recipient)
+        await asyncio.to_thread(self._send_sync, message, log)
+        log.info("otp_email_sent")
 
-    def _send_sync(self, message: EmailMessage) -> None:
+    async def send_email_with_attachments(
+        self,
+        recipients: list[str],
+        subject: str,
+        body: str,
+        attachment_paths: list[str],
+    ) -> None:
+        """Generic SMTP send with one or more file attachments (e.g. the
+        Excel/JSON harvest report) — same transport/credentials as send_otp."""
+        log = logger.bind(recipients=recipients, subject=subject, attachments=len(attachment_paths))
+        log.debug("email_with_attachments_start")
+        await asyncio.to_thread(
+            self._send_with_attachments_sync, recipients, subject, body, attachment_paths, log
+        )
+        log.info("email_with_attachments_sent")
+
+    def _send_with_attachments_sync(
+        self,
+        recipients: list[str],
+        subject: str,
+        body: str,
+        attachment_paths: list[str],
+        log,
+    ) -> None:
+        message = EmailMessage()
+        message["Subject"] = subject
+        message["From"] = self._settings.smtp_from_email
+        message["To"] = ", ".join(recipients)
+        message.set_content(body)
+
+        for raw_path in attachment_paths:
+            path = Path(raw_path)
+            log.debug("email_attachment_reading", path=str(path))
+            data = path.read_bytes()
+            maintype, subtype = _guess_attachment_type(path)
+            message.add_attachment(data, maintype=maintype, subtype=subtype, filename=path.name)
+            log.debug(
+                "email_attachment_attached",
+                path=str(path),
+                bytes=len(data),
+                content_type=f"{maintype}/{subtype}",
+            )
+
+        self._send_sync(message, log)
+
+    def _send_sync(self, message: EmailMessage, log=None) -> None:
+        log = log or logger
         settings = self._settings
-        with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=10) as server:
-            if settings.smtp_use_tls:
-                server.starttls()
-            if settings.smtp_username:
-                server.login(settings.smtp_username, settings.smtp_password)
-            server.send_message(message)
+        log.debug(
+            "smtp_connecting",
+            host=settings.smtp_host,
+            port=settings.smtp_port,
+            use_tls=settings.smtp_use_tls,
+        )
+        try:
+            with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=10) as server:
+                log.debug("smtp_connected")
+                if settings.smtp_use_tls:
+                    server.starttls()
+                    log.debug("smtp_starttls_ok")
+                if settings.smtp_username:
+                    log.debug("smtp_login_attempt", username=settings.smtp_username)
+                    server.login(settings.smtp_username, settings.smtp_password)
+                    log.debug("smtp_login_ok")
+                log.debug("smtp_sending_message", to=message["To"])
+                server.send_message(message)
+                log.debug("smtp_send_message_ok")
+        except Exception:
+            log.exception(
+                "smtp_send_failed",
+                host=settings.smtp_host,
+                port=settings.smtp_port,
+                username=settings.smtp_username,
+            )
+            raise
+
+
+def _guess_attachment_type(path: Path) -> tuple[str, str]:
+    content_type, _ = mimetypes.guess_type(path.name)
+    if content_type is None:
+        return "application", "octet-stream"
+    maintype, subtype = content_type.split("/", 1)
+    return maintype, subtype

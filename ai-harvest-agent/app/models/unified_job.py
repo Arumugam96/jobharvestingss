@@ -24,7 +24,7 @@ class UnifiedJob:
 
     Fields populated by BusinessFilterService (after scraping)
     ──────────────────────────────────────────────────────────
-    domain, hiring_entity, is_gcc, job_type (tagged from config)
+    domain, hiring_entity, is_gcc, job_type (inferred from job content)
 
     Fields populated by VerificationAgent (optional)
     ─────────────────────────────────────────────────
@@ -45,10 +45,13 @@ class UnifiedJob:
     source:          str        # "LinkedIn" | "Naukri" | "Dice"
 
     # ── BusinessFilterService fills these ─────────────────────────────────────
-    job_type:       str  = ""           # "Contract" | "Permanent" | … (from config)
+    job_type:       str  = ""           # "contract" | "permanent" | … | "not_specified" (inferred)
     domain:         str  = "Any"        # "IT" | "Finance" | "Engineering" | …
     hiring_entity:  str  = "Any"        # "Direct Client" | "GCC" | "Staffing Firm" | "Ambiguous"
     is_gcc:         bool = False
+
+    # ── Raw platform hints consumed by BusinessFilterService, not user-facing ──
+    domain_hint:    str  = ""           # e.g. LinkedIn's native "Industries" tag
 
     # ── VerificationAgent fills this ──────────────────────────────────────────
     # "pending" | "verified" | "not_verified" | "career_page_not_found" | "skipped"

@@ -45,11 +45,20 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from app.agents.orchestrator_agent import OrchestratorAgent, OrchestratorResult
+from app.config import get_settings
 from app.core.proactor import needs_proactor, run_in_proactor
 from app.models.harvest_run import HarvestRunORM
 from app.models.unified_job import UnifiedJob
 from app.services.config_service import ConfigService
-from app.services.harvest_run_service import HarvestRunService, db_read, db_write
+from app.services.email_service import EmailSender
+from app.services.harvest_notification_service import send_harvest_report
+from app.services.harvest_run_service import (
+    HarvestRunService,
+    data_source_mode,
+    db_read,
+    db_write,
+    resolve_read,
+)
 from app.services.job_tracker import JobTracker
 from app.services.run_history_service import RunHistoryService
 
@@ -251,6 +260,17 @@ async def _run_harvest_background(
                 error        = str(exc),
                 completed_at = datetime.now(timezone.utc),
             ))
+
+        # ── Alert configured recipients that the run failed (best-effort) ────────
+        await send_harvest_report(
+            EmailSender(get_settings()),
+            config.notifications,
+            run_id     = run_id,
+            status     = "failed",
+            total_jobs = 0,
+            sources    = enabled,
+            error      = str(exc),
+        )
         return
 
     JobTracker.update(
@@ -352,6 +372,18 @@ async def _run_harvest_background(
             sources         = result.sources_executed,
         ))
 
+    # ── Email the report to configured recipients (best-effort) ──────────────
+    await send_harvest_report(
+        EmailSender(get_settings()),
+        config.notifications,
+        run_id      = run_id,
+        status      = status_str,
+        total_jobs  = result.total_jobs,
+        sources     = result.sources_executed,
+        excel_path  = result.excel_path,
+        json_path   = result.combined_path,
+    )
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # POST /run-harvest-agent
@@ -452,19 +484,28 @@ async def get_harvest_status(job_id: str) -> Any:
     - `no_results` — harvest completed but found no matching jobs
     - `failed`     — harvest error (check `error` field)
     """
-    run = await db_read(lambda db: HarvestRunService(db).get_by_job_id(job_id))
-    if run is not None:
+    mode = data_source_mode()
+    run, source = await resolve_read(
+        mode,
+        lambda: db_read(lambda db: HarvestRunService(db).get_by_job_id(job_id)),
+        lambda: JobTracker.get(job_id),
+    )
+    if source == "database":
+        if run is None:
+            return JSONResponse(
+                status_code = 404,
+                content     = {"detail": f"No harvest job found with id '{job_id}'"},
+            )
         return _run_to_job_status_dict(run)
 
-    # Fall back to JobTracker for runs that predate the DB mirror, or if the
-    # DB is temporarily unavailable.
-    js = JobTracker.get(job_id)
-    if js is None:
+    # source == "json": run is whatever JobTracker.get() returned (predates
+    # the DB mirror, or DATA_SOURCE=json / DB temporarily unavailable in "auto").
+    if run is None:
         return JSONResponse(
             status_code = 404,
             content     = {"detail": f"No harvest job found with id '{job_id}'"},
         )
-    return js.to_dict()
+    return run.to_dict()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -474,24 +515,37 @@ async def get_harvest_status(job_id: str) -> Any:
 @router.get("/run-history", status_code=status.HTTP_200_OK)
 async def get_run_history() -> Any:
     """Return all harvest run history entries, newest first."""
-    runs = await db_read(lambda db: HarvestRunService(db).list_runs(source=None))
-    if runs:
-        entries = [_run_to_history_entry(r) for r in runs]
+    mode = data_source_mode()
+    runs, source = await resolve_read(
+        mode,
+        lambda: db_read(lambda db: HarvestRunService(db).list_runs(source=None)),
+        lambda: _history_svc.list_all(),
+    )
+    if source == "database":
+        entries = [_run_to_history_entry(r) for r in runs] if runs else []
         return {"total_runs": len(entries), "runs": entries}
 
-    # Fall back to the JSON file for history predating the DB mirror, or if
-    # the DB has no rows yet (e.g. nothing has run since this shipped).
-    return {"total_runs": len(_history_svc.list_all()), "runs": _history_svc.list_all()}
+    return {"total_runs": len(runs), "runs": runs}
 
 
 @router.get("/run-history/{run_id}", status_code=status.HTTP_200_OK)
 async def get_run_history_entry(run_id: str) -> Any:
     """Return a single run history entry by run_id."""
-    run = await db_read(lambda db: HarvestRunService(db).get_by_run_id(run_id, source=None))
-    if run is not None:
+    mode = data_source_mode()
+    run, source = await resolve_read(
+        mode,
+        lambda: db_read(lambda db: HarvestRunService(db).get_by_run_id(run_id, source=None)),
+        lambda: _history_svc.get(run_id),
+    )
+    if source == "database":
+        if run is None:
+            return JSONResponse(
+                status_code=404,
+                content={"detail": f"No result found for run_id '{run_id}'"},
+            )
         return _run_to_history_entry(run)
 
-    entry = _history_svc.get(run_id)
+    entry = run
     if entry is None:
         return JSONResponse(
             status_code=404,

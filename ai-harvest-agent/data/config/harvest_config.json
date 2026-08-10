@@ -35,5 +35,11 @@
     "headless": false,
     "slow_mo_ms": 0,
     "chrome_profile": "data/chrome_profile"
+  },
+  "notifications": {
+    "enabled": true,
+    "recipients": ["harijordan95@gmail.com"],
+    "report_format": "both",
+    "subject_template": "Harvest Report — {run_id} ({status}, {total_jobs} jobs)"
   }
 }

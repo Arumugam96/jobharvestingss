@@ -1,21 +1,12 @@
 # Full-stack deployment (backend + frontend + live browser view) — intended
-# for the EC2 target. For backend-only local dev, ai-harvest-agent/docker-compose.yml
-# still works standalone.
-#
-# No Postgres/Redis/Celery here — the app doesn't use them. The only DB-backed
-# route (app/routes/harvest.py) is a legacy CRUD API the frontend never calls,
-# and harvests run as in-process asyncio background tasks (run_harvest_agent.py),
-# not Celery jobs. Confirmed via grep: nothing in the codebase calls
-# `.delay()`/`.apply_async()`.
+# for the EC2 target.
 
 services:
   api:
     build: ./ai-harvest-agent
     # No host port publishing — nginx (the "frontend" service) reaches this
     # container over the internal Docker network (http://api:8000, /vnc/ ->
-    # http://api:6080) regardless. Not publishing to the host avoids ever
-    # colliding with something else already using 8000/6080 on the host,
-    # and keeps both ports unreachable from outside Docker entirely.
+    # http://api:6080) 
     expose:
       - "8000"
       - "6080"

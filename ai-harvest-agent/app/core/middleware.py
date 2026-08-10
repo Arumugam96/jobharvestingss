@@ -12,6 +12,17 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 
 logger = structlog.get_logger(__name__)
 
+# Routes the frontend polls every few seconds (harvest progress, health
+# checks). Logging these at INFO flooded the console within seconds during a
+# long-running harvest and buried the one line that actually mattered (e.g.
+# the harvest-report email result). They're still logged, just at DEBUG —
+# visible in data/logs/app.log, out of the default console.
+_NOISY_PATH_PREFIXES = ("/harvest-status", "/health", "/run-history")
+
+
+def _is_noisy(path: str) -> bool:
+    return path.startswith(_NOISY_PATH_PREFIXES)
+
 
 class LoggingMiddleware(BaseHTTPMiddleware):
     """Structured request/response logging."""
@@ -23,11 +34,13 @@ class LoggingMiddleware(BaseHTTPMiddleware):
             path=request.url.path,
             client=request.client.host if request.client else "unknown",
         )
-        log.info("request_started")
+        noisy = _is_noisy(request.url.path)
+        log_fn = log.debug if noisy else log.info
+        log_fn("request_started")
         try:
             response = await call_next(request)
             elapsed_ms = round((time.perf_counter() - start) * 1000, 2)
-            log.info(
+            log_fn(
                 "request_finished",
                 status_code=response.status_code,
                 elapsed_ms=elapsed_ms,

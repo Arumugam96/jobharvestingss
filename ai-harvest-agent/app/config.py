@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic import AnyHttpUrl
@@ -10,7 +11,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file="ai-harvest-agent/.env",
+        # Anchored to the ai-harvest-agent project root (parent of this file's
+        # directory) so it resolves correctly regardless of the process's CWD —
+        # ".env" alone breaks when launched from the repo root instead of from
+        # inside ai-harvest-agent/, and "ai-harvest-agent/.env" breaks when
+        # launched (as documented) from inside ai-harvest-agent/ itself.
+        env_file=str(Path(__file__).resolve().parent.parent / ".env"),
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
@@ -23,6 +29,21 @@ class Settings(BaseSettings):
     app_secret_key: str = "change-me-in-production"
     api_key: str = "dev-api-key"
     api_v1_prefix: str = "/api/v1"
+
+    # Console log verbosity (DEBUG/INFO/WARNING/ERROR). The rotating debug
+    # file at data/logs/app.log always captures DEBUG regardless of this —
+    # this only controls what prints to the terminal.
+    log_level: str = "INFO"
+
+    # ── Harvest results read source ────────────────────────────────────────────
+    # "auto"     — DB first, fall back to the JSON/file store if the DB has no
+    #              rows for that query or is unreachable (default).
+    # "database" — DB only; never fall back, even when empty (surfaces DB bugs
+    #              immediately instead of silently masking them with old JSON).
+    # "json"     — always read the JSON/file store; skip the DB read entirely.
+    # Applies to GET /harvest-status, /run-history, /{linkedin,naukri,dice}-results.
+    # Writes are unaffected — every run is still mirrored to the DB regardless.
+    data_source: Literal["auto", "database", "json"] = "auto"
 
     # ── Database ─────────────────────────────────────────────────────────────────
     database_url: str = "sqlite+aiosqlite:///./data/harvest.db"

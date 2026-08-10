@@ -203,7 +203,7 @@ _SOURCE_PRIORITY = ["naukri", "linkedin", "dice"]
 
 # ── Converters: source-specific dataclass → UnifiedJob ────────────────────────
 
-def _naukri_to_unified(j: "NaukriScrapedJob", job_type: str) -> UnifiedJob:  # type: ignore[name-defined]
+def _naukri_to_unified(j: "NaukriScrapedJob") -> UnifiedJob:  # type: ignore[name-defined]
     return UnifiedJob(
         job_title               = j.job_title,
         company                 = j.company,
@@ -216,7 +216,6 @@ def _naukri_to_unified(j: "NaukriScrapedJob", job_type: str) -> UnifiedJob:  # t
         skills                  = j.skills,
         work_mode               = j.work_mode,
         source                  = "Naukri",
-        job_type                = job_type,
         job_poster_name         = getattr(j, "recruiter_name", None),
         job_poster_designation  = getattr(j, "job_poster_designation", None),
         current_company         = getattr(j, "recruiter_company", None),
@@ -225,7 +224,7 @@ def _naukri_to_unified(j: "NaukriScrapedJob", job_type: str) -> UnifiedJob:  # t
     )
 
 
-def _linkedin_to_unified(j: LinkedInScrapedJob, job_type: str) -> UnifiedJob:
+def _linkedin_to_unified(j: LinkedInScrapedJob) -> UnifiedJob:
     return UnifiedJob(
         job_title               = j.job_title,
         company                 = j.company,
@@ -238,7 +237,8 @@ def _linkedin_to_unified(j: LinkedInScrapedJob, job_type: str) -> UnifiedJob:
         skills                  = j.skills,
         work_mode               = j.work_mode,
         source                  = "LinkedIn",
-        job_type                = job_type,
+        job_type                = getattr(j, "employment_type", ""),
+        domain_hint             = getattr(j, "industry_hint", ""),
         job_poster_name         = getattr(j, "job_poster_name", None),
         job_poster_designation  = getattr(j, "job_poster_designation", None),
         linkedin_profile_url    = getattr(j, "linkedin_profile_url", None),
@@ -248,7 +248,7 @@ def _linkedin_to_unified(j: LinkedInScrapedJob, job_type: str) -> UnifiedJob:
     )
 
 
-def _dice_to_unified(j: "DiceScrapedJob", job_type: str) -> UnifiedJob:  # type: ignore[name-defined]
+def _dice_to_unified(j: "DiceScrapedJob") -> UnifiedJob:  # type: ignore[name-defined]
     return UnifiedJob(
         job_title               = j.job_title,
         company                 = j.company,
@@ -261,7 +261,7 @@ def _dice_to_unified(j: "DiceScrapedJob", job_type: str) -> UnifiedJob:  # type:
         skills                  = j.skills,
         work_mode               = j.work_mode,
         source                  = "Dice",
-        job_type                = job_type,
+        job_type                = getattr(j, "employment_type", ""),
         job_poster_name         = getattr(j, "recruiter_name", None),
         job_poster_designation  = getattr(j, "job_poster_designation", None),
         current_company         = getattr(j, "recruiter_company", None),
@@ -680,7 +680,7 @@ class OrchestratorAgent:
                 try:
                     agent   = NaukriAgent()
                     scraped: list[NaukriScrapedJob] = await agent._run(page, config.filters)
-                    unified = [_naukri_to_unified(j, config.filters.job_type) for j in scraped]
+                    unified = [_naukri_to_unified(j) for j in scraped]
                     logger.info("orchestrator_source_done", source="naukri", count=len(unified))
                     logger.info("batch_saved", source="Naukri", count=len(unified))
                     return "Naukri", unified
@@ -702,7 +702,7 @@ class OrchestratorAgent:
                     )
                     # ── Checkpoint 2: jobs received by orchestrator ────────────
                     logger.info("linkedin_jobs_received_by_orchestrator", count=len(scraped))
-                    unified = [_linkedin_to_unified(j, config.filters.job_type) for j in scraped]
+                    unified = [_linkedin_to_unified(j) for j in scraped]
                     logger.info("orchestrator_source_done", source="linkedin", count=len(unified))
                     logger.info("batch_saved", source="LinkedIn", count=len(unified))
 
@@ -743,7 +743,7 @@ class OrchestratorAgent:
                 try:
                     scraper = DiceScraper(page, config.filters)
                     scraped: list[DiceScrapedJob] = await scraper.run()
-                    unified = [_dice_to_unified(j, config.filters.job_type) for j in scraped]
+                    unified = [_dice_to_unified(j) for j in scraped]
                     logger.info("orchestrator_source_done", source="dice", count=len(unified))
                     logger.info("batch_saved", source="Dice", count=len(unified))
                     return "Dice", unified

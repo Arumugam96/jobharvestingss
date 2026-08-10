@@ -52,12 +52,6 @@ frontend/dist/
 build/
 dist/
 
-# Local environment files
-frontend/.env
-frontend/.env.*
-backend/.env
-backend/.env.*
-
 # Cache
 .cache/
 .parcel-cache/

@@ -26,9 +26,11 @@ from app.models.response_models import DiceJob, DiceRunResponse
 from app.services.config_service import ConfigService
 from app.services.harvest_run_service import (
     HarvestRunService,
+    data_source_mode,
     db_read,
     db_write,
     filters_view,
+    resolve_read,
     run_to_result_summary,
 )
 from app.services.dice_storage_service import DiceStorageService
@@ -252,23 +254,37 @@ async def run_dice_agent() -> Any:
 @router.get("/dice-results", status_code=status.HTTP_200_OK)
 async def list_dice_results() -> Any:
     """List all saved Dice harvest run files, newest first."""
-    runs = await db_read(lambda db: HarvestRunService(db).list_runs(source="Dice"))
-    if runs:
-        results = [run_to_result_summary(r) for r in runs]
+    mode = data_source_mode()
+    runs, source = await resolve_read(
+        mode,
+        lambda: db_read(lambda db: HarvestRunService(db).list_runs(source="Dice")),
+        lambda: _storage_svc.list_results(),
+    )
+    if source == "database":
+        results = [run_to_result_summary(r) for r in runs] if runs else []
         return {"total_runs": len(results), "results": results}
 
-    results = _storage_svc.list_results()
-    return {"total_runs": len(results), "results": results}
+    return {"total_runs": len(runs), "results": runs}
 
 
 @router.get("/dice-results/{run_id}", status_code=status.HTTP_200_OK)
 async def get_dice_result(run_id: str) -> Any:
     """Return the full JSON payload for a single saved Dice run."""
-    run = await db_read(lambda db: HarvestRunService(db).get_by_run_id(run_id, source="Dice"))
-    if run is not None:
+    mode = data_source_mode()
+    run, source = await resolve_read(
+        mode,
+        lambda: db_read(lambda db: HarvestRunService(db).get_by_run_id(run_id, source="Dice")),
+        lambda: _storage_svc.get_result(run_id),
+    )
+    if source == "database":
+        if run is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"No Dice result found for run_id '{run_id}'",
+            )
         return _run_to_dice_payload(run)
 
-    data = _storage_svc.get_result(run_id)
+    data = run
     if data is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

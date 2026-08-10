@@ -32,7 +32,7 @@ from app.models.unified_job import UnifiedJob
 
 logger = structlog.get_logger(__name__)
 
-_MASTER_DIR = Path("data/master")
+_MASTER_DIR = Path(__file__).resolve().parents[2] / "data" / "master"
 
 
 # ── Master-list loader ────────────────────────────────────────────────────────
@@ -136,8 +136,7 @@ class BusinessFilterService:
                 j.domain = self._infer_domain(j)
             if not j.hiring_entity or j.hiring_entity == "Any":
                 j.is_gcc, j.hiring_entity = self._infer_hiring_entity(j)
-            if not j.job_type:
-                j.job_type = cfg.job_type
+            j.job_type = self._infer_job_type(j)
         return jobs
 
     def apply_all(self, jobs: list[UnifiedJob], cfg: FiltersConfig) -> list[UnifiedJob]:
@@ -155,15 +154,29 @@ class BusinessFilterService:
 
     # ── Domain ─────────────────────────────────────────────────────────────────
 
+    # Subset of LinkedIn's own "Industries" taxonomy (job-insight tag, company-
+    # level) that indicates an IT employer. Used only as a coarse fallback
+    # when no domain_keywords.json term matches the title/description — it
+    # can't distinguish SAP/Cloud/AI-ML etc., only IT vs. Non-IT.
+    _IT_INDUSTRIES: frozenset[str] = frozenset({
+        "it services and it consulting", "software development",
+        "information technology and services",
+        "technology, information and internet",
+        "computer and network security", "semiconductor manufacturing",
+        "telecommunications",
+    })
+
     def _infer_domain(self, j: UnifiedJob) -> str:
         text = f"{j.job_title} {j.job_description} {' '.join(j.skills)}".lower()
         scores: dict[str, int] = {}
         for domain, keywords in _DOMAIN_KW.items():
             scores[domain] = sum(1 for kw in keywords if kw in text)
-        if not scores:
-            return "Non-IT"
-        best = max(scores, key=lambda d: scores[d])
-        return best if scores[best] > 0 else "Non-IT"
+        if scores and max(scores.values()) > 0:
+            return max(scores, key=lambda d: scores[d])
+        hint = (j.domain_hint or "").lower()
+        if any(industry in hint for industry in self._IT_INDUSTRIES):
+            return "IT"
+        return "Non-IT"
 
     def _filter_domain(self, jobs: list[UnifiedJob], cfg: FiltersConfig) -> list[UnifiedJob]:
         if cfg.domain == "Any":
@@ -250,21 +263,30 @@ class BusinessFilterService:
         "full-time":  ["permanent", "regular", "full-time", "fulltime", "full time"],
     }
 
+    # "Permanent" (Naukri's term) and "Full-time" (LinkedIn's term) are the
+    # same employment type under two different platform vocabularies.
+    _JT_ALIASES: dict[str, str] = {"full-time": "permanent"}
+
+    def _infer_job_type(self, j: UnifiedJob) -> str:
+        # j.job_type may already hold a native platform label (e.g. LinkedIn's
+        # "Full-time"/"Contract", scraped verbatim from the job page) — that
+        # authoritative hint is checked before falling back to scanning the
+        # free-text title/description.
+        text = f"{j.job_type} {j.job_title} {j.job_description}".lower()
+        for job_type, keywords in self._JT_KEYWORDS.items():
+            if any(kw in text for kw in keywords):
+                return job_type
+        return "not_specified"
+
     def _filter_job_type(self, jobs: list[UnifiedJob], cfg: FiltersConfig) -> list[UnifiedJob]:
         if cfg.job_type == "Any":
             return jobs
-        target_kws = self._JT_KEYWORDS.get(cfg.job_type.lower(), [])
-        result = []
-        for j in jobs:
-            if j.job_type.lower() == cfg.job_type.lower():
-                result.append(j)
-            elif target_kws and any(kw in f"{j.job_title} {j.job_description}".lower() for kw in target_kws):
-                j.job_type = cfg.job_type
-                result.append(j)
-            elif not j.job_type:
-                j.job_type = cfg.job_type
-                result.append(j)
-        return result
+        target = self._JT_ALIASES.get(cfg.job_type.lower(), cfg.job_type.lower())
+        return [
+            j for j in jobs
+            if self._JT_ALIASES.get(j.job_type.lower(), j.job_type.lower()) == target
+            or j.job_type == "not_specified"
+        ]
 
     # ── Salary ─────────────────────────────────────────────────────────────────
 

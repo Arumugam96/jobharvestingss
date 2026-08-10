@@ -1,6 +1,7 @@
 """FastAPI dependency injection helpers."""
 from __future__ import annotations
 
+from pathlib import Path
 from typing import AsyncGenerator
 
 import structlog
@@ -20,12 +21,31 @@ logger = structlog.get_logger(__name__)
 
 # ── Database ─────────────────────────────────────────────────────────────────────
 
+# Anchored to the ai-harvest-agent project root (parent of this file's app/core/
+# directory) — same fix as ConfigService's _CONFIG_PATH. A bare relative sqlite
+# path resolves against the process's CWD, so running once from inside
+# ai-harvest-agent/ and once from a different CWD/container WORKDIR silently
+# reads/writes two different .db files (this is what made a completed harvest's
+# jobs look "missing" from the database — they were written to the other file).
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_SQLITE_PREFIX = "sqlite+aiosqlite:///"
+
+
+def _resolve_sqlite_url(url: str) -> str:
+    if not url.startswith(_SQLITE_PREFIX):
+        return url
+    raw_path = url[len(_SQLITE_PREFIX):]
+    path = Path(raw_path)
+    if path.is_absolute():
+        return url
+    return _SQLITE_PREFIX + (_PROJECT_ROOT / path).resolve().as_posix()
+
 
 def _build_engine(settings: Settings):  # type: ignore[return]
     # SQLite's async dialect (aiosqlite) uses NullPool and rejects pool_size /
     # max_overflow entirely — those only apply to pooled dialects (Postgres, MySQL).
     if settings.database_url.startswith("sqlite"):
-        return create_async_engine(settings.database_url, echo=settings.db_echo)
+        return create_async_engine(_resolve_sqlite_url(settings.database_url), echo=settings.db_echo)
     return create_async_engine(
         settings.database_url,
         pool_size=settings.db_pool_size,

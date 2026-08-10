@@ -101,6 +101,25 @@ class ScheduleConfig(BaseModel):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Notifications (post-harvest report email)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class NotificationConfig(BaseModel):
+    """
+    Post-harvest report email settings — reuses the SMTP transport already
+    configured for OTP delivery (see Settings.smtp_*). Fully dynamic: toggle,
+    recipients, attachment format, and subject line are all editable via
+    PUT /harvest-config without a code change.
+
+    subject_template supports {run_id}, {status}, {total_jobs} placeholders.
+    """
+    enabled:           bool                              = False
+    recipients:        list[str]                         = Field(default_factory=list)
+    report_format:     Literal["excel", "json", "both"]  = "both"
+    subject_template:  str                                = "Harvest Report — {run_id} ({status}, {total_jobs} jobs)"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Browser
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -131,7 +150,8 @@ class BrowserConfig(BaseModel):
 
 class HarvestConfig(BaseModel):
     """Full harvest agent configuration — the root object in harvest_config.json."""
-    sources:  SourcesConfig  = Field(default_factory=SourcesConfig)
-    filters:  FiltersConfig  = Field(default_factory=FiltersConfig)
-    schedule: ScheduleConfig = Field(default_factory=ScheduleConfig)
-    browser:  BrowserConfig  = Field(default_factory=BrowserConfig)
+    sources:       SourcesConfig      = Field(default_factory=SourcesConfig)
+    filters:       FiltersConfig      = Field(default_factory=FiltersConfig)
+    schedule:      ScheduleConfig     = Field(default_factory=ScheduleConfig)
+    browser:       BrowserConfig      = Field(default_factory=BrowserConfig)
+    notifications: NotificationConfig = Field(default_factory=NotificationConfig)

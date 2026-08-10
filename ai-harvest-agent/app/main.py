@@ -15,6 +15,10 @@ from typing import AsyncGenerator
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import get_settings
+from app.core.logging_config import configure_logging
+
+configure_logging(get_settings().log_level)
+
 from app.core.dependencies import get_engine
 from app.core.exceptions import HarvestException, harvest_exception_handler
 from app.core.middleware import LoggingMiddleware, RateLimitMiddleware
