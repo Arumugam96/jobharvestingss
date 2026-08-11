@@ -296,7 +296,10 @@ export default function RuleEngineConfig({
         const status = await getHarvestStatus(jobId);
         if (status.status === "running") {
           setRunMessage(status.message || "Running…");
-          pollTimer.current = setTimeout(tick, 3000);
+          // Harvest runs take minutes, not seconds — 10s keeps the UI
+          // responsive without hammering the server (was 3s, which flooded
+          // the API logs with a request every 3s for the whole run).
+          pollTimer.current = setTimeout(tick, 18000);
           return;
         }
         if (status.status === "failed") {
@@ -328,7 +331,7 @@ export default function RuleEngineConfig({
             }
           } catch {
             setRunMessage("Harvest running — no live status available yet; retrying…");
-            pollTimer.current = setTimeout(tick, 5000);
+            pollTimer.current = setTimeout(tick, 10000);
             return;
           }
           setHarvestRunning(false);
