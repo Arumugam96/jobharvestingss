@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     # "json"     — always read the JSON/file store; skip the DB read entirely.
     # Applies to GET /harvest-status, /run-history, /{linkedin,naukri,dice}-results.
     # Writes are unaffected — every run is still mirrored to the DB regardless.
-    data_source: Literal["auto", "database", "json"] = "auto"
+    data_source: Literal["auto", "database", "json"] = "database"
 
     # ── Database ─────────────────────────────────────────────────────────────────
     database_url: str = "sqlite+aiosqlite:///./data/harvest.db"
@@ -65,13 +65,19 @@ class Settings(BaseSettings):
     # ── HTML extraction LLM provider ──────────────────────────────────────────────
     # Selects which model LLMService.extract_json() uses (the LinkedIn HTML
     # extraction fallback and any other extract_json() caller).
-    #   ""  or "claude" / "claude-*"  -> Anthropic Claude (anthropic_model, or the
-    #                                    specific claude-* id given here)
-    #   "ollama"                      -> local LLM at local_llm_url, model = local_llm_model
-    #   any other value               -> local LLM at local_llm_url, used as the model name
+    #   ""  or "claude" / "claude-*"     -> Anthropic Claude (anthropic_model, or the
+    #                                       specific claude-* id given here)
+    #   "ollama"                         -> local LLM at local_llm_url, model = local_llm_model
+    #   "openrouter"                     -> OpenRouter, model = openrouter_model
+    #   "openrouter/<provider>/<model>"  -> OpenRouter, using that model id directly
+    #   any other value                  -> local LLM at local_llm_url, used as the model name
     extraction_llm_model: str = "claude"
     local_llm_url:        str = "http://localhost:11434"
     local_llm_model:      str = "llama3.1:8b"
+
+    # ── OpenRouter (fallback LLM for HTML extraction) ──────────────────────────────
+    openrouter_api_key: str = ""
+    openrouter_model:   str = "google/gemma-4-26b-a4b-it:free"
 
     # ── Google Gemini ────────────────────────────────────────────────────────────
     gemini_api_key: str = ""

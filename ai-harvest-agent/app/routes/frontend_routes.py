@@ -4,14 +4,21 @@ Frontend integration routes — read-only data access layer.
 Endpoints
 ─────────
 GET /jobs                  — paginated, filtered, sorted job list
-GET /jobs/{id}             — single job by stable id (md5 of job_url)
+GET /jobs/{id}             — single job by id (DB primary key, or an md5
+                              hash of job_url when read from the JSON
+                              fallback — see _job_id())
 GET /lead-intelligence     — recruiter intelligence records (paginated)
 GET /lead-intelligence/{id}— single recruiter profile
 GET /download/json         — download latest combined harvest JSON
 GET /download/excel        — download latest Excel report
 
 Note: GET /health is served by app/routes/health.py (Swagger-visible).
-All read from saved result files under data/results/ — no scraping triggered.
+GET /jobs reads from the database (every run ever recorded, see
+HarvestRunService.list_scraped_jobs) or the JSON file store, per
+Settings.data_source — same DATA_SOURCE toggle as /harvest-status,
+/run-history, and /{linkedin,naukri,dice}-results. Every other endpoint
+here still reads only from saved result files under data/results/.
+No scraping is triggered by anything in this file.
 """
 from __future__ import annotations
 
@@ -25,6 +32,15 @@ import structlog
 from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
+
+from app.services.harvest_run_service import (
+    JOB_SORT_FIELDS,
+    HarvestRunService,
+    data_source_mode,
+    db_read,
+    resolve_read,
+    scraped_job_view,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -164,13 +180,8 @@ def _date_lte(posted: str | None, bound: str) -> bool:
         return True
 
 
-_VALID_SORT_FIELDS = {
-    "posted_date", "company", "job_title", "source", "hiring_entity", "location",
-}
-
-
 def _apply_sort(jobs: list[dict], sort_by: str, sort_order: str) -> list[dict]:
-    if sort_by not in _VALID_SORT_FIELDS:
+    if sort_by not in JOB_SORT_FIELDS:
         sort_by = "posted_date"
     return sorted(
         jobs,
@@ -213,8 +224,9 @@ def _latest_json() -> Path | None:
     status_code = status.HTTP_200_OK,
     summary     = "List jobs",
     description = (
-        "Returns a paginated, filterable, sortable list of harvested jobs "
-        "from the most recent combined harvest run."
+        "Returns a paginated, filterable, sortable list of every harvested "
+        "job on record (database), or the most recent combined harvest "
+        "run's jobs (JSON fallback) — see Settings.data_source."
     ),
 )
 async def list_jobs(
@@ -231,7 +243,9 @@ async def list_jobs(
     date_to:       str = Query("",                        description="Filter jobs posted on or before this date (YYYY-MM-DD)"),
 ) -> dict:
     """
-    Paginated job list from the most recent harvest.
+    Paginated job list — every run on record when read from the database,
+    or just the most recent harvest when read from the JSON fallback (that
+    file only ever holds the latest run's jobs). See Settings.data_source.
 
     **Filtering** (all optional, combinable):
     - `keyword` — searches job_title, job_description, company
@@ -249,21 +263,50 @@ async def list_jobs(
         keyword=keyword, company=company, source=source,
     )
 
-    all_jobs = _load_all_jobs()
+    def _json_fallback() -> tuple[list[dict], int, int]:
+        all_jobs = _load_all_jobs()
+        filtered = _apply_job_filters(
+            all_jobs,
+            keyword       = keyword,
+            company       = company,
+            source        = source,
+            hiring_entity = hiring_entity,
+            work_mode     = work_mode,
+            date_from     = date_from or None,
+            date_to       = date_to   or None,
+        )
+        sorted_jobs = _apply_sort(filtered, sort_by, sort_order)
+        return _paginate(sorted_jobs, page, page_size)
 
-    filtered = _apply_job_filters(
-        all_jobs,
-        keyword       = keyword,
-        company       = company,
-        source        = source,
-        hiring_entity = hiring_entity,
-        work_mode     = work_mode,
-        date_from     = date_from or None,
-        date_to       = date_to   or None,
+    mode = data_source_mode()
+    result, used = await resolve_read(
+        mode,
+        lambda: db_read(lambda db: HarvestRunService(db).list_scraped_jobs(
+            keyword       = keyword       or None,
+            company       = company       or None,
+            source        = source        or None,
+            hiring_entity = hiring_entity or None,
+            work_mode     = work_mode     or None,
+            date_from     = date_from     or None,
+            date_to       = date_to       or None,
+            sort_by       = sort_by,
+            sort_order    = sort_order,
+            page          = page,
+            page_size     = page_size,
+        )),
+        _json_fallback,
     )
 
-    sorted_jobs  = _apply_sort(filtered, sort_by, sort_order)
-    page_items, total, total_pages = _paginate(sorted_jobs, page, page_size)
+    if used == "database":
+        # db_read() returns None on a DB error even in "database" mode (that
+        # mode means "never fall back to JSON", not "assume the DB call
+        # succeeded") — guard the unpack the same way linkedin_routes.py's
+        # equivalent read does.
+        orm_jobs, total = result if result else ([], 0)
+        page_items  = [scraped_job_view(j) for j in orm_jobs]
+        total_pages = max(1, math.ceil(total / page_size)) if page_size > 0 else 1
+    else:
+        page_items, total, total_pages = result
 
     return {
         "total":       total,
@@ -288,26 +331,41 @@ async def list_jobs(
 # GET /jobs/{id}
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _get_job_from_json(job_id: str) -> dict | None:
+    for job in _load_all_jobs():
+        if job.get("id") == job_id:
+            return job
+    return None
+
+
 @router.get(
     "/jobs/{job_id}",
     status_code = status.HTTP_200_OK,
     summary     = "Job detail",
-    description = "Returns the complete record for a single harvested job by its stable id.",
+    description = "Returns the complete record for a single harvested job by its id.",
     responses   = {404: {"description": "Job not found"}},
 )
 async def get_job(job_id: str) -> dict:
     """
-    Returns one job record by `id` (a 16-char hex stable hash of the job URL).
-    The `id` field is included in every record returned by **GET /jobs**.
+    Returns one job record by `id` — the DB row's real primary key when read
+    from the database, or a 16-char hex hash of the job URL when read from
+    the JSON fallback (see Settings.data_source). The `id` field is included
+    in every record returned by **GET /jobs**, using whichever scheme that
+    same read produced.
     """
-    all_jobs = _load_all_jobs()
-    for job in all_jobs:
-        if job.get("id") == job_id:
-            return job
-    raise HTTPException(
-        status_code = 404,
-        detail      = f"Job '{job_id}' not found. Run a harvest first or check the id.",
+    mode = data_source_mode()
+    result, used = await resolve_read(
+        mode,
+        lambda: db_read(lambda db: HarvestRunService(db).get_scraped_job_by_id(job_id)),
+        lambda: _get_job_from_json(job_id),
     )
+    job = scraped_job_view(result) if (used == "database" and result is not None) else result
+    if job is None:
+        raise HTTPException(
+            status_code = 404,
+            detail      = f"Job '{job_id}' not found. Run a harvest first or check the id.",
+        )
+    return job
 
 
 # ══════════════════════════════════════════════════════════════════════════════

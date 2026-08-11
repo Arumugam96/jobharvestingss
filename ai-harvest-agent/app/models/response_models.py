@@ -16,10 +16,11 @@ class ProviderTokenUsage(BaseModel):
 
 class TokenUsageSummary(BaseModel):
     """Total LLM token usage for a harvest run, broken down by provider
-    (claude / ollama — see LLMService.get_usage_summary())."""
-    claude: ProviderTokenUsage = Field(default_factory=ProviderTokenUsage)
-    ollama: ProviderTokenUsage = Field(default_factory=ProviderTokenUsage)
-    total:  ProviderTokenUsage = Field(default_factory=ProviderTokenUsage)
+    (claude / ollama / openrouter — see LLMService.get_usage_summary())."""
+    claude:     ProviderTokenUsage = Field(default_factory=ProviderTokenUsage)
+    ollama:     ProviderTokenUsage = Field(default_factory=ProviderTokenUsage)
+    openrouter: ProviderTokenUsage = Field(default_factory=ProviderTokenUsage)
+    total:      ProviderTokenUsage = Field(default_factory=ProviderTokenUsage)
 
 
 class HarvestJob(BaseModel):

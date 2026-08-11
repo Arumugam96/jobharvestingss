@@ -14,7 +14,7 @@ from datetime import datetime
 from typing import Any, Awaitable, Callable, TypeVar
 
 import structlog
-from sqlalchemy import select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -24,6 +24,12 @@ from app.models.harvest_run import HarvestRunORM, LlmCallORM, ScrapedJobORM
 logger = structlog.get_logger(__name__)
 
 _T = TypeVar("_T")
+
+# Shared with app/routes/frontend_routes.py's GET /jobs — one canonical set so
+# the DB-side ORDER BY and the JSON-fallback path's in-memory sort never drift.
+JOB_SORT_FIELDS = {
+    "posted_date", "company", "job_title", "source", "hiring_entity", "location",
+}
 
 
 def data_source_mode() -> str:
@@ -227,6 +233,71 @@ class HarvestRunService:
         result = await self._db.execute(stmt)
         return list(result.scalars())
 
+    async def list_scraped_jobs(
+        self,
+        *,
+        keyword:       str | None = None,
+        company:       str | None = None,
+        source:        str | None = None,
+        hiring_entity: str | None = None,
+        work_mode:     str | None = None,
+        date_from:     str | None = None,
+        date_to:       str | None = None,
+        sort_by:       str = "posted_date",
+        sort_order:    str = "desc",
+        page:          int = 1,
+        page_size:     int = 50,
+    ) -> tuple[list[ScrapedJobORM], int]:
+        """ScrapedJobORM rows across *every* run (unlike get_by_run_id/
+        list_runs, not scoped to one HarvestRunORM) — the DB-backed
+        equivalent of frontend_routes.py's _apply_job_filters/_apply_sort/
+        _paginate against the JSON file store. Filtering/sorting/pagination
+        all happen in SQL so this scales as scraped_jobs accumulates across
+        runs (the JSON file only ever held the latest run's jobs).
+
+        posted_date is a free-text String column, not a real DateTime — the
+        date_from/date_to bound is a string-prefix comparison, matching the
+        JSON path's _date_gte/_date_lte, and only works if callers persist
+        posted_date as a YYYY-MM-DD-prefixed string (true for LinkedIn's
+        _format_posted(); not independently verified for Naukri/Dice)."""
+        stmt = select(ScrapedJobORM)
+        if keyword:
+            like = f"%{keyword}%"
+            stmt = stmt.where(
+                or_(
+                    ScrapedJobORM.job_title.ilike(like),
+                    ScrapedJobORM.job_description.ilike(like),
+                    ScrapedJobORM.company.ilike(like),
+                )
+            )
+        if company:
+            stmt = stmt.where(ScrapedJobORM.company.ilike(f"%{company}%"))
+        if source:
+            stmt = stmt.where(func.lower(ScrapedJobORM.source) == source.lower())
+        if hiring_entity:
+            stmt = stmt.where(func.lower(ScrapedJobORM.hiring_entity) == hiring_entity.lower())
+        if work_mode:
+            stmt = stmt.where(func.lower(ScrapedJobORM.work_mode) == work_mode.lower())
+        if date_from:
+            stmt = stmt.where(func.substr(ScrapedJobORM.posted_date, 1, 10) >= date_from[:10])
+        if date_to:
+            stmt = stmt.where(func.substr(ScrapedJobORM.posted_date, 1, 10) <= date_to[:10])
+
+        total = (
+            await self._db.execute(select(func.count()).select_from(stmt.subquery()))
+        ).scalar_one()
+
+        sort_column = getattr(ScrapedJobORM, sort_by if sort_by in JOB_SORT_FIELDS else "posted_date")
+        stmt = stmt.order_by(sort_column.desc() if sort_order.lower() == "desc" else sort_column.asc())
+        stmt = stmt.offset(max(0, page - 1) * page_size).limit(page_size)
+
+        result = await self._db.execute(stmt)
+        return list(result.scalars()), total
+
+    async def get_scraped_job_by_id(self, job_id: str) -> ScrapedJobORM | None:
+        result = await self._db.execute(select(ScrapedJobORM).where(ScrapedJobORM.id == job_id))
+        return result.scalar_one_or_none()
+
 
 # ── Shared read-side view helpers ───────────────────────────────────────────────
 # Used by linkedin_routes.py / naukri_routes.py / dice_routes.py to reconstruct
@@ -251,6 +322,42 @@ def filters_view(snapshot: dict[str, Any] | None) -> dict[str, Any]:
         "salary_max": s.get("salary_max"),
         "salary_currency": s.get("salary_currency", ""),
         "include_undisclosed_salary": s.get("include_undisclosed_salary", False),
+    }
+
+
+def scraped_job_view(job: ScrapedJobORM) -> dict[str, Any]:
+    """Matches the shape of one entry in a combined-JSON file's "jobs" list
+    (see frontend_routes.py's _load_all_jobs) — used by GET /jobs so the DB
+    and JSON read paths are interchangeable to the frontend. `id` here is
+    the row's real primary key; a JSON-sourced job instead gets a synthetic
+    md5-of-url id from frontend_routes.py's _job_id() — the two id schemes
+    only ever coexist across responses, never mixed within one."""
+    return {
+        "id":                     job.id,
+        "job_title":              job.job_title,
+        "company":                job.company,
+        "location":               job.location,
+        "salary":                 job.salary,
+        "experience":             job.experience,
+        "posted_date":            job.posted_date,
+        "job_url":                job.job_url,
+        "job_description":        job.job_description,
+        "skills":                 job.skills,
+        "work_mode":              job.work_mode,
+        "company_url":            job.company_url,
+        "employment_type":        job.employment_type,
+        "job_type":               job.job_type,
+        "domain":                 job.domain,
+        "hiring_entity":          job.hiring_entity,
+        "is_gcc":                 job.is_gcc,
+        "verification_status":    job.verification_status,
+        "source":                 job.source,
+        "job_poster_name":        job.job_poster_name,
+        "job_poster_designation": job.job_poster_designation,
+        "linkedin_profile_url":   job.linkedin_profile_url,
+        "current_company":        job.current_company,
+        "email_id":               job.email_id,
+        "contact_number":         job.contact_number,
     }
 
 

@@ -1,4 +1,5 @@
-"""Claude wrapper with tool-use support, plus a local-LLM (Ollama) extraction path."""
+"""Claude wrapper with tool-use support, plus local-LLM (Ollama) and OpenRouter
+extraction paths."""
 from __future__ import annotations
 
 import json
@@ -20,11 +21,17 @@ logger = structlog.get_logger(__name__)
 
 _PROVIDER_CLAUDE = "claude"
 _PROVIDER_OLLAMA = "ollama"
+_PROVIDER_OPENROUTER = "openrouter"
 
 # Ollama can be slow on CPU-only/remote hosts — generous timeout vs. Claude's
 # default (seen live: a 4B model over a remote Ollama host took >120s on a
 # ~12K-char prompt and got cut off mid-generation).
 _LOCAL_LLM_TIMEOUT_S = 300.0
+
+# OpenRouter is a hosted API in front of many providers — no need for the
+# generous local-LLM timeout, but free-tier models can still queue.
+_OPENROUTER_TIMEOUT_S = 90.0
+_OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 # Tracks tenacity's attempt count for the retry-decorated call made by the
 # current extract_json() invocation. A ContextVar (not an instance attribute)
@@ -63,7 +70,12 @@ def empty_usage_summary() -> dict[str, dict[str, int]]:
     """Zeroed usage summary shape — used by callers that never touched an
     LLMService instance (e.g. a harvest run that hit no LLM fallback)."""
     zero = _ProviderUsage().as_dict()
-    return {"claude": dict(zero), "ollama": dict(zero), "total": dict(zero)}
+    return {
+        "claude": dict(zero),
+        "ollama": dict(zero),
+        "openrouter": dict(zero),
+        "total": dict(zero),
+    }
 
 
 # ── Tool definitions the LLM can call ────────────────────────────────────────────
@@ -205,10 +217,13 @@ class LLMService:
         self._extraction_llm_model = settings.extraction_llm_model
         self._local_llm_url = settings.local_llm_url
         self._local_llm_model = settings.local_llm_model
+        self._openrouter_api_key = settings.openrouter_api_key
+        self._openrouter_model = settings.openrouter_model
         self._debug_seq = 0
         self._usage: dict[str, _ProviderUsage] = {
             _PROVIDER_CLAUDE: _ProviderUsage(),
             _PROVIDER_OLLAMA: _ProviderUsage(),
+            _PROVIDER_OPENROUTER: _ProviderUsage(),
         }
         self._call_log: list[dict[str, Any]] = []
 
@@ -227,19 +242,21 @@ class LLMService:
 
     def get_usage_summary(self) -> dict[str, dict[str, int]]:
         """Cumulative token usage recorded by this LLMService instance so far,
-        broken down per provider (claude / ollama) plus a combined total.
-        Scoped to this instance's lifetime — callers that create one
+        broken down per provider (claude / ollama / openrouter) plus a combined
+        total. Scoped to this instance's lifetime — callers that create one
         LLMService per harvest run get a per-run total for free."""
         claude = self._usage.get(_PROVIDER_CLAUDE, _ProviderUsage())
         ollama = self._usage.get(_PROVIDER_OLLAMA, _ProviderUsage())
+        openrouter = self._usage.get(_PROVIDER_OPENROUTER, _ProviderUsage())
         return {
             "claude": claude.as_dict(),
             "ollama": ollama.as_dict(),
+            "openrouter": openrouter.as_dict(),
             "total": {
-                "calls":         claude.calls + ollama.calls,
-                "input_tokens":  claude.input_tokens + ollama.input_tokens,
-                "output_tokens": claude.output_tokens + ollama.output_tokens,
-                "total_tokens":  claude.total_tokens + ollama.total_tokens,
+                "calls":         claude.calls + ollama.calls + openrouter.calls,
+                "input_tokens":  claude.input_tokens + ollama.input_tokens + openrouter.input_tokens,
+                "output_tokens": claude.output_tokens + ollama.output_tokens + openrouter.output_tokens,
+                "total_tokens":  claude.total_tokens + ollama.total_tokens + openrouter.total_tokens,
             },
         }
 
@@ -301,13 +318,19 @@ class LLMService:
         """
         Decide which provider/model extract_json() should call, driven entirely
         by EXTRACTION_LLM_MODEL (with LOCAL_LLM_URL / LOCAL_LLM_MODEL as the
-        local-LLM connection details):
+        local-LLM connection details, and OPENROUTER_MODEL as the OpenRouter
+        default):
 
-          ""            -> Claude, using the default anthropic_model
-          "claude"      -> Claude, using the default anthropic_model
-          "claude-*"    -> Claude, using that specific model id
-          "ollama"      -> local LLM at local_llm_url, model = local_llm_model
-          anything else -> local LLM at local_llm_url, using that value as the model name
+          ""                          -> Claude, using the default anthropic_model
+          "claude"                    -> Claude, using the default anthropic_model
+          "claude-*"                  -> Claude, using that specific model id
+          "ollama"                    -> local LLM at local_llm_url, model = local_llm_model
+          "openrouter"                -> OpenRouter, model = openrouter_model
+          "openrouter/<model-id>"     -> OpenRouter, using that model id directly
+                                          (OpenRouter model ids themselves contain
+                                          slashes, e.g. "google/gemma-3-27b-it:free")
+          anything else               -> local LLM at local_llm_url, using that value
+                                          as the model name
         """
         raw = (self._extraction_llm_model or "").strip()
         lowered = raw.lower()
@@ -317,6 +340,10 @@ class LLMService:
             return _PROVIDER_CLAUDE, raw
         if lowered == _PROVIDER_OLLAMA:
             return _PROVIDER_OLLAMA, self._local_llm_model
+        if lowered == _PROVIDER_OPENROUTER:
+            return _PROVIDER_OPENROUTER, self._openrouter_model
+        if lowered.startswith(f"{_PROVIDER_OPENROUTER}/"):
+            return _PROVIDER_OPENROUTER, raw.split("/", 1)[1]
         return _PROVIDER_OLLAMA, raw
 
     @retry(
@@ -365,6 +392,71 @@ class LLMService:
             eval_count=eval_count, total_duration_ns=data.get("total_duration"),
         )
         return data.get("response", ""), prompt_eval_count, eval_count
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        reraise=True,
+        after=_track_attempt,
+    )
+    async def _complete_text_openrouter(self, prompt: str, system: str, model: str) -> tuple[str, int, int]:
+        """Call an OpenRouter chat-completions model (OpenAI-compatible REST API).
+        Returns (text, prompt_tokens, completion_tokens)."""
+        if not self._openrouter_api_key:
+            raise LLMError("OpenRouter extraction requested but OPENROUTER_API_KEY is not set")
+
+        messages: list[dict[str, str]] = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "response_format": {"type": "json_object"},
+        }
+        headers = {
+            "Authorization": f"Bearer {self._openrouter_api_key}",
+            "Content-Type": "application/json",
+        }
+
+        logger.info("openrouter_request_started", model=model, prompt_chars=len(prompt))
+        try:
+            async with httpx.AsyncClient(timeout=_OPENROUTER_TIMEOUT_S) as client:
+                response = await client.post(_OPENROUTER_URL, json=payload, headers=headers)
+            response.raise_for_status()
+        except httpx.ConnectError as exc:
+            logger.error("openrouter_connection_failed", model=model, error=str(exc))
+            raise LLMError(f"OpenRouter unreachable: {exc}") from exc
+        except httpx.TimeoutException as exc:
+            logger.error("openrouter_timeout", model=model, timeout_s=_OPENROUTER_TIMEOUT_S)
+            raise LLMError(f"OpenRouter ({model}) timed out after {_OPENROUTER_TIMEOUT_S}s") from exc
+        except httpx.HTTPStatusError as exc:
+            logger.error(
+                "openrouter_http_error", model=model,
+                status=exc.response.status_code, body=exc.response.text[:300],
+            )
+            raise LLMError(f"OpenRouter returned HTTP {exc.response.status_code}: {exc.response.text[:300]}") from exc
+
+        data = response.json()
+        if data.get("error"):
+            # OpenRouter can return HTTP 200 with an inline error object (e.g. the
+            # requested model/provider is unavailable) — surface it as a failure
+            # rather than passing an empty completion on to JSON parsing.
+            logger.error("openrouter_inline_error", model=model, error=data["error"])
+            raise LLMError(f"OpenRouter error: {data['error']}")
+
+        choices = data.get("choices") or []
+        text = choices[0]["message"].get("content", "") if choices else ""
+        usage = data.get("usage") or {}
+        prompt_tokens = usage.get("prompt_tokens", 0)
+        completion_tokens = usage.get("completion_tokens", 0)
+        self._record_usage(_PROVIDER_OPENROUTER, prompt_tokens, completion_tokens)
+        logger.info(
+            "openrouter_request_succeeded", model=model,
+            prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+        )
+        return text or "", prompt_tokens, completion_tokens
 
     def _save_extraction_debug_artifact(
         self, debug_dir: str | Path | None, provider: str, model: str, prompt: str, response_text: str,
@@ -439,6 +531,8 @@ class LLMService:
             try:
                 if provider == _PROVIDER_OLLAMA:
                     text, input_tokens, output_tokens = await self._complete_text_local(prompt, system, model)
+                elif provider == _PROVIDER_OPENROUTER:
+                    text, input_tokens, output_tokens = await self._complete_text_openrouter(prompt, system, model)
                 else:
                     response = await self.complete(messages=[LLMMessage.user(prompt)], system=system, model=model)
                     text = self.get_text(response)
