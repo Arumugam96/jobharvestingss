@@ -21,8 +21,10 @@ logger = structlog.get_logger(__name__)
 _PROVIDER_CLAUDE = "claude"
 _PROVIDER_OLLAMA = "ollama"
 
-# Ollama can be slow on CPU-only hosts — generous timeout vs. Claude's default.
-_LOCAL_LLM_TIMEOUT_S = 120.0
+# Ollama can be slow on CPU-only/remote hosts — generous timeout vs. Claude's
+# default (seen live: a 4B model over a remote Ollama host took >120s on a
+# ~12K-char prompt and got cut off mid-generation).
+_LOCAL_LLM_TIMEOUT_S = 300.0
 
 # Tracks tenacity's attempt count for the retry-decorated call made by the
 # current extract_json() invocation. A ContextVar (not an instance attribute)

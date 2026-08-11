@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Awaitable, Callable
 from urllib.parse import quote_plus
 
 import structlog
+from bs4 import BeautifulSoup
 from playwright.async_api import ElementHandle, Page
 
 from app.core.text_formatting import format_job_description
@@ -92,7 +93,7 @@ _DATE_MAP: dict[int, str] = {
 
 
 # ── Scraped job dataclass ─────────────────────────────────────────────────────
-
+  
 @dataclass
 class LinkedInScrapedJob:
     job_title:       str
@@ -178,13 +179,35 @@ class _Sel:
         "ul[class*='jobs-search-results__list']",
         ".scaffold-layout__list-container",
         ".scaffold-layout__list",
+        # Structural fallback, independent of whatever CSS classnames LinkedIn's
+        # authenticated app currently uses — a job-search results list always
+        # contains job permalinks, so find the closest <ul> wrapping them.
+        "ul:has(a[href*='/jobs/view/'])",
     ]
     CARD: list[str] = [
+        # LinkedIn's current split-view results render each card as a
+        # `<div role="button" componentkey="job-card-component-ref-<jobId>">`
+        # with fully hashed/atomic utility classes and no <li>/<a href> at
+        # all — confirmed via a live DOM diagnosis dump (see
+        # linkedin_job_cards_not_found history). componentkey is a functional
+        # wiring attribute LinkedIn's own React tree depends on, so it's far
+        # more stable than any classname. Tried first since it's the current
+        # markup; the rest are kept as fallbacks for older/other templates.
+        "[componentkey^='job-card-component-ref-']",
         "li[data-occludable-job-id]",
         "li.jobs-search-results__list-item",
         "ul.jobs-search__results-list > li",
         "div.base-card",
         "li[class*='jobs-search-results']",
+        # Attribute/structure-based fallbacks that don't depend on LinkedIn's
+        # (frequently renamed) utility CSS classnames. data-entity-urn carries
+        # the job posting's internal URN and is a functional attribute LinkedIn's
+        # own tracking code depends on, so it's far more stable than styling
+        # classes. The href-based :has() fallback works regardless of markup
+        # as long as the card links to its own job-view permalink.
+        "div[data-entity-urn*='jobPosting']",
+        "div[data-job-id]",
+        "li:has(a[href*='/jobs/view/'])",
     ]
 
     # Card list-view fields
@@ -223,66 +246,15 @@ class _Sel:
     ]
     POSTED:   list[str] = ["time", "span.job-search-card__listdate", "[class*='listdate']"]
 
-    # Detail panel (opened after clicking a card)
-    DETAIL_PANEL:      list[str] = ["#job-details", "div.jobs-description", "article.jobs-description"]
-    DETAIL_TITLE:      list[str] = [".jobs-unified-top-card__job-title", "h1.jobs-unified-top-card__job-title", "h1"]
-    DETAIL_COMPANY:    list[str] = [
-        ".job-details-jobs-unified-top-card__company-name a",   # authenticated 2024+ with prefix
-        ".job-details-jobs-unified-top-card__company-name",
-        ".jobs-unified-top-card__company-name a",
-        ".jobs-unified-top-card__company-name",
-        "a[data-tracking-control-name='public_jobs_topcard-org-name']",
-        "a[href*='/company/']",
-    ]
-    DETAIL_COMPANY_URL: list[str] = [
-        ".job-details-jobs-unified-top-card__company-name a",
-        ".jobs-unified-top-card__company-name a",
-        "a[href*='/company/']",
-    ]
-    DETAIL_LOCATION:   list[str] = [
-        ".job-details-jobs-unified-top-card__primary-description",  # authenticated 2024+
-        ".jobs-unified-top-card__primary-description",
-        ".jobs-unified-top-card__bullet",
-        ".jobs-unified-top-card__workplace-type",
-        ".topcard__flavor",
-    ]
-    DETAIL_POSTED:     list[str] = ["span.jobs-unified-top-card__posted-date", ".topcard__flavor--metadata time", "time"]
-    DETAIL_EMP_TYPE:   list[str] = [".jobs-unified-top-card__job-insight span", ".jobs-unified-top-card__workplace-type"]
-    # Every "job insight" bullet under the title (employment type, seniority,
-    # company size, industry, …) — used to pull the Industries tag natively
-    # instead of guessing domain from the description.
-    DETAIL_JOB_INSIGHTS: list[str] = [
-        ".job-details-jobs-unified-top-card__job-insight",
-        ".jobs-unified-top-card__job-insight",
-    ]
-    DETAIL_SALARY:     list[str] = [".jobs-unified-top-card__job-insight--highlight", "[class*='salary']", "[class*='compensation']"]
-    DETAIL_SKILLS:     list[str] = [".job-details-skill-match-status-list li", ".jobs-unified-top-card__job-insight ul li"]
-    DETAIL_DESC:       list[str] = ["#job-details", "div.jobs-description__content", "div.jobs-description"]
+    # Detail page — only used to expand the truncated description before
+    # capturing the page's full text for LLM extraction (see
+    # LinkedInAgent._llm_fallback_extract). Every other detail-page field is
+    # extracted by the LLM rather than matched by selector, since LinkedIn's
+    # detail-page CSS classes drift/obfuscate too often to rely on.
     SHOW_MORE_BTN:     list[str] = [
         'button[aria-label="Show more, visually expands previously read content"]',
         'button.show-more-less-html__button',
         'button:has-text("Show more")',
-    ]
-
-    # "Meet the hiring team" recruiter card (visible when authenticated)
-    RECRUITER_NAME: list[str] = [
-        ".hirer-card .artdeco-entity-lockup__title a",
-        ".hirer-card .artdeco-entity-lockup__title",
-        ".jobs-poster__name",
-        ".hirer-card__hirer-information a",
-        "[class*='hirer-card'] a[href*='/in/']",
-    ]
-    RECRUITER_TITLE: list[str] = [
-        ".hirer-card .artdeco-entity-lockup__subtitle",
-        ".jobs-poster__occupation",
-        ".hirer-card__hirer-information span",
-        "[class*='hirer-card'] span.t-14",
-    ]
-    RECRUITER_URL: list[str] = [
-        ".hirer-card .artdeco-entity-lockup__title a",
-        ".hirer-card a[href*='/in/']",
-        ".jobs-poster__name a",
-        "[class*='hirer-card'] a[href*='linkedin.com/in/']",
     ]
 
 
@@ -296,6 +268,59 @@ def _clean(text: str) -> str:
     text = _UNICODE_JUNK.sub(" ", text)
     text = _WHITESPACE.sub(" ", text)
     return re.sub(r"\n+", " ", text).strip()
+
+
+# Known LinkedIn upsell/ad lines that show up in the *main content* area
+# (not nav/header/footer, which are stripped as whole tags below) — pure
+# noise for job-data extraction, and a big share of a captured page's text.
+# Confirmed live: these more than doubled a detail page's prompt size and
+# pushed a local LLM over its response-time budget for no extraction gain.
+_LINKEDIN_BOILERPLATE_LINE = re.compile(
+    r"Reactivate Premium|Job search smarter with Premium|"
+    r"Premium members are up to|Cancel anytime\.|"
+    r"Use AI to assess how you fit|Get AI-powered advice on this job|"
+    r"Hiring, not job hunting\?|No response insights available|"
+    r"Select language",
+    re.IGNORECASE,
+)
+
+
+def _html_to_text(html: str) -> str:
+    """Strip tags/classes/scripts/styles from a full page's HTML, leaving
+    plain text — used to feed the LLM extractor instead of matching
+    LinkedIn's constantly-drifting CSS selectors. Unlike innerText, this also
+    picks up text LinkedIn hides via CSS (e.g. a "Meet the hiring team" card
+    that's present in the DOM but display:none for guest/unauthenticated
+    sessions).
+
+    Also strips whole-tag site chrome (nav/header/footer/aside — top nav,
+    footer/legal/language links, and the related-jobs rail; never the job
+    posting itself) and known upsell/ad lines that live in the main content
+    area, to keep the LLM prompt from ballooning with pure noise."""
+    soup = BeautifulSoup(html, "lxml")
+    for tag in soup(["script", "style", "noscript", "svg", "nav", "header", "footer", "aside"]):
+        tag.decompose()
+    lines = soup.get_text(separator="\n").split("\n")
+    lines = [ln for ln in lines if not _LINKEDIN_BOILERPLATE_LINE.search(ln)]
+    return _clean("\n".join(lines))
+
+
+def _trim_to_relevant(text: str, max_chars: int) -> str:
+    """Cap `text` at max_chars without silently cutting away the actual job
+    description when it's preceded by a long related-jobs/recommendation
+    rail. A plain head-cut can land entirely inside that rail on a page
+    where "About the job" sits deep in the text — instead, keep a short
+    lead-in (title/company/insights from the top of the page) then jump
+    straight to the description section for the remaining budget."""
+    if len(text) <= max_chars:
+        return text
+    head_budget = min(1_500, max_chars // 4)
+    idx = text.find("About the job")
+    if idx == -1 or idx <= head_budget:
+        return text[:max_chars]
+    head = text[:head_budget]
+    body = text[idx: idx + (max_chars - head_budget)]
+    return f"{head}\n…\n{body}"
 
 
 def _infer_work_mode(text: str) -> str:
@@ -342,6 +367,47 @@ async def _delay(page: Page, lo: int, hi: int) -> None:
     await page.wait_for_timeout(random.randint(lo, hi))
 
 
+async def _wait_for_page_text_stable(
+    page:          Page,
+    poll_ms:       int = 500,
+    stable_rounds: int = 4,
+    max_polls:     int = 90,
+) -> int:
+    """
+    Poll document.body.innerText.length until it stops growing for
+    `stable_rounds` consecutive checks in a row (not just one lucky
+    plateau — a client-rendered SPA can pause mid-hydration) before
+    treating the page as "done rendering". Used before handing the page to
+    the LLM extractor — a fixed short delay isn't reliable here: a capture
+    taken too early on this SPA can land with only nav/footer chrome and no
+    actual job content, even though the same page finishes rendering a
+    moment later (confirmed live via a saved debug HTML/LLM-prompt pair).
+
+    Bounded at `max_polls` * `poll_ms` (default ~45s) rather than an
+    unbounded wait — some pages carry a live/ticking element (relative
+    timestamps, view counters) whose text never truly stops changing, and
+    an unbounded wait there would hang the entire harvest run on one page.
+    Returns the final text length observed (for logging), whether or not
+    it actually stabilized.
+    """
+    prev_len = -1
+    stable   = 0
+    for _ in range(max_polls):
+        try:
+            cur_len = await page.evaluate("() => document.body.innerText.length")
+        except Exception:
+            break
+        if cur_len == prev_len:
+            stable += 1
+            if stable >= stable_rounds:
+                break
+        else:
+            stable = 0
+        prev_len = cur_len
+        await page.wait_for_timeout(poll_ms)
+    return prev_len
+
+
 async def _first_text(root: Page | ElementHandle, selectors: list[str]) -> str:
     for sel in selectors:
         try:
@@ -353,20 +419,6 @@ async def _first_text(root: Page | ElementHandle, selectors: list[str]) -> str:
         except Exception:
             continue
     return ""
-
-
-async def _all_texts(root: Page | ElementHandle, selectors: list[str]) -> list[str]:
-    """Like _first_text, but returns every matching element's text for the
-    first selector in the chain that matches anything (not just one element)."""
-    for sel in selectors:
-        try:
-            els = await root.query_selector_all(sel)
-            texts = [t.strip() for e in els if (t := await e.inner_text()) and t.strip()]
-            if texts:
-                return texts
-        except Exception:
-            continue
-    return []
 
 
 async def _first_attr(root: Page | ElementHandle, selectors: list[str], attr: str) -> str:
@@ -406,6 +458,101 @@ async def _save_html(page: Page, name: str) -> None:
         logger.debug("debug_html_saved", name=name)
     except Exception as exc:
         logger.debug("debug_html_failed", name=name, error=str(exc))
+
+
+_DOM_WALK_JS = r"""
+() => {
+    const results = {
+        light_dom_job_links: [], shadow_hosts: [], shadow_job_links: [],
+        role_matches: [], aria_job_labels: [], li_count: 0, theme_host_detail: null,
+    };
+    function describe(el) {
+        if (!el) return null;
+        const attrs = {};
+        for (const a of el.attributes) attrs[a.name] = a.value;
+        return { tag: el.tagName.toLowerCase(), attrs };
+    }
+    function ancestorChain(el, depth) {
+        const chain = [];
+        let cur = el;
+        for (let i = 0; i < depth && cur; i++) { chain.push(describe(cur)); cur = cur.parentElement; }
+        return chain;
+    }
+    const links = document.querySelectorAll('a[href*="/jobs/view/"]');
+    links.forEach((a, i) => { if (i < 5) results.light_dom_job_links.push(ancestorChain(a, 8)); });
+    results.light_dom_job_link_count = links.length;
+
+    // Anchor hrefs may not exist for list cards at all in the redesigned SPA
+    // (client-side router on a non-anchor element) — ARIA roles/labels are
+    // driven by accessibility requirements, not the CSS-module build, so
+    // they tend to survive even when every classname is hashed.
+    const ROLE_TARGETS = new Set(['listitem', 'option', 'article', 'button', 'link']);
+    function scan(root, path) {
+        const all = root.querySelectorAll('*');
+        for (const el of all) {
+            if (el.tagName === 'LI') results.li_count++;
+            const role = el.getAttribute && el.getAttribute('role');
+            if (role && ROLE_TARGETS.has(role) && results.role_matches.length < 15) {
+                results.role_matches.push({ path, role, chain: ancestorChain(el, 4) });
+            }
+            const ariaLabel = el.getAttribute && el.getAttribute('aria-label');
+            if (ariaLabel && /job/i.test(ariaLabel) && results.aria_job_labels.length < 15) {
+                results.aria_job_labels.push({ path, ariaLabel, chain: ancestorChain(el, 4) });
+            }
+            if (el.shadowRoot) {
+                results.shadow_hosts.push({ tag: el.tagName.toLowerCase(), class: el.className, path });
+                if (el.className && el.className.includes('theme--light') && !results.theme_host_detail) {
+                    results.theme_host_detail = {
+                        light_dom_children: Array.from(el.children).slice(0, 8).map(c => ({ tag: c.tagName.toLowerCase(), class: c.className, role: c.getAttribute('role') })),
+                        shadow_root_children: Array.from(el.shadowRoot.children).slice(0, 8).map(c => ({ tag: c.tagName.toLowerCase(), class: c.className })),
+                    };
+                }
+                scan(el.shadowRoot, path + ' >>> ' + el.tagName.toLowerCase());
+                const shadowLinks = el.shadowRoot.querySelectorAll('a[href*="/jobs/view/"]');
+                shadowLinks.forEach((a, i) => { if (i < 3) results.shadow_job_links.push({ path, chain: ancestorChain(a, 8) }); });
+            }
+        }
+    }
+    scan(document, 'document');
+
+    results.body_text_length = document.body.innerText.length;
+    results.body_job_word_count = (document.body.innerText.match(/job/gi) || []).length;
+    return results;
+}
+"""
+
+
+async def _save_dom_diagnosis(page: Page, name: str) -> None:
+    """
+    On a "no cards found" failure, dump every job-permalink element's ancestor
+    chain, a shadow-DOM walk, and ARIA role/label matches (list items in the
+    redesigned SPA may not use real <a href> navigation at all, so hrefs alone
+    aren't reliable bait — accessibility roles/labels usually survive even
+    when every classname is hashed by a CSS-modules build). This lets a future
+    selector mismatch be root-caused from this artifact alone, without
+    repeating a live, ad-hoc DOM investigation against the shared Chrome
+    profile (risky — see linkedin_agent history: a one-off external Playwright
+    session against the same profile caused a "Connection closed while
+    reading from the driver" launch failure).
+    """
+    try:
+        d = _ensure_debug_dir()
+        report = await page.evaluate(_DOM_WALK_JS)
+        (d / f"{name}.json").write_text(
+            json.dumps({"url": page.url, "title": await page.title(), **report}, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        logger.info(
+            "linkedin_dom_diagnosis_saved",
+            path=str(d / f"{name}.json"),
+            light_dom_job_link_count=report.get("light_dom_job_link_count"),
+            shadow_host_count=len(report.get("shadow_hosts", [])),
+            li_count=report.get("li_count"),
+            role_match_count=len(report.get("role_matches", [])),
+            aria_job_label_count=len(report.get("aria_job_labels", [])),
+        )
+    except Exception as exc:
+        logger.debug("linkedin_dom_diagnosis_failed", error=str(exc))
 
 
 async def _retry(coro_fn, retries: int = 3, delay_s: float = 2.0):
@@ -678,6 +825,7 @@ class LinkedInAgent:
         # same way /linkedin-auth-status and /linkedin-setup-session already do.
         cookies = await page.context.cookies()
         if any(c["name"] == "li_at" for c in cookies):
+            logger.debug("linkedin_authenticated", url=current_url, cookie_count=len(cookies))
             return
 
         await _screenshot(page, "linkedin_no_li_at_cookie")
@@ -936,6 +1084,7 @@ class LinkedInAgent:
                 if await el.is_visible(timeout=1_200):
                     await el.click()
                     await _delay(page, 400, 700)
+                    logger.debug("linkedin_cookie_banner_dismissed", selector=sel)
                     break
             except Exception:
                 continue
@@ -945,6 +1094,7 @@ class LinkedInAgent:
                 if await el.is_visible(timeout=1_000):
                     await el.click()
                     await _delay(page, 400, 700)
+                    logger.debug("linkedin_modal_dismissed", selector=sel)
                     break
             except Exception:
                 continue
@@ -952,6 +1102,7 @@ class LinkedInAgent:
             if await page.locator('div[role="dialog"]').first.is_visible(timeout=600):
                 await page.keyboard.press("Escape")
                 await _delay(page, 300, 600)
+                logger.debug("linkedin_dialog_escaped")
         except Exception:
             pass
 
@@ -976,6 +1127,7 @@ class LinkedInAgent:
 
         if container:
             prev_h = -1
+            iterations = 0
             for _ in range(25):
                 h = await container.evaluate("el => el.scrollHeight")
                 if h == prev_h:
@@ -983,9 +1135,12 @@ class LinkedInAgent:
                 prev_h = h
                 await container.evaluate("el => el.scrollTo(0, el.scrollHeight)")
                 await _delay(page, 400, 800)
+                iterations += 1
+            logger.debug("linkedin_scroll_done", mode="container", selector=matched_sel, iterations=iterations, final_height=prev_h)
         else:
             logger.debug("linkedin_no_container_scrolling_window")
             prev_h = -1
+            iterations = 0
             for _ in range(15):
                 h = await page.evaluate("document.body.scrollHeight")
                 if h == prev_h:
@@ -993,6 +1148,8 @@ class LinkedInAgent:
                 prev_h = h
                 await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 await _delay(page, 600, 1_000)
+                iterations += 1
+            logger.debug("linkedin_scroll_done", mode="window", iterations=iterations, final_height=prev_h)
 
     # ── Card extraction ────────────────────────────────────────────────────────
 
@@ -1032,7 +1189,28 @@ class LinkedInAgent:
         if not raw:
             await _screenshot(page, "linkedin_no_cards")
             await _save_html(page, "linkedin_no_cards")
-            logger.warning("linkedin_job_cards_not_found", source="linkedin", selectors_tried=_Sel.CARD)
+            await _save_dom_diagnosis(page, "linkedin_dom_diagnosis")
+            # Distinguish "selectors are stale" from "not actually authenticated
+            # / wrong template" without needing a manual DOM investigation next
+            # time: a real authenticated results page always has some element
+            # linking to a job permalink, even if its wrapper markup changed.
+            try:
+                job_link_count = len(await page.query_selector_all("a[href*='/jobs/view/']"))
+                has_li_at      = any(c["name"] == "li_at" for c in await page.context.cookies())
+            except Exception:
+                job_link_count, has_li_at = -1, None
+            logger.warning(
+                "linkedin_job_cards_not_found",
+                source="linkedin", selectors_tried=_Sel.CARD,
+                url=page.url, job_link_count=job_link_count, has_li_at_cookie=has_li_at,
+                hint=(
+                    "job_link_count>0 with cards_not_found means LinkedIn's card "
+                    "markup/classnames changed — update _Sel.CONTAINER/_Sel.CARD. "
+                    "job_link_count==0 or has_li_at_cookie==False means the session "
+                    "isn't really on the authenticated results page (logged out or "
+                    "served the guest template) — re-authenticate the Chrome profile."
+                ),
+            )
             logger.warning("linkedin_no_cards_found")
             logger.info("linkedin_cards_found", count=0)
             return []
@@ -1154,6 +1332,22 @@ class LinkedInAgent:
         try:
             title = _clean(await _first_text(el, _Sel.TITLE))
             if not title:
+                # Fallback: the current split-view card renders as a bare
+                # <div role="button" componentkey="job-card-component-ref-…">
+                # with no matching text selector, but it does carry a sibling
+                # "Dismiss <Title> job" button — its aria-label is the one
+                # place the job title still appears verbatim.
+                try:
+                    dismiss_el = await el.query_selector("button[aria-label^='Dismiss ']")
+                    if dismiss_el:
+                        aria = (await dismiss_el.get_attribute("aria-label")) or ""
+                        m = re.match(r"^Dismiss\s+(.+?)\s+job$", aria.strip())
+                        if m:
+                            title = _clean(m.group(1))
+                except Exception:
+                    pass
+
+            if not title:
                 # Log inner text snippet for debugging selector mismatches
                 try:
                     snippet = (await el.inner_text())[:120].replace("\n", " ")
@@ -1168,6 +1362,14 @@ class LinkedInAgent:
                 job_id = await el.get_attribute("data-occludable-job-id")
                 if job_id:
                     href = f"https://www.linkedin.com/jobs/view/{job_id}/"
+            # Fallback: build URL from the componentkey wiring attribute
+            # (see _Sel.CARD) — "job-card-component-ref-<jobId>".
+            if not href:
+                component_key = await el.get_attribute("componentkey")
+                if component_key and component_key.startswith("job-card-component-ref-"):
+                    job_id = component_key.removeprefix("job-card-component-ref-")
+                    if job_id:
+                        href = f"https://www.linkedin.com/jobs/view/{job_id}/"
             clean_url = href.split("?")[0] if href else ""
             if clean_url.startswith("/"):
                 clean_url = "https://www.linkedin.com" + clean_url
@@ -1192,10 +1394,16 @@ class LinkedInAgent:
             except Exception as exc:
                 logger.debug("linkedin_card_text_read_failed", error=str(exc))
 
+            company  = _clean(await _first_text(el, _Sel.COMPANY))
+            location = _clean(await _first_text(el, _Sel.LOCATION))
+            logger.debug(
+                "linkedin_card_list_view_parsed",
+                title=title, company=company, location=location, url=clean_url,
+            )
             return {
                 "title":    title,
-                "company":  _clean(await _first_text(el, _Sel.COMPANY)),
-                "location": _clean(await _first_text(el, _Sel.LOCATION)),
+                "company":  company,
+                "location": location,
                 "posted":   (
                     await _first_attr(el, _Sel.POSTED, "datetime")
                     or await _first_text(el, _Sel.POSTED)
@@ -1259,14 +1467,23 @@ class LinkedInAgent:
                 requested_url=url, landed_url=detail_page.url,
             )
 
-            # Expand truncated description ("Show more" / "… more") BEFORE any
-            # text capture below — including the LLM-fallback branch a few lines
-            # down, which reads document.body.innerText directly. The button
-            # selectors are matched by visible text, not by (obfuscated) class
-            # names, so this works whether or not DETAIL_PANEL matches. Doing
-            # this unconditionally, before the panel_found check, is what makes
-            # the fallback see the complete description instead of the
-            # collapsed "…more" preview.
+            # Wait for the page to actually finish hydrating before touching
+            # it further — domcontentloaded + the fixed delay above isn't a
+            # guarantee on this client-rendered SPA. A capture taken too early
+            # can land with only nav/footer chrome and no real job content at
+            # all, even though the same page finishes rendering moments later
+            # (confirmed live via a saved debug HTML/LLM-prompt pair). This
+            # also ensures the "Show more" button below actually exists yet.
+            stable_len = await _wait_for_page_text_stable(detail_page)
+            logger.debug("linkedin_detail_page_text_stable", idx=idx, text_length=stable_len)
+
+            # Expand truncated description ("Show more" / "… more") BEFORE the
+            # text capture below — the LLM extraction a few lines down reads
+            # the page's full HTML directly. The button selectors are matched
+            # by visible text, not by (obfuscated) class names, so this works
+            # regardless of LinkedIn's current markup. Doing this first is
+            # what makes the extraction see the complete description instead
+            # of the collapsed "…more" preview.
             for sel in _Sel.SHOW_MORE_BTN:
                 try:
                     btn = detail_page.locator(sel).first
@@ -1277,96 +1494,20 @@ class LinkedInAgent:
                 except Exception:
                     continue
 
-            panel_found = False
-            panel_sel:   str | None = None
-            for sel in _Sel.DETAIL_PANEL:
-                try:
-                    await detail_page.wait_for_selector(sel, timeout=3_000)
-                    panel_found = True
-                    panel_sel   = sel
-                    logger.info("linkedin_detail_panel_found", selector=sel, idx=idx)
-                    break
-                except Exception:
-                    continue
-
-            if not panel_found:
-                logger.info(
-                    "linkedin_detail_panel_not_found", idx=idx, url=url,
-                    landed_url=detail_page.url, title=await detail_page.title(),
-                )
-                await _screenshot(detail_page, f"detail_fail_{idx:03d}")
-                await _save_html(detail_page, f"detail_fail_{idx:03d}")
-                # Selectors matched nothing — most likely LinkedIn served an
-                # obfuscated-CSS build of this page (see linkedin_detail_panel_not_found
-                # docs above _Sel). Fall back to LLM extraction over the page's
-                # visible text, which doesn't depend on class names at all.
-                llm_detail = await self._llm_fallback_extract(
-                    detail_page, idx, url, card_text=card_text, card_links=card_links,
-                )
-                detail.update(llm_detail)
-                return detail
-
-            detail["title"]       = await _first_text(detail_page, _Sel.DETAIL_TITLE)
-            detail["company"]     = await _first_text(detail_page, _Sel.DETAIL_COMPANY)
-            detail["company_url"] = await _first_attr(detail_page, _Sel.DETAIL_COMPANY_URL, "href")
-            detail["location"]    = await _first_text(detail_page, _Sel.DETAIL_LOCATION)
-            detail["posted"]      = (
-                await _first_attr(detail_page, _Sel.DETAIL_POSTED, "datetime")
-                or await _first_text(detail_page, _Sel.DETAIL_POSTED)
+            # LinkedIn drifts/obfuscates its detail-page CSS classes constantly
+            # (in production, hardcoded selectors matched 0 of the jobs in a
+            # run — see linkedin_detail_panel_not_found history). Rather than
+            # matching selectors at all, extract every field via the LLM from
+            # the page's full HTML with tags/classes stripped down to text.
+            llm_detail = await self._llm_fallback_extract(
+                detail_page, idx, url, card_text=card_text, card_links=card_links,
             )
-            detail["emp_type"]    = await _first_text(detail_page, _Sel.DETAIL_EMP_TYPE)
-            detail["salary"]      = await _first_text(detail_page, _Sel.DETAIL_SALARY)
-            detail["job_insights"] = " | ".join(await _all_texts(detail_page, _Sel.DETAIL_JOB_INSIGHTS))
-
-            # Description — inner text of the whole panel
-            for sel in _Sel.DETAIL_DESC:
-                try:
-                    desc_el = await detail_page.query_selector(sel)
-                    if desc_el:
-                        raw_desc = await desc_el.inner_text()
-                        if raw_desc and raw_desc.strip():
-                            detail["description"] = raw_desc.strip()[:20_000]
-                            break
-                except Exception:
-                    continue
-
-            # Fallback: none of the narrow DETAIL_DESC selectors matched, but the
-            # panel itself was found — read its full text rather than losing the
-            # description entirely (LinkedIn drifts its description markup often).
-            if not detail.get("description") and panel_sel:
-                try:
-                    panel_el = await detail_page.query_selector(panel_sel)
-                    if panel_el:
-                        panel_text = _clean(await panel_el.inner_text())
-                        if len(panel_text) >= 100:
-                            detail["description"] = panel_text[:20_000]
-                            logger.info("linkedin_description_fallback_used", idx=idx, selector=panel_sel)
-                except Exception:
-                    pass
+            detail.update(llm_detail)
 
             if not detail.get("description"):
-                logger.info("linkedin_description_still_empty", idx=idx, url=url, panel_selector=panel_sel)
+                logger.info("linkedin_description_still_empty", idx=idx, url=url)
                 await _screenshot(detail_page, f"desc_empty_{idx:03d}")
                 await _save_html(detail_page, f"desc_empty_{idx:03d}")
-
-            # Skills list
-            skills: list[str] = []
-            for sel in _Sel.DETAIL_SKILLS:
-                try:
-                    skill_els = await detail_page.query_selector_all(sel)
-                    for s in skill_els:
-                        t = await s.inner_text()
-                        if t and t.strip():
-                            skills.append(t.strip())
-                    if skills:
-                        break
-                except Exception:
-                    continue
-            detail["skills"] = skills[:20]
-
-            # Recruiter / "Meet the hiring team" (visible when authenticated)
-            recruiter = await self._extract_recruiter(detail_page)
-            detail.update(recruiter)
 
         except Exception as exc:
             logger.info("linkedin_detail_page_error", idx=idx, url=url, error=str(exc))
@@ -1388,17 +1529,22 @@ class LinkedInAgent:
         card_links: list[dict] | None = None,
     ) -> dict:
         """
-        LLM fallback for when LinkedIn serves an obfuscated-CSS build of the
-        job-detail page and none of the _Sel.DETAIL_* selectors match.
+        Extracts every detail-page field via the LLM instead of matching
+        LinkedIn's CSS selectors, which drift/obfuscate constantly (in
+        production, hardcoded selectors matched 0 of the jobs in a run — see
+        linkedin_detail_panel_not_found history).
 
-        Sends the page's *visible text* only (never raw HTML — the hashed
-        classes are meaningless noise and would bloat the prompt for nothing),
-        capped at _LLM_FALLBACK_TEXT_MAX_CHARS, combined with the search-results
-        card's own visible text (recruiter/poster info is sometimes only shown
-        there, not on the detail page), plus a de-duplicated list of `/in/`
-        profile links gathered from *both* pages by href pattern (not by class,
-        so it survives the same obfuscation) so the LLM can pick out a
-        recruiter/poster URL that innerText alone wouldn't contain.
+        Reads the page's full HTML (page.content()) and strips
+        tags/scripts/styles/classes down to plain text via _html_to_text —
+        this recovers text innerText would miss too, e.g. a "Meet the hiring
+        team" card that's present in the DOM but CSS-hidden for a guest/
+        unauthenticated session. Capped at _LLM_FALLBACK_TEXT_MAX_CHARS,
+        combined with the search-results card's own visible text (recruiter/
+        poster info is sometimes only shown there, not on the detail page),
+        plus a de-duplicated list of `/in/` profile links gathered from
+        *both* pages by href pattern (not by class, so it survives the same
+        obfuscation) so the LLM can pick out a recruiter/poster URL that the
+        page text alone wouldn't contain.
 
         Routed through LLMService.extract_json(), which itself picks Claude or
         a local Ollama model per EXTRACTION_LLM_MODEL — this method doesn't
@@ -1412,12 +1558,12 @@ class LinkedInAgent:
             return {}
 
         try:
-            raw_text = await page.evaluate("() => document.body.innerText")
+            html = await page.content()
         except Exception as exc:
             logger.info("linkedin_llm_fallback_text_read_failed", idx=idx, error=str(exc))
             return {}
 
-        detail_text = _clean(raw_text or "")[: self._LLM_FALLBACK_TEXT_MAX_CHARS]
+        detail_text = _trim_to_relevant(_html_to_text(html), self._LLM_FALLBACK_TEXT_MAX_CHARS)
         if len(detail_text) < 100:
             logger.info("linkedin_llm_fallback_text_too_short", idx=idx, chars=len(detail_text))
             return {}
@@ -1443,6 +1589,15 @@ class LinkedInAgent:
                 deduped_links.append(link)
         profile_links = deduped_links[:20]
 
+        company_links: list[dict] = []
+        try:
+            company_links = await page.eval_on_selector_all(
+                "a[href*='/company/']",
+                "els => els.slice(0, 10).map(e => ({text: e.innerText.trim(), href: e.href}))",
+            )
+        except Exception as exc:
+            logger.debug("linkedin_llm_fallback_company_links_failed", idx=idx, error=str(exc))
+
         self._llm_fallback_calls += 1
         logger.info(
             "linkedin_llm_fallback_started",
@@ -1453,11 +1608,21 @@ class LinkedInAgent:
         )
 
         schema_description = (
-            "{\"description\": str (the COMPLETE job description / \"About the job\" "
+            "{\"title\": str (the job title; empty string if not present), "
+            "\"company\": str (the hiring company's name; empty if not present), "
+            "\"company_url\": str or null (pick the matching href from the "
+            "candidate company links below by matching the name, null if no match), "
+            "\"location\": str (city/region and Remote/Hybrid/On-site if stated; "
+            "empty if not present), "
+            "\"posted\": str or null (the posting date in YYYY-MM-DD form if "
+            "stated or derivable, e.g. from \"2 days ago\"; null otherwise), "
+            "\"description\": str (the COMPLETE job description / \"About the job\" "
             "text — include every paragraph and bullet point verbatim, do not "
             "summarize or shorten it; empty string if not present), "
             "\"employment_type\": str (e.g. Full-time, Contract; empty if not stated), "
             "\"salary\": str (empty if not disclosed), "
+            "\"job_insights\": str (employment type/seniority/company size/industry "
+            "bullets shown near the title, joined with \" | \"; empty if none), "
             "\"skills\": list[str] (empty list if none listed), "
             "\"recruiter_name\": str or null (name of the recruiter / hiring "
             "manager / job poster — check both the search-card text and the "
@@ -1474,11 +1639,14 @@ class LinkedInAgent:
             "verbatim in the text — never guess or construct one; null otherwise)}"
         )
         content = (
+            f"Candidate company links found on the page (name → url):\n"
+            f"{json.dumps(company_links, ensure_ascii=False)}\n\n"
             f"Candidate LinkedIn profile links found on the search card and/or "
             f"detail page (name → url):\n{json.dumps(profile_links, ensure_ascii=False)}\n\n"
             f"Visible text from the search-results CARD for this job "
             f"(may be empty if none was captured):\n{card_text_clean or '(none captured)'}\n\n"
-            f"Visible text from the job's own DETAIL page:\n{detail_text}"
+            f"Full text content of the job's own DETAIL page (HTML tags "
+            f"stripped):\n{detail_text}"
         )
 
         try:
@@ -1487,14 +1655,14 @@ class LinkedInAgent:
                 schema_description=schema_description,
                 system=(
                     "You are extracting structured job-posting data from the "
-                    "raw visible text of LinkedIn pages (a search-result card "
-                    "and/or the job's detail page). The page's CSS classes are "
-                    "obfuscated so selectors can't be used — work from the text "
-                    "content only. Prioritize returning the COMPLETE job "
-                    "description and any recruiter contact details that are "
-                    "explicitly present. Never fabricate an email, phone number, "
-                    "or any other field that is not literally present in the "
-                    "text. Return only the fields in the schema, no commentary."
+                    "text content of LinkedIn pages (a search-result card "
+                    "and/or the job's detail page, with all HTML tags/classes "
+                    "already stripped) — work from the text content only. "
+                    "Prioritize returning the COMPLETE job description and any "
+                    "recruiter contact details that are explicitly present. "
+                    "Never fabricate an email, phone number, url, or any other "
+                    "field that is not literally present in the text or link "
+                    "list. Return only the fields in the schema, no commentary."
                 ),
                 debug_dir=_DEBUG_DIR,
                 job_url=url,
@@ -1504,12 +1672,24 @@ class LinkedInAgent:
             return {}
 
         result: dict = {}
+        if extracted.get("title"):
+            result["title"] = str(extracted["title"]).strip()
+        if extracted.get("company"):
+            result["company"] = str(extracted["company"]).strip()
+        if extracted.get("company_url"):
+            result["company_url"] = str(extracted["company_url"]).strip()
+        if extracted.get("location"):
+            result["location"] = str(extracted["location"]).strip()
+        if extracted.get("posted"):
+            result["posted"] = str(extracted["posted"]).strip()
         if extracted.get("description"):
             result["description"] = str(extracted["description"]).strip()[:20_000]
         if extracted.get("employment_type"):
             result["emp_type"] = str(extracted["employment_type"]).strip()
         if extracted.get("salary"):
             result["salary"] = str(extracted["salary"]).strip()
+        if extracted.get("job_insights"):
+            result["job_insights"] = str(extracted["job_insights"]).strip()
         if extracted.get("skills"):
             result["skills"] = [str(s).strip() for s in extracted["skills"] if str(s).strip()][:20]
         if extracted.get("recruiter_name"):
@@ -1532,36 +1712,4 @@ class LinkedInAgent:
             recovered_recruiter=bool(result.get("recruiter_name")),
             recovered_recruiter_contact=bool(result.get("recruiter_email") or result.get("recruiter_phone")),
         )
-        return result
-
-    async def _extract_recruiter(self, page: Page) -> dict:
-        """Extract recruiter / hiring manager info from the detail panel."""
-        result: dict = {}
-        try:
-            name = await _first_text(page, _Sel.RECRUITER_NAME)
-            if name:
-                result["recruiter_name"] = _clean(name)
-                logger.info("poster_found", source="linkedin", name=result["recruiter_name"])
-
-            title_text = await _first_text(page, _Sel.RECRUITER_TITLE)
-            if title_text:
-                result["recruiter_title"] = _clean(title_text)
-                logger.info("designation_found", source="linkedin",
-                            designation=result["recruiter_title"])
-
-            url = await _first_attr(page, _Sel.RECRUITER_URL, "href")
-            if url and "/in/" in url:
-                result["recruiter_url"] = url.split("?")[0]
-                logger.info("linkedin_url_found", source="linkedin",
-                            linkedin_url=result["recruiter_url"])
-
-            if result.get("recruiter_name"):
-                logger.info(
-                    "linkedin_recruiter_found",
-                    name  = result.get("recruiter_name"),
-                    title = result.get("recruiter_title"),
-                    url   = result.get("recruiter_url"),
-                )
-        except Exception as exc:
-            logger.debug("linkedin_recruiter_extract_error", error=str(exc))
         return result
