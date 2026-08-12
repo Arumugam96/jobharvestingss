@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.core.dependencies import get_session_factory
 from app.models.harvest_run import HarvestRunORM, LlmCallORM, ScrapedJobORM
+from app.services.recruiter_service import upsert_recruiter
 
 logger = structlog.get_logger(__name__)
 
@@ -149,8 +150,21 @@ class HarvestRunService:
         share field names for recruiter/poster info)."""
         if not jobs:
             return
-        self._db.add_all(
-            [
+        rows: list[ScrapedJobORM] = []
+        for j in jobs:
+            recruiter_id = None
+            poster_name = (j.get("job_poster_name") or "").strip()
+            if poster_name:
+                recruiter = await upsert_recruiter(
+                    self._db,
+                    person_name=poster_name,
+                    company_name=j.get("current_company") or j.get("company") or "",
+                    designation=j.get("job_poster_designation") or "",
+                    linkedin_profile_url=j.get("linkedin_profile_url"),
+                    harvest_source=j.get("source", ""),
+                )
+                recruiter_id = recruiter.id if recruiter else None
+            rows.append(
                 ScrapedJobORM(
                     id=str(uuid.uuid4()),
                     run_id=run_pk,
@@ -178,10 +192,10 @@ class HarvestRunService:
                     current_company=j.get("current_company"),
                     email_id=j.get("email_id"),
                     contact_number=j.get("contact_number"),
+                    recruiter_id=recruiter_id,
                 )
-                for j in jobs
-            ]
-        )
+            )
+        self._db.add_all(rows)
         await self._db.flush()
 
     async def bulk_insert_llm_calls(self, run_pk: str, calls: list[dict[str, Any]]) -> None:

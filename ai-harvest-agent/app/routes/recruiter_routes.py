@@ -27,6 +27,8 @@ from pydantic import BaseModel, Field
 
 from app.agents.recruiter_contact_agent import RecruiterContactAgent
 from app.core.proactor import needs_proactor, run_in_proactor
+from app.services.harvest_run_service import data_source_mode, db_read, resolve_read
+from app.services.recruiter_service import get_discovery_run, list_discovery_runs
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(tags=["Recruiter Contact Discovery"])
@@ -174,9 +176,7 @@ async def run_recruiter_discovery(
 # GET /recruiter-results
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@router.get("/recruiter-results", status_code=status.HTTP_200_OK)
-async def list_recruiter_results() -> Any:
-    """List all saved recruiter contact discovery JSON result files, newest first."""
+def _list_recruiter_results_from_json() -> list[dict[str, Any]]:
     _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     files = sorted(
         _OUTPUT_DIR.glob("rcd_*_recruiter_contacts.json"),
@@ -201,6 +201,36 @@ async def list_recruiter_results() -> Any:
             })
         except Exception:
             entries.append({"file": str(f), "error": "Could not parse"})
+    return entries
+
+
+@router.get("/recruiter-results", status_code=status.HTTP_200_OK)
+async def list_recruiter_results() -> Any:
+    """List all past recruiter contact discovery runs, newest first —
+    DB-first (recruiter_discovery_runs), falling back to the JSON result
+    files per the DATA_SOURCE setting (app/config.py)."""
+    mode = data_source_mode()
+    entries, source = await resolve_read(
+        mode,
+        lambda: db_read(lambda db: list_discovery_runs(db)),
+        _list_recruiter_results_from_json,
+    )
+    if source == "database":
+        entries = [
+            {
+                "run_id":          r.run_id,
+                "source_filter":   r.source_filter,
+                "total":           r.total_recruiters,
+                "enriched":        r.enriched,
+                "verified_emails": r.verified_emails,
+                "public_emails":   r.public_emails,
+                "high":            r.high_confidence,
+                "medium":          r.medium_confidence,
+                "low":             r.low_confidence,
+                "json_path":       r.json_path or "",
+            }
+            for r in (entries or [])
+        ]
     return {"total_runs": len(entries), "runs": entries}
 
 
@@ -210,9 +240,31 @@ async def list_recruiter_results() -> Any:
 
 @router.get("/recruiter-results/{run_id}", status_code=status.HTTP_200_OK)
 async def get_recruiter_result(run_id: str) -> Any:
-    """Retrieve the full JSON output of one recruiter contact discovery run."""
-    _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    path = _OUTPUT_DIR / f"{run_id}_recruiter_contacts.json"
+    """Retrieve the full JSON output of one recruiter contact discovery run.
+
+    The per-recruiter detail (enrichment_audit etc.) isn't duplicated into
+    the DB — recruiter_discovery_runs only stores the summary + json_path
+    (see its docstring), so this still reads the JSON file either way; DB
+    mode just uses the DB's stored path instead of guessing the legacy
+    filename pattern, and skips the JSON path entirely under DATA_SOURCE=database.
+    """
+    mode = data_source_mode()
+    path: Path | None = None
+
+    if mode != "json":
+        db_run = await db_read(lambda db: get_discovery_run(db, run_id))
+        if db_run is not None and db_run.json_path:
+            path = Path(db_run.json_path)
+        elif mode == "database":
+            return JSONResponse(
+                status_code=404,
+                content={"detail": f"No result found for run_id '{run_id}'"},
+            )
+
+    if path is None:
+        _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        path = _OUTPUT_DIR / f"{run_id}_recruiter_contacts.json"
+
     if not path.exists():
         return JSONResponse(
             status_code=404,

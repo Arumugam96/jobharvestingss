@@ -86,9 +86,16 @@ class ScrapedJobORM(Base):
     current_company: Mapped[str | None] = mapped_column(String(255), nullable=True)
     email_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     contact_number: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # Canonical recruiter identity (app/models/recruiter.py), resolved at
+    # insert time by app/services/recruiter_service.py::upsert_recruiter.
+    # job_poster_name/linkedin_profile_url above stay as-is — the raw
+    # snapshot scraped for *this* job — this FK is the merged identity link
+    # that lets one recruiter's many job postings be queried together.
+    recruiter_id: Mapped[str | None] = mapped_column(ForeignKey("recruiters.id"), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     run: Mapped[HarvestRunORM] = relationship(back_populates="jobs")
+    recruiter: Mapped["RecruiterORM | None"] = relationship(back_populates="jobs")
 
 
 class LlmCallORM(Base):

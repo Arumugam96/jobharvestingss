@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import inspect as sa_inspect, text as sa_text
 from app.config import get_settings
 from app.core.logging_config import configure_logging
 
@@ -24,6 +25,7 @@ from app.core.exceptions import HarvestException, harvest_exception_handler
 from app.core.middleware import LoggingMiddleware, RateLimitMiddleware
 import app.models.auth  # noqa: F401 — registers users / otp_verifications on Base.metadata
 import app.models.harvest_run  # noqa: F401 — registers harvest_runs / scraped_jobs / llm_calls on Base.metadata
+import app.models.recruiter  # noqa: F401 — registers recruiters on Base.metadata
 from app.models.harvest import Base
 from app.routes import harvest, agents, tasks, health, job_parser, linkedin_harvest
 from app.routes.auth_routes import router as auth_router
@@ -44,6 +46,16 @@ logger   = structlog.get_logger(__name__)
 settings = get_settings()
 
 
+def _ensure_scraped_jobs_recruiter_id_column(sync_conn) -> None:
+    inspector = sa_inspect(sync_conn)
+    if "scraped_jobs" not in inspector.get_table_names():
+        return  # brand-new DB — create_all above already made this table with the column
+    existing_cols = {c["name"] for c in inspector.get_columns("scraped_jobs")}
+    if "recruiter_id" not in existing_cols:
+        sync_conn.execute(sa_text("ALTER TABLE scraped_jobs ADD COLUMN recruiter_id VARCHAR(36)"))
+        logger.info("scraped_jobs_recruiter_id_column_added")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Startup: launch browser pool + scheduler. Shutdown: clean up both."""
@@ -58,6 +70,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     engine = get_engine(settings)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # create_all only creates missing tables — it never alters an
+        # existing one, so `recruiter_id` (added to the pre-existing
+        # scraped_jobs table alongside the new recruiters table) needs its
+        # own one-time, idempotent ADD COLUMN here.
+        await conn.run_sync(_ensure_scraped_jobs_recruiter_id_column)
 
     # ── Playwright pool (optional — demo routes create their own browser) ─────
     # On Windows with --reload, uvicorn forces SelectorEventLoop which cannot

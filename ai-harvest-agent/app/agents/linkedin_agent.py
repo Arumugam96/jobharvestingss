@@ -29,13 +29,14 @@ import os
 import random
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable
 from urllib.parse import quote_plus
 
 import structlog
 from bs4 import BeautifulSoup
+from dateutil import parser as dateutil_parser
 from playwright.async_api import ElementHandle, Page
 
 from app.core.text_formatting import format_job_description
@@ -280,9 +281,32 @@ _LINKEDIN_BOILERPLATE_LINE = re.compile(
     r"Premium members are up to|Cancel anytime\.|"
     r"Use AI to assess how you fit|Get AI-powered advice on this job|"
     r"Hiring, not job hunting\?|No response insights available|"
-    r"Select language",
+    r"Select language|"
+    r"Skip to search|Skip to main content|Skip to primary content|"
+    r"Skip to aside|Skip to footer|"
+    r"notifications|"
+    r"Show match details|Tailor my resume|Help me stand out|"
+    r"Actively reviewing applicants|Promoted by hirer|"
+    r"Be an early applicant|Easy Apply|Save$|"
+    r"Access company insights|headcount trends|"
+    r"members use Premium",
     re.IGNORECASE,
 )
+
+# Section headers LinkedIn always renders AFTER the real job content on a
+# detail page (a related-jobs rail, "People also viewed", Premium upsells) —
+# hundreds of lines of noise that add nothing for extraction. Cutting the
+# text at the earliest of these alone shrinks a typical detail-page prompt
+# by 30-50%.
+_NOISE_CUTOFF_MARKERS = [
+    "More jobs",
+    "See more jobs like this",
+    "More jobs like this",
+    "Similar jobs",
+    "People also viewed",
+    "Job search faster with Premium",
+    "Set alert for similar jobs",
+]
 
 
 def _html_to_text(html: str) -> str:
@@ -295,14 +319,21 @@ def _html_to_text(html: str) -> str:
 
     Also strips whole-tag site chrome (nav/header/footer/aside — top nav,
     footer/legal/language links, and the related-jobs rail; never the job
-    posting itself) and known upsell/ad lines that live in the main content
-    area, to keep the LLM prompt from ballooning with pure noise."""
+    posting itself), known upsell/ad lines that live in the main content
+    area, and truncates at the first noise-section marker (see
+    _NOISE_CUTOFF_MARKERS) — LinkedIn always renders these after the real
+    job content, so anything from there on is safe to drop."""
     soup = BeautifulSoup(html, "lxml")
     for tag in soup(["script", "style", "noscript", "svg", "nav", "header", "footer", "aside"]):
         tag.decompose()
     lines = soup.get_text(separator="\n").split("\n")
     lines = [ln for ln in lines if not _LINKEDIN_BOILERPLATE_LINE.search(ln)]
-    return _clean("\n".join(lines))
+    text = _clean("\n".join(lines))
+
+    cutoff_positions = [pos for pos in (text.find(marker) for marker in _NOISE_CUTOFF_MARKERS) if pos != -1]
+    if cutoff_positions:
+        text = text[: min(cutoff_positions)]
+    return text
 
 
 def _trim_to_relevant(text: str, max_chars: int) -> str:
@@ -343,6 +374,104 @@ def _format_posted(raw: str) -> str:
     if "T" in raw and len(raw) >= 10:
         return raw[:10]
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+_ABSOLUTE_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+_RELATIVE_DATE_RE = re.compile(
+    r"(?P<num>\d+)\s*(?P<unit>hours?|h|days?|d|weeks?|w|months?)\s*ago"
+    r"|(?P<yesterday>yesterday)"
+    r"|(?P<now>just now|moments ago)",
+    re.IGNORECASE,
+)
+
+
+def _resolve_posted_date(raw_text: str, harvest_date: datetime) -> str | None:
+    """Convert a relative LinkedIn posting-date string ("3 days ago", "2w
+    ago", "yesterday", …) to an absolute YYYY-MM-DD date computed here in
+    Python, before the text ever reaches the LLM — the LLM was previously
+    asked to do this arithmetic itself, which cost tokens and occasionally
+    got the date wrong. Returns None on no match, leaving the caller to fall
+    back to the LLM's own best-effort read of the surrounding text.
+
+    Standalone module-level function (not a method) — takes harvest_date
+    explicitly so it stays a pure, independently testable function rather
+    than reaching for "now" or agent instance state itself.
+    """
+    if not raw_text:
+        return None
+
+    abs_match = _ABSOLUTE_DATE_RE.search(raw_text)
+    if abs_match:
+        return abs_match.group(0)
+
+    m = _RELATIVE_DATE_RE.search(raw_text)
+    if m:
+        if m.group("yesterday"):
+            delta_days = 1
+        elif m.group("now"):
+            delta_days = 0
+        else:
+            num  = int(m.group("num"))
+            unit = m.group("unit").lower()
+            if unit.startswith("h"):
+                delta_days = 0
+            elif unit.startswith("d"):
+                delta_days = num
+            elif unit.startswith("w"):
+                delta_days = num * 7
+            elif unit.startswith("month"):
+                delta_days = num * 30
+            else:
+                return None
+        return (harvest_date - timedelta(days=delta_days)).strftime("%Y-%m-%d")
+
+    # Catch-all for absolute dates spelled out in other formats LinkedIn
+    # sometimes uses (e.g. "Aug 5, 2025") that the patterns above don't cover.
+    # fuzzy=True lets it pull a date out of a longer sentence rather than
+    # requiring the whole string to be a date; anything dateutil can't parse
+    # at all, or resolves to something clearly implausible (future-dated
+    # relative to the harvest, or absurdly old), is treated as no match.
+    try:
+        parsed = dateutil_parser.parse(raw_text, fuzzy=True, default=harvest_date)
+    except (ValueError, OverflowError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=harvest_date.tzinfo)
+    if parsed > harvest_date + timedelta(days=1) or parsed < harvest_date - timedelta(days=365 * 2):
+        return None
+    return parsed.strftime("%Y-%m-%d")
+
+
+_COMPANY_NAME_PUNCT_RE = re.compile(r"[^\w\s]")
+
+
+def _normalize_company_name(name: str) -> str:
+    name = _COMPANY_NAME_PUNCT_RE.sub("", (name or "").lower())
+    return re.sub(r"\s+", " ", name).strip()
+
+
+def _resolve_company_url_from_links(company_name: str, company_links: list[dict]) -> str:
+    """Fallback for when the LLM returned an empty/wrong company_url despite
+    a clear candidate being available: match the extracted company name
+    against each candidate link's own text (both normalized — lowercased,
+    punctuation stripped), accepting an exact match or either string
+    containing the other. All candidates already come from `a[href*='/company/']`
+    (see _llm_fallback_extract), so any match is already a canonical company
+    URL — this just strips a trailing "/life" (LinkedIn's culture/life-page
+    tab) to land on the company's main page instead of that sub-tab."""
+    target = _normalize_company_name(company_name)
+    if not target:
+        return ""
+    for link in company_links:
+        link_name = _normalize_company_name(link.get("text", ""))
+        if not link_name:
+            continue
+        if link_name == target or link_name in target or target in link_name:
+            href = (link.get("href") or "").rstrip("/")
+            if href.endswith("/life"):
+                href = href[: -len("/life")]
+            return href
+    return ""
 
 
 def _test_mode_max_jobs() -> int | None:
@@ -569,6 +698,31 @@ async def _retry(coro_fn, retries: int = 3, delay_s: float = 2.0):
     raise last_exc  # type: ignore[misc]
 
 
+def _group_recruiters_for_enrichment(
+    jobs: list[LinkedInScrapedJob],
+) -> dict[str, list[LinkedInScrapedJob]]:
+    """Group harvested jobs by normalized recruiter LinkedIn URL, for the
+    post-harvest recruiter contact-discovery pass (LinkedInAgent._enrich_recruiters).
+
+    Skips any job whose linkedin_profile_url is missing, empty, or not a
+    real "/in/" personal-profile URL — company/school pages or other stray
+    links occasionally end up in this field, and aren't recruiter profiles
+    to visit. Normalization matches
+    app/services/recruiter_service.py::normalize_linkedin_url (lowercase,
+    strip query params and trailing slash) so a recruiter who posted via
+    multiple jobs with slightly different URL variants (tracking params,
+    trailing slash) still groups into one entry.
+    """
+    groups: dict[str, list[LinkedInScrapedJob]] = {}
+    for job in jobs:
+        raw_url = (job.linkedin_profile_url or "").strip()
+        if not raw_url or "/in/" not in raw_url.lower():
+            continue
+        norm_url = raw_url.split("?")[0].rstrip("/").lower()
+        groups.setdefault(norm_url, []).append(job)
+    return groups
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # LinkedIn Agent
 # ══════════════════════════════════════════════════════════════════════════════
@@ -591,13 +745,23 @@ class LinkedInAgent:
     # there in the DOM. When that happens we fall back to an LLM extraction
     # over the page's visible text instead of guessing new selectors. Capped
     # per-run so a fully-flagged session can't run up unbounded LLM cost.
-    _LLM_FALLBACK_MAX_CALLS_PER_RUN     = 50
+    _LLM_FALLBACK_MAX_CALLS_PER_RUN     = 500
     _LLM_FALLBACK_TEXT_MAX_CHARS        = 16_000
     _LLM_FALLBACK_CARD_TEXT_MAX_CHARS   = 2_000
+
+    # Recruiter contact-discovery post-harvest pass (see _enrich_recruiters) —
+    # separate concern from the job-extraction LLM fallback above but shares
+    # its call counter/cap (_llm_fallback_calls / _LLM_FALLBACK_MAX_CALLS_PER_RUN).
+    _RECRUITER_CONTACT_SCRAPE_CAP = 50
 
     def __init__(self, llm_service: "LLMService | None" = None) -> None:
         self._llm_service        = llm_service
         self._llm_fallback_calls = 0
+        # Fixed at construction (one LinkedInAgent per harvest run, per this
+        # class's docstring) rather than re-read per job, so every relative
+        # date ("3 days ago") on a multi-hour run resolves against the same
+        # reference point instead of drifting as the run progresses.
+        self._harvest_started_at = datetime.now(timezone.utc)
 
     def _get_llm_service(self) -> "LLMService":
         """Lazily build an LLMService from Settings if one wasn't injected —
@@ -760,6 +924,17 @@ class LinkedInAgent:
         await _screenshot(page, "02_after_search")
         jobs = await self._paginate_and_collect(page, f)
         logger.info("linkedin_jobs_returned", count=len(jobs))
+
+        # Post-harvest recruiter contact-discovery pass — deliberately after
+        # pagination/detail extraction is fully done, not inside per-card
+        # parsing (which would visit a recruiter's profile once per job they
+        # posted instead of once per recruiter). Best-effort: any failure
+        # here must not affect the job list already collected above.
+        try:
+            await self._enrich_recruiters(page, jobs)
+        except Exception as exc:
+            logger.warning("recruiter_enrichment_pass_failed", error=str(exc))
+
         return jobs
 
     async def _ensure_authenticated(
@@ -1046,7 +1221,211 @@ class LinkedInAgent:
 
         return all_jobs
 
+    # ── Recruiter contact-discovery (post-harvest) ─────────────────────────────
 
+    async def _enrich_recruiters(self, page: Page, jobs: list[LinkedInScrapedJob]) -> None:
+        """
+        Post-harvest recruiter contact-discovery pass.
+
+        RecruiterORM (app/models/recruiter.py) is the single source of truth
+        for recruiter identity/contact info — jobs are grouped by normalized
+        recruiter LinkedIn URL (see _group_recruiters_for_enrichment), one
+        RecruiterORM row is found-or-created per unique URL, and each
+        profile is visited at most once (across runs, not just this one —
+        a recruiter already fully enriched from a previous run is skipped
+        entirely) using the SAME authenticated page's browser context this
+        harvest just used, in a fresh tab that's always closed.
+
+        Capped at _RECRUITER_CONTACT_SCRAPE_CAP *profile visits* per run
+        (identity resolution/DB linking for the rest still happens — only
+        the expensive browser visit is capped). Every recruiter is
+        individually try/excepted: a DB outage, LinkedIn nav failure,
+        Contact Info miss, or LLM error affects only that one recruiter,
+        never the harvest's already-collected job list (the caller in _run
+        also wraps this whole method for the same reason).
+        """
+        groups = _group_recruiters_for_enrichment(jobs)
+        if not groups:
+            return
+
+        from app.config import get_settings
+        from app.core.dependencies import get_session_factory
+        from app.agents.prospect_intelligence_agent import _extract_linkedin_contact_info, _infer_department
+        from app.services.recruiter_service import link_recruiter_jobs_by_url, save_enrichment, upsert_recruiter
+
+        session_factory = get_session_factory(get_settings())
+        visited = 0
+
+        logger.info(
+            "recruiter_enrichment_pass_started",
+            unique_recruiters=len(groups), cap=self._RECRUITER_CONTACT_SCRAPE_CAP,
+        )
+
+        for norm_url, group_jobs in groups.items():
+            sample       = group_jobs[0]
+            person_name  = (sample.job_poster_name or "").strip()
+            company_name = (sample.job_poster_company or sample.company or "").strip()
+            if not person_name:
+                continue
+
+            try:
+                async with session_factory() as db:
+                    recruiter = await upsert_recruiter(
+                        db,
+                        person_name          = person_name,
+                        company_name         = company_name,
+                        designation          = sample.job_poster_designation or "",
+                        linkedin_profile_url = norm_url,
+                        harvest_source       = "LinkedIn",
+                    )
+                    if recruiter is None:
+                        await db.commit()
+                        continue
+                    recruiter_id  = recruiter.id
+                    already_email = recruiter.email_status in ("VERIFIED", "PUBLIC")
+                    already_phone = recruiter.phone_status in ("VERIFIED", "PUBLIC")
+                    await db.commit()
+            except Exception as exc:
+                logger.warning("recruiter_upsert_failed", url=norm_url, error=str(exc))
+                continue
+
+            if already_email and already_phone:
+                # Already fully enriched by a previous run — the "visit
+                # each unique recruiter profile only once" rule extends
+                # across runs, so skip the visit but still backfill any
+                # ScrapedJobORM rows from *this* run that reference them.
+                try:
+                    async with session_factory() as db:
+                        await link_recruiter_jobs_by_url(db, recruiter_id, norm_url)
+                        await db.commit()
+                except Exception as exc:
+                    logger.warning("recruiter_job_link_failed", url=norm_url, error=str(exc))
+                continue
+
+            if visited >= self._RECRUITER_CONTACT_SCRAPE_CAP:
+                logger.info(
+                    "recruiter_contact_scrape_cap_reached",
+                    cap=self._RECRUITER_CONTACT_SCRAPE_CAP, unique_recruiters=len(groups),
+                )
+                break
+
+            visited += 1
+            contact_page: Page | None = None
+            contact_info: dict = {"email": "", "phone": "", "headline": "", "location": ""}
+            try:
+                contact_page = await page.context.new_page()
+                contact_info = await _extract_linkedin_contact_info(contact_page, norm_url)
+
+                if not contact_info.get("email") and not contact_info.get("phone"):
+                    llm_contact = await self._llm_fallback_extract_contact(contact_page, norm_url)
+                    if llm_contact.get("email"):
+                        contact_info["email"] = llm_contact["email"]
+                    if llm_contact.get("phone"):
+                        contact_info["phone"] = llm_contact["phone"]
+            except Exception as exc:
+                logger.warning("recruiter_contact_visit_failed", url=norm_url, error=str(exc))
+            finally:
+                if contact_page:
+                    try:
+                        await contact_page.close()
+                    except Exception:
+                        pass
+
+            found_email = bool(contact_info.get("email"))
+            found_phone = bool(contact_info.get("phone"))
+
+            try:
+                async with session_factory() as db:
+                    await save_enrichment(
+                        db, recruiter_id,
+                        official_email_id = contact_info.get("email", ""),
+                        email_status      = "PUBLIC" if found_email else "NOT_FOUND",
+                        contact_number    = contact_info.get("phone", ""),
+                        phone_status      = "PUBLIC" if found_phone else "NOT_FOUND",
+                        linkedin_headline = contact_info.get("headline", ""),
+                        location          = contact_info.get("location", ""),
+                        department        = _infer_department(
+                            sample.job_poster_designation or "", contact_info.get("headline", ""),
+                        ),
+                        verified = found_email or found_phone,
+                    )
+                    await link_recruiter_jobs_by_url(db, recruiter_id, norm_url)
+                    await db.commit()
+            except Exception as exc:
+                logger.warning("recruiter_enrichment_save_failed", url=norm_url, error=str(exc))
+
+            logger.info(
+                "recruiter_enriched",
+                url=norm_url, person=person_name,
+                found_email=found_email, found_phone=found_phone,
+            )
+
+        logger.info(
+            "recruiter_enrichment_pass_complete",
+            unique_recruiters=len(groups), profiles_visited=visited,
+        )
+
+    async def _llm_fallback_extract_contact(self, page: Page, profile_url: str) -> dict:
+        """
+        Last-resort contact extraction for one recruiter's LinkedIn profile —
+        used only when the Contact Info modal + full-page-text regex scan
+        (_extract_linkedin_contact_info) found neither an email nor a phone.
+
+        Shares this agent's job-extraction LLM call counter/cap
+        (_llm_fallback_calls / _LLM_FALLBACK_MAX_CALLS_PER_RUN) rather than a
+        separate recruiter-specific budget, per design — recruiter contact
+        LLM calls and job-detail LLM calls draw from the same per-run pool.
+        """
+        if self._llm_fallback_calls >= self._LLM_FALLBACK_MAX_CALLS_PER_RUN:
+            logger.warning("recruiter_llm_fallback_cap_reached", url=profile_url)
+            return {}
+
+        try:
+            html = await page.content()
+        except Exception as exc:
+            logger.debug("recruiter_llm_fallback_text_read_failed", url=profile_url, error=str(exc))
+            return {}
+
+        text = _trim_to_relevant(_html_to_text(html), self._LLM_FALLBACK_TEXT_MAX_CHARS)
+        if len(text) < 50:
+            return {}
+
+        self._llm_fallback_calls += 1
+        logger.info("recruiter_llm_fallback_started", url=profile_url, call_number=self._llm_fallback_calls)
+
+        schema_description = (
+            "{\"email\": str or null (ONLY if an email address is written "
+            "verbatim in the text — never guess or construct one; null "
+            "otherwise), \"phone\": str or null (ONLY if a phone number is "
+            "written verbatim in the text — never guess or construct one; "
+            "null otherwise)}"
+        )
+        content = f"---LINKEDIN PROFILE PAGE---\n{text}\n\n---EXTRACT JSON---\n{schema_description}"
+
+        try:
+            extracted = await self._get_llm_service().extract_json(
+                content=content,
+                schema_description=schema_description,
+                system=(
+                    "You are extracting only explicitly-stated contact details "
+                    "from a LinkedIn profile page's text content. Never "
+                    "fabricate, guess, or construct an email or phone number "
+                    "that is not literally present in the text. Return only "
+                    "the fields in the schema, no commentary."
+                ),
+                debug_dir=_DEBUG_DIR,
+                job_url=profile_url,
+            )
+        except Exception as exc:
+            logger.warning("recruiter_llm_fallback_failed", url=profile_url, error=str(exc))
+            return {}
+
+        result: dict = {}
+        if extracted.get("email"):
+            result["email"] = str(extracted["email"]).strip()
+        if extracted.get("phone"):
+            result["phone"] = str(extracted["phone"]).strip()
+        return result
 
     # ── Search URL builder ─────────────────────────────────────────────────────
 
@@ -1598,6 +1977,14 @@ class LinkedInAgent:
         except Exception as exc:
             logger.debug("linkedin_llm_fallback_company_links_failed", idx=idx, error=str(exc))
 
+        # Pre-resolve the posting date here in Python (card text first, then
+        # detail text) instead of asking the LLM to do the "X days ago" →
+        # YYYY-MM-DD arithmetic itself — see _resolve_posted_date.
+        resolved_date = (
+            _resolve_posted_date(card_text_clean, self._harvest_started_at)
+            or _resolve_posted_date(detail_text, self._harvest_started_at)
+        )
+
         self._llm_fallback_calls += 1
         logger.info(
             "linkedin_llm_fallback_started",
@@ -1605,6 +1992,7 @@ class LinkedInAgent:
             detail_text_chars=len(detail_text), card_text_chars=len(card_text_clean),
             profile_link_candidates=len(profile_links),
             call_number=self._llm_fallback_calls,
+            resolved_date=resolved_date,
         )
 
         schema_description = (
@@ -1614,8 +2002,9 @@ class LinkedInAgent:
             "candidate company links below by matching the name, null if no match), "
             "\"location\": str (city/region and Remote/Hybrid/On-site if stated; "
             "empty if not present), "
-            "\"posted\": str or null (the posting date in YYYY-MM-DD form if "
-            "stated or derivable, e.g. from \"2 days ago\"; null otherwise), "
+            "\"posted\": str or null (copy the pre-calculated posting date given "
+            "above verbatim — do not calculate or derive it yourself; null if it "
+            "was marked unavailable), "
             "\"description\": str (the COMPLETE job description / \"About the job\" "
             "text — include every paragraph and bullet point verbatim, do not "
             "summarize or shorten it; empty string if not present), "
@@ -1638,15 +2027,17 @@ class LinkedInAgent:
             "\"recruiter_phone\": str or null (ONLY if a phone number is written "
             "verbatim in the text — never guess or construct one; null otherwise)}"
         )
+        # Labelled sections, short context first (card/links/date) and the
+        # long detail-page text last — the LLM sees the most important
+        # signals before wading into a much longer blob, instead of that
+        # blob burying them.
         content = (
-            f"Candidate company links found on the page (name → url):\n"
-            f"{json.dumps(company_links, ensure_ascii=False)}\n\n"
-            f"Candidate LinkedIn profile links found on the search card and/or "
-            f"detail page (name → url):\n{json.dumps(profile_links, ensure_ascii=False)}\n\n"
-            f"Visible text from the search-results CARD for this job "
-            f"(may be empty if none was captured):\n{card_text_clean or '(none captured)'}\n\n"
-            f"Full text content of the job's own DETAIL page (HTML tags "
-            f"stripped):\n{detail_text}"
+            f"---CARD TEXT---\n{card_text_clean or '(none)'}\n\n"
+            f"---COMPANY LINKS---\n{json.dumps(company_links, ensure_ascii=False)}\n\n"
+            f"---PROFILE LINKS---\n{json.dumps(profile_links, ensure_ascii=False)}\n\n"
+            f"---POSTING DATE (pre-calculated)---\n{resolved_date or 'unavailable'}\n\n"
+            f"---JOB DETAIL PAGE---\n{detail_text}\n\n"
+            f"---EXTRACT JSON---\n{schema_description}"
         )
 
         try:
@@ -1670,6 +2061,18 @@ class LinkedInAgent:
         except Exception as exc:
             logger.warning("linkedin_llm_fallback_failed", idx=idx, url=url, error=str(exc))
             return {}
+
+        # The LLM sometimes matches the right company but returns an empty or
+        # slightly-off company_url despite a clear candidate being in
+        # company_links — resolve it directly from the links instead.
+        if not extracted.get("company_url") and company_links and extracted.get("company"):
+            fallback_url = _resolve_company_url_from_links(str(extracted["company"]), company_links)
+            if fallback_url:
+                extracted["company_url"] = fallback_url
+                logger.debug(
+                    "linkedin_company_url_resolved_via_fallback",
+                    idx=idx, company=extracted["company"], url=fallback_url,
+                )
 
         result: dict = {}
         if extracted.get("title"):

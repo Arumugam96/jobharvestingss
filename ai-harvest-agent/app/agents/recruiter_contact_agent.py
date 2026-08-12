@@ -1,12 +1,14 @@
 """
 Recruiter Contact Discovery Agent
 
-Reads job-poster / recruiter records from completed harvest runs
-(LinkedIn, Naukri, Dice combined JSON files), deduplicates them,
-then enriches each with scraped contact discovery.
+Loads job-poster / recruiter records — DB-first via the canonical
+RecruiterORM identity table (app/models/recruiter.py), grouped with the
+ScrapedJobORM rows each recruiter posted — then enriches each with scraped
+contact discovery. Falls back to scanning harvest-run JSON files per the
+DATA_SOURCE setting (app/config.py) or if the DB read fails/returns nothing.
 
-Input sources scanned
-─────────────────────
+Input sources (JSON fallback only — the DB path has no per-dir distinction)
+─────────────────────────────────────────────────────────────────────────────
 data/results/combined/*_combined.json   ← primary (all sources merged)
 data/results/linkedin/*_linkedin.json   ← LinkedIn-only fallback
 data/results/naukri/*_naukri.json       ← Naukri-only fallback
@@ -14,9 +16,14 @@ data/results/dice/*_dice.json           ← Dice-only fallback
 
 Deduplication
 ─────────────
-Primary key  : linkedin_profile_url    (when non-null)
-Secondary key: lower(name) + lower(company)
-Job titles posted by each recruiter are aggregated.
+DB path   : one RecruiterORM row per person — see
+            app/services/recruiter_service.py::upsert_recruiter, resolved
+            once at harvest-ingest time (HarvestRunService.bulk_insert_scraped_jobs),
+            not rebuilt from scratch on every read.
+JSON path : primary key linkedin_profile_url (when non-null), secondary key
+            lower(name) + lower(company) — same two-tier logic, just
+            recomputed in-memory each call (kept for DATA_SOURCE="json"/fallback).
+Job titles posted by each recruiter are aggregated either way.
 
 Enrichment pipeline (per recruiter)
 ─────────────────────────────────────
@@ -46,8 +53,15 @@ from pathlib import Path
 from typing import Any
 
 import structlog
+from sqlalchemy import func, select
 
+from app.config import get_settings
+from app.core.dependencies import get_session_factory
+from app.models.harvest_run import HarvestRunORM, ScrapedJobORM
 from app.models.prospect_models import ProspectResult
+from app.models.recruiter import RecruiterORM
+from app.services.harvest_run_service import data_source_mode, db_write, resolve_read
+from app.services.recruiter_service import save_discovery_run, save_enrichment, upsert_recruiter
 from app.agents.prospect_intelligence_agent import (
     _infer_company_domain,
     _infer_department,
@@ -99,6 +113,11 @@ class RecruiterRecord:
     harvest_source:    str  = ""
     job_titles_posted: list[str] = field(default_factory=list)
     run_ids:           list[str] = field(default_factory=list)
+    # Set when loaded from the DB (_load_recruiters_from_db) — lets enrichment
+    # results write straight back to this row. Empty for JSON-sourced records
+    # (_load_recruiters_from_harvest); _persist_enrichment resolves/creates the
+    # row by identity in that case instead.
+    recruiter_id:      str  = ""
 
 
 # ── Run summary ────────────────────────────────────────────────────────────────
@@ -258,6 +277,123 @@ def _load_recruiters_from_harvest(
     return recruiters
 
 
+async def _load_recruiters_from_db(
+    source_filter: str = "all",
+    run_ids: list[str] | None = None,
+    max_files: int = 10,
+) -> list[RecruiterRecord]:
+    """DB-backed replacement for _load_recruiters_from_harvest — groups
+    ScrapedJobORM rows by their canonical RecruiterORM (identity resolved
+    once at ingest time by app/services/recruiter_service.py) instead of
+    rebuilding a dedup dict from JSON on every call.
+
+    "combined" vs per-source JSON files has no DB equivalent: a ScrapedJobORM
+    row from an orchestrator run's LinkedIn portion and one from a standalone
+    /run-linkedin-agent route are structurally identical, so source_filter
+    just filters ScrapedJobORM.source directly regardless of run type.
+
+    max_files approximates the old "latest N files per source dir" cap by
+    scoping to the N most recent harvest runs (x3 when source_filter="all",
+    to roughly cover 3 real sources) rather than N files per source dir.
+    """
+    try:
+        session_factory = get_session_factory(get_settings())
+        async with session_factory() as db:
+            run_limit = max_files if source_filter != "all" else max_files * 3
+            recent_run_pks = (
+                await db.execute(
+                    select(HarvestRunORM.id).order_by(HarvestRunORM.created_at.desc()).limit(run_limit)
+                )
+            ).scalars().all()
+
+            stmt = (
+                select(ScrapedJobORM, RecruiterORM, HarvestRunORM.run_id)
+                .join(RecruiterORM, ScrapedJobORM.recruiter_id == RecruiterORM.id)
+                .join(HarvestRunORM, HarvestRunORM.id == ScrapedJobORM.run_id)
+                .where(ScrapedJobORM.run_id.in_(recent_run_pks))
+            )
+            if source_filter != "all" and source_filter in _SOURCE_DIRS:
+                stmt = stmt.where(func.lower(ScrapedJobORM.source) == source_filter.lower())
+            if run_ids:
+                stmt = stmt.where(HarvestRunORM.run_id.in_(run_ids))
+
+            rows = (await db.execute(stmt)).all()
+    except Exception as exc:
+        logger.warning("recruiter_db_read_failed", error=str(exc))
+        return []
+
+    grouped: dict[str, RecruiterRecord] = {}
+    for scraped_job, recruiter, human_run_id in rows:
+        rec = grouped.get(recruiter.id)
+        if rec is None:
+            rec = RecruiterRecord(
+                person_name       = recruiter.person_name,
+                company_name      = recruiter.company_name,
+                designation       = recruiter.designation,
+                existing_linkedin = recruiter.linkedin_profile_url or "",
+                harvest_source    = scraped_job.source or "",
+                recruiter_id      = recruiter.id,
+            )
+            grouped[recruiter.id] = rec
+        if scraped_job.job_title and scraped_job.job_title not in rec.job_titles_posted:
+            rec.job_titles_posted.append(scraped_job.job_title)
+        if human_run_id not in rec.run_ids:
+            rec.run_ids.append(human_run_id)
+
+    recruiters = list(grouped.values())
+    logger.info("recruiters_loaded_from_db", total=len(recruiters), runs_scanned=len(recent_run_pks))
+    return recruiters
+
+
+async def _persist_enrichment(rec: RecruiterRecord, result: ProspectResult) -> None:
+    """Best-effort cache of one recruiter's enrichment result onto their
+    RecruiterORM row (app/services/recruiter_service.py::save_enrichment).
+
+    A DB outage must never fail the enrichment run itself, so this mirrors
+    the db_write()/db_read() pattern used elsewhere: swallow errors, log,
+    move on — the JSON/Excel output this run already produces is untouched.
+    rec.recruiter_id is empty for JSON-sourced records (DATA_SOURCE="json"
+    or DB-fallback), so those resolve/create the row by identity first —
+    meaning even a JSON-mode run still warms the DB cache for next time.
+    """
+    async def _write(db):
+        recruiter_id = rec.recruiter_id
+        if not recruiter_id:
+            recruiter = await upsert_recruiter(
+                db,
+                person_name=rec.person_name,
+                company_name=rec.company_name,
+                designation=rec.designation,
+                linkedin_profile_url=rec.existing_linkedin or None,
+                harvest_source=rec.harvest_source,
+            )
+            recruiter_id = recruiter.id if recruiter else None
+        if not recruiter_id:
+            return
+        await save_enrichment(
+            db, recruiter_id,
+            company_domain      = result.company_domain,
+            company_website     = result.company_website,
+            official_email_id   = result.official_email_id,
+            email_status        = result.email_status,
+            contact_number      = result.contact_number,
+            phone_status        = result.phone_status,
+            linkedin_headline   = result.linkedin_headline,
+            location            = result.location,
+            reporting_hierarchy = result.reporting_hierarchy,
+            position_level      = result.position_level,
+            employment_type     = result.employment_type,
+            years_in_company    = result.years_in_company,
+            overall_experience  = result.overall_experience,
+            hiring_domain       = result.hiring_domain,
+            company_industry    = result.company_industry,
+            company_size        = result.company_size,
+            confidence_score    = result.confidence_score,
+        )
+
+    await db_write(_write)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # RecruiterContactAgent
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -286,9 +422,12 @@ class RecruiterContactAgent:
 
         logger.info("recruiter_discovery_start", run_id=run_id, source_filter=source_filter)
 
-        recruiters = _load_recruiters_from_harvest(
-            source_filter=source_filter, run_ids=run_ids, max_files=max_files,
+        recruiters, load_source = await resolve_read(
+            data_source_mode(),
+            lambda: _load_recruiters_from_db(source_filter, run_ids, max_files),
+            lambda: _load_recruiters_from_harvest(source_filter, run_ids, max_files),
         )
+        logger.info("recruiters_loaded", total=len(recruiters), source=load_source, source_filter=source_filter)
 
         if not recruiters:
             completed_at = datetime.now(timezone.utc)
@@ -314,7 +453,9 @@ class RecruiterContactAgent:
             async with sem:
                 page = await pbm.new_page()
                 try:
-                    return await self._enrich_recruiter(page, rec)
+                    result = await self._enrich_recruiter(page, rec)
+                    await _persist_enrichment(rec, result)
+                    return result
                 except Exception as exc:
                     logger.warning("recruiter_enrich_error", person=rec.person_name, error=str(exc))
                     domain, website = _infer_company_domain(rec.company_name)
@@ -425,6 +566,29 @@ class RecruiterContactAgent:
             debug_path = debug_path,
             results    = all_results,
         )
+
+        await db_write(lambda db: save_discovery_run(
+            db,
+            run_id             = run_id,
+            source_filter      = source_filter,
+            harvest_sources    = unique_sources,
+            total_recruiters   = result.total_recruiters,
+            enriched           = result.enriched,
+            high_confidence    = result.high_confidence,
+            medium_confidence  = result.medium_confidence,
+            low_confidence     = result.low_confidence,
+            verified_emails    = result.verified_emails,
+            public_emails      = result.public_emails,
+            verified_phones    = result.verified_phones,
+            public_phones      = result.public_phones,
+            no_contact         = result.no_contact,
+            runtime_minutes    = result.runtime_minutes,
+            json_path          = result.json_path,
+            excel_path         = result.excel_path,
+            debug_path         = result.debug_path,
+            started_at         = started_at,
+            completed_at       = completed_at,
+        ))
 
         logger.info(
             "recruiter_discovery_complete",
