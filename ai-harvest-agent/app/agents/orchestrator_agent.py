@@ -25,7 +25,6 @@ To add a new source (e.g. Indeed):
 from __future__ import annotations
 
 import asyncio
-import json
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -44,8 +43,6 @@ from app.models.harvest_models import HarvestConfig
 from app.models.response_models import HarvestJob
 from app.models.unified_job import UnifiedJob
 from app.services.business_filter_service import BusinessFilterService
-
-_COMBINED_DIR = Path("data/results/combined")
 
 logger = structlog.get_logger(__name__)
 
@@ -123,27 +120,6 @@ def _deduplicate(jobs: list[UnifiedJob]) -> list[UnifiedJob]:
         deduped.append(job)
     return deduped
 
-
-def _save_combined(
-    run_id:       str,
-    executed_at:  str,
-    jobs:         list[UnifiedJob],
-    filters_snap: dict,
-) -> str:
-    """Save all deduplicated jobs to data/results/combined/YYYYMMDD_combined.json."""
-    _COMBINED_DIR.mkdir(parents=True, exist_ok=True)
-    ts      = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    path    = _COMBINED_DIR / f"{ts}_combined.json"
-    payload = {
-        "run_id":      run_id,
-        "executed_at": executed_at,
-        "total_found": len(jobs),
-        "sources":     list({j.source for j in jobs}),
-        "filters":     filters_snap,
-        "jobs":        [j.to_dict() for j in jobs],
-    }
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-    return str(path.resolve())
 
 def _cross_source_enrich(jobs: list[UnifiedJob]) -> list[UnifiedJob]:
     """
@@ -237,6 +213,8 @@ def _linkedin_to_unified(j: LinkedInScrapedJob) -> UnifiedJob:
         skills                  = j.skills,
         work_mode               = j.work_mode,
         source                  = "LinkedIn",
+        company_url             = getattr(j, "company_url", ""),
+        employment_type         = getattr(j, "employment_type", ""),
         job_type                = getattr(j, "employment_type", ""),
         domain_hint             = getattr(j, "industry_hint", ""),
         job_poster_name         = getattr(j, "job_poster_name", None),
@@ -261,6 +239,8 @@ def _dice_to_unified(j: "DiceScrapedJob") -> UnifiedJob:  # type: ignore[name-de
         skills                  = j.skills,
         work_mode               = j.work_mode,
         source                  = "Dice",
+        company_url             = getattr(j, "company_url", ""),
+        employment_type         = getattr(j, "employment_type", ""),
         job_type                = getattr(j, "employment_type", ""),
         job_poster_name         = getattr(j, "recruiter_name", None),
         job_poster_designation  = getattr(j, "job_poster_designation", None),
@@ -363,7 +343,6 @@ class OrchestratorAgent:
         """
         config      = self._config
         started_at  = datetime.now(timezone.utc)
-        executed_at = started_at.isoformat()
         run_id      = started_at.strftime("%Y%m%d_%H%M%S")
         result      = OrchestratorResult(started_at=started_at)
 
@@ -468,47 +447,16 @@ class OrchestratorAgent:
             deduped_by_source.setdefault(job.source, []).append(job)
         result.jobs_by_source = deduped_by_source
 
-        # ── Step 7: save combined JSON ────────────────────────────────────────
-        filters_snap  = config.filters.model_dump() if hasattr(config.filters, "model_dump") else {}
-        combined_path = _save_combined(run_id, executed_at, all_unified, filters_snap)
-        logger.info("json_saved", path=combined_path, total=len(all_unified))
+        # ── Step 7: finalize result (DB is the only store) ────────────────────
+        # Combined-JSON and Excel result files are no longer written at
+        # harvest time — the caller mirrors all_jobs to ScrapedJobORM and
+        # reports are generated from those rows (merged with RecruiterORM
+        # contact info) on demand: GET /download/{json,excel} and the
+        # report email (see app/services/report_service.py).
+        result.all_jobs = all_unified
 
-        result.all_jobs      = all_unified
-        result.combined_path = combined_path
-
-        # ── Step 8: export Excel workbook ─────────────────────────────────────
-        _li_before_excel = len(deduped_by_source.get("LinkedIn", []))
-        logger.info("linkedin_jobs_before_excel", count=_li_before_excel)
-
-        # Save debug: linkedin before excel
-        try:
-            import json as _json_be
-            _dbg_be = Path("data/debug/linkedin")
-            _dbg_be.mkdir(parents=True, exist_ok=True)
-            (_dbg_be / "linkedin_before_excel.json").write_text(
-                _json_be.dumps(
-                    {"stage": "before_excel", "count": _li_before_excel,
-                     "jobs": [{"title": j.job_title, "company": j.company, "url": j.job_url}
-                               for j in deduped_by_source.get("LinkedIn", [])]},
-                    indent=2, ensure_ascii=False,
-                ),
-                encoding="utf-8",
-            )
-        except Exception:
-            pass
-
-        try:
-            from app.services.excel_export_service import ExcelExportService
-            excel_path = ExcelExportService().export(
-                all_jobs       = all_unified,
-                jobs_by_source = deduped_by_source,
-                run_id         = run_id,
-                filters_snap   = filters_snap,
-            )
-            result.excel_path = excel_path
-            logger.info("excel_saved", path=excel_path, total=len(all_unified))
-        except Exception as exc:
-            logger.warning("excel_export_failed", error=str(exc))
+        _li_final = len(deduped_by_source.get("LinkedIn", []))
+        logger.info("linkedin_jobs_final", count=_li_final)
 
         result.completed_at  = datetime.now(timezone.utc)
 
@@ -527,8 +475,7 @@ class OrchestratorAgent:
                         "linkedin_jobs_received_by_orch": _li_before_dedup,
                         "linkedin_jobs_before_dedup":     _li_before_dedup,
                         "linkedin_jobs_after_dedup":      _li_after_dedup,
-                        "linkedin_jobs_before_excel":     _li_before_excel,
-                        "linkedin_jobs_written_to_excel": _li_before_excel,
+                        "linkedin_jobs_final":            _li_final,
                         "root_cause_if_zero":
                             "Check uvicorn_err.txt for UnicodeEncodeError or LinkedInLoginError "
                             "before the linkedin_jobs_received_by_orchestrator log line."
@@ -557,9 +504,6 @@ class OrchestratorAgent:
             dice_jobs      = len(deduped_by_source.get("Dice", [])),
             combined_jobs  = result.total_jobs,
             lead_records   = lead_count,
-            excel_generated = bool(result.excel_path),
-            excel_path     = result.excel_path,
-            json_path      = combined_path,
             verified       = result.verified_jobs,
             elapsed        = round(elapsed, 1),
         )

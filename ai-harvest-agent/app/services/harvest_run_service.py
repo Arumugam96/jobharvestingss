@@ -312,6 +312,22 @@ class HarvestRunService:
         result = await self._db.execute(select(ScrapedJobORM).where(ScrapedJobORM.id == job_id))
         return result.scalar_one_or_none()
 
+    async def list_jobs_for_run(self, run_pk: str) -> list[ScrapedJobORM]:
+        """All of one run's scraped jobs — used to build the post-harvest
+        report (JSON/Excel) from the DB instead of harvest-time files."""
+        result = await self._db.execute(
+            select(ScrapedJobORM).where(ScrapedJobORM.run_id == run_pk)
+        )
+        return list(result.scalars())
+
+    async def list_all_jobs_for_report(self) -> list[ScrapedJobORM]:
+        """Every scraped job on record, newest posting first — the dataset
+        behind GET /download/{json,excel}, matching what GET /jobs lists."""
+        result = await self._db.execute(
+            select(ScrapedJobORM).order_by(ScrapedJobORM.posted_date.desc())
+        )
+        return list(result.scalars())
+
 
 # ── Shared read-side view helpers ───────────────────────────────────────────────
 # Used by linkedin_routes.py / naukri_routes.py / dice_routes.py to reconstruct
@@ -345,7 +361,15 @@ def scraped_job_view(job: ScrapedJobORM) -> dict[str, Any]:
     and JSON read paths are interchangeable to the frontend. `id` here is
     the row's real primary key; a JSON-sourced job instead gets a synthetic
     md5-of-url id from frontend_routes.py's _job_id() — the two id schemes
-    only ever coexist across responses, never mixed within one."""
+    only ever coexist across responses, never mixed within one.
+
+    email_id/contact_number merge in the linked RecruiterORM's enriched
+    contact info (official_email_id/contact_number) when the job row itself
+    scraped none — one view feeds the UI, the report files, and the report
+    email, so they all show the merged contact identically."""
+    recruiter = job.recruiter
+    email = job.email_id or (recruiter.official_email_id if recruiter else "") or None
+    phone = job.contact_number or (recruiter.contact_number if recruiter else "") or None
     return {
         "id":                     job.id,
         "job_title":              job.job_title,
@@ -370,8 +394,8 @@ def scraped_job_view(job: ScrapedJobORM) -> dict[str, Any]:
         "job_poster_designation": job.job_poster_designation,
         "linkedin_profile_url":   job.linkedin_profile_url,
         "current_company":        job.current_company,
-        "email_id":               job.email_id,
-        "contact_number":         job.contact_number,
+        "email_id":               email,
+        "contact_number":         phone,
     }
 
 

@@ -3,18 +3,21 @@ Sends the post-harvest report email (Excel/JSON attachments) once a harvest
 run completes — called from both the manual (POST /run-harvest-agent) and
 scheduled (APScheduler auto-run) completion paths.
 
+The attachments are generated in memory from the run's job records (with
+each job's RecruiterORM contact info already merged in — see
+app/services/report_service.py); no result file is written to disk anymore.
+
 Everything is driven by HarvestConfig.notifications (harvest_config.json):
-enable/disable, recipient list, which files to attach (excel/json/both), and
-the subject line template — no code change needed to retarget or restyle.
+enable/disable, recipient list, which formats to attach (excel/json/both),
+and the subject line template — no code change needed to retarget or restyle.
 """
 from __future__ import annotations
-
-from pathlib import Path
 
 import structlog
 
 from app.models.harvest_models import NotificationConfig
 from app.services.email_service import EmailSender
+from app.services.report_service import build_excel_report_bytes, build_json_report_bytes
 
 logger = structlog.get_logger(__name__)
 
@@ -55,13 +58,14 @@ async def send_harvest_report(
     status: str,
     total_jobs: int,
     sources: list[str],
-    excel_path: str = "",
-    json_path: str = "",
+    job_dicts: list[dict] | None = None,
     error: str = "",
 ) -> None:
     """Email the harvest report (or a failure alert) to notifications.recipients,
-    if enabled. Logs every step so a delivery problem is diagnosable from
-    data/logs/app.log instead of silently disappearing.
+    if enabled. The JSON/Excel attachments are built in memory from job_dicts
+    (job records with recruiter contact info merged in). Logs every step so a
+    delivery problem is diagnosable from data/logs/app.log instead of silently
+    disappearing.
 
     Never raises — a misconfigured/unreachable SMTP server must not fail the
     harvest run itself; errors are logged (with full traceback) and swallowed.
@@ -79,17 +83,21 @@ async def send_harvest_report(
         return
     log.debug("harvest_report_recipients_resolved", recipients=recipients)
 
-    attachments: list[str] = []
-    if notifications.report_format in ("excel", "both") and excel_path and Path(excel_path).is_file():
-        attachments.append(excel_path)
-    if notifications.report_format in ("json", "both") and json_path and Path(json_path).is_file():
-        attachments.append(json_path)
+    attachments: list[tuple[str, bytes]] = []
+    if job_dicts:
+        if notifications.report_format in ("excel", "both"):
+            excel_bytes = build_excel_report_bytes(job_dicts)
+            if excel_bytes:
+                attachments.append((f"{run_id}_harvest.xlsx", excel_bytes))
+        if notifications.report_format in ("json", "both"):
+            attachments.append(
+                (f"{run_id}_harvest.json", build_json_report_bytes(job_dicts, run_id=run_id))
+            )
     log.debug(
         "harvest_report_attachments_resolved",
         report_format=notifications.report_format,
-        excel_path=excel_path,
-        json_path=json_path,
-        resolved=attachments,
+        job_records=len(job_dicts or []),
+        resolved=[name for name, _ in attachments],
     )
 
     # A failed run never reached the export step, so there's nothing to
@@ -119,11 +127,13 @@ async def send_harvest_report(
 
     try:
         log.info("harvest_report_email_sending", recipients=recipients, attachments=len(attachments))
-        await email_sender.send_email_with_attachments(recipients, subject, body, attachments)
+        await email_sender.send_email_with_attachments(
+            recipients, subject, body, attachment_blobs=attachments,
+        )
         log.info(
             "harvest_report_email_sent",
             recipients=recipients,
-            attachments=[Path(p).name for p in attachments],
+            attachments=[name for name, _ in attachments],
         )
     except Exception:
         log.exception(

@@ -20,7 +20,7 @@ from fastapi.responses import JSONResponse
 
 from app.agents.naukri_agent import NaukriAgent, NaukriScrapedJob
 from app.core.proactor import needs_proactor, run_in_proactor
-from app.models.harvest_models import FiltersConfig
+
 from app.models.harvest_run import HarvestRunORM, ScrapedJobORM
 from app.models.response_models import NaukriJob, NaukriRunResponse
 from app.services.config_service import ConfigService
@@ -71,37 +71,6 @@ def _to_naukri_job(j: NaukriScrapedJob) -> NaukriJob:
         skills          = j.skills,
         source          = "Naukri",
     )
-
-
-def _build_payload(
-    run_id:     str,
-    executed_at: str,
-    f:          FiltersConfig,
-    response:   NaukriRunResponse,
-) -> dict:
-    return {
-        "run_id":      run_id,
-        "executed_at": executed_at,
-        "status":      response.status,
-        "source":      "Naukri",
-        "total_found": response.total_found,
-        "filters": {
-            "keyword":                  f.keyword,
-            "location":                 f.location,
-            "job_type":                 f.job_type,
-            "work_mode":                f.work_mode,
-            "search_window_hours":      f.search_window_hours,
-            "max_jobs":                 f.max_jobs,
-            "domain":                   f.domain,
-            "hiring_entity":            f.hiring_entity,
-            "gcc_mode":                 f.gcc_mode,
-            "salary_min":               f.salary_min,
-            "salary_max":               f.salary_max,
-            "salary_currency":          f.salary_currency,
-            "include_undisclosed_salary": f.include_undisclosed_salary,
-        },
-        "jobs": [j.model_dump() for j in response.jobs],
-    }
 
 
 def _to_scraped_job_dict(j: NaukriScrapedJob) -> dict[str, Any]:
@@ -242,11 +211,6 @@ async def run_naukri_agent() -> Any:
             saved_to    = "",
             jobs        = [],
         )
-        try:
-            payload = _build_payload(run_id, now_iso, f, response)
-            response.saved_to = _storage_svc.save_results(payload)
-        except Exception:
-            pass
         await _mirror_run_to_db(response)
         return response.model_dump()
 
@@ -261,12 +225,9 @@ async def run_naukri_agent() -> Any:
         jobs        = jobs,
     )
 
-    try:
-        payload = _build_payload(run_id, now_iso, f, response)
-        response.saved_to = _storage_svc.save_results(payload)
-        log.info("naukri_results_saved", saved_to=response.saved_to)
-    except Exception as exc:
-        log.warning("naukri_save_failed", error=str(exc))
+    # Results are persisted to the database only (see _mirror_run_to_db) —
+    # no per-run JSON file is written anymore.
+    log.info("naukri_jobs_saved", count=len(jobs))
 
     await _mirror_run_to_db(response)
     return response.model_dump()

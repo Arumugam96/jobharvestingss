@@ -262,14 +262,10 @@ async def _apply_schedule(scheduler, config: HarvestConfig) -> None:
     from app.config import get_settings
     from app.services.email_service import EmailSender
     from app.services.harvest_notification_service import send_harvest_report
-    from app.services.harvest_storage_service import HarvestStorageService
-
-    storage = HarvestStorageService()
 
     async def _auto_harvest() -> None:
         cfg     = _config_svc.load()
         run_id  = _make_run_id(cfg.filters.keyword, cfg.filters.location)
-        now_iso = datetime.now(timezone.utc).isoformat()
         orch    = OrchestratorAgent(cfg)
         try:
             # wait_for_login=False: this is an unattended scheduled run — no
@@ -298,19 +294,11 @@ async def _apply_schedule(scheduler, config: HarvestConfig) -> None:
             return
 
         status_str = "success" if result.total_jobs else "no_results"
-        payload = {
-            "run_id":      run_id,
-            "executed_at": now_iso,
-            "status":      status_str,
-            "total_found": result.total_jobs,
-            "source":      ", ".join(result.sources_executed),
-            "filters":     cfg.filters.model_dump(),
-            "jobs":        [j.to_dict() for j in result.all_jobs],
-        }
-        storage.save_results(payload)
         logger.info("scheduled_harvest_complete", run_id=run_id, total=result.total_jobs)
 
         # ── Email the report to configured recipients (best-effort) ──────────
+        # Attachments are generated in memory from the run's job records —
+        # no result JSON/Excel file is written to disk anymore.
         await send_harvest_report(
             EmailSender(get_settings()),
             cfg.notifications,
@@ -318,8 +306,7 @@ async def _apply_schedule(scheduler, config: HarvestConfig) -> None:
             status      = status_str,
             total_jobs  = result.total_jobs,
             sources     = result.sources_executed,
-            excel_path  = result.excel_path,
-            json_path   = result.combined_path,
+            job_dicts   = [j.to_dict() for j in result.all_jobs],
         )
 
     scheduler.schedule_harvest(

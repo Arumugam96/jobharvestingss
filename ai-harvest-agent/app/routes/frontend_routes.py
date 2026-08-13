@@ -9,8 +9,8 @@ GET /jobs/{id}             — single job by id (DB primary key, or an md5
                               fallback — see _job_id())
 GET /lead-intelligence     — recruiter intelligence records (paginated)
 GET /lead-intelligence/{id}— single recruiter profile
-GET /download/json         — download latest combined harvest JSON
-GET /download/excel        — download latest Excel report
+GET /download/json         — harvest JSON report, generated from the DB
+GET /download/excel        — harvest Excel report, generated from the DB
 
 Note: GET /health is served by app/routes/health.py (Swagger-visible).
 GET /jobs reads from the database (every run ever recorded, see
@@ -30,7 +30,7 @@ from typing import Any
 
 import structlog
 from fastapi import APIRouter, HTTPException, Query, status
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import Response
 from pydantic import BaseModel
 
 from app.services.harvest_run_service import (
@@ -41,6 +41,12 @@ from app.services.harvest_run_service import (
     resolve_read,
     scraped_job_view,
 )
+from app.services.report_service import (
+    build_excel_report_bytes,
+    build_json_report_bytes,
+    merged_job_dicts,
+    report_basename,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -48,7 +54,6 @@ router = APIRouter(tags=["Jobs & Leads"])
 
 _COMBINED_DIR  = Path("data/results/combined")
 _LEAD_DIR      = Path("data/results/lead_intelligence")
-_RESULTS_ROOT  = Path("data/results")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -195,24 +200,6 @@ def _paginate(items: list, page: int, page_size: int) -> tuple[list, int, int]:
     total_pages = max(1, math.ceil(total / page_size)) if page_size > 0 else 1
     start       = (page - 1) * page_size
     return items[start : start + page_size], total, total_pages
-
-
-def _latest_excel() -> Path | None:
-    xlsx_files: list[Path] = list(_RESULTS_ROOT.rglob("*.xlsx"))
-    if not xlsx_files:
-        return None
-    return max(xlsx_files, key=lambda f: f.stat().st_mtime)
-
-
-def _latest_json() -> Path | None:
-    if not _COMBINED_DIR.exists():
-        return None
-    files = sorted(
-        _COMBINED_DIR.glob("*_combined.json"),
-        key     = lambda f: f.stat().st_mtime,
-        reverse = True,
-    )
-    return files[0] if files else None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -483,32 +470,44 @@ async def get_lead(lead_id: str) -> dict:
 # GET /download/json
 # ══════════════════════════════════════════════════════════════════════════════
 
+async def _report_job_dicts() -> list[dict] | None:
+    """Every scraped job on record with its recruiter's contact info merged
+    in (see report_service) — the shared dataset behind both downloads.
+    Generated fresh from the DB per request; harvest runs no longer persist
+    JSON/Excel result files. None means the DB read itself failed."""
+    rows = await db_read(lambda db: HarvestRunService(db).list_all_jobs_for_report())
+    if rows is None:
+        return None
+    return merged_job_dicts(rows)
+
+
 @router.get(
     "/download/json",
-    summary     = "Download latest harvest JSON",
-    description = "Returns the most recent combined harvest JSON as a file download.",
+    summary     = "Download harvest JSON report",
+    description = "Generates the harvest JSON report from the database (jobs merged with recruiter contact info) and returns it as a file download.",
     responses   = {
         200: {"description": "JSON file download"},
         404: {"description": "No harvest results found"},
     },
 )
-async def download_json() -> FileResponse:
+async def download_json() -> Response:
     """
-    Downloads the latest `*_combined.json` from `data/results/combined/`.
-    Run a harvest first if no file is found.
+    Builds the JSON report on demand from every scraped job on record,
+    with each job's recruiter-enriched email/phone merged in.
+    Run a harvest first if the database is empty.
     """
-    path = _latest_json()
-    if path is None:
+    job_dicts = await _report_job_dicts()
+    if not job_dicts:
         raise HTTPException(
             status_code = 404,
-            detail      = "No harvest JSON found. Run POST /run-harvest-agent first.",
+            detail      = "No harvest results in the database. Run POST /run-harvest-agent first.",
         )
-    logger.info("download_json", path=str(path))
-    return FileResponse(
-        path         = str(path),
+    filename = f"{report_basename()}.json"
+    logger.info("download_json_generated", jobs=len(job_dicts), filename=filename)
+    return Response(
+        content      = build_json_report_bytes(job_dicts),
         media_type   = "application/json",
-        filename     = path.name,
-        headers      = {"Content-Disposition": f'attachment; filename="{path.name}"'},
+        headers      = {"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
@@ -518,28 +517,35 @@ async def download_json() -> FileResponse:
 
 @router.get(
     "/download/excel",
-    summary     = "Download latest harvest Excel",
-    description = "Returns the most recent harvest Excel report (.xlsx) as a file download.",
+    summary     = "Download harvest Excel report",
+    description = "Generates the harvest Excel report (.xlsx) from the database (jobs merged with recruiter contact info) and returns it as a file download.",
     responses   = {
         200: {"description": "Excel file download"},
-        404: {"description": "No Excel report found"},
+        404: {"description": "No harvest results found"},
     },
 )
-async def download_excel() -> FileResponse:
+async def download_excel() -> Response:
     """
-    Downloads the latest `.xlsx` file from `data/results/`.
-    Run a harvest first if no file is found.
+    Builds the Excel workbook on demand from every scraped job on record,
+    with each job's recruiter-enriched email/phone merged in.
+    Run a harvest first if the database is empty.
     """
-    path = _latest_excel()
-    if path is None:
+    job_dicts = await _report_job_dicts()
+    if not job_dicts:
         raise HTTPException(
             status_code = 404,
-            detail      = "No Excel report found. Run POST /run-harvest-agent first.",
+            detail      = "No harvest results in the database. Run POST /run-harvest-agent first.",
         )
-    logger.info("download_excel", path=str(path))
-    return FileResponse(
-        path         = str(path),
+    excel_bytes = build_excel_report_bytes(job_dicts)
+    if not excel_bytes:
+        raise HTTPException(
+            status_code = 500,
+            detail      = "Excel generation unavailable (openpyxl not installed).",
+        )
+    filename = f"{report_basename()}.xlsx"
+    logger.info("download_excel_generated", jobs=len(job_dicts), filename=filename)
+    return Response(
+        content      = excel_bytes,
         media_type   = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        filename     = path.name,
-        headers      = {"Content-Disposition": f'attachment; filename="{path.name}"'},
+        headers      = {"Content-Disposition": f'attachment; filename="{filename}"'},
     )

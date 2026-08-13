@@ -26,7 +26,6 @@ from app.agents.linkedin_agent import (
     LinkedInScrapedJob,
 )
 from app.core.proactor import needs_proactor, run_in_proactor
-from app.models.harvest_models import FiltersConfig
 from app.models.harvest_run import HarvestRunORM, ScrapedJobORM
 from app.models.response_models import LinkedInJob, LinkedInRunResponse
 from app.services.config_service import ConfigService
@@ -104,38 +103,6 @@ def _to_linkedin_job(j: LinkedInScrapedJob) -> LinkedInJob:
     )
 
 
-def _build_payload(
-    run_id:      str,
-    executed_at: str,
-    f:           FiltersConfig,
-    response:    LinkedInRunResponse,
-) -> dict:
-    return {
-        "run_id":      run_id,
-        "executed_at": executed_at,
-        "status":      response.status,
-        "source":      "LinkedIn",
-        "total_found": response.total_found,
-        "filters": {
-            "keyword":                  f.keyword,
-            "location":                 f.location,
-            "job_type":                 f.job_type,
-            "work_mode":                f.work_mode,
-            "search_window_hours":      f.search_window_hours,
-            "max_jobs":                 f.max_jobs,
-            "domain":                   f.domain,
-            "hiring_entity":            f.hiring_entity,
-            "gcc_mode":                 f.gcc_mode,
-            "salary_min":               f.salary_min,
-            "salary_max":               f.salary_max,
-            "salary_currency":          f.salary_currency,
-            "include_undisclosed_salary": f.include_undisclosed_salary,
-        },
-        "jobs": [j.model_dump() for j in response.jobs],
-        "token_usage": response.token_usage.model_dump(),
-    }
-
-
 def _to_scraped_job_dict(j: LinkedInScrapedJob) -> dict[str, Any]:
     """LinkedInScrapedJob -> ScrapedJobORM's canonical dict shape (see
     HarvestRunService.bulk_insert_scraped_jobs)."""
@@ -188,8 +155,8 @@ def _scraped_job_to_linkedin_dict(j: ScrapedJobORM) -> dict[str, Any]:
 
 
 def _run_to_linkedin_payload(run: HarvestRunORM) -> dict[str, Any]:
-    """HarvestRunORM (+ its ScrapedJobORM rows) -> the exact payload shape
-    _build_payload()/_storage_svc.save_results() already produces."""
+    """HarvestRunORM (+ its ScrapedJobORM rows) -> the payload shape the old
+    per-run JSON files (_storage_svc.save_results) used to have."""
     return {
         "run_id":      run.run_id,
         "executed_at": run.started_at.isoformat() if run.started_at else "",
@@ -286,11 +253,6 @@ async def run_linkedin_agent() -> Any:
             jobs        = [],
             token_usage = token_usage,
         )
-        try:
-            payload = _build_payload(run_id, now_iso, f, response)
-            response.saved_to = _storage_svc.save_results(payload)
-        except Exception:
-            pass
         await _mirror_run_to_db(response)
         return response.model_dump()
 
@@ -306,13 +268,10 @@ async def run_linkedin_agent() -> Any:
         token_usage = token_usage,
     )
 
-    try:
-        payload = _build_payload(run_id, now_iso, f, response)
-        response.saved_to = _storage_svc.save_results(payload)
-        log.info("linkedin_jobs_saved", count=len(jobs), saved_to=response.saved_to)
-        log.info("linkedin_results_saved", saved_to=response.saved_to)
-    except Exception as exc:
-        log.warning("linkedin_save_failed", error=str(exc))
+    # Results are persisted to the database only (see _mirror_run_to_db) —
+    # no per-run JSON file is written anymore; GET /linkedin-results reads
+    # the DB, with the file store kept solely as a legacy fallback.
+    log.info("linkedin_jobs_saved", count=len(jobs))
 
     await _mirror_run_to_db(response)
     return response.model_dump()

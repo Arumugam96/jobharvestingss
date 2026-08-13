@@ -33,9 +33,7 @@ Poll GET /harvest-status/{job_id} for progress and final results.
 from __future__ import annotations
 
 import asyncio
-import json
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -48,7 +46,6 @@ from app.agents.orchestrator_agent import OrchestratorAgent, OrchestratorResult
 from app.config import get_settings
 from app.core.proactor import needs_proactor, run_in_proactor
 from app.models.harvest_run import HarvestRunORM
-from app.models.unified_job import UnifiedJob
 from app.services.config_service import ConfigService
 from app.services.email_service import EmailSender
 from app.services.harvest_notification_service import send_harvest_report
@@ -60,6 +57,7 @@ from app.services.harvest_run_service import (
     resolve_read,
 )
 from app.services.job_tracker import JobTracker
+from app.services.report_service import merged_job_dicts
 from app.services.run_history_service import RunHistoryService
 
 logger = structlog.get_logger(__name__)
@@ -68,8 +66,6 @@ router = APIRouter(tags=["Harvest Agent"])
 
 _config_svc  = ConfigService()
 _history_svc = RunHistoryService()
-
-_RESULTS_BASE = Path("data/results")
 
 
 # ── Request model ──────────────────────────────────────────────────────────────
@@ -156,39 +152,6 @@ def _run_to_history_entry(run: HarvestRunORM) -> dict[str, Any]:
         "ambiguous":      run.ambiguous,
         "error":          run.error,
     }
-
-
-def _save_source_results(
-    run_id:      str,
-    executed_at: str,
-    source:      str,
-    jobs:        list[UnifiedJob],
-    filters_snap: dict,
-) -> str:
-    """
-    Save one source's jobs to data/results/<source_lower>/YYYYMMDD_HHMMSS_<source_lower>.json.
-    Returns the absolute path of the saved file.
-    """
-    source_lower = source.lower()
-    out_dir      = _RESULTS_BASE / source_lower
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    ts       = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    filename = f"{ts}_{source_lower}.json"
-    payload  = {
-        "run_id":      run_id,
-        "executed_at": executed_at,
-        "source":      source,
-        "total_found": len(jobs),
-        "filters":     filters_snap,
-        "jobs":        [j.to_dict() for j in jobs],
-    }
-    path = out_dir / filename
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-    logger.info("source_results_saved", source=source, path=str(path), count=len(jobs))
-    if source.lower() == "linkedin":
-        logger.info("linkedin_json_saved", path=str(path), count=len(jobs))
-    return str(path.resolve())
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -293,16 +256,10 @@ async def _run_harvest_background(
             combined_count = result.total_jobs,
         ))
 
-    # ── Save per-source result files ──────────────────────────────────────────
-    filters_snap = _filters_snapshot(config)
-
-    for source, jobs in result.jobs_by_source.items():
-        try:
-            _save_source_results(run_id, now_iso, source, jobs, filters_snap)
-        except Exception as exc:
-            log.warning("source_save_failed", source=source, error=str(exc))
-
-    # ── Mirror the final deduped/filtered/verified job list + LLM call log ────
+    # ── Persist the final deduped/filtered/verified job list + LLM call log ──
+    # The database is now the only store — per-source/combined JSON and Excel
+    # result files are no longer written; reports are generated from these
+    # rows on demand (GET /download/{json,excel}, the report email below).
     if run_pk:
         scraped_dicts = [j.to_dict() for j in result.all_jobs]
         await db_write(lambda db: HarvestRunService(db).bulk_insert_scraped_jobs(run_pk, scraped_dicts))
@@ -373,6 +330,17 @@ async def _run_harvest_background(
         ))
 
     # ── Email the report to configured recipients (best-effort) ──────────────
+    # Attachments are built in memory from this run's DB rows so the
+    # recruiter-merged email/phone (scraped_job_view) is what recipients see;
+    # falls back to the in-memory scraped list if the DB mirror failed.
+    report_dicts: list[dict] = []
+    if run_pk:
+        run_rows = await db_read(lambda db: HarvestRunService(db).list_jobs_for_run(run_pk))
+        if run_rows:
+            report_dicts = merged_job_dicts(run_rows)
+    if not report_dicts:
+        report_dicts = [j.to_dict() for j in result.all_jobs]
+
     await send_harvest_report(
         EmailSender(get_settings()),
         config.notifications,
@@ -380,8 +348,7 @@ async def _run_harvest_background(
         status      = status_str,
         total_jobs  = result.total_jobs,
         sources     = result.sources_executed,
-        excel_path  = result.excel_path,
-        json_path   = result.combined_path,
+        job_dicts   = report_dicts,
     )
 
 

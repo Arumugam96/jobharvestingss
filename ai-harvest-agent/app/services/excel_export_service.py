@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,7 @@ _EXCEL_DIR = Path("data/results/excel")
 _JOB_COLUMNS: list[tuple[str, str]] = [
     ("job_title",              "Job Title"),
     ("company",                "Company"),
+    ("company_url",            "Company URL"),
     ("location",               "Location"),
     ("salary",                 "Salary"),
     ("experience",             "Experience"),
@@ -41,6 +43,7 @@ _JOB_COLUMNS: list[tuple[str, str]] = [
     ("skills",                 "Skills"),
     ("work_mode",              "Work Mode"),
     ("source",                 "Source"),
+    ("employment_type",        "Employment Type"),
     ("job_type",               "Job Type"),
     ("domain",                 "Domain"),
     ("hiring_entity",          "Hiring Entity"),
@@ -83,15 +86,24 @@ def _sanitize(val: Any) -> Any:
     return val
 
 
+def _field(job: Any, key: str) -> Any:
+    """Read a field off either a UnifiedJob-style object or a plain dict —
+    the DB-backed report path passes scraped_job_view() dicts instead of
+    dataclass instances."""
+    if isinstance(job, dict):
+        return job.get(key)
+    return getattr(job, key, None)
+
+
 def _lead_status(job: Any) -> str:
     """Compute Lead Status for a job record."""
-    has_name  = bool(getattr(job, "job_poster_name", None))
-    has_email = bool(getattr(job, "email_id", None))
-    has_phone = bool(getattr(job, "contact_number", None))
-    has_url   = bool(getattr(job, "linkedin_profile_url", None))
+    has_name  = bool(_field(job, "job_poster_name"))
+    has_email = bool(_field(job, "email_id"))
+    has_phone = bool(_field(job, "contact_number"))
+    has_url   = bool(_field(job, "linkedin_profile_url"))
     if has_email or has_phone:
         return "Enriched - Contact Available"
-    if has_name and (has_url or getattr(job, "current_company", None)):
+    if has_name and (has_url or _field(job, "current_company")):
         return "Enriched - Profile Only"
     if has_name:
         return "Partial - Name Only"
@@ -99,13 +111,13 @@ def _lead_status(job: Any) -> str:
 
 
 def _job_to_row(job: Any, columns: list[tuple[str, str]]) -> list[Any]:
-    """Convert a UnifiedJob to a flat list aligned with `columns`."""
+    """Convert a UnifiedJob (or job dict) to a flat list aligned with `columns`."""
     row: list[Any] = []
     for field_key, _ in columns:
         if field_key == "_lead_status":
             val = _lead_status(job)
         else:
-            val = getattr(job, field_key, None)
+            val = _field(job, field_key)
             if isinstance(val, list):
                 val = ", ".join(str(v) for v in val)
             elif val is None:
@@ -163,27 +175,14 @@ def _write_sheet(ws: Any, columns: list[tuple[str, str]], jobs: list[Any]) -> No
 class ExcelExportService:
     """Generate a multi-sheet Excel workbook from harvest results."""
 
-    def export(
+    def _build_workbook(
         self,
         all_jobs:       list[Any],
         jobs_by_source: dict[str, list[Any]],
-        run_id:         str,
-        filters_snap:   dict,
-    ) -> str:
-        """
-        Build the workbook and write it to data/results/excel/.
-        Returns the absolute path of the saved file.
-        """
-        try:
-            import openpyxl
-        except ImportError:
-            logger.error("excel_export_skipped", reason="openpyxl not installed — run: pip install openpyxl")
-            return ""
-
-        _EXCEL_DIR.mkdir(parents=True, exist_ok=True)
-        ts       = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        filename = f"{ts}_harvest.xlsx"
-        path     = _EXCEL_DIR / filename
+    ) -> "Any":
+        """Assemble the 5-sheet workbook. Jobs may be UnifiedJob instances or
+        scraped_job_view() dicts (the DB-backed report path)."""
+        import openpyxl
 
         wb = openpyxl.Workbook()
 
@@ -206,12 +205,62 @@ class ExcelExportService:
         # ── Sheet 5: Lead Intelligence (ALL jobs with lead status column) ────
         ws_leads = wb.create_sheet(title="Lead Intelligence")
         _write_sheet(ws_leads, _LEAD_COLUMNS, all_jobs)
+        return wb
+
+    def build_bytes(
+        self,
+        all_jobs:       list[Any],
+        jobs_by_source: dict[str, list[Any]] | None = None,
+    ) -> bytes:
+        """Build the workbook fully in memory and return the .xlsx bytes —
+        used by GET /download/excel and the report email, which generate the
+        report from the DB on demand instead of a harvest-time file."""
+        try:
+            import openpyxl  # noqa: F401
+        except ImportError:
+            logger.error("excel_export_skipped", reason="openpyxl not installed — run: pip install openpyxl")
+            return b""
+
+        if jobs_by_source is None:
+            jobs_by_source = {}
+            for j in all_jobs:
+                jobs_by_source.setdefault(_field(j, "source") or "", []).append(j)
+
+        wb  = self._build_workbook(all_jobs, jobs_by_source)
+        buf = BytesIO()
+        wb.save(buf)
+        logger.info("excel_built_in_memory", total_jobs=len(all_jobs), bytes=buf.getbuffer().nbytes)
+        return buf.getvalue()
+
+    def export(
+        self,
+        all_jobs:       list[Any],
+        jobs_by_source: dict[str, list[Any]],
+        run_id:         str,
+        filters_snap:   dict,
+    ) -> str:
+        """
+        Build the workbook and write it to data/results/excel/.
+        Returns the absolute path of the saved file.
+        """
+        try:
+            import openpyxl  # noqa: F401
+        except ImportError:
+            logger.error("excel_export_skipped", reason="openpyxl not installed — run: pip install openpyxl")
+            return ""
+
+        _EXCEL_DIR.mkdir(parents=True, exist_ok=True)
+        ts       = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        filename = f"{ts}_harvest.xlsx"
+        path     = _EXCEL_DIR / filename
+
+        wb = self._build_workbook(all_jobs, jobs_by_source)
 
         enriched_count = sum(
             1 for j in all_jobs
-            if getattr(j, "job_poster_name", None)
-            or getattr(j, "email_id", None)
-            or getattr(j, "contact_number", None)
+            if _field(j, "job_poster_name")
+            or _field(j, "email_id")
+            or _field(j, "contact_number")
         )
 
         wb.save(str(path))

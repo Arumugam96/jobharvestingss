@@ -95,7 +95,11 @@ class ScrapedJobORM(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     run: Mapped[HarvestRunORM] = relationship(back_populates="jobs")
-    recruiter: Mapped["RecruiterORM | None"] = relationship(back_populates="jobs")
+    # lazy="selectin": the recruiter must be loaded eagerly — read paths merge
+    # RecruiterORM.official_email_id/contact_number into the job's own
+    # email/phone (see harvest_run_service.scraped_job_view), and a lazy load
+    # would raise MissingGreenlet under the async session.
+    recruiter: Mapped["RecruiterORM | None"] = relationship(back_populates="jobs", lazy="selectin")
 
 
 class LlmCallORM(Base):

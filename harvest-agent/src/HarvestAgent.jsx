@@ -152,6 +152,7 @@ function mapApiJob(j) {
     jobType: j.job_type || "",
     workMode: j.work_mode || "",
     applyLink: j.job_url || "",
+    companyUrl: j.company_url || "",
     posterTitle: j.job_poster_designation || "",
   };
 }
@@ -166,7 +167,7 @@ function mapJobToDetail(j) {
     salary: j.salary,
     postedDate: j.postedDate,
     applyLink: j.applyLink,
-    companyUrl: "",
+    companyUrl: j.companyUrl || "",
     posterName: j.poc || "",
     posterLinkedIn: j.linkedin || "",
     posterTitle: j.posterTitle || "",

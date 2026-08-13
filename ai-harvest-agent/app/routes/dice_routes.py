@@ -20,7 +20,7 @@ from fastapi.responses import JSONResponse
 from app.agents.dice_agent import DiceAgent
 from app.scrapers.dice_scraper import DiceScrapedJob
 from app.core.proactor import needs_proactor, run_in_proactor
-from app.models.harvest_models import FiltersConfig
+
 from app.models.harvest_run import HarvestRunORM, ScrapedJobORM
 from app.models.response_models import DiceJob, DiceRunResponse
 from app.services.config_service import ConfigService
@@ -71,37 +71,6 @@ def _to_dice_job(j: DiceScrapedJob) -> DiceJob:
         employment_type = j.employment_type,
         source          = "Dice",
     )
-
-
-def _build_payload(
-    run_id:      str,
-    executed_at: str,
-    f:           FiltersConfig,
-    response:    DiceRunResponse,
-) -> dict:
-    return {
-        "run_id":      run_id,
-        "executed_at": executed_at,
-        "status":      response.status,
-        "source":      "Dice",
-        "total_found": response.total_found,
-        "filters": {
-            "keyword":                    f.keyword,
-            "location":                   f.location,
-            "job_type":                   f.job_type,
-            "work_mode":                  f.work_mode,
-            "search_window_hours":        f.search_window_hours,
-            "max_jobs":                   f.max_jobs,
-            "domain":                     f.domain,
-            "hiring_entity":              f.hiring_entity,
-            "gcc_mode":                   f.gcc_mode,
-            "salary_min":                 f.salary_min,
-            "salary_max":                 f.salary_max,
-            "salary_currency":            f.salary_currency,
-            "include_undisclosed_salary": f.include_undisclosed_salary,
-        },
-        "jobs": [j.model_dump() for j in response.jobs],
-    }
 
 
 def _to_scraped_job_dict(j: DiceScrapedJob) -> dict[str, Any]:
@@ -227,11 +196,6 @@ async def run_dice_agent() -> Any:
             run_id=run_id, status="no_results", source="Dice",
             total_found=0, executed_at=now_iso, saved_to="", jobs=[],
         )
-        try:
-            payload = _build_payload(run_id, now_iso, f, response)
-            response.saved_to = _storage_svc.save_results(payload)
-        except Exception:
-            pass
         await _mirror_run_to_db(response)
         return response.model_dump()
 
@@ -239,13 +203,9 @@ async def run_dice_agent() -> Any:
         run_id=run_id, status="success", source="Dice",
         total_found=len(jobs), executed_at=now_iso, saved_to="", jobs=jobs,
     )
-    try:
-        payload = _build_payload(run_id, now_iso, f, response)
-        response.saved_to = _storage_svc.save_results(payload)
-        log.info("dice_jobs_saved", count=len(jobs), saved_to=response.saved_to)
-        log.info("dice_results_saved", saved_to=response.saved_to)
-    except Exception as exc:
-        log.warning("dice_save_failed", error=str(exc))
+    # Results are persisted to the database only (see _mirror_run_to_db) —
+    # no per-run JSON file is written anymore.
+    log.info("dice_jobs_saved", count=len(jobs))
 
     await _mirror_run_to_db(response)
     return response.model_dump()

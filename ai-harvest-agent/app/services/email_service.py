@@ -62,14 +62,19 @@ class EmailSender:
         recipients: list[str],
         subject: str,
         body: str,
-        attachment_paths: list[str],
+        attachment_paths: list[str] | None = None,
+        attachment_blobs: list[tuple[str, bytes]] | None = None,
     ) -> None:
-        """Generic SMTP send with one or more file attachments (e.g. the
-        Excel/JSON harvest report) — same transport/credentials as send_otp."""
-        log = logger.bind(recipients=recipients, subject=subject, attachments=len(attachment_paths))
+        """Generic SMTP send with attachments — same transport/credentials as
+        send_otp. Attachments come as file paths and/or as in-memory
+        (filename, bytes) blobs; the harvest report is generated from the DB
+        in memory and attached as a blob (no result file is written to disk)."""
+        paths = attachment_paths or []
+        blobs = attachment_blobs or []
+        log = logger.bind(recipients=recipients, subject=subject, attachments=len(paths) + len(blobs))
         log.debug("email_with_attachments_start")
         await asyncio.to_thread(
-            self._send_with_attachments_sync, recipients, subject, body, attachment_paths, log
+            self._send_with_attachments_sync, recipients, subject, body, paths, blobs, log
         )
         log.info("email_with_attachments_sent")
 
@@ -79,6 +84,7 @@ class EmailSender:
         subject: str,
         body: str,
         attachment_paths: list[str],
+        attachment_blobs: list[tuple[str, bytes]],
         log,
     ) -> None:
         message = EmailMessage()
@@ -96,6 +102,16 @@ class EmailSender:
             log.debug(
                 "email_attachment_attached",
                 path=str(path),
+                bytes=len(data),
+                content_type=f"{maintype}/{subtype}",
+            )
+
+        for filename, data in attachment_blobs:
+            maintype, subtype = _guess_attachment_type(Path(filename))
+            message.add_attachment(data, maintype=maintype, subtype=subtype, filename=filename)
+            log.debug(
+                "email_attachment_attached",
+                filename=filename,
                 bytes=len(data),
                 content_type=f"{maintype}/{subtype}",
             )
