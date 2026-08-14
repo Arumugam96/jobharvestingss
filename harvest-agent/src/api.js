@@ -22,8 +22,10 @@ async function request(path, options = {}) {
     // no JSON body
   }
   if (!res.ok) {
+    // FastAPI uses {detail}; our HarvestException handler nests it under
+    // {error: {message}} (e.g. the 409 "a harvest is already running").
     const message =
-      (body && (body.detail || body.message)) ||
+      (body && (body.detail || body.message || (body.error && body.error.message))) ||
       `Request to ${path} failed with status ${res.status}`;
     throw new ApiError(typeof message === "string" ? message : JSON.stringify(message), res.status, body);
   }
@@ -68,6 +70,12 @@ export function runHarvestAgent() {
 /** GET /run-history — all past harvest runs, newest first. */
 export function getRunHistory() {
   return request("/run-history");
+}
+
+/** GET /active-run — whether a harvest is currently running (any source/tab).
+ * Returns {active, job_id, run_id, source}. Used to freeze the Run controls. */
+export function getActiveRun() {
+  return request("/active-run");
 }
 
 /** GET /harvest-status/{jobId} — live progress for an in-flight background harvest job. */

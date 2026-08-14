@@ -20,6 +20,7 @@ from fastapi.responses import JSONResponse
 from app.agents.dice_agent import DiceAgent
 from app.scrapers.dice_scraper import DiceScrapedJob
 from app.core.proactor import needs_proactor, run_in_proactor
+from app.services import run_guard
 
 from app.models.harvest_run import HarvestRunORM, ScrapedJobORM
 from app.models.response_models import DiceJob, DiceRunResponse
@@ -155,16 +156,18 @@ async def run_dice_agent() -> Any:
             slow_mo  = config.browser.slow_mo_ms,
         )
 
-    try:
-        if needs_proactor():
-            log.debug("using_proactor_thread")
-            scraped: list[DiceScrapedJob] = await run_in_proactor(_do_harvest)
-        else:
-            scraped = await _do_harvest()
+    # Single-flight: reject if a harvest is already running (raises 409).
+    async with run_guard.single_flight(run_id, "Dice"):
+        try:
+            if needs_proactor():
+                log.debug("using_proactor_thread")
+                scraped: list[DiceScrapedJob] = await run_in_proactor(_do_harvest)
+            else:
+                scraped = await _do_harvest()
 
-    except Exception as exc:
-        log.exception("dice_harvest_error", error=str(exc))
-        return _err("Dice harvest failed", str(exc) or "Unexpected error during scraping")
+        except Exception as exc:
+            log.exception("dice_harvest_error", error=str(exc))
+            return _err("Dice harvest failed", str(exc) or "Unexpected error during scraping")
 
     log.info("dice_jobs_extracted", total=len(scraped))
 

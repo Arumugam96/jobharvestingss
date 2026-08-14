@@ -32,11 +32,16 @@ class JobNotFoundError(HarvestException):
 
 
 class JobAlreadyRunningError(HarvestException):
-    def __init__(self, job_id: str) -> None:
+    def __init__(self, job_id: str, details: dict[str, Any] | None = None) -> None:
         super().__init__(
-            message=f"Harvest job '{job_id}' is already running",
+            message=(
+                "A harvest is already running — only one can run at a time "
+                "(Playwright cannot drive the same Chrome profile twice). "
+                "Wait for the current run to finish."
+            ),
             code="JOB_ALREADY_RUNNING",
             status_code=status.HTTP_409_CONFLICT,
+            details=details or {"job_id": job_id},
         )
 
 
@@ -67,6 +72,22 @@ class LLMError(HarvestException):
             code="LLM_ERROR",
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
         )
+
+
+class LLMUnavailableError(LLMError):
+    """The extraction LLM provider itself is unreachable/down (connection
+    refused, timeout, HTTP 5xx, missing credentials, provider-side error) —
+    as opposed to plain LLMError, which signals a single call went wrong
+    (e.g. the model returned invalid JSON) and is safe to skip past.
+
+    This distinction is load-bearing: a bare LLMError still just skips the one
+    job, but an LLMUnavailableError aborts the entire harvest run (all sources)
+    because retrying every remaining job against a dead provider is pointless.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.code = "LLM_UNAVAILABLE"
 
 
 class ValidationError(HarvestException):

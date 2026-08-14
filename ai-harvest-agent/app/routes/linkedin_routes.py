@@ -27,6 +27,7 @@ from app.agents.linkedin_agent import (
 )
 from app.core.proactor import needs_proactor, run_in_proactor
 from app.models.harvest_run import HarvestRunORM, ScrapedJobORM
+from app.services import run_guard
 from app.models.response_models import LinkedInJob, LinkedInRunResponse
 from app.services.config_service import ConfigService
 from app.services.harvest_run_service import (
@@ -198,20 +199,22 @@ async def run_linkedin_agent() -> Any:
         )
         return jobs, agent.get_token_usage(), agent.get_llm_call_log()
 
-    try:
-        if needs_proactor():
-            log.debug("using_proactor_thread")
-            scraped, token_usage, llm_calls = await run_in_proactor(_do_harvest)
-        else:
-            scraped, token_usage, llm_calls = await _do_harvest()
+    # Single-flight: reject if a harvest is already running (raises 409).
+    async with run_guard.single_flight(run_id, "LinkedIn"):
+        try:
+            if needs_proactor():
+                log.debug("using_proactor_thread")
+                scraped, token_usage, llm_calls = await run_in_proactor(_do_harvest)
+            else:
+                scraped, token_usage, llm_calls = await _do_harvest()
 
-    except LinkedInLoginError as exc:
-        log.error("linkedin_login_failed", error=str(exc))
-        return _err("LinkedIn login failed — check credentials or run /linkedin-save-session", str(exc))
+        except LinkedInLoginError as exc:
+            log.error("linkedin_login_failed", error=str(exc))
+            return _err("LinkedIn login failed — check credentials or run /linkedin-save-session", str(exc))
 
-    except Exception as exc:
-        log.exception("linkedin_harvest_error", error=str(exc))
-        return _err("LinkedIn harvest failed", str(exc) or "Unexpected error during scraping")
+        except Exception as exc:
+            log.exception("linkedin_harvest_error", error=str(exc))
+            return _err("LinkedIn harvest failed", str(exc) or "Unexpected error during scraping")
 
     log.info("linkedin_jobs_extracted", total=len(scraped))
 

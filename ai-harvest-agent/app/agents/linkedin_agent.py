@@ -39,6 +39,7 @@ from bs4 import BeautifulSoup
 from dateutil import parser as dateutil_parser
 from playwright.async_api import ElementHandle, Page
 
+from app.core.exceptions import LLMUnavailableError
 from app.core.text_formatting import format_job_description
 from app.models.harvest_models import FiltersConfig
 from app.scrapers.browser_manager import PersistentBrowserManager
@@ -1416,6 +1417,9 @@ class LinkedInAgent:
                 debug_dir=_DEBUG_DIR,
                 job_url=profile_url,
             )
+        except LLMUnavailableError:
+            # LLM provider is down — abort the run (see _llm_fallback_extract).
+            raise
         except Exception as exc:
             logger.warning("recruiter_llm_fallback_failed", url=profile_url, error=str(exc))
             return {}
@@ -1677,6 +1681,10 @@ class LinkedInAgent:
                     recruiter = detail_data.get("recruiter_name"),
                 )
                 logger.info("job_card_extracted", source="linkedin", index=idx, title=title, company=company, url=url)
+            except LLMUnavailableError:
+                # The extraction LLM is down — stop the whole page/run instead of
+                # churning through the remaining cards against a dead provider.
+                raise
             except Exception as exc:
                 # One bad card (timeout, stale element, transient nav failure) must
                 # not discard every job already extracted from this page/run.
@@ -2058,6 +2066,10 @@ class LinkedInAgent:
                 debug_dir=_DEBUG_DIR,
                 job_url=url,
             )
+        except LLMUnavailableError:
+            # The extraction LLM itself is down — abort the whole run rather
+            # than degrade every remaining job. Propagates up to run_all().
+            raise
         except Exception as exc:
             logger.warning("linkedin_llm_fallback_failed", idx=idx, url=url, error=str(exc))
             return {}

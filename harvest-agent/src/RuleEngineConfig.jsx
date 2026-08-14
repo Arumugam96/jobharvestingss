@@ -375,7 +375,9 @@ export default function RuleEngineConfig({
     } catch (err) {
       setRunState("failed");
       setRunMessage(err instanceof ApiError ? err.message : "Could not reach the harvest backend.");
-      setHarvestRunning(false);
+      // 409 = the backend rejected because a run is already in flight — keep the
+      // controls frozen rather than clearing them; any other error unfreezes.
+      setHarvestRunning(err instanceof ApiError && err.status === 409);
     }
   };
 
@@ -507,10 +509,13 @@ export default function RuleEngineConfig({
                 <Eye size={16} /> {needsLogin ? "Log in now — Watch Live Browser" : "Watch Live Browser"}
               </button>
             )}
-            <button className="rec-btn rec-btn--run" onClick={handleRun} disabled={runState === "running" || configLoading || harvestRunning}
-              title={harvestRunning && runState !== "running" ? "Another harvest is already running elsewhere" : undefined}>
-              {runState === "running" ? <Loader2 size={16} className="rec-spin" /> : <Play size={16} fill="currentColor" />}
-              {runState === "running" ? "Running" : "Run Now"}
+            <button
+              className={"rec-btn rec-btn--run" + (harvestRunning && runState !== "running" ? " rec-btn--busy" : "")}
+              onClick={handleRun}
+              disabled={runState === "running" || configLoading || harvestRunning}
+              title={harvestRunning && runState !== "running" ? "A harvest is already running — controls locked until it finishes" : undefined}>
+              {(runState === "running" || harvestRunning) ? <Loader2 size={16} className="rec-spin" /> : <Play size={16} fill="currentColor" />}
+              {runState === "running" ? "Running" : harvestRunning ? "Running…" : "Run Now"}
             </button>
             <button className="rec-btn rec-btn--save" onClick={handleSave} disabled={saving || configLoading}>
               {saving ? <Loader2 size={16} className="rec-spin" /> : <Save size={16} />}
@@ -772,6 +777,8 @@ const styles = `
   .rec-btn:disabled { opacity:.75; cursor:default; }
   .rec-btn--run { background:var(--green); color:#fff; box-shadow:0 1px 2px rgba(22,163,74,.35); }
   .rec-btn--run:hover:not(:disabled) { background:#15803D; }
+  /* A harvest is running elsewhere — grey the button + spinner to signal "locked". */
+  .rec-btn--busy, .rec-btn--busy:hover { background:#94A3B8; box-shadow:none; }
   .rec-btn--save { background:var(--primary); color:#fff; box-shadow:0 1px 2px rgba(37,99,235,.35); }
   .rec-btn--save:hover { background:var(--secondary); }
   .rec-btn--watch { background:#fff; color:var(--primary); border:1px solid var(--primary); }

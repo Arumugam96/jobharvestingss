@@ -2,9 +2,15 @@ import React, { useEffect, useState } from "react";
 import { Circle } from "lucide-react";
 import { getHealth } from "./api";
 
-const POLL_MS = 30000;
-
-/** Small backend-liveness pill for GET /health — polls every 30s. */
+/**
+ * Small backend-liveness pill for GET /health.
+ *
+ * Event-driven, NOT a timer: it checks once on mount and again whenever the
+ * window regains focus. The old unconditional 30s setInterval fired a /health
+ * request forever while the app was open, flooding the backend logs — run
+ * progress is already driven off the DB-backed /harvest-status + /active-run
+ * endpoints, so a constant liveness ping bought nothing.
+ */
 export default function HealthBadge({ dark = true }) {
   const [state, setState] = useState({ status: "checking", version: "", environment: "" });
 
@@ -19,8 +25,9 @@ export default function HealthBadge({ dark = true }) {
       }
     };
     tick();
-    const id = setInterval(tick, POLL_MS);
-    return () => { cancelled = true; clearInterval(id); };
+    const onFocus = () => tick();
+    window.addEventListener("focus", onFocus);
+    return () => { cancelled = true; window.removeEventListener("focus", onFocus); };
   }, []);
 
   const tone = state.status === "ok" ? "#22C55E" : state.status === "degraded" ? "#F59E0B" : state.status === "checking" ? "#94A3B8" : "#EF4444";

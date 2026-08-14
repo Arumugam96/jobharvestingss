@@ -8,7 +8,7 @@ import JobDetailsView from "./JobDetailsView";
 import RuleEngineConfig from "./RuleEngineConfig";
 import HealthBadge from "./HealthBadge";
 import {
-  getJobs, getRunHistory, getRunHistoryEntry, ApiError,
+  getJobs, getRunHistory, getRunHistoryEntry, getActiveRun, ApiError,
   runLinkedinAgent, getLinkedinResults, getLinkedinResult,
   runNaukriAgent, getNaukriResults, getNaukriResult,
   runDiceAgent, getDiceResults, getDiceResult,
@@ -741,6 +741,7 @@ function SourceRunsPage({ harvestRunning, setHarvestRunning }) {
     setRunning(true);
     setHarvestRunning(true);
     setRunMessage(`Running ${current.label} harvest — this calls a synchronous endpoint and can take several minutes. Don't close this tab.`);
+    let conflict = false;
     try {
       const res = await current.run();
       if (res.status === "failed") {
@@ -750,10 +751,12 @@ function SourceRunsPage({ harvestRunning, setHarvestRunning }) {
         fetchResults(current);
       }
     } catch (err) {
+      // 409 = a harvest is already running — keep controls frozen.
+      conflict = err instanceof ApiError && err.status === 409;
       setRunMessage(err instanceof ApiError ? `Failed: ${err.message}` : "Could not reach the harvest backend.");
     } finally {
       setRunning(false);
-      setHarvestRunning(false);
+      setHarvestRunning(conflict);
     }
   };
 
@@ -777,9 +780,10 @@ function SourceRunsPage({ harvestRunning, setHarvestRunning }) {
           </p>
         </div>
         <button className="ha-btn ha-btn-primary" onClick={handleRun} disabled={running || harvestRunning}
-          title={harvestRunning && !running ? "Another harvest is already running elsewhere" : undefined}>
-          {running ? <Loader2 size={16} className="ha-spin" /> : <Play size={16} />}
-          {running ? "Running…" : `Run ${current.label} Only`}
+          style={harvestRunning && !running ? { background: "#94A3B8", borderColor: "#94A3B8" } : undefined}
+          title={harvestRunning && !running ? "A harvest is already running — controls locked until it finishes" : undefined}>
+          {(running || harvestRunning) ? <Loader2 size={16} className="ha-spin" /> : <Play size={16} />}
+          {running ? "Running…" : harvestRunning ? "Running elsewhere…" : `Run ${current.label} Only`}
         </button>
       </div>
       <div style={{ marginTop: 20, borderBottom: "1px solid " + C.border }} />
@@ -1112,8 +1116,26 @@ export default function HarvestAgent() {
 
   const refreshAll = useCallback(() => { fetchJobs(); fetchRuns(); }, [fetchJobs, fetchRuns]);
 
+  // Freeze the Run controls if a harvest is already running — including one
+  // started in another tab or before this page loaded. Event-driven (mount +
+  // window focus), so no always-on polling loop.
+  const syncActiveRun = useCallback(async () => {
+    try {
+      const res = await getActiveRun();
+      setHarvestRunning(Boolean(res?.active));
+    } catch {
+      // Backend unreachable — leave the flag as-is; HealthBadge surfaces the outage.
+    }
+  }, []);
+
   useEffect(() => { fetchJobs(); }, [fetchJobs]);
   useEffect(() => { fetchRuns(); }, [fetchRuns]);
+  useEffect(() => {
+    syncActiveRun();
+    const onFocus = () => syncActiveRun();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [syncActiveRun]);
 
   if (activePage === "rules") {
     return (

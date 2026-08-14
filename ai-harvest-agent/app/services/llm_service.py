@@ -12,10 +12,15 @@ from typing import Any
 import anthropic
 import httpx
 import structlog
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import (
+    retry,
+    retry_if_not_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from app.config import Settings
-from app.core.exceptions import LLMError
+from app.core.exceptions import LLMError, LLMUnavailableError
 
 logger = structlog.get_logger(__name__)
 
@@ -263,6 +268,8 @@ class LLMService:
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
+        # Don't burn retries on a provider that's down/misconfigured — fail fast.
+        retry=retry_if_not_exception_type(LLMUnavailableError),
         reraise=True,
         after=_track_attempt,
     )
@@ -298,7 +305,9 @@ class LLMService:
             )
             return response
         except anthropic.APIError as exc:
-            raise LLMError(f"Anthropic API error: {exc}") from exc
+            # Provider-level failure — surface the raw Anthropic error and stop
+            # everything that depends on the LLM (see LLMUnavailableError).
+            raise LLMUnavailableError(f"Anthropic API error: {exc}") from exc
 
     async def complete_text(self, prompt: str, system: str = "", model: str | None = None) -> str:
         """Convenience wrapper returning plain text."""
@@ -346,9 +355,22 @@ class LLMService:
             return _PROVIDER_OPENROUTER, raw.split("/", 1)[1]
         return _PROVIDER_OLLAMA, raw
 
+    def _local_llm_unavailable_msg(self, model: str, url: str, reason: str) -> str:
+        """Admin-facing message for a down/misconfigured local LLM. Names the
+        configured LOCAL_LLM_MODEL (self._local_llm_model) so ops know exactly
+        which server/model to check; falls back to the resolved model id."""
+        name = self._local_llm_model or model
+        return (
+            f"Local LLM '{name}' at {url} is unavailable ({reason}) — the server "
+            f"may be shut down or misconfigured. Contact the admin team."
+        )
+
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
+        # A down/misconfigured local server won't recover within the backoff —
+        # fail fast instead of retrying (esp. the 300s timeout, 3×).
+        retry=retry_if_not_exception_type(LLMUnavailableError),
         reraise=True,
         after=_track_attempt,
     )
@@ -371,16 +393,20 @@ class LLMService:
             response.raise_for_status()
         except httpx.ConnectError as exc:
             logger.error("local_llm_connection_failed", url=url, model=model, error=str(exc))
-            raise LLMError(f"Local LLM unreachable at {url}: {exc}") from exc
+            raise LLMUnavailableError(self._local_llm_unavailable_msg(model, url, "connection refused")) from exc
         except httpx.TimeoutException as exc:
             logger.error("local_llm_timeout", url=url, model=model, timeout_s=_LOCAL_LLM_TIMEOUT_S)
-            raise LLMError(f"Local LLM ({model}) at {url} timed out after {_LOCAL_LLM_TIMEOUT_S}s") from exc
+            raise LLMUnavailableError(
+                self._local_llm_unavailable_msg(model, url, f"timed out after {_LOCAL_LLM_TIMEOUT_S}s")
+            ) from exc
         except httpx.HTTPStatusError as exc:
             logger.error(
                 "local_llm_http_error", url=url, model=model,
                 status=exc.response.status_code, body=exc.response.text[:300],
             )
-            raise LLMError(f"Local LLM returned HTTP {exc.response.status_code}: {exc.response.text[:300]}") from exc
+            raise LLMUnavailableError(
+                self._local_llm_unavailable_msg(model, url, f"HTTP {exc.response.status_code}")
+            ) from exc
 
         data = response.json()
         prompt_eval_count = data.get("prompt_eval_count", 0)
@@ -396,6 +422,8 @@ class LLMService:
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
+        # Provider down/unavailable → fail fast rather than retrying.
+        retry=retry_if_not_exception_type(LLMUnavailableError),
         reraise=True,
         after=_track_attempt,
     )
@@ -403,7 +431,7 @@ class LLMService:
         """Call an OpenRouter chat-completions model (OpenAI-compatible REST API).
         Returns (text, prompt_tokens, completion_tokens)."""
         if not self._openrouter_api_key:
-            raise LLMError("OpenRouter extraction requested but OPENROUTER_API_KEY is not set")
+            raise LLMUnavailableError("OpenRouter extraction requested but OPENROUTER_API_KEY is not set")
 
         messages: list[dict[str, str]] = []
         if system:
@@ -427,16 +455,18 @@ class LLMService:
             response.raise_for_status()
         except httpx.ConnectError as exc:
             logger.error("openrouter_connection_failed", model=model, error=str(exc))
-            raise LLMError(f"OpenRouter unreachable: {exc}") from exc
+            raise LLMUnavailableError(f"OpenRouter unreachable: {exc}") from exc
         except httpx.TimeoutException as exc:
             logger.error("openrouter_timeout", model=model, timeout_s=_OPENROUTER_TIMEOUT_S)
-            raise LLMError(f"OpenRouter ({model}) timed out after {_OPENROUTER_TIMEOUT_S}s") from exc
+            raise LLMUnavailableError(f"OpenRouter ({model}) timed out after {_OPENROUTER_TIMEOUT_S}s") from exc
         except httpx.HTTPStatusError as exc:
             logger.error(
                 "openrouter_http_error", model=model,
                 status=exc.response.status_code, body=exc.response.text[:300],
             )
-            raise LLMError(f"OpenRouter returned HTTP {exc.response.status_code}: {exc.response.text[:300]}") from exc
+            raise LLMUnavailableError(
+                f"OpenRouter returned HTTP {exc.response.status_code}: {exc.response.text[:300]}"
+            ) from exc
 
         data = response.json()
         if data.get("error"):
@@ -444,7 +474,7 @@ class LLMService:
             # requested model/provider is unavailable) — surface it as a failure
             # rather than passing an empty completion on to JSON parsing.
             logger.error("openrouter_inline_error", model=model, error=data["error"])
-            raise LLMError(f"OpenRouter error: {data['error']}")
+            raise LLMUnavailableError(f"OpenRouter error: {data['error']}")
 
         choices = data.get("choices") or []
         text = choices[0]["message"].get("content", "") if choices else ""

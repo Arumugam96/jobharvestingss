@@ -76,6 +76,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # own one-time, idempotent ADD COLUMN here.
         await conn.run_sync(_ensure_scraped_jobs_recruiter_id_column)
 
+    # Reconcile stale 'running' runs left by a previous process (a harvest runs
+    # in a detached task that doesn't survive a restart). Without this, the
+    # single-flight guard's DB backstop would treat a dead run as active and
+    # reject every new start with 409. Best-effort — never block startup.
+    try:
+        from app.services.harvest_run_service import HarvestRunService, db_write
+        stale = await db_write(lambda db: HarvestRunService(db).fail_stale_running())
+        if stale:
+            logger.info("stale_running_runs_reconciled", count=stale)
+    except Exception as exc:
+        logger.warning("stale_run_reconcile_failed", error=str(exc))
+
     # ── Playwright pool (optional — demo routes create their own browser) ─────
     # On Windows with --reload, uvicorn forces SelectorEventLoop which cannot
     # spawn Playwright's browser subprocess.  The pool is skipped gracefully;

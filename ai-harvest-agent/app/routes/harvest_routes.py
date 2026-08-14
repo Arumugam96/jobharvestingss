@@ -22,6 +22,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from app.agents.orchestrator_agent import OrchestratorAgent
 from app.core.proactor import needs_proactor, run_in_proactor
+from app.services import run_guard
 from app.models.harvest_models import HarvestConfig
 from app.models.response_models import (
     HarvestFiltersSnapshot,
@@ -266,6 +267,16 @@ async def _apply_schedule(scheduler, config: HarvestConfig) -> None:
     async def _auto_harvest() -> None:
         cfg     = _config_svc.load()
         run_id  = _make_run_id(cfg.filters.keyword, cfg.filters.location)
+
+        # Single-flight: an unattended scheduled tick must NOT collide with an
+        # in-progress manual run (same Chrome profile). Skip this tick if a run
+        # is already active rather than failing both.
+        conflict = await run_guard.check_conflict()
+        if conflict is not None:
+            logger.warning("scheduled_harvest_skipped_run_in_progress", run_id=run_id, active=conflict)
+            return
+        run_guard.begin(None, run_id, None)
+
         orch    = OrchestratorAgent(cfg)
         try:
             # wait_for_login=False: this is an unattended scheduled run — no
@@ -292,6 +303,8 @@ async def _apply_schedule(scheduler, config: HarvestConfig) -> None:
                 error      = str(exc),
             )
             return
+        finally:
+            run_guard.end()
 
         status_str = "success" if result.total_jobs else "no_results"
         logger.info("scheduled_harvest_complete", run_id=run_id, total=result.total_jobs)

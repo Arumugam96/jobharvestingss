@@ -44,6 +44,7 @@ from pydantic import BaseModel
 
 from app.agents.orchestrator_agent import OrchestratorAgent, OrchestratorResult
 from app.config import get_settings
+from app.core.exceptions import JobAlreadyRunningError, LLMUnavailableError
 from app.core.proactor import needs_proactor, run_in_proactor
 from app.models.harvest_run import HarvestRunORM
 from app.services.config_service import ConfigService
@@ -56,6 +57,7 @@ from app.services.harvest_run_service import (
     db_write,
     resolve_read,
 )
+from app.services import run_guard
 from app.services.job_tracker import JobTracker
 from app.services.report_service import merged_job_dicts
 from app.services.run_history_service import RunHistoryService
@@ -166,6 +168,22 @@ async def _run_harvest_background(
     enabled:  list[str],
     run_pk:   str | None = None,
 ) -> None:
+    """Background entry point — releases the single-flight guard no matter how
+    the run ends (success, LLM outage, or unexpected failure)."""
+    try:
+        await _run_harvest_background_impl(job_id, run_id, config, now_iso, enabled, run_pk)
+    finally:
+        run_guard.end()
+
+
+async def _run_harvest_background_impl(
+    job_id:   str,
+    run_id:   str,
+    config:   Any,
+    now_iso:  str,
+    enabled:  list[str],
+    run_pk:   str | None = None,
+) -> None:
     """Runs the full harvest in a background asyncio task, updating JobTracker."""
     log = logger.bind(job_id=job_id, run_id=run_id, sources=enabled)
     log.info("harvest_background_start")
@@ -193,6 +211,64 @@ async def _run_harvest_background(
             )
         else:
             result = await orch.run_all(wait_for_login=True, on_status=_on_status)
+    except LLMUnavailableError as exc:
+        # The extraction LLM went down mid-run. Per product requirement: stop
+        # the whole scrape, surface the provider error verbatim (the local-LLM
+        # message names LOCAL_LLM_MODEL + "contact the admin team"), but KEEP
+        # whatever jobs were scraped before the outage.
+        err_msg = exc.message
+        log.error("harvest_background_llm_unavailable", error=err_msg)
+        partial: OrchestratorResult | None = getattr(exc, "partial_result", None)
+
+        if run_pk and partial is not None:
+            if partial.all_jobs:
+                scraped_dicts = [j.to_dict() for j in partial.all_jobs]
+                await db_write(lambda db: HarvestRunService(db).bulk_insert_scraped_jobs(run_pk, scraped_dicts))
+            if partial.llm_calls:
+                await db_write(lambda db: HarvestRunService(db).bulk_insert_llm_calls(run_pk, partial.llm_calls))
+
+        partial_count = partial.total_jobs if partial is not None else 0
+        _history_svc.append(
+            RunHistoryService.make_entry(
+                run_id       = run_id,
+                sources      = enabled,
+                started_at   = datetime.now(timezone.utc),
+                completed_at = datetime.now(timezone.utc),
+                status       = "failed",
+                jobs_found   = partial_count,
+                error        = err_msg,
+            )
+        )
+        JobTracker.update(
+            job_id,
+            status       = "failed",
+            progress     = 100,
+            message      = "LLM unavailable — scraping stopped",
+            error        = err_msg,
+            combined     = partial_count,
+            completed_at = datetime.now(timezone.utc).isoformat(),
+        )
+        if run_pk:
+            await db_write(lambda db: HarvestRunService(db).update_run(
+                run_pk,
+                status         = "failed",
+                progress       = 100,
+                message        = "LLM unavailable — scraping stopped",
+                error          = err_msg,
+                combined_count = partial_count,
+                completed_at   = datetime.now(timezone.utc),
+            ))
+
+        await send_harvest_report(
+            EmailSender(get_settings()),
+            config.notifications,
+            run_id     = run_id,
+            status     = "failed",
+            total_jobs = partial_count,
+            sources    = enabled,
+            error      = err_msg,
+        )
+        return
     except Exception as exc:
         log.exception("harvest_background_error", error=str(exc))
         _history_svc.append(
@@ -396,7 +472,13 @@ async def run_harvest_agent(body: HarvestAgentRequest = HarvestAgentRequest()) -
             "Enable at least one source (linkedin, naukri, or dice) in harvest_config.json",
         )
 
+    # ── Single-flight: reject if a harvest is already running ─────────────────
+    conflict = await run_guard.check_conflict()
+    if conflict is not None:
+        raise JobAlreadyRunningError(conflict.get("job_id") or "", details=conflict)
+
     job_id = uuid4().hex
+    run_guard.begin(job_id, run_id, None)
     JobTracker.create(job_id, run_id)
 
     run_pk = await db_write(lambda db: HarvestRunService(db).create_run(
@@ -431,6 +513,25 @@ async def run_harvest_agent(body: HarvestAgentRequest = HarvestAgentRequest()) -
             "message": "Harvest started in background — poll GET /harvest-status/{job_id}",
         },
     )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# GET /active-run
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/active-run", status_code=status.HTTP_200_OK)
+async def get_active_run() -> Any:
+    """Whether a harvest is currently running (any source). The frontend calls
+    this on load and after a run ends to freeze/unfreeze its Run controls, so a
+    second browser tab reflects a run started elsewhere. Cheap: no polling loop
+    needed, single indexed lookup."""
+    conflict = await run_guard.check_conflict()
+    return {
+        "active": conflict is not None,
+        "job_id": (conflict or {}).get("job_id"),
+        "run_id": (conflict or {}).get("run_id"),
+        "source": (conflict or {}).get("source"),
+    }
 
 
 # ══════════════════════════════════════════════════════════════════════════════

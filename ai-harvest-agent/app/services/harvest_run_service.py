@@ -16,6 +16,7 @@ from typing import Any, Awaitable, Callable, TypeVar
 import structlog
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import noload
 
 from app.config import get_settings
 from app.core.dependencies import get_session_factory
@@ -246,6 +247,36 @@ class HarvestRunService:
         stmt = stmt.order_by(HarvestRunORM.created_at.desc()).limit(limit)
         result = await self._db.execute(stmt)
         return list(result.scalars())
+
+    async def fail_stale_running(self, message: str = "Interrupted by a server restart") -> int:
+        """Mark every still-'running' run as 'failed'. A harvest executes in a
+        detached asyncio task that does NOT survive a process restart, so any
+        row left 'running' at startup is stale. Without this the single-flight
+        guard's DB backstop (get_active_run) would see a dead run and reject
+        every new start with 409 forever. Mirrors JobTracker.load_from_disk's
+        in-memory reconciliation. Returns the number of rows updated."""
+        result = await self._db.execute(
+            update(HarvestRunORM)
+            .where(HarvestRunORM.status == "running")
+            .values(status="failed", message=message, error=message, progress=100)
+        )
+        return result.rowcount or 0
+
+    async def get_active_run(self) -> HarvestRunORM | None:
+        """The most-recent still-running harvest (any source, orchestrator or
+        standalone), or None. Backs the single-flight guard: Playwright can't
+        drive the same Chrome profile from two runs at once, so a second start
+        while this returns non-None must be rejected. This is the cross-process
+        backstop to the in-process asyncio.Lock in the start routes."""
+        stmt = (
+            select(HarvestRunORM)
+            .options(noload(HarvestRunORM.jobs))  # guard only needs identity — don't load child jobs
+            .where(HarvestRunORM.status == "running")
+            .order_by(HarvestRunORM.started_at.desc())
+            .limit(1)
+        )
+        result = await self._db.execute(stmt)
+        return result.scalars().first()
 
     async def list_scraped_jobs(
         self,

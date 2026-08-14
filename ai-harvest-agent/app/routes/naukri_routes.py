@@ -20,6 +20,7 @@ from fastapi.responses import JSONResponse
 
 from app.agents.naukri_agent import NaukriAgent, NaukriScrapedJob
 from app.core.proactor import needs_proactor, run_in_proactor
+from app.services import run_guard
 
 from app.models.harvest_run import HarvestRunORM, ScrapedJobORM
 from app.models.response_models import NaukriJob, NaukriRunResponse
@@ -156,24 +157,26 @@ async def run_naukri_agent() -> Any:
             slow_mo  = config.browser.slow_mo_ms,
         )
 
-    try:
-        if needs_proactor():
-            log.debug("using_proactor_thread")
-            scraped: list[NaukriScrapedJob] = await run_in_proactor(_do_harvest)
-        else:
-            scraped = await _do_harvest()
+    # Single-flight: reject if a harvest is already running (raises 409).
+    async with run_guard.single_flight(run_id, "Naukri"):
+        try:
+            if needs_proactor():
+                log.debug("using_proactor_thread")
+                scraped: list[NaukriScrapedJob] = await run_in_proactor(_do_harvest)
+            else:
+                scraped = await _do_harvest()
 
-    except RuntimeError as exc:
-        err_lower = str(exc).lower()
-        if "login" in err_lower or "failed" in err_lower:
-            log.error("naukri_login_failed", error=str(exc))
-            return _err("Naukri login failed", "naukri_login_failed")
-        log.exception("naukri_harvest_error", error=str(exc))
-        return _err("Naukri harvest failed", str(exc))
+        except RuntimeError as exc:
+            err_lower = str(exc).lower()
+            if "login" in err_lower or "failed" in err_lower:
+                log.error("naukri_login_failed", error=str(exc))
+                return _err("Naukri login failed", "naukri_login_failed")
+            log.exception("naukri_harvest_error", error=str(exc))
+            return _err("Naukri harvest failed", str(exc))
 
-    except Exception as exc:
-        log.exception("naukri_harvest_error", error=str(exc))
-        return _err("Naukri harvest failed", str(exc) or "Unexpected error during scraping")
+        except Exception as exc:
+            log.exception("naukri_harvest_error", error=str(exc))
+            return _err("Naukri harvest failed", str(exc) or "Unexpected error during scraping")
 
     log.info("naukri_jobs_extracted", total=len(scraped))
 

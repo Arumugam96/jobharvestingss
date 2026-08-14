@@ -39,6 +39,7 @@ from app.agents.linkedin_agent import (
     LinkedInLoginError,
     LinkedInScrapedJob,
 )
+from app.core.exceptions import LLMUnavailableError
 from app.models.harvest_models import HarvestConfig
 from app.models.response_models import HarvestJob
 from app.models.unified_job import UnifiedJob
@@ -63,9 +64,15 @@ def _filter_by_date_window(jobs: list[UnifiedJob], window_hours: int) -> list[Un
     cutoff = datetime.now(timezone.utc).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
-    # For windows < 48 h we allow today only; for longer windows we go back N calendar days.
+    # Go back ceil(window_hours/24) whole calendar days from today's UTC midnight.
+    # We deliberately allow one extra calendar day beyond the strict window: this
+    # is a calendar-DATE comparison, and boards report coarse, day-granular dates
+    # (LinkedIn's "1 day ago" resolves to *yesterday*), so a job well inside a
+    # rolling 24h window routinely lands on yesterday's date. Without the extra
+    # day, a 24h window meant "posted today (UTC)" and silently dropped genuinely
+    # recent jobs that the board's own time filter had already included.
     import math
-    extra_days = max(0, math.ceil(window_hours / 24) - 1)
+    extra_days = math.ceil(window_hours / 24)
     from datetime import timedelta
     cutoff = cutoff - timedelta(days=extra_days)
 
@@ -347,9 +354,33 @@ class OrchestratorAgent:
         result      = OrchestratorResult(started_at=started_at)
 
         # ── Step 1: collect raw jobs from all enabled sources ─────────────────
-        raw_by_source, result.token_usage, result.llm_calls = await self._collect_all(
-            config, wait_for_login=wait_for_login, on_status=on_status
-        )
+        try:
+            raw_by_source, result.token_usage, result.llm_calls = await self._collect_all(
+                config, wait_for_login=wait_for_login, on_status=on_status
+            )
+        except LLMUnavailableError as exc:
+            # The extraction LLM went down mid-scrape. Keep whatever was
+            # collected (unprocessed — we skip dedup/classify/verify since the
+            # run is failing anyway) so the caller can persist the partial
+            # harvest, then re-raise to mark the run failed.
+            from app.services.llm_service import empty_usage_summary
+
+            result.token_usage = getattr(exc, "partial_token_usage", None) or empty_usage_summary()
+            result.llm_calls   = getattr(exc, "partial_llm_calls", None) or []
+            partial_raw        = getattr(exc, "partial_raw", None) or {}
+            partial_jobs: list[UnifiedJob] = []
+            for source, jobs in partial_raw.items():
+                result.sources_executed.append(source)
+                partial_jobs.extend(jobs)
+            result.jobs_by_source = dict(partial_raw)
+            result.all_jobs       = partial_jobs
+            result.completed_at   = datetime.now(timezone.utc)
+            exc.partial_result    = result
+            logger.error(
+                "orchestrator_run_aborted_llm_unavailable",
+                error=str(exc), partial_jobs=len(partial_jobs),
+            )
+            raise
 
         # ── Step 2: convert to UnifiedJob ─────────────────────────────────────
         all_unified: list[UnifiedJob] = []
@@ -674,6 +705,11 @@ class OrchestratorAgent:
                         note="LinkedIn skipped; other sources are retained",
                     )
                     return "LinkedIn", []
+                except LLMUnavailableError:
+                    # Extraction LLM is down — do NOT downgrade to an empty
+                    # source; let it propagate so _collect_all halts the whole
+                    # run (all sources), per product requirement.
+                    raise
                 except Exception as exc:
                     logger.exception(
                         "orchestrator_linkedin_error", error=str(exc),
@@ -705,15 +741,43 @@ class OrchestratorAgent:
             }
 
             # ── Launch all enabled sources concurrently ────────────────────────
-            coros   = [_RUNNERS[src](pages[src]) for src in enabled]
-            gathered = await asyncio.gather(*coros, return_exceptions=True)
+            # FIRST_EXCEPTION (not gather-return_exceptions) so an
+            # LLMUnavailableError escaping any source stops the wait immediately;
+            # benign per-source failures are already caught inside each runner
+            # (returned as ("Source", [])), so the only thing that can raise here
+            # is a fatal LLM outage — which must halt the *entire* scrape.
+            tasks = [
+                asyncio.ensure_future(_RUNNERS[src](pages[src]))
+                for src in enabled
+            ]
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
 
-            for item in gathered:
-                if isinstance(item, Exception):
-                    logger.exception("orchestrator_source_unexpected_exception", error=str(item))
-                elif item:
-                    source_name, unified_jobs = item
-                    results[source_name] = unified_jobs
+            fatal: LLMUnavailableError | None = None
+            for task in done:
+                exc = task.exception()
+                if exc is None:
+                    item = task.result()
+                    if item:
+                        source_name, unified_jobs = item
+                        results[source_name] = unified_jobs
+                elif isinstance(exc, LLMUnavailableError):
+                    fatal = exc
+                else:
+                    logger.exception("orchestrator_source_unexpected_exception", error=str(exc))
+
+            if fatal is not None:
+                # Stop all still-running sources — the LLM they'd fall back on
+                # is down, so there's nothing to wait for.
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
+                logger.error(
+                    "orchestrator_llm_unavailable_abort",
+                    error=str(fatal),
+                    partial_sources={k: len(v) for k, v in results.items()},
+                    note="LLM provider down — all scraping stopped",
+                )
 
         # ── Log batch_saved events every 100 jobs across combined list ─────────
         all_so_far = [j for jobs in results.values() for j in jobs]
@@ -738,5 +802,15 @@ class OrchestratorAgent:
             else []
         )
         logger.info("orchestrator_token_usage", **token_usage["total"])
+
+        if fatal is not None:
+            # Carry the partial harvest + usage/audit out on the exception so the
+            # caller (run_all → _run_harvest_background) can persist what was
+            # scraped before the outage and record the failing LLM call, then
+            # mark the run failed with the provider message.
+            fatal.partial_raw = results
+            fatal.partial_token_usage = token_usage
+            fatal.partial_llm_calls = llm_calls
+            raise fatal
 
         return results, token_usage, llm_calls
