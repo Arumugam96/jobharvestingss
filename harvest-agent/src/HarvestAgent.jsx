@@ -50,7 +50,7 @@ const ThemeStyles = () => (
     .ha-nav-active{background:rgba(37,99,235,.28);color:#fff;box-shadow:inset 0 0 0 1px rgba(37,99,235,.55);}
     .ha-badge{background:${C.accent};color:#1E293B;border-radius:999px;padding:2px 8px;font-size:12px;font-weight:700;}
     .ha-card{background:#fff;border:1px solid ${C.border};border-radius:12px;box-shadow:0 1px 2px rgba(15,23,42,.04);}
-    .ha-input{border:1px solid #CBD5E1;background:#fff;color:${C.text};border-radius:8px;font-size:14px;}
+    .ha-input{box-sizing:border-box;height:38px;padding:0 12px;border:1px solid #CBD5E1;background:#fff;color:${C.text};border-radius:8px;font-size:14px;}
     .ha-input:focus{outline:none;border-color:${C.primary};box-shadow:0 0 0 2px rgba(37,99,235,.25);}
     .ha-btn{display:inline-flex;align-items:center;gap:8px;border-radius:8px;padding:8px 16px;font-size:14px;cursor:pointer;transition:.15s;}
     .ha-btn-primary{border:0;font-weight:600;background:${C.primary};color:#fff;box-shadow:0 2px 6px rgba(37,99,235,.35);}
@@ -73,7 +73,14 @@ const ThemeStyles = () => (
     .ha-link{color:${C.primary};font-weight:600;background:none;border:0;padding:0;cursor:pointer;font-size:inherit;font-family:inherit;}
     .ha-statnum{font-size:30px;font-weight:700;line-height:1;}
     .ha-statlbl{margin-top:8px;font-size:14px;color:${C.textSoft};}
-    .ha-select{padding:6px 12px;}
+    .ha-select{cursor:pointer;flex:1 1 auto;min-width:0;box-sizing:border-box;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+    .ha-filterbar{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px 16px;align-items:center;width:100%;max-width:100%;box-sizing:border-box;}
+    .ha-daterow{display:flex;flex-wrap:wrap;align-items:center;gap:12px;max-width:100%;box-sizing:border-box;}
+    .ha-filter-field{display:flex;align-items:center;gap:8px;width:100%;min-width:0;box-sizing:border-box;}
+    .ha-filter-field>span{font-size:14px;font-weight:500;color:${C.textSoft};white-space:nowrap;flex-shrink:0;}
+    .ha-filter-search{position:relative;min-width:0;box-sizing:border-box;grid-column:1/-1;}
+    .ha-filter-search .ha-input{width:100%;min-width:0;max-width:100%;padding-left:34px;box-sizing:border-box;}
+    .ha-filter-search svg{position:absolute;left:10px;top:50%;transform:translateY(-50%);color:#94A3B8;pointer-events:none;}
     .ha-pill{display:inline-block;border-radius:6px;padding:2px 10px;font-size:12px;font-weight:600;}
     .ha-act{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:8px;border:1px solid ${C.border};background:#fff;color:${C.textSoft};cursor:pointer;transition:.15s;}
     .ha-act:hover{border-color:${C.primary};color:${C.primary};background:${C.pale};}
@@ -90,7 +97,7 @@ const ThemeStyles = () => (
     .ha-errbanner{background:#FEF2F2;border:1px solid #FCA5A5;color:#B91C1C;border-radius:10px;padding:10px 16px;font-size:13px;font-weight:500;}
     .ha-breakdown{display:flex;flex-wrap:wrap;gap:6px;font-size:12px;color:${C.textSoft};}
     .ha-breakdown b{color:${C.text};}
-    .ha-detail-page{padding:24px;max-width:900px;}
+    .ha-detail-page{padding:24px;width:100%;box-sizing:border-box;}
     .ha-detail-back{display:inline-flex;align-items:center;gap:7px;cursor:pointer;background:#fff;border:1px solid ${C.border};color:#334155;font-size:13px;font-weight:600;padding:8px 14px;border-radius:8px;margin-bottom:18px;}
     .ha-detail-back:hover{background:#F1F5F9;}
     .ha-detail-card{background:#fff;border:1px solid ${C.border};border-radius:14px;padding:24px;margin-bottom:16px;}
@@ -217,8 +224,8 @@ const PlainHeader = ({ label, align = "left", width }) => (
 
 function Select({ label, value, onChange, options }) {
   return (
-    <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 14, color: C.textSoft }}>
-      <span style={{ fontWeight: 500 }}>{label}</span>
+    <label className="ha-filter-field">
+      <span>{label}</span>
       <select className="ha-input ha-select" value={value} onChange={(e) => onChange(e.target.value)}>
         {options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
       </select>
@@ -426,13 +433,13 @@ function JobsPage({ jobs, total, loading, error, onRefresh, onNavigate, onView }
       <div style={{ display: "flex", flexDirection: "column", gap: 16, padding: 24 }}>
         {error && <div className="ha-errbanner">{error}</div>}
 
-        <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 12 }}>
+        <div className="ha-daterow">
           <span style={{ fontSize: 14, fontWeight: 600, color: C.text }}>Posted between</span>
-          <input type="date" className="ha-input" style={{ padding: "7px 10px" }} value={startDate} onChange={(e) => setStartDate(e.target.value)} />
+          <input type="date" className="ha-input" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
           <span style={{ color: C.textSoft }}>to</span>
-          <input type="date" className="ha-input" style={{ padding: "7px 10px" }} value={endDate} onChange={(e) => setEndDate(e.target.value)} />
+          <input type="date" className="ha-input" value={endDate} onChange={(e) => setEndDate(e.target.value)} />
           {(startDate || endDate) && (
-            <button className="ha-btn ha-btn-secondary" style={{ padding: "6px 12px" }} onClick={() => { setStartDate(""); setEndDate(""); }}>Clear dates</button>
+            <button className="ha-btn ha-btn-secondary" style={{ height: 38, boxSizing: "border-box", padding: "0 14px" }} onClick={() => { setStartDate(""); setEndDate(""); }}>Clear dates</button>
           )}
         </div>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 16 }}>
@@ -441,7 +448,7 @@ function JobsPage({ jobs, total, loading, error, onRefresh, onNavigate, onView }
           <StatCard value={counts.pocs} label="POCs identified" color={C.primary} />
         </div>
 
-        <div className="ha-card" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 16, padding: "16px 20px" }}>
+        <div className="ha-card ha-filterbar" style={{ padding: "16px 20px", gridTemplateColumns: "repeat(4, minmax(0, 1fr))" }}>
           <Select label="Company" value={filters.company} onChange={(v) => setFilters((f) => ({ ...f, company: v }))}
             options={[{ value: "all", label: "All" }, ...companies.map((c) => ({ value: c, label: c }))]} />
           <Select label="Contact" value={filters.contact} onChange={(v) => setFilters((f) => ({ ...f, contact: v }))}
@@ -450,11 +457,9 @@ function JobsPage({ jobs, total, loading, error, onRefresh, onNavigate, onView }
             options={[{ value: "all", label: "All" }, ...jobTitles.map((t) => ({ value: t, label: t }))]} />
           <Select label="POC" value={filters.poc} onChange={(v) => setFilters((f) => ({ ...f, poc: v }))}
             options={[{ value: "all", label: "All" }, ...pocNames.map((p) => ({ value: p, label: p }))]} />
-          <div style={{ position: "relative", marginLeft: "auto", minWidth: 220, flex: 1 }}>
-            <span style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: "#94A3B8", display: "flex" }}>
-              <Search size={16} />
-            </span>
-            <input className="ha-input" style={{ width: "100%", padding: "8px 12px 8px 34px" }} value={query}
+          <div className="ha-filter-search">
+            <Search size={16} />
+            <input className="ha-input" value={query}
               onChange={(e) => setQuery(e.target.value)} placeholder="Search…" />
           </div>
         </div>
@@ -605,13 +610,13 @@ function RunHistoryPage({ runs, loading, error, onRefresh, onNavigate, onView })
       <div style={{ display: "flex", flexDirection: "column", gap: 16, padding: 24 }}>
         {error && <div className="ha-errbanner">{error}</div>}
 
-        <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 12 }}>
+        <div className="ha-daterow">
           <span style={{ fontSize: 14, fontWeight: 600, color: C.text }}>Started between</span>
-          <input type="date" className="ha-input" style={{ padding: "7px 10px" }} value={startDate} onChange={(e) => setStartDate(e.target.value)} />
+          <input type="date" className="ha-input" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
           <span style={{ color: C.textSoft }}>to</span>
-          <input type="date" className="ha-input" style={{ padding: "7px 10px" }} value={endDate} onChange={(e) => setEndDate(e.target.value)} />
+          <input type="date" className="ha-input" value={endDate} onChange={(e) => setEndDate(e.target.value)} />
           {(startDate || endDate) && (
-            <button className="ha-btn ha-btn-secondary" style={{ padding: "6px 12px" }} onClick={() => { setStartDate(""); setEndDate(""); }}>Clear dates</button>
+            <button className="ha-btn ha-btn-secondary" style={{ height: 38, boxSizing: "border-box", padding: "0 14px" }} onClick={() => { setStartDate(""); setEndDate(""); }}>Clear dates</button>
           )}
         </div>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 16 }}>
@@ -620,23 +625,21 @@ function RunHistoryPage({ runs, loading, error, onRefresh, onNavigate, onView })
           <StatCard value={counts.directClients} label="Direct clients" color={C.primary} />
         </div>
 
-        <div className="ha-card" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 16, padding: "16px 20px" }}>
+        <div className="ha-card ha-filterbar" style={{ padding: "16px 20px", gridTemplateColumns: "repeat(2, minmax(0, 1fr))" }}>
           <Select label="Source" value={filters.source} onChange={(v) => setFilters((f) => ({ ...f, source: v }))}
             options={[{ value: "all", label: "All" }, { value: "linkedin", label: "LinkedIn" }, { value: "naukri", label: "Naukri" }, { value: "dice", label: "Dice" }]} />
           <Select label="Status" value={filters.status} onChange={(v) => setFilters((f) => ({ ...f, status: v }))}
             options={[{ value: "all", label: "All" }, { value: "success", label: "Success" }, { value: "no_results", label: "No results" }, { value: "failed", label: "Failed" }, { value: "running", label: "Running" }]} />
-          <div style={{ position: "relative", marginLeft: "auto", minWidth: 220, flex: 1 }}>
-            <span style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: "#94A3B8", display: "flex" }}>
-              <Search size={16} />
-            </span>
-            <input className="ha-input" style={{ width: "100%", padding: "8px 12px 8px 34px" }} value={query}
+          <div className="ha-filter-search">
+            <Search size={16} />
+            <input className="ha-input" value={query}
               onChange={(e) => setQuery(e.target.value)} placeholder="Search run ID…" />
           </div>
         </div>
 
         <div className="ha-card" style={{ overflow: "hidden" }}>
           <div className="ha-table-scroll">
-            <table className="ha-table" style={{ minWidth: 1190,}}>
+            <table className="ha-table" style={{ minWidth: 1100 }}>
               <thead className="ha-thead">
                 <tr>
                   <SortHeader label="Run ID" col="runId" sort={sort} setSort={setSort} width={190} />
@@ -646,12 +649,11 @@ function RunHistoryPage({ runs, loading, error, onRefresh, onNavigate, onView })
                   <SortHeader label="Completed" col="completed" sort={sort} setSort={setSort} width={150} />
                   <SortHeader label="Jobs found" col="jobsFound" sort={sort} setSort={setSort} width={100} />
                   <PlainHeader label="Breakdown" width={220} />
-                  <PlainHeader label="Action" align="center" width={90} />
                 </tr>
               </thead>
               <tbody>
                 {loading && (
-                  <tr><td className="ha-td" colSpan={8} style={{ textAlign: "center", padding: "48px 16px", color: "#94A3B8" }}>
+                  <tr><td className="ha-td" colSpan={7} style={{ textAlign: "center", padding: "48px 16px", color: "#94A3B8" }}>
                     Loading run history…
                   </td></tr>
                 )}
@@ -675,15 +677,10 @@ function RunHistoryPage({ runs, loading, error, onRefresh, onNavigate, onView })
                         <span><b>{r.ambiguous}</b> Amb</span>
                       </div>
                     </td>
-                    <td className="ha-td">
-                      <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
-                        <button className="ha-act" title="View" onClick={() => onView(r.runId)}><Eye size={16} /></button>
-                      </div>
-                    </td>
                   </tr>
                 ))}
                 {!loading && !error && filtered.length === 0 && (
-                  <tr><td className="ha-td" colSpan={8} style={{ textAlign: "center", padding: "48px 16px", color: "#94A3B8" }}>
+                  <tr><td className="ha-td" colSpan={7} style={{ textAlign: "center", padding: "48px 16px", color: "#94A3B8" }}>
                     No runs match your search. Trigger a harvest from the Rule Engine to see history here.
                   </td></tr>
                 )}
