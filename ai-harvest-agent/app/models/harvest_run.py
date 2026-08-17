@@ -80,6 +80,11 @@ class ScrapedJobORM(Base):
     hiring_entity: Mapped[str] = mapped_column(String(50), nullable=False, default="Any")
     is_gcc: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     verification_status: Mapped[str] = mapped_column(String(30), nullable=False, default="pending")
+    # BusinessFilterService annotation — the filter no longer removes jobs, it
+    # flags them. passed_filter=False means the job failed a filter rule but is
+    # still retained/shown; filter_reason records the first failing stage+value.
+    passed_filter: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    filter_reason: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     job_poster_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     job_poster_designation: Mapped[str | None] = mapped_column(String(255), nullable=True)
     linkedin_profile_url: Mapped[str | None] = mapped_column(Text, nullable=True)

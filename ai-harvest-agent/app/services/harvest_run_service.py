@@ -10,7 +10,7 @@ what the frontend-facing GET endpoints read from.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, TypeVar
 
 import structlog
@@ -187,6 +187,8 @@ class HarvestRunService:
                     hiring_entity=j.get("hiring_entity", "Any"),
                     is_gcc=j.get("is_gcc", False),
                     verification_status=j.get("verification_status", "pending"),
+                    passed_filter=j.get("passed_filter", True),
+                    filter_reason=j.get("filter_reason", ""),
                     job_poster_name=j.get("job_poster_name"),
                     job_poster_designation=j.get("job_poster_designation"),
                     linkedin_profile_url=j.get("linkedin_profile_url"),
@@ -277,6 +279,23 @@ class HarvestRunService:
         )
         result = await self._db.execute(stmt)
         return result.scalars().first()
+
+    async def jobs_scraped_today(self) -> int:
+        """Total jobs harvested across all runs since UTC midnight — backs the
+        global daily cap (MAX_JOBS_PER_DAY). Sums `combined_count` (the deduped
+        per-run total), which is written at run completion, so this reflects
+        finished runs; the single-flight guard ensures the prior run has ended
+        (and been counted) before a new one can start. `created_at` is used
+        (never null); the boundary is naive UTC midnight to match SQLite's
+        naive-UTC storage of the column."""
+        start = datetime.now(timezone.utc).replace(
+            hour=0, minute=0, second=0, microsecond=0, tzinfo=None
+        )
+        result = await self._db.execute(
+            select(func.coalesce(func.sum(HarvestRunORM.combined_count), 0))
+            .where(HarvestRunORM.created_at >= start)
+        )
+        return int(result.scalar_one() or 0)
 
     async def list_scraped_jobs(
         self,
@@ -420,6 +439,8 @@ def scraped_job_view(job: ScrapedJobORM) -> dict[str, Any]:
         "hiring_entity":          job.hiring_entity,
         "is_gcc":                 job.is_gcc,
         "verification_status":    job.verification_status,
+        "passed_filter":          job.passed_filter,
+        "filter_reason":          job.filter_reason,
         "source":                 job.source,
         "job_poster_name":        job.job_poster_name,
         "job_poster_designation": job.job_poster_designation,

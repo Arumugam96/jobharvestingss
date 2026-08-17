@@ -39,6 +39,7 @@ from bs4 import BeautifulSoup
 from dateutil import parser as dateutil_parser
 from playwright.async_api import ElementHandle, Page
 
+from app.core.domain_keywords import domain_matches, domain_search_terms, infer_domain
 from app.core.exceptions import LLMUnavailableError
 from app.core.text_formatting import format_job_description
 from app.models.harvest_models import FiltersConfig
@@ -92,6 +93,13 @@ _DATE_MAP: dict[int, str] = {
     168: "r604800",
     720: "r2592000",
 }
+
+# Cap on how many domain keywords are OR-ed into the search query for a specific
+# sub-domain bucket (Cloud, SAP, …). Bounded so the refinement narrows results
+# without producing an overlong / over-broad boolean expression. The coarse "IT"
+# umbrella samples one term per bucket instead (see domain_search_terms); only
+# "Non-IT"/"Any" push nothing and rely on the post-scrape domain check.
+_DOMAIN_TERM_CAP = 5
 
 
 # ── Scraped job dataclass ─────────────────────────────────────────────────────
@@ -491,6 +499,25 @@ def _test_mode_max_jobs() -> int | None:
         logger.warning("linkedin_test_max_jobs_invalid", value=raw)
         return None
     return value if value > 0 else None
+
+
+# Consecutive pages yielding zero domain-matching jobs before pagination stops
+# early (only when a specific domain filter is active).
+_DEFAULT_MATCH_DRY_PAGES = 2
+
+
+def _match_dry_pages() -> int:
+    """How many consecutive no-domain-match pages trigger an early stop. Read
+    from LINKEDIN_MATCH_DRY_PAGES (.env); unset/blank/non-positive → default."""
+    raw = os.getenv("LINKEDIN_MATCH_DRY_PAGES", "").strip()
+    if not raw:
+        return _DEFAULT_MATCH_DRY_PAGES
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("linkedin_match_dry_pages_invalid", value=raw)
+        return _DEFAULT_MATCH_DRY_PAGES
+    return value if value > 0 else _DEFAULT_MATCH_DRY_PAGES
 
 
 async def _delay(page: Page, lo: int, hi: int) -> None:
@@ -1095,6 +1122,10 @@ class LinkedInAgent:
         batch_size:  int                      = 25
         safety_cap:  int                      = f.max_jobs if f.max_jobs > 0 else 5_000
         empty_pages: int                      = 0
+        # Early-stop-on-domain-match-dry-up state (only used when f.domain != "Any")
+        empty_match_pages: int                = 0
+        match_total:       int                = 0
+        dry_page_limit:    int                = _match_dry_pages()
 
         test_cap = _test_mode_max_jobs()
         if test_cap is not None:
@@ -1190,12 +1221,47 @@ class LinkedInAgent:
                     break
             else:
                 empty_pages = 0
+                new_jobs: list[LinkedInScrapedJob] = []
                 for j in page_jobs:
                     url = (j.job_url or "").split("?")[0].rstrip("/").lower()
                     if url and url not in seen_urls:
                         seen_urls.add(url)
                         all_jobs.append(j)
+                        new_jobs.append(j)
                 logger.info("next_page_found", source="linkedin", page=page_num + 1, jobs_this_page=len(page_jobs))
+
+                # ── Early-stop on domain-match dry-up ─────────────────────────
+                # When a specific domain filter is active, stop paginating once
+                # pages stop yielding domain-matching jobs. LinkedIn is date-
+                # sorted, so once relevant results run out, later pages are just
+                # wasted detail-fetches. Keyword-based match — consistent with
+                # the post-scrape filter and the domain terms pushed to search.
+                if f.domain != "Any" and new_jobs:
+                    page_matches = sum(
+                        1 for j in new_jobs
+                        if domain_matches(
+                            infer_domain(j.job_title, j.job_description, j.skills, j.industry_hint),
+                            f.domain,
+                        )
+                    )
+                    match_total += page_matches
+                    if page_matches == 0:
+                        empty_match_pages += 1
+                        logger.info(
+                            "linkedin_page_no_domain_match",
+                            page=page_num + 1, consecutive=empty_match_pages,
+                            domain=f.domain, new_jobs=len(new_jobs), matching_so_far=match_total,
+                        )
+                        if empty_match_pages >= dry_page_limit:
+                            logger.info(
+                                "linkedin_early_stop_no_matches",
+                                page=page_num + 1, domain=f.domain,
+                                dry_pages=empty_match_pages, total=len(all_jobs),
+                                matching_so_far=match_total,
+                            )
+                            break
+                    else:
+                        empty_match_pages = 0
 
             logger.info("linkedin_page_done", page=page_num + 1, page_new=len(page_jobs), total=len(all_jobs))
             logger.info("page_processed", source="linkedin", page=page_num + 1, jobs_this_page=len(page_jobs), total_collected=len(all_jobs))
@@ -1443,9 +1509,35 @@ class LinkedInAgent:
     # ── Search URL builder ─────────────────────────────────────────────────────
 
     @staticmethod
+    def _domain_query_fragment(domain: str) -> str:
+        """LinkedIn boolean-OR fragment for a domain choice, e.g.
+        Cloud → ("cloud engineer" OR "cloud architect" OR aws OR azure OR gcp);
+        IT → the umbrella OR-set (one term per bucket). Returns "" for domains
+        with no terms (Any / Non-IT), which fall back to the post-scrape check."""
+        terms = domain_search_terms(domain, cap=_DOMAIN_TERM_CAP)
+        if not terms:
+            return ""
+        quoted = [f'"{t}"' if " " in t else t for t in terms]
+        return "(" + " OR ".join(quoted) + ")"
+
+    @staticmethod
+    def _compose_keyword_query(keyword: str, domain: str) -> str:
+        """AND-combine the user's keyword with the domain OR-set so LinkedIn
+        returns domain-relevant jobs. Edge cases: no bucket → keyword only;
+        empty keyword → the domain fragment becomes the whole query."""
+        keyword  = (keyword or "").strip()
+        fragment = LinkedInAgent._domain_query_fragment(domain)
+        if not fragment:
+            return keyword
+        if not keyword:
+            return fragment
+        return f"{keyword} AND {fragment}"
+
+    @staticmethod
     def _build_search_url(f: FiltersConfig, start: int = 0) -> str:
+        keyword_query = LinkedInAgent._compose_keyword_query(f.keyword, f.domain)
         params: list[str] = [
-            f"keywords={quote_plus(f.keyword)}",
+            f"keywords={quote_plus(keyword_query)}",
             f"location={quote_plus(f.location)}",
             "sortBy=DD",
         ]

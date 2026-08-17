@@ -30,6 +30,11 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     data_source: Literal["auto", "database", "json"] = "database"
 
+    # Global daily harvest cap: max jobs that may be scraped across all runs in a
+    # UTC day. 0 = unlimited. Enforced at the run start-gate (MAX_JOBS_PER_DAY in
+    # .env) — a new run is rejected once today's harvested total reaches this.
+    max_jobs_per_day: int = 0
+
     # ── Database ─────────────────────────────────────────────────────────────────
     database_url: str = "sqlite+aiosqlite:///./data/harvest.db"
     db_pool_size: int = 10

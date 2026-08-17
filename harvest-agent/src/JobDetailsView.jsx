@@ -13,6 +13,7 @@ import {
   Link2,
   UserCircle,
   Mail,
+  Filter,
 } from "lucide-react";
 
 const WhatsAppIcon = ({ size = 16 }) => (
@@ -139,6 +140,31 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
           </main>
 
           <aside className="ha-rail">
+            <section className="ha-section">
+              <div className="ha-label"><Filter size={14} /> Filter status</div>
+              <div className="ha-rows">
+                <div className="ha-row">
+                  <span className="ha-key">Status</span>
+                  <span className="ha-val" style={{ color: job.passedFilter === false ? "#B45309" : "#047857", fontWeight: 600 }}>
+                    {job.passedFilter === false ? "Flagged" : "Qualified"}
+                  </span>
+                </div>
+                {job.passedFilter === false && (
+                  <div className="ha-row">
+                    <span className="ha-key">Reason</span>
+                    <span className="ha-val">{job.filterReason || <span className="ha-muted">—</span>}</span>
+                  </div>
+                )}
+                <div className="ha-row">
+                  <span className="ha-key">Hiring</span>
+                  <span className="ha-val">{job.hiringEntity || <span className="ha-muted">—</span>}</span>
+                </div>
+                <div className="ha-row">
+                  <span className="ha-key">Domain</span>
+                  <span className="ha-val">{job.domain || <span className="ha-muted">—</span>}</span>
+                </div>
+              </div>
+            </section>
             <section className="ha-section">
               <div className="ha-label"><Link2 size={14} /> Links</div>
               <div className="ha-rows">

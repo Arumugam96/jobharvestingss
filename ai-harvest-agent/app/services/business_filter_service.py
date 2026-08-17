@@ -27,6 +27,10 @@ from typing import Any
 
 import structlog
 
+from app.core.domain_keywords import (
+    domain_matches as _domain_matches,
+    infer_domain as _infer_domain_shared,
+)
 from app.models.harvest_models import FiltersConfig
 from app.models.unified_job import UnifiedJob
 
@@ -50,18 +54,14 @@ def _load_json(filename: str, key: str | None = None) -> Any:
         return [] if key else {}
 
 
-def _load_domain_keywords() -> dict[str, list[str]]:
-    raw = _load_json("domain_keywords.json")
-    return {k: [s.lower() for s in v] for k, v in raw.items()} if isinstance(raw, dict) else {}
-
-
 def _load_set(filename: str, key: str = "companies") -> frozenset[str]:
     items = _load_json(filename, key)
     return frozenset(s.lower().strip() for s in items if isinstance(s, str))
 
 
-# Load once at import time — refreshed by restarting the server
-_DOMAIN_KW:          dict[str, list[str]] = _load_domain_keywords()
+# Load once at import time — refreshed by restarting the server. Domain
+# classification/matching lives in app.core.domain_keywords (shared with
+# LinkedInAgent's search-time refinement and in-scrape early-stop).
 _KNOWN_GCC:          frozenset[str]       = _load_set("gcc_master_list.json")
 _KNOWN_STAFFING:     frozenset[str]       = _load_set("staffing_firm_master_list.json")
 _STAFFING_KW:        frozenset[str]       = frozenset(
@@ -84,6 +84,27 @@ _STAFFING_TOKENS: frozenset[str] = frozenset({
     "staffing", "recruitment", "recruiter", "manpower",
     "placement", "outsourcing", "consulting",
 })
+
+# ── Source-aware search-time enforcement ──────────────────────────────────────
+# Each source agent already pushes job_type / work_mode into its OWN search URL,
+# but with different coverage (see each agent's _WORK_MODE_MAP / _JOB_TYPE_MAP).
+# A job from a source that ENFORCED the requested value at search time is
+# trusted and NOT re-judged here — this stops free-text re-inference from
+# flagging valid LinkedIn/Dice results (e.g. a genuine contract job) as failing.
+# Naukri's gaps — Onsite work-mode and Freelance/Full-time job-type, none of
+# which Naukri's URL can express — stay judged post-scrape.
+_WM_ENFORCED: dict[str, frozenset[str]] = {
+    "Remote": frozenset({"LinkedIn", "Dice", "Naukri"}),
+    "Hybrid": frozenset({"LinkedIn", "Dice", "Naukri"}),
+    "Onsite": frozenset({"LinkedIn", "Dice"}),          # Naukri omits Onsite
+}
+_JT_ENFORCED: dict[str, frozenset[str]] = {
+    "Contract":  frozenset({"LinkedIn", "Dice", "Naukri"}),
+    "Permanent": frozenset({"LinkedIn", "Dice", "Naukri"}),
+    "Part-time": frozenset({"LinkedIn", "Dice", "Naukri"}),
+    "Full-time": frozenset({"LinkedIn", "Dice"}),        # Naukri has no such param
+    "Freelance": frozenset({"LinkedIn", "Dice"}),        # Naukri has no such param
+}
 
 
 def _tok(s: str) -> str:
@@ -140,48 +161,66 @@ class BusinessFilterService:
         return jobs
 
     def apply_all(self, jobs: list[UnifiedJob], cfg: FiltersConfig) -> list[UnifiedJob]:
-        """Return the subset of jobs that satisfy all active filter rules."""
+        """Annotate every job with pass/fail against the active rules — WITHOUT
+        removing any. Each job is tagged `passed_filter` + `filter_reason` (the
+        first criterion it fails, with the offending value) and ALL jobs are
+        returned so nothing is lost: they are persisted and shown, and the UI
+        filters client-side on these fields. Deduplication is kept — it removes
+        true duplicate postings, not business-qualified data."""
         before = len(jobs)
         jobs   = _deduplicate(jobs)
-        jobs   = self._filter_work_mode(jobs, cfg)
-        jobs   = self._filter_job_type(jobs, cfg)
-        jobs   = self._filter_domain(jobs, cfg)
-        jobs   = self._filter_gcc(jobs, cfg)
-        jobs   = self._filter_hiring_entity(jobs, cfg)
-        jobs   = self._filter_salary(jobs, cfg)
-        logger.info("business_filter_complete", before=before, after=len(jobs))
+
+        # (stage name, per-job predicate, reason builder) — evaluated in order;
+        # the first failing stage owns the reason (matches the old sequential
+        # remove order, so per-stage counts are unchanged in meaning).
+        stages: list[tuple[str, Any, Any]] = [
+            ("work_mode",     self._passes_work_mode,
+             lambda j: f"work_mode: got '{j.work_mode}', wanted '{cfg.work_mode}'"),
+            ("job_type",      self._passes_job_type,
+             lambda j: f"job_type: got '{j.job_type}', wanted '{cfg.job_type}'"),
+            ("domain",        self._passes_domain,
+             lambda j: f"domain: got '{j.domain}', wanted '{cfg.domain}'"),
+            ("gcc",           self._passes_gcc,
+             lambda j: f"gcc_mode: is_gcc={j.is_gcc}, mode '{cfg.gcc_mode}'"),
+            ("hiring_entity", self._passes_hiring_entity,
+             lambda j: f"hiring_entity: got '{j.hiring_entity}', wanted '{cfg.hiring_entity}'"),
+            ("salary",        self._passes_salary,
+             lambda j: f"salary: '{j.salary}' outside "
+                       f"[{cfg.salary_min}, {cfg.salary_max}] {cfg.salary_currency}"),
+        ]
+
+        fail_counts: dict[str, int] = {name: 0 for name, _, _ in stages}
+        passed_count = 0
+        for j in jobs:
+            j.passed_filter = True
+            j.filter_reason = ""
+            for name, predicate, reason_fn in stages:
+                if not predicate(j, cfg):
+                    j.passed_filter = False
+                    j.filter_reason = reason_fn(j)
+                    fail_counts[name] += 1
+                    break
+            if j.passed_filter:
+                passed_count += 1
+
+        for name, _, _ in stages:
+            logger.info("filter_stage", stage=name, flagged=fail_counts[name])
+        logger.info(
+            "business_filter_complete",
+            before=before, after=len(jobs),
+            passed=passed_count, flagged=len(jobs) - passed_count,
+        )
         return jobs
 
     # ── Domain ─────────────────────────────────────────────────────────────────
-
-    # Subset of LinkedIn's own "Industries" taxonomy (job-insight tag, company-
-    # level) that indicates an IT employer. Used only as a coarse fallback
-    # when no domain_keywords.json term matches the title/description — it
-    # can't distinguish SAP/Cloud/AI-ML etc., only IT vs. Non-IT.
-    _IT_INDUSTRIES: frozenset[str] = frozenset({
-        "it services and it consulting", "software development",
-        "information technology and services",
-        "technology, information and internet",
-        "computer and network security", "semiconductor manufacturing",
-        "telecommunications",
-    })
+    # Classification + match logic live in app.core.domain_keywords (shared with
+    # LinkedInAgent's in-scrape early-stop) so the two can't drift.
 
     def _infer_domain(self, j: UnifiedJob) -> str:
-        text = f"{j.job_title} {j.job_description} {' '.join(j.skills)}".lower()
-        scores: dict[str, int] = {}
-        for domain, keywords in _DOMAIN_KW.items():
-            scores[domain] = sum(1 for kw in keywords if kw in text)
-        if scores and max(scores.values()) > 0:
-            return max(scores, key=lambda d: scores[d])
-        hint = (j.domain_hint or "").lower()
-        if any(industry in hint for industry in self._IT_INDUSTRIES):
-            return "IT"
-        return "Non-IT"
+        return _infer_domain_shared(j.job_title, j.job_description, j.skills, j.domain_hint)
 
-    def _filter_domain(self, jobs: list[UnifiedJob], cfg: FiltersConfig) -> list[UnifiedJob]:
-        if cfg.domain == "Any":
-            return jobs
-        return [j for j in jobs if j.domain == cfg.domain]
+    def _passes_domain(self, j: UnifiedJob, cfg: FiltersConfig) -> bool:
+        return _domain_matches(j.domain, cfg.domain)
 
     # ── Hiring entity ──────────────────────────────────────────────────────────
 
@@ -228,30 +267,30 @@ class BusinessFilterService:
         _append_ambiguous(j.company)
         return False, "Ambiguous"
 
-    def _filter_hiring_entity(self, jobs: list[UnifiedJob], cfg: FiltersConfig) -> list[UnifiedJob]:
+    def _passes_hiring_entity(self, j: UnifiedJob, cfg: FiltersConfig) -> bool:
         if cfg.hiring_entity == "Any":
-            return jobs
-        return [j for j in jobs if j.hiring_entity == cfg.hiring_entity]
+            return True
+        return j.hiring_entity == cfg.hiring_entity
 
     # ── GCC mode ───────────────────────────────────────────────────────────────
 
-    def _filter_gcc(self, jobs: list[UnifiedJob], cfg: FiltersConfig) -> list[UnifiedJob]:
+    def _passes_gcc(self, j: UnifiedJob, cfg: FiltersConfig) -> bool:
         if cfg.gcc_mode == "include_gcc":
-            return jobs
+            return True
         if cfg.gcc_mode == "gcc_only":
-            return [j for j in jobs if j.is_gcc]
-        return [j for j in jobs if not j.is_gcc]   # exclude_gcc
+            return j.is_gcc
+        return not j.is_gcc   # exclude_gcc
 
     # ── Work mode ──────────────────────────────────────────────────────────────
 
-    def _filter_work_mode(self, jobs: list[UnifiedJob], cfg: FiltersConfig) -> list[UnifiedJob]:
+    def _passes_work_mode(self, j: UnifiedJob, cfg: FiltersConfig) -> bool:
         if cfg.work_mode == "Any":
-            return jobs
-        target = cfg.work_mode.lower()
-        return [
-            j for j in jobs
-            if j.work_mode.lower() == target or j.work_mode == "not_specified"
-        ]
+            return True
+        # Trust the source's own search-time f_WT/wfhType filter (see
+        # _WM_ENFORCED) rather than re-judging inferred work_mode text.
+        if j.source in _WM_ENFORCED.get(cfg.work_mode, frozenset()):
+            return True
+        return j.work_mode.lower() == cfg.work_mode.lower() or j.work_mode == "not_specified"
 
     # ── Job type ───────────────────────────────────────────────────────────────
 
@@ -278,37 +317,33 @@ class BusinessFilterService:
                 return job_type
         return "not_specified"
 
-    def _filter_job_type(self, jobs: list[UnifiedJob], cfg: FiltersConfig) -> list[UnifiedJob]:
+    def _passes_job_type(self, j: UnifiedJob, cfg: FiltersConfig) -> bool:
         if cfg.job_type == "Any":
-            return jobs
+            return True
+        # Trust the source's own search-time f_JT/jobType filter (see
+        # _JT_ENFORCED) rather than re-judging inferred job_type text.
+        if j.source in _JT_ENFORCED.get(cfg.job_type, frozenset()):
+            return True
         target = self._JT_ALIASES.get(cfg.job_type.lower(), cfg.job_type.lower())
-        return [
-            j for j in jobs
-            if self._JT_ALIASES.get(j.job_type.lower(), j.job_type.lower()) == target
-            or j.job_type == "not_specified"
-        ]
+        jt     = self._JT_ALIASES.get(j.job_type.lower(), j.job_type.lower())
+        return jt == target or j.job_type == "not_specified"
 
     # ── Salary ─────────────────────────────────────────────────────────────────
 
-    def _filter_salary(self, jobs: list[UnifiedJob], cfg: FiltersConfig) -> list[UnifiedJob]:
+    def _passes_salary(self, j: UnifiedJob, cfg: FiltersConfig) -> bool:
         if not cfg.salary_min and not cfg.salary_max:
-            return jobs
-        result = []
-        for j in jobs:
-            parsed = _parse_salary_lpa(j.salary)
-            if parsed is None:
-                if cfg.include_undisclosed_salary:
-                    result.append(j)
-                continue
-            mid_lpa = (parsed[0] + parsed[1]) / 2
-            min_lpa = (cfg.salary_min / 100_000) if cfg.salary_min else None
-            max_lpa = (cfg.salary_max / 100_000) if cfg.salary_max else None
-            if min_lpa and mid_lpa < min_lpa:
-                continue
-            if max_lpa and mid_lpa > max_lpa:
-                continue
-            result.append(j)
-        return result
+            return True
+        parsed = _parse_salary_lpa(j.salary)
+        if parsed is None:
+            return cfg.include_undisclosed_salary
+        mid_lpa = (parsed[0] + parsed[1]) / 2
+        min_lpa = (cfg.salary_min / 100_000) if cfg.salary_min else None
+        max_lpa = (cfg.salary_max / 100_000) if cfg.salary_max else None
+        if min_lpa and mid_lpa < min_lpa:
+            return False
+        if max_lpa and mid_lpa > max_lpa:
+            return False
+        return True
 
 
 # ── Deduplication ─────────────────────────────────────────────────────────────

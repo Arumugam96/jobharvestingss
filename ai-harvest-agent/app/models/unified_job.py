@@ -63,6 +63,14 @@ class UnifiedJob:
     # "pending" | "verified" | "not_verified" | "career_page_not_found" | "skipped"
     verification_status: str = "pending"
 
+    # ── BusinessFilterService annotation (does NOT remove jobs) ───────────────
+    # passed_filter is True when the job satisfies every active filter rule;
+    # when False, filter_reason names the first failing stage + the offending
+    # value (e.g. "hiring_entity: got 'GCC', wanted 'Direct Client'"). All jobs
+    # are retained/persisted regardless — the UI filters on these fields.
+    passed_filter: bool = True
+    filter_reason: str  = ""
+
     # ── Lead Intelligence (populated by source agents, optional) ─────────────
     job_poster_name:        str | None = None   # Recruiter / Hiring Manager name
     job_poster_designation: str | None = None   # Recruiter title / designation
@@ -91,6 +99,8 @@ class UnifiedJob:
             "hiring_entity":          self.hiring_entity,
             "is_gcc":                 self.is_gcc,
             "verification_status":    self.verification_status,
+            "passed_filter":          self.passed_filter,
+            "filter_reason":          self.filter_reason,
             "job_poster_name":        self.job_poster_name,
             "job_poster_designation": self.job_poster_designation,
             "linkedin_profile_url":   self.linkedin_profile_url,

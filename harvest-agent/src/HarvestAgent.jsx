@@ -3,6 +3,7 @@ import {
   SlidersHorizontal, Download, LayoutList, History, Send, BarChart3,
   Search, Mail, ArrowUpDown, ArrowUp, ArrowDown, Eye, Pencil, RefreshCw, ArrowLeft,
   CheckCircle2, XCircle, Loader2, HelpCircle, Radar, UserSearch, Play, FileJson, FileSpreadsheet,
+  AlertTriangle,
 } from "lucide-react";
 import JobDetailsView from "./JobDetailsView";
 import RuleEngineConfig from "./RuleEngineConfig";
@@ -126,6 +127,23 @@ const StatusPill = ({ status }) => {
   );
 };
 
+// Business-filter annotation badge. The backend no longer drops jobs — it
+// flags the ones that failed a filter rule (passed_filter=false) and records
+// the reason. "Qualified" = passed every active rule; "Flagged" = shown but
+// did not match (hover for the stage + offending value).
+const FilterStatusBadge = ({ passed, reason }) => {
+  const tone = passed
+    ? { background: "#ECFDF5", color: "#047857", Icon: CheckCircle2, label: "Qualified" }
+    : { background: "#FFFBEB", color: "#B45309", Icon: AlertTriangle, label: "Flagged" };
+  const Icon = tone.Icon;
+  return (
+    <span className="ha-pill" title={passed ? "Passed every active filter rule" : (reason || "Did not match the active filters")}
+      style={{ background: tone.background, color: tone.color, display: "inline-flex", alignItems: "center", gap: 5, cursor: reason ? "help" : "default" }}>
+      <Icon size={12} /> {tone.label}
+    </span>
+  );
+};
+
 function fmtDate(iso) {
   if (!iso) return "—";
   const d = new Date(iso);
@@ -154,6 +172,13 @@ function mapApiJob(j) {
     applyLink: j.job_url || "",
     companyUrl: j.company_url || "",
     posterTitle: j.job_poster_designation || "",
+    domain: j.domain || "",
+    hiringEntity: j.hiring_entity || "",
+    isGcc: !!j.is_gcc,
+    // Business-filter annotation — the backend no longer drops jobs, it flags
+    // them. passed_filter defaults to true for legacy rows lacking the column.
+    passedFilter: j.passed_filter !== false,
+    filterReason: j.filter_reason || "",
   };
 }
 
@@ -173,6 +198,10 @@ function mapJobToDetail(j) {
     posterTitle: j.posterTitle || "",
     posterContact: { email: j.email || "", mobile: j.mobile || "" },
     source: j.source,
+    domain: j.domain || "",
+    hiringEntity: j.hiringEntity || "",
+    passedFilter: j.passedFilter,
+    filterReason: j.filterReason || "",
   };
 }
 
@@ -338,7 +367,7 @@ function RunDetailView({ runId, onBack }) {
 
 /* ── Harvested Jobs page ─────────────────────────────────────────────── */
 function JobsPage({ jobs, total, loading, error, onRefresh, onNavigate, onView }) {
-  const [filters, setFilters] = useState({ company: "all", contact: "all", job: "all", poc: "all" });
+  const [filters, setFilters] = useState({ company: "all", contact: "all", job: "all", poc: "all", status: "all" });
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
   const [query, setQuery] = useState("");
@@ -351,6 +380,8 @@ function JobsPage({ jobs, total, loading, error, onRefresh, onNavigate, onView }
     linkedin: jobs.filter((j) => j.linkedin).length,
     companies: new Set(jobs.map((j) => j.company)).size,
     pocs: jobs.filter((j) => j.poc).length,
+    qualified: jobs.filter((j) => j.passedFilter).length,
+    flagged: jobs.filter((j) => !j.passedFilter).length,
   }), [jobs]);
 
   const companies = useMemo(() => Array.from(new Set(jobs.map((j) => j.company))).sort(), [jobs]);
@@ -365,6 +396,8 @@ function JobsPage({ jobs, total, loading, error, onRefresh, onNavigate, onView }
       if (filters.contact === "email" && !j.email) return false;
       if (filters.contact === "mobile" && !j.mobile) return false;
       if (filters.contact === "linkedin" && !j.linkedin) return false;
+      if (filters.status === "qualified" && !j.passedFilter) return false;
+      if (filters.status === "flagged" && j.passedFilter) return false;
       if (startDate && j.postedDate.slice(0, 10) < startDate) return false;
       if (endDate && j.postedDate.slice(0, 10) > endDate) return false;
       if (query.trim()) {
@@ -387,9 +420,9 @@ function JobsPage({ jobs, total, loading, error, onRefresh, onNavigate, onView }
   }, [jobs, filters, startDate, endDate, query, sort]);
 
   function exportCsv() {
-    const header = ["Job title", "Company", "Source", "POC", "Posted date", "Email", "Mobile", "WhatsApp", "LinkedIn"];
+    const header = ["Job title", "Company", "Source", "Filter status", "Filter reason", "POC", "Posted date", "Email", "Mobile", "WhatsApp", "LinkedIn"];
     const lines = filtered.map((j) =>
-      [j.title, j.company, j.source, j.poc || "—", j.postedDate || "—", j.email || "—", j.mobile || "—", j.whatsapp || "—", j.linkedin || "—"]
+      [j.title, j.company, j.source, j.passedFilter ? "Qualified" : "Flagged", j.filterReason || "—", j.poc || "—", j.postedDate || "—", j.email || "—", j.mobile || "—", j.whatsapp || "—", j.linkedin || "—"]
         .map((c) => '"' + String(c).replace(/"/g, '""') + '"').join(","));
     const blob = new Blob([[header.join(","), ...lines].join("\n")], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
@@ -404,7 +437,7 @@ function JobsPage({ jobs, total, loading, error, onRefresh, onNavigate, onView }
         <div>
           <h1 style={{ margin: 0, fontSize: 24, fontWeight: 700, color: C.text }}>Harvested Jobs</h1>
           <p style={{ margin: "4px 0 0", fontSize: 14, color: C.textSoft }}>
-            {loading ? "Loading…" : `${total} qualified posting${total === 1 ? "" : "s"} from the latest harvest run`}
+            {loading ? "Loading…" : `${total} harvested posting${total === 1 ? "" : "s"} · ${counts.qualified} qualified · ${counts.flagged} flagged`}
           </p>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
@@ -450,6 +483,8 @@ function JobsPage({ jobs, total, loading, error, onRefresh, onNavigate, onView }
             options={[{ value: "all", label: "All" }, ...jobTitles.map((t) => ({ value: t, label: t }))]} />
           <Select label="POC" value={filters.poc} onChange={(v) => setFilters((f) => ({ ...f, poc: v }))}
             options={[{ value: "all", label: "All" }, ...pocNames.map((p) => ({ value: p, label: p }))]} />
+          <Select label="Filter status" value={filters.status} onChange={(v) => setFilters((f) => ({ ...f, status: v }))}
+            options={[{ value: "all", label: "All" }, { value: "qualified", label: `Qualified (${counts.qualified})` }, { value: "flagged", label: `Flagged (${counts.flagged})` }]} />
           <div style={{ position: "relative", marginLeft: "auto", minWidth: 220, flex: 1 }}>
             <span style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: "#94A3B8", display: "flex" }}>
               <Search size={16} />
@@ -467,6 +502,7 @@ function JobsPage({ jobs, total, loading, error, onRefresh, onNavigate, onView }
                   <SortHeader label="Job title" col="title" sort={sort} setSort={setSort} width={230} />
                   <SortHeader label="Company" col="company" sort={sort} setSort={setSort} width={170} />
                   <SortHeader label="Source" col="source" sort={sort} setSort={setSort} width={100} />
+                  <PlainHeader label="Filter status" align="center" width={120} />
                   <SortHeader label="POC" col="poc" sort={sort} setSort={setSort} width={150} />
                   <SortHeader label="Posted date" col="posted" sort={sort} setSort={setSort} width={130} />
                   <PlainHeader label="Email" width={200} />
@@ -477,7 +513,7 @@ function JobsPage({ jobs, total, loading, error, onRefresh, onNavigate, onView }
               </thead>
               <tbody>
                 {loading && (
-                  <tr><td className="ha-td" colSpan={9} style={{ textAlign: "center", padding: "48px 16px", color: "#94A3B8" }}>
+                  <tr><td className="ha-td" colSpan={10} style={{ textAlign: "center", padding: "48px 16px", color: "#94A3B8" }}>
                     Loading harvested jobs…
                   </td></tr>
                 )}
@@ -486,6 +522,9 @@ function JobsPage({ jobs, total, loading, error, onRefresh, onNavigate, onView }
                     <td className="ha-td"><span className="ha-link">{j.title}</span></td>
                     <td className="ha-td" style={{ color: C.text }}>{j.company}</td>
                     <td className="ha-td"><SourceChip source={j.source} /></td>
+                    <td className="ha-td" style={{ textAlign: "center" }}>
+                      <FilterStatusBadge passed={j.passedFilter} reason={j.filterReason} />
+                    </td>
                     <td className="ha-td" style={{ color: C.text }}>
                       {j.poc || <span style={{ color: "#94A3B8" }}>—</span>}
                     </td>
@@ -518,7 +557,7 @@ function JobsPage({ jobs, total, loading, error, onRefresh, onNavigate, onView }
                   </tr>
                 ))}
                 {!loading && !error && filtered.length === 0 && (
-                  <tr><td className="ha-td" colSpan={9} style={{ textAlign: "center", padding: "48px 16px", color: "#94A3B8" }}>
+                  <tr><td className="ha-td" colSpan={10} style={{ textAlign: "center", padding: "48px 16px", color: "#94A3B8" }}>
                     No postings match your search. Run a harvest from the Rule Engine to collect jobs.
                   </td></tr>
                 )}
@@ -526,7 +565,7 @@ function JobsPage({ jobs, total, loading, error, onRefresh, onNavigate, onView }
             </table>
           </div>
           <div style={{ display: "flex", justifyContent: "space-between", padding: "12px 16px", fontSize: 12, borderTop: "1px solid #EEF2F7", color: C.textSoft }}>
-            <span>Showing {filtered.length} of {jobs.length} loaded postings</span>
+            <span>Showing {filtered.length} of {jobs.length} loaded postings · {counts.qualified} qualified · {counts.flagged} flagged</span>
             <span>{counts.email} email · {counts.whatsapp} WhatsApp · {counts.linkedin} LinkedIn</span>
           </div>
         </div>

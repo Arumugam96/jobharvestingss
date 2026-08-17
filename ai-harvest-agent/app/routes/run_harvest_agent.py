@@ -44,7 +44,7 @@ from pydantic import BaseModel
 
 from app.agents.orchestrator_agent import OrchestratorAgent, OrchestratorResult
 from app.config import get_settings
-from app.core.exceptions import JobAlreadyRunningError, LLMUnavailableError
+from app.core.exceptions import DailyJobLimitExceededError, JobAlreadyRunningError, LLMUnavailableError
 from app.core.proactor import needs_proactor, run_in_proactor
 from app.models.harvest_run import HarvestRunORM
 from app.services.config_service import ConfigService
@@ -471,6 +471,11 @@ async def run_harvest_agent(body: HarvestAgentRequest = HarvestAgentRequest()) -
             "No sources enabled",
             "Enable at least one source (linkedin, naukri, or dice) in harvest_config.json",
         )
+
+    # ── Global daily cap: reject before claiming the single-flight slot ───────
+    budget = await run_guard.daily_budget_conflict()
+    if budget is not None:
+        raise DailyJobLimitExceededError(budget["used"], budget["limit"])
 
     # ── Single-flight: reject if a harvest is already running ─────────────────
     # DB backstop first (catches a run left 'running' by a previous process),

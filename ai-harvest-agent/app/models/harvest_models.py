@@ -12,7 +12,15 @@ from __future__ import annotations
 import os
 from typing import Literal
 
-from pydantic import BaseModel, Field
+import structlog
+from pydantic import BaseModel, Field, model_validator
+
+logger = structlog.get_logger(__name__)
+
+# hiring_entity values that are, by definition, NOT a GCC. When hiring_entity is
+# one of these, gcc_mode="gcc_only" is impossible (the intersection is empty);
+# and hiring_entity="GCC" with gcc_mode="exclude_gcc" is the symmetric conflict.
+_NON_GCC_ENTITIES = {"Direct Client", "Staffing Firm", "Ambiguous"}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -86,6 +94,31 @@ class FiltersConfig(BaseModel):
 
     # ── Company verification ──────────────────────────────────────────────────
     verification: VerificationConfig = Field(default_factory=VerificationConfig)
+
+    @model_validator(mode="after")
+    def _reconcile_gcc(self) -> "FiltersConfig":
+        """Auto-normalize the impossible gcc_mode × hiring_entity combinations.
+
+        hiring_entity, when specific, already determines GCC-ness ("GCC" ⟺ is a
+        GCC; Direct Client / Staffing Firm / Ambiguous ⟺ not a GCC), so gcc_mode
+        is only meaningful when hiring_entity == "Any". A contradictory pair
+        (e.g. gcc_only + Direct Client) would flag every job. Resolve by relaxing
+        the less-specific gcc_mode → include_gcc, keeping the hiring_entity
+        intent. Never raises — ConfigService.load swallows validation errors and
+        would otherwise reset ALL settings to defaults on an already-saved file.
+        """
+        conflict = (
+            (self.gcc_mode == "gcc_only" and self.hiring_entity in _NON_GCC_ENTITIES)
+            or (self.gcc_mode == "exclude_gcc" and self.hiring_entity == "GCC")
+        )
+        if conflict:
+            logger.warning(
+                "filter_config_gcc_normalized",
+                gcc_mode=self.gcc_mode, hiring_entity=self.hiring_entity,
+                normalized_gcc_mode="include_gcc",
+            )
+            self.gcc_mode = "include_gcc"
+        return self
 
 
 # ══════════════════════════════════════════════════════════════════════════════

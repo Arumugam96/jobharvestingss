@@ -43,7 +43,11 @@ const DiceIcon = () => (
 /* ── Backend enum ↔ display-label maps (app/models/harvest_models.py) ───── */
 const JOB_TYPES      = ["Any", "Contract", "Permanent", "Part-time", "Freelance", "Full-time"];
 const WORK_MODES     = ["Any", "Remote", "Hybrid", "Onsite"];
-const DOMAINS        = ["Any", "Data Engineering", "Data Science", "AI/ML", "SAP", "Cloud", "Digital", "UX/UI", "ERP", "Cyber Security", "Infrastructure", "IT", "Engineering", "Finance", "Operations", "Non-IT"];
+// Only values the classifier can actually assign (the domain_keywords.json
+// buckets + the coarse IT/Non-IT split). "Engineering"/"Finance"/"Operations"
+// were removed — the backend never labels a job with them, so selecting one
+// would extract zero jobs.
+const DOMAINS        = ["Any", "Data Engineering", "Data Science", "AI/ML", "SAP", "Cloud", "Digital", "UX/UI", "ERP", "Cyber Security", "Infrastructure", "IT", "Non-IT"];
 const HIRING_ENTITIES = ["Any", "Direct Client", "GCC", "Ambiguous", "Staffing Firm"];
 const GCC_MODES = [
   { value: "include_gcc", label: "Include GCC" },
@@ -78,10 +82,11 @@ function Toggle({ on, onChange, label }) {
   );
 }
 
-function Chip({ active, onClick, children, variant = "green" }) {
+function Chip({ active, onClick, children, variant = "green", disabled = false, title }) {
   return (
     <button type="button" className={"rec-chip" + (active ? " is-active rec-chip--" + variant : "")}
-      aria-pressed={active} onClick={onClick}>
+      aria-pressed={active} onClick={onClick} disabled={disabled} title={title}
+      style={disabled ? { opacity: 0.4, cursor: "not-allowed" } : undefined}>
       {children}
     </button>
   );
@@ -220,8 +225,12 @@ export default function RuleEngineConfig({
     setJobType(config.filters.job_type || "Any");
     setWorkMode(config.filters.work_mode || "Any");
     setDomain(config.filters.domain || "Any");
-    setHiringEntity(config.filters.hiring_entity || "Any");
-    setGccMode(config.filters.gcc_mode || "include_gcc");
+    const loadedEntity = config.filters.hiring_entity || "Any";
+    setHiringEntity(loadedEntity);
+    // A specific hiring entity determines GCC-ness — neutralize any stale/
+    // conflicting gcc_mode on load so the UI never shows the impossible combo
+    // (the backend normalizes it too; see FiltersConfig._reconcile_gcc).
+    setGccMode(loadedEntity !== "Any" ? "include_gcc" : (config.filters.gcc_mode || "include_gcc"));
     setSearchWindow(config.filters.search_window_hours || 24);
     setSalaryMin(config.filters.salary_min == null ? "" : String(config.filters.salary_min));
     setSalaryMax(config.filters.salary_max == null ? "" : String(config.filters.salary_max));
@@ -649,10 +658,10 @@ export default function RuleEngineConfig({
                 </div>
               </div>
 
-              <div className="rec-section-label">Qualification Filters — applied before any data is collected</div>
+              <div className="rec-section-label">Filters — search terms (job type, domain, location) narrow what each source fetches; every scraped job is kept and labelled, then flagged if it doesn&rsquo;t match (nothing is dropped)</div>
 
               <div className="rec-grid rec-grid--2">
-                <Card title="Job type" required invalid={showErr("jobType")} desc="Any posting not matching the selected type is skipped immediately.">
+                <Card title="Job type" required invalid={showErr("jobType")} desc="Pushed into each source's search (e.g. LinkedIn f_JT). Non-matching jobs are flagged after scraping, not dropped.">
                   <div className="rec-chips">
                     {JOB_TYPES.map((t) => (
                       <Chip key={t} active={jobType === t} onClick={() => { setJobType(t); markDirty(); }}>{t}</Chip>
@@ -660,7 +669,7 @@ export default function RuleEngineConfig({
                   </div>
                 </Card>
 
-                <Card title="Domain" required invalid={showErr("domain")} desc="Agent matches domain based on title and JD keywords.">
+                <Card title="Domain" required invalid={showErr("domain")} desc='A specific domain (or "IT") adds keywords to the search so fewer irrelevant jobs are fetched. Every job is also labelled by title/JD keywords and flagged if it doesn&rsquo;t match. "Non-IT"/"Any" don&rsquo;t narrow the search.'>
                   <div className="rec-chips">
                     {DOMAINS.map((t) => (
                       <Chip key={t} active={domain === t} onClick={() => { setDomain(t); markDirty(); }}>{t}</Chip>
@@ -668,18 +677,35 @@ export default function RuleEngineConfig({
                   </div>
                 </Card>
 
-                <Card title="Hiring entity" required invalid={showErr("hiring")} desc='Detected via keyword list (e.g., "on behalf of", "staffing", "manpower").'>
+                <Card title="Hiring entity" required invalid={showErr("hiring")} desc='Classified after scraping via company/JD keyword lists (GCC, staffing, direct-client). No LinkedIn equivalent, so non-matching jobs are flagged, not dropped.'>
                   <div className="rec-chips">
                     {HIRING_ENTITIES.map((t) => (
-                      <Chip key={t} active={hiringEntity === t} onClick={() => { setHiringEntity(t); markDirty(); }}>{t}</Chip>
+                      <Chip key={t} active={hiringEntity === t}
+                        onClick={() => {
+                          setHiringEntity(t);
+                          // A specific hiring entity already determines GCC-ness,
+                          // so neutralize GCC flag to avoid the impossible combo
+                          // (e.g. gcc_only + Direct Client) — matches the backend
+                          // auto-normalization in FiltersConfig._reconcile_gcc.
+                          if (t !== "Any") setGccMode("include_gcc");
+                          markDirty();
+                        }}>{t}</Chip>
                     ))}
                   </div>
                 </Card>
 
-                <Card title="GCC flag" required invalid={showErr("gccFlag")} desc="Global Capability Centre detection via keyword list in JD.">
+                <Card title="GCC flag" required invalid={showErr("gccFlag")}
+                  desc={hiringEntity !== "Any"
+                    ? `Determined by Hiring entity ("${hiringEntity}"). GCC flag applies only when Hiring entity is "Any".`
+                    : "Global Capability Centre detection via keyword list in JD."}>
                   <div className="rec-chips">
                     {GCC_MODES.map((g) => (
-                      <Chip key={g.value} active={gccMode === g.value} onClick={() => { setGccMode(g.value); markDirty(); }}>{g.label}</Chip>
+                      <Chip key={g.value} active={gccMode === g.value}
+                        disabled={hiringEntity !== "Any"}
+                        title={hiringEntity !== "Any"
+                          ? `Locked — Hiring entity "${hiringEntity}" already determines GCC status`
+                          : undefined}
+                        onClick={() => { setGccMode(g.value); markDirty(); }}>{g.label}</Chip>
                     ))}
                   </div>
                 </Card>
@@ -689,7 +715,7 @@ export default function RuleEngineConfig({
                     onChange={(e) => { setLocation(e.target.value); markDirty(); }} />
                 </Card>
 
-                <Card title="Salary / Budget" desc="Applied against disclosed salary range in the posting.">
+                <Card title="Salary / Budget" desc="Checked after scraping against the posting's disclosed salary. Out-of-range jobs are flagged, not dropped.">
                   <div className="rec-field-row">
                     <div className="rec-field">
                       <label>Min (₹ LPA)</label>

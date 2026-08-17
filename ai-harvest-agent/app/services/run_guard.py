@@ -26,7 +26,8 @@ from contextlib import asynccontextmanager
 
 import structlog
 
-from app.core.exceptions import JobAlreadyRunningError
+from app.config import get_settings
+from app.core.exceptions import DailyJobLimitExceededError, JobAlreadyRunningError
 from app.services.harvest_run_service import HarvestRunService, db_read
 
 logger = structlog.get_logger(__name__)
@@ -61,6 +62,23 @@ async def db_conflict() -> dict | None:
     row = await db_read(lambda db: HarvestRunService(db).get_active_run())
     if row is not None:
         return {"job_id": row.job_id, "run_id": row.run_id, "source": row.source}
+    return None
+
+
+async def daily_budget_conflict() -> dict | None:
+    """Global daily job cap: return `{"used", "limit"}` if today's harvested
+    total has reached MAX_JOBS_PER_DAY, else None. Disabled when the limit is 0.
+
+    Fail-open — if the DB read fails (`db_read` returns None) the run is allowed,
+    matching the guard's best-effort posture (never block a run on a transient
+    DB error). Counts finished runs since UTC midnight (see
+    `HarvestRunService.jobs_scraped_today`)."""
+    limit = get_settings().max_jobs_per_day
+    if limit <= 0:
+        return None
+    used = await db_read(lambda db: HarvestRunService(db).jobs_scraped_today())
+    if used is not None and used >= limit:
+        return {"used": used, "limit": limit}
     return None
 
 
@@ -110,7 +128,11 @@ async def single_flight(run_id: str, source: str | None, job_id: str | None = No
 
     The multi-source POST /run-harvest-agent can't use this — its run outlives
     the request in a background task — so it calls try_begin()/end() directly."""
-    # DB backstop first (a run left 'running' by a previous process), then the
+    # Global daily cap first — reject before touching the single-flight slot.
+    budget = await daily_budget_conflict()
+    if budget is not None:
+        raise DailyJobLimitExceededError(budget["used"], budget["limit"])
+    # DB backstop next (a run left 'running' by a previous process), then the
     # atomic in-process claim. try_begin() serializes concurrent starts: even if
     # two callers both clear the DB check, only the first claims the slot; the
     # rest get 409.

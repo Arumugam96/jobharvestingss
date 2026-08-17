@@ -46,14 +46,24 @@ logger   = structlog.get_logger(__name__)
 settings = get_settings()
 
 
-def _ensure_scraped_jobs_recruiter_id_column(sync_conn) -> None:
+def _ensure_scraped_jobs_columns(sync_conn) -> None:
+    """One-time, idempotent ADD COLUMN backfill for columns added to the
+    pre-existing scraped_jobs table (create_all only creates missing tables,
+    never alters an existing one)."""
     inspector = sa_inspect(sync_conn)
     if "scraped_jobs" not in inspector.get_table_names():
-        return  # brand-new DB — create_all above already made this table with the column
+        return  # brand-new DB — create_all above already made this table with the columns
     existing_cols = {c["name"] for c in inspector.get_columns("scraped_jobs")}
-    if "recruiter_id" not in existing_cols:
-        sync_conn.execute(sa_text("ALTER TABLE scraped_jobs ADD COLUMN recruiter_id VARCHAR(36)"))
-        logger.info("scraped_jobs_recruiter_id_column_added")
+    # (column name, ADD COLUMN DDL) — SQLite requires a constant DEFAULT here.
+    pending = [
+        ("recruiter_id",  "ALTER TABLE scraped_jobs ADD COLUMN recruiter_id VARCHAR(36)"),
+        ("passed_filter", "ALTER TABLE scraped_jobs ADD COLUMN passed_filter BOOLEAN NOT NULL DEFAULT 1"),
+        ("filter_reason", "ALTER TABLE scraped_jobs ADD COLUMN filter_reason VARCHAR(255) NOT NULL DEFAULT ''"),
+    ]
+    for name, ddl in pending:
+        if name not in existing_cols:
+            sync_conn.execute(sa_text(ddl))
+            logger.info("scraped_jobs_column_added", column=name)
 
 
 @asynccontextmanager
@@ -71,10 +81,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         # create_all only creates missing tables — it never alters an
-        # existing one, so `recruiter_id` (added to the pre-existing
-        # scraped_jobs table alongside the new recruiters table) needs its
-        # own one-time, idempotent ADD COLUMN here.
-        await conn.run_sync(_ensure_scraped_jobs_recruiter_id_column)
+        # existing one, so columns added to the pre-existing scraped_jobs table
+        # (recruiter_id, passed_filter, filter_reason) each need a one-time,
+        # idempotent ADD COLUMN here.
+        await conn.run_sync(_ensure_scraped_jobs_columns)
 
     # Reconcile stale 'running' runs left by a previous process (a harvest runs
     # in a detached task that doesn't survive a restart). Without this, the

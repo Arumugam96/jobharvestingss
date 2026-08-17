@@ -45,6 +45,20 @@ class JobAlreadyRunningError(HarvestException):
         )
 
 
+class DailyJobLimitExceededError(HarvestException):
+    def __init__(self, used: int, limit: int) -> None:
+        super().__init__(
+            message=(
+                f"Daily harvest limit reached — {used} of {limit} jobs already "
+                f"scraped today. Try again after the daily reset (UTC midnight) "
+                f"or raise MAX_JOBS_PER_DAY."
+            ),
+            code="DAILY_LIMIT_EXCEEDED",
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            details={"used": used, "limit": limit},
+        )
+
+
 class AgentError(HarvestException):
     def __init__(self, message: str, details: dict[str, Any] | None = None) -> None:
         super().__init__(
