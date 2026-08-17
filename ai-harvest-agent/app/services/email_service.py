@@ -68,7 +68,7 @@ class EmailSender:
         """Generic SMTP send with attachments — same transport/credentials as
         send_otp. Attachments come as file paths and/or as in-memory
         (filename, bytes) blobs; the harvest report is generated from the DB
-        in memory and attached as a blob (no result file is written to disk)."""
+        in memory and attached as a blob."""
         paths = attachment_paths or []
         blobs = attachment_blobs or []
         log = logger.bind(recipients=recipients, subject=subject, attachments=len(paths) + len(blobs))

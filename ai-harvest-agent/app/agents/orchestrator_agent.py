@@ -468,9 +468,9 @@ class OrchestratorAgent:
         # The URL-level filter (jobAge/f_TPR/datePosted) is the primary gate;
         # this is a secondary code-level check to drop any jobs the board
         # returned outside the configured window despite the filter.
-        all_unified = _filter_by_date_window(
-            all_unified, config.filters.search_window_hours
-        )
+        # all_unified = _filter_by_date_window(
+        #     all_unified, config.filters.search_window_hours
+        # )
 
         # ── Step 6: rebuild jobs_by_source from deduped set ───────────────────
         deduped_by_source: dict[str, list[UnifiedJob]] = {}

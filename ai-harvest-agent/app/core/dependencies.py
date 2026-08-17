@@ -19,14 +19,7 @@ from app.services.playwright_service import PlaywrightService
 
 logger = structlog.get_logger(__name__)
 
-# ── Database ─────────────────────────────────────────────────────────────────────
-
-# Anchored to the ai-harvest-agent project root (parent of this file's app/core/
-# directory) — same fix as ConfigService's _CONFIG_PATH. A bare relative sqlite
-# path resolves against the process's CWD, so running once from inside
-# ai-harvest-agent/ and once from a different CWD/container WORKDIR silently
-# reads/writes two different .db files (this is what made a completed harvest's
-# jobs look "missing" from the database — they were written to the other file).
+# ── Database ────────────────────────────────────────────────────────────────────
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _SQLITE_PREFIX = "sqlite+aiosqlite:///"
 
@@ -41,7 +34,7 @@ def _resolve_sqlite_url(url: str) -> str:
     return _SQLITE_PREFIX + (_PROJECT_ROOT / path).resolve().as_posix()
 
 
-def _build_engine(settings: Settings):  # type: ignore[return]
+def _build_engine(settings: Settings):
     # SQLite's async dialect (aiosqlite) uses NullPool and rejects pool_size /
     # max_overflow entirely — those only apply to pooled dialects (Postgres, MySQL).
     if settings.database_url.startswith("sqlite"):

@@ -28,8 +28,6 @@ class Settings(BaseSettings):
     # file at data/logs/app.log always captures DEBUG regardless of this —
     # this only controls what prints to the terminal.
     log_level: str = "INFO"
-
-    # ── Harvest results read source ────────────────────────────────────────────
     data_source: Literal["auto", "database", "json"] = "database"
 
     # ── Database ─────────────────────────────────────────────────────────────────
@@ -50,14 +48,6 @@ class Settings(BaseSettings):
     anthropic_temperature: float = 0.0
 
     # ── HTML extraction LLM provider ──────────────────────────────────────────────
-    # Selects which model LLMService.extract_json() uses (the LinkedIn HTML
-    # extraction fallback and any other extract_json() caller).
-    #   ""  or "claude" / "claude-*"     -> Anthropic Claude (anthropic_model, or the
-    #                                       specific claude-* id given here)
-    #   "ollama"                         -> local LLM at local_llm_url, model = local_llm_model
-    #   "openrouter"                     -> OpenRouter, model = openrouter_model
-    #   "openrouter/<provider>/<model>"  -> OpenRouter, using that model id directly
-    #   any other value                  -> local LLM at local_llm_url, used as the model name
     extraction_llm_model: str = "claude"
     local_llm_url:        str = "http://localhost:11434"
     local_llm_model:      str = "llama3.1:8b"
@@ -91,11 +81,9 @@ class Settings(BaseSettings):
     microsoft_email:    str = ""
     microsoft_password: str = ""
 
-    # ── Naukri scraper ────────────────────────────────────────────────────────────
     naukri_email:    str = ""
     naukri_password: str = ""
 
-    # ── Dice scraper (public board — credentials optional) ────────────────────────
     dice_email:    str = ""
     dice_password: str = ""
 
@@ -132,9 +120,10 @@ class Settings(BaseSettings):
     # value like "http://a,http://b" before any field_validator ever runs.
     cors_origins: str = "http://localhost:3000,http://localhost:8080"
 
+    
     @property
     def cors_origins_list(self) -> list[str]:
-        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+        return [o for o in self.cors_origins.split(",") if o.strip()]
 
     @property
     def is_production(self) -> bool:

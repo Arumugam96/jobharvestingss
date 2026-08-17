@@ -59,7 +59,7 @@ def _ensure_scraped_jobs_recruiter_id_column(sync_conn) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Startup: launch browser pool + scheduler. Shutdown: clean up both."""
-    logger.info("startup", env=settings.app_env, model=settings.anthropic_model)
+    logger.info("startup", env=settings.app_env, model=settings.extraction_llm_model)
 
     # Restore any in-flight job states from the previous process
     JobTracker.load_from_disk()

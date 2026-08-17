@@ -1,4 +1,4 @@
-"""Claude wrapper with tool-use support, plus local-LLM (Ollama) and OpenRouter
+"""LLM wrapper with tool-use support for claude, local-LLM (Ollama) and OpenRouter
 extraction paths."""
 from __future__ import annotations
 
@@ -27,21 +27,14 @@ logger = structlog.get_logger(__name__)
 _PROVIDER_CLAUDE = "claude"
 _PROVIDER_OLLAMA = "ollama"
 _PROVIDER_OPENROUTER = "openrouter"
-
-# Ollama can be slow on CPU-only/remote hosts — generous timeout vs. Claude's
-# default (seen live: a 4B model over a remote Ollama host took >120s on a
-# ~12K-char prompt and got cut off mid-generation).
-_LOCAL_LLM_TIMEOUT_S = 300.0
-
-# OpenRouter is a hosted API in front of many providers — no need for the
-# generous local-LLM timeout, but free-tier models can still queue.
+_LOCAL_LLM_TIMEOUT_S = 500.0
 _OPENROUTER_TIMEOUT_S = 90.0
 _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 # Tracks tenacity's attempt count for the retry-decorated call made by the
 # current extract_json() invocation. A ContextVar (not an instance attribute)
 # keeps this race-free across concurrent asyncio tasks (LinkedIn/Naukri/Dice
-# scrape concurrently; LinkedIn's own detail pages fetch concurrently too).
+# scrape concurrently).
 _retry_attempts: ContextVar[int] = ContextVar("llm_retry_attempts", default=0)
 
 
@@ -53,7 +46,7 @@ def _track_attempt(retry_state: Any) -> None:
 
 @dataclass
 class _ProviderUsage:
-    """Cumulative token counters for one provider (Claude or Ollama)."""
+    """Cumulative token counters for one provider (Claude or Ollama or openrouter)."""
     calls:         int = 0
     input_tokens:  int = 0
     output_tokens: int = 0
@@ -83,107 +76,107 @@ def empty_usage_summary() -> dict[str, dict[str, int]]:
     }
 
 
-# ── Tool definitions the LLM can call ────────────────────────────────────────────
+# # ── Tool definitions the LLM can call ────────────────────────────────────────────
 
-HARVEST_TOOLS: list[dict[str, Any]] = [
-    {
-        "name": "navigate",
-        "description": "Navigate the browser to a URL and get the page content.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "url": {"type": "string", "description": "The URL to navigate to"},
-                "wait_until": {
-                    "type": "string",
-                    "enum": ["load", "networkidle", "domcontentloaded"],
-                    "description": "When to consider navigation complete",
-                    "default": "networkidle",
-                },
-            },
-            "required": ["url"],
-        },
-    },
-    {
-        "name": "click",
-        "description": "Click an element on the current page by CSS selector.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "selector": {"type": "string", "description": "CSS selector of the element to click"},
-            },
-            "required": ["selector"],
-        },
-    },
-    {
-        "name": "extract_data",
-        "description": "Extract structured data from the current page content.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "schema": {
-                    "type": "object",
-                    "description": "JSON schema describing the data to extract",
-                },
-                "instructions": {
-                    "type": "string",
-                    "description": "Natural language extraction instructions",
-                },
-            },
-            "required": ["instructions"],
-        },
-    },
-    {
-        "name": "scroll",
-        "description": "Scroll the page to load more content (infinite scroll).",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "count": {"type": "integer", "description": "Number of scroll actions", "default": 3},
-            },
-        },
-    },
-    {
-        "name": "fill_form",
-        "description": "Fill a form and submit it.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "fields": {
-                    "type": "object",
-                    "description": "Mapping of CSS selector → value",
-                },
-                "submit_selector": {
-                    "type": "string",
-                    "description": "CSS selector of the submit button",
-                },
-            },
-            "required": ["fields", "submit_selector"],
-        },
-    },
-    {
-        "name": "finish",
-        "description": "Signal that harvesting is complete and return the final structured result.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "data": {
-                    "type": "object",
-                    "description": "The final harvested and structured data",
-                },
-                "summary": {
-                    "type": "string",
-                    "description": "Brief summary of what was harvested",
-                },
-                "pages_visited": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "List of URLs visited",
-                },
-            },
-            "required": ["data", "summary"],
-        },
-    },
-]
+# HARVEST_TOOLS: list[dict[str, Any]] = [
+#     {
+#         "name": "navigate",
+#         "description": "Navigate the browser to a URL and get the page content.",
+#         "input_schema": {
+#             "type": "object",
+#             "properties": {
+#                 "url": {"type": "string", "description": "The URL to navigate to"},
+#                 "wait_until": {
+#                     "type": "string",
+#                     "enum": ["load", "networkidle", "domcontentloaded"],
+#                     "description": "When to consider navigation complete",
+#                     "default": "networkidle",
+#                 },
+#             },
+#             "required": ["url"],
+#         },
+#     },
+#     {
+#         "name": "click",
+#         "description": "Click an element on the current page by CSS selector.",
+#         "input_schema": {
+#             "type": "object",
+#             "properties": {
+#                 "selector": {"type": "string", "description": "CSS selector of the element to click"},
+#             },
+#             "required": ["selector"],
+#         },
+#     },
+#     {
+#         "name": "extract_data",
+#         "description": "Extract structured data from the current page content.",
+#         "input_schema": {
+#             "type": "object",
+#             "properties": {
+#                 "schema": {
+#                     "type": "object",
+#                     "description": "JSON schema describing the data to extract",
+#                 },
+#                 "instructions": {
+#                     "type": "string",
+#                     "description": "Natural language extraction instructions",
+#                 },
+#             },
+#             "required": ["instructions"],
+#         },
+#     },
+#     {
+#         "name": "scroll",
+#         "description": "Scroll the page to load more content (infinite scroll).",
+#         "input_schema": {
+#             "type": "object",
+#             "properties": {
+#                 "count": {"type": "integer", "description": "Number of scroll actions", "default": 3},
+#             },
+#         },
+#     },
+#     {
+#         "name": "fill_form",
+#         "description": "Fill a form and submit it.",
+#         "input_schema": {
+#             "type": "object",
+#             "properties": {
+#                 "fields": {
+#                     "type": "object",
+#                     "description": "Mapping of CSS selector → value",
+#                 },
+#                 "submit_selector": {
+#                     "type": "string",
+#                     "description": "CSS selector of the submit button",
+#                 },
+#             },
+#             "required": ["fields", "submit_selector"],
+#         },
+#     },
+#     {
+#         "name": "finish",
+#         "description": "Signal that harvesting is complete and return the final structured result.",
+#         "input_schema": {
+#             "type": "object",
+#             "properties": {
+#                 "data": {
+#                     "type": "object",
+#                     "description": "The final harvested and structured data",
+#                 },
+#                 "summary": {
+#                     "type": "string",
+#                     "description": "Brief summary of what was harvested",
+#                 },
+#                 "pages_visited": {
+#                     "type": "array",
+#                     "items": {"type": "string"},
+#                     "description": "List of URLs visited",
+#                 },
+#             },
+#             "required": ["data", "summary"],
+#         },
+#     },
+# ]
 
 
 class LLMMessage:
@@ -212,7 +205,7 @@ class LLMMessage:
 
 
 class LLMService:
-    """Anthropic Claude client with retry logic and tool-use support."""
+    """Anthropic Claude/openrouter/LocalLLM client with retry logic and tool-use support."""
 
     def __init__(self, settings: Settings) -> None:
         self._client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
@@ -345,14 +338,10 @@ class LLMService:
         lowered = raw.lower()
         if not raw or lowered == _PROVIDER_CLAUDE:
             return _PROVIDER_CLAUDE, self._model
-        if lowered.startswith("claude-"):
-            return _PROVIDER_CLAUDE, raw
         if lowered == _PROVIDER_OLLAMA:
             return _PROVIDER_OLLAMA, self._local_llm_model
         if lowered == _PROVIDER_OPENROUTER:
             return _PROVIDER_OPENROUTER, self._openrouter_model
-        if lowered.startswith(f"{_PROVIDER_OPENROUTER}/"):
-            return _PROVIDER_OPENROUTER, raw.split("/", 1)[1]
         return _PROVIDER_OLLAMA, raw
 
     def _local_llm_unavailable_msg(self, model: str, url: str, reason: str) -> str:
@@ -361,8 +350,8 @@ class LLMService:
         which server/model to check; falls back to the resolved model id."""
         name = self._local_llm_model or model
         return (
-            f"Local LLM '{name}' at {url} is unavailable ({reason}) — the server "
-            f"may be shut down or misconfigured. Contact the admin team."
+            f"SightSpectrum's Local LLM '{name}' at is unavailable ({reason}) — the server "
+            f"may be shut down. Contact the admin team."
         )
 
     @retry(
