@@ -34,35 +34,35 @@ JOB_SORT_FIELDS = {
 }
 
 
-# def data_source_mode() -> str:
-#     """Current value of DATA_SOURCE from .env — "auto" (default) | "database"
-#     | "json". See Settings.data_source in app/config.py for what each means."""
-#     return get_settings().data_source
+def data_source_mode() -> str:
+    """Current value of DATA_SOURCE from .env — "auto" (default) | "database"
+    | "json". See Settings.data_source in app/config.py for what each means."""
+    return get_settings().data_source
 
 
-# async def resolve_read(
-#     mode: str,
-#     db_fn: Callable[[], Awaitable[_T]],
-#     json_fn: Callable[[], Any],
-# ) -> tuple[Any, str]:
-#     """Pick DB vs. JSON for one GET-endpoint read, per the DATA_SOURCE setting.
+async def resolve_read(
+    mode: str,
+    db_fn: Callable[[], Awaitable[_T]],
+    json_fn: Callable[[], Any],
+) -> tuple[Any, str]:
+    """Pick DB vs. JSON for one GET-endpoint read, per the DATA_SOURCE setting.
 
-#     "json"     -> never call db_fn; always read the JSON/file store.
-#     "database" -> only call db_fn; caller gets whatever it returns (including
-#                   an empty/None "not found") without a JSON fallback.
-#     "auto"     -> call db_fn first; fall back to json_fn if it returned
-#                   nothing (None, [], falsy) — today's pre-toggle behavior.
+    "json"     -> never call db_fn; always read the JSON/file store.
+    "database" -> only call db_fn; caller gets whatever it returns (including
+                  an empty/None "not found") without a JSON fallback.
+    "auto"     -> call db_fn first; fall back to json_fn if it returned
+                  nothing (None, [], falsy) — today's pre-toggle behavior.
 
-#     Returns (result, source_used) so the caller knows which shape it's
-#     holding — a DB row/ORM list needs its own mapper, a JSON result is
-#     already in the response's final shape.
-#     """
-#     if mode == "json":
-#         return json_fn(), "json"
-#     result = await db_fn()
-#     if result or mode == "database":
-#         return result, "database"
-#     return json_fn(), "json"
+    Returns (result, source_used) so the caller knows which shape it's
+    holding — a DB row/ORM list needs its own mapper, a JSON result is
+    already in the response's final shape.
+    """
+    if mode == "json":
+        return json_fn(), "json"
+    result = await db_fn()
+    if result or mode == "database":
+        return result, "database"
+    return json_fn(), "json"
 
 
 async def db_write(coro_fn: Callable[[AsyncSession], Awaitable[_T]]) -> _T | None:

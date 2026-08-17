@@ -270,12 +270,18 @@ async def _apply_schedule(scheduler, config: HarvestConfig) -> None:
 
         # Single-flight: an unattended scheduled tick must NOT collide with an
         # in-progress manual run (same Chrome profile). Skip this tick if a run
-        # is already active rather than failing both.
-        conflict = await run_guard.check_conflict()
+        # is already active rather than failing both. DB backstop first, then an
+        # atomic in-process claim — try_begin() has no await between check and
+        # set, so a tick firing at the same moment as a manual start can't slip
+        # past it; exactly one claims the slot, the other skips/409s.
+        db = await run_guard.db_conflict()
+        if db is not None:
+            logger.warning("scheduled_harvest_skipped_run_in_progress", run_id=run_id, active=db)
+            return
+        conflict = run_guard.try_begin(None, run_id, None)
         if conflict is not None:
             logger.warning("scheduled_harvest_skipped_run_in_progress", run_id=run_id, active=conflict)
             return
-        run_guard.begin(None, run_id, None)
 
         orch    = OrchestratorAgent(cfg)
         try:

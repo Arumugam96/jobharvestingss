@@ -42,18 +42,53 @@ def active_run() -> dict | None:
 
 async def check_conflict() -> dict | None:
     """Return conflict info if a harvest is already running (in-process marker
-    first, then the DB backstop), else None. Call `begin()` only when this
-    returns None."""
+    first, then the DB backstop), else None.
+
+    Read-only — safe for status endpoints (GET /active-run). Do NOT use this to
+    gate a start: it awaits (the DB read) between reading `_active` and the
+    caller's later `begin()`, and two concurrent starts can both pass it before
+    either claims the slot. Use `try_begin()` for the start path instead."""
     if _active is not None:
         return dict(_active)
+    return await db_conflict()
+
+
+async def db_conflict() -> dict | None:
+    """DB backstop only: info for a run left 'running' by a previous process
+    (e.g. an ungraceful restart), else None. Does NOT consult the in-process
+    marker. Pair with `try_begin()` on the start path — this catches a stale
+    cross-process run, `try_begin()` closes the live-request race."""
     row = await db_read(lambda db: HarvestRunService(db).get_active_run())
     if row is not None:
         return {"job_id": row.job_id, "run_id": row.run_id, "source": row.source}
     return None
 
 
+def try_begin(job_id: str | None, run_id: str, source: str | None) -> dict | None:
+    """Atomically claim the in-process single-flight slot.
+
+    Returns None (and marks the run in-flight) if no run is active in THIS
+    process; otherwise returns the existing run's info and changes nothing.
+
+    Contains NO `await`, so the check and the set can't be interleaved by the
+    event loop — this is what actually closes the double-click / two-tab start
+    race that the old `check_conflict()` + `begin()` pair left open (the DB read
+    inside check_conflict is an await point both callers could slip past before
+    either called begin). Must be paired with `end()` when it returns None."""
+    global _active
+    if _active is not None:
+        return dict(_active)
+    _active = {"job_id": job_id, "run_id": run_id, "source": source}
+    logger.info("run_guard_begin", job_id=job_id, run_id=run_id, source=source)
+    return None
+
+
 def begin(job_id: str | None, run_id: str, source: str | None) -> None:
-    """Mark a run as in-flight in this process. Must be paired with end()."""
+    """Mark a run as in-flight in this process. Must be paired with end().
+
+    Prefer `try_begin()` on the start path — it makes the check-and-set atomic.
+    This unconditional setter remains for callers that have already established
+    exclusivity by other means."""
     global _active
     _active = {"job_id": job_id, "run_id": run_id, "source": source}
     logger.info("run_guard_begin", job_id=job_id, run_id=run_id, source=source)
@@ -74,11 +109,17 @@ async def single_flight(run_id: str, source: str | None, job_id: str | None = No
     running, otherwise marks in-flight for the duration and releases on exit.
 
     The multi-source POST /run-harvest-agent can't use this — its run outlives
-    the request in a background task — so it calls begin()/end() directly."""
-    conflict = await check_conflict()
+    the request in a background task — so it calls try_begin()/end() directly."""
+    # DB backstop first (a run left 'running' by a previous process), then the
+    # atomic in-process claim. try_begin() serializes concurrent starts: even if
+    # two callers both clear the DB check, only the first claims the slot; the
+    # rest get 409.
+    db = await db_conflict()
+    if db is not None:
+        raise JobAlreadyRunningError(db.get("job_id") or "", details=db)
+    conflict = try_begin(job_id, run_id, source)
     if conflict is not None:
         raise JobAlreadyRunningError(conflict.get("job_id") or "", details=conflict)
-    begin(job_id, run_id, source)
     try:
         yield
     finally:

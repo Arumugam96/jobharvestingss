@@ -908,8 +908,17 @@ class LinkedInAgent:
 
         await _screenshot(page, "page_loaded")
 
+        # Retry the first navigation: right after the browser starts, the
+        # container's embedded DNS resolver can briefly fail (Chromium reports
+        # this as net::ERR_NAME_NOT_RESOLVED), which would otherwise abort the
+        # whole run with 0 jobs. A couple of retries with backoff rides out the
+        # transient blip.
         try:
-            await page.goto(search_url, wait_until="domcontentloaded", timeout=30_000)
+            await _retry(
+                lambda: page.goto(search_url, wait_until="domcontentloaded", timeout=30_000),
+                retries=3,
+                delay_s=3.0,
+            )
         except Exception as exc:
             logger.error("linkedin_navigation_failed", error=str(exc))
             return []

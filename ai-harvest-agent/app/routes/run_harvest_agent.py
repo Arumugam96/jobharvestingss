@@ -473,36 +473,54 @@ async def run_harvest_agent(body: HarvestAgentRequest = HarvestAgentRequest()) -
         )
 
     # ── Single-flight: reject if a harvest is already running ─────────────────
-    conflict = await run_guard.check_conflict()
+    # DB backstop first (catches a run left 'running' by a previous process),
+    # then an atomic in-process claim. try_begin() has no await between its
+    # check and set, so two near-simultaneous starts (a double-click, two tabs,
+    # two users) can't both pass it — the first wins, the rest get 409. The old
+    # check_conflict()+begin() pair awaited the DB read between check and set,
+    # leaving that race open (both could start and drive the same Chrome
+    # profile at once — exactly what this guard exists to prevent).
+    db_conflict = await run_guard.db_conflict()
+    if db_conflict is not None:
+        raise JobAlreadyRunningError(db_conflict.get("job_id") or "", details=db_conflict)
+
+    job_id = uuid4().hex
+    conflict = run_guard.try_begin(job_id, run_id, None)
     if conflict is not None:
         raise JobAlreadyRunningError(conflict.get("job_id") or "", details=conflict)
 
-    job_id = uuid4().hex
-    run_guard.begin(job_id, run_id, None)
-    JobTracker.create(job_id, run_id)
+    # The slot is now claimed. Anything that fails before the background task is
+    # scheduled must release it, or the lock would stick until the next restart.
+    try:
+        JobTracker.create(job_id, run_id)
 
-    run_pk = await db_write(lambda db: HarvestRunService(db).create_run(
-        run_id           = run_id,
-        job_id           = job_id,
-        source           = None,
-        sources          = enabled,
-        filters_snapshot = _filters_snapshot(config),
-        started_at       = datetime.now(timezone.utc),
-    ))
+        run_pk = await db_write(lambda db: HarvestRunService(db).create_run(
+            run_id           = run_id,
+            job_id           = job_id,
+            source           = None,
+            sources          = enabled,
+            filters_snapshot = _filters_snapshot(config),
+            started_at       = datetime.now(timezone.utc),
+        ))
 
-    logger.info(
-        "harvest_agent_queued",
-        job_id    = job_id,
-        run_id    = run_id,
-        sources   = enabled,
-        keyword   = config.filters.keyword,
-        config_id = body.config_id,
-    )
+        logger.info(
+            "harvest_agent_queued",
+            job_id    = job_id,
+            run_id    = run_id,
+            sources   = enabled,
+            keyword   = config.filters.keyword,
+            config_id = body.config_id,
+        )
 
-    asyncio.create_task(
-        _run_harvest_background(job_id, run_id, config, now_iso, enabled, run_pk),
-        name = f"harvest-{job_id}",
-    )
+        asyncio.create_task(
+            _run_harvest_background(job_id, run_id, config, now_iso, enabled, run_pk),
+            name = f"harvest-{job_id}",
+        )
+    except Exception:
+        # Background task never started → its finally: run_guard.end() will
+        # never fire, so release the slot here. end() is idempotent.
+        run_guard.end()
+        raise
 
     return JSONResponse(
         status_code = status.HTTP_202_ACCEPTED,
