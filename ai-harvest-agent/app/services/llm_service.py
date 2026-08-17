@@ -76,107 +76,107 @@ def empty_usage_summary() -> dict[str, dict[str, int]]:
     }
 
 
-# # ── Tool definitions the LLM can call ────────────────────────────────────────────
+# ── Tool definitions the LLM can call ────────────────────────────────────────────
 
-# HARVEST_TOOLS: list[dict[str, Any]] = [
-#     {
-#         "name": "navigate",
-#         "description": "Navigate the browser to a URL and get the page content.",
-#         "input_schema": {
-#             "type": "object",
-#             "properties": {
-#                 "url": {"type": "string", "description": "The URL to navigate to"},
-#                 "wait_until": {
-#                     "type": "string",
-#                     "enum": ["load", "networkidle", "domcontentloaded"],
-#                     "description": "When to consider navigation complete",
-#                     "default": "networkidle",
-#                 },
-#             },
-#             "required": ["url"],
-#         },
-#     },
-#     {
-#         "name": "click",
-#         "description": "Click an element on the current page by CSS selector.",
-#         "input_schema": {
-#             "type": "object",
-#             "properties": {
-#                 "selector": {"type": "string", "description": "CSS selector of the element to click"},
-#             },
-#             "required": ["selector"],
-#         },
-#     },
-#     {
-#         "name": "extract_data",
-#         "description": "Extract structured data from the current page content.",
-#         "input_schema": {
-#             "type": "object",
-#             "properties": {
-#                 "schema": {
-#                     "type": "object",
-#                     "description": "JSON schema describing the data to extract",
-#                 },
-#                 "instructions": {
-#                     "type": "string",
-#                     "description": "Natural language extraction instructions",
-#                 },
-#             },
-#             "required": ["instructions"],
-#         },
-#     },
-#     {
-#         "name": "scroll",
-#         "description": "Scroll the page to load more content (infinite scroll).",
-#         "input_schema": {
-#             "type": "object",
-#             "properties": {
-#                 "count": {"type": "integer", "description": "Number of scroll actions", "default": 3},
-#             },
-#         },
-#     },
-#     {
-#         "name": "fill_form",
-#         "description": "Fill a form and submit it.",
-#         "input_schema": {
-#             "type": "object",
-#             "properties": {
-#                 "fields": {
-#                     "type": "object",
-#                     "description": "Mapping of CSS selector → value",
-#                 },
-#                 "submit_selector": {
-#                     "type": "string",
-#                     "description": "CSS selector of the submit button",
-#                 },
-#             },
-#             "required": ["fields", "submit_selector"],
-#         },
-#     },
-#     {
-#         "name": "finish",
-#         "description": "Signal that harvesting is complete and return the final structured result.",
-#         "input_schema": {
-#             "type": "object",
-#             "properties": {
-#                 "data": {
-#                     "type": "object",
-#                     "description": "The final harvested and structured data",
-#                 },
-#                 "summary": {
-#                     "type": "string",
-#                     "description": "Brief summary of what was harvested",
-#                 },
-#                 "pages_visited": {
-#                     "type": "array",
-#                     "items": {"type": "string"},
-#                     "description": "List of URLs visited",
-#                 },
-#             },
-#             "required": ["data", "summary"],
-#         },
-#     },
-# ]
+HARVEST_TOOLS: list[dict[str, Any]] = [
+    {
+        "name": "navigate",
+        "description": "Navigate the browser to a URL and get the page content.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "The URL to navigate to"},
+                "wait_until": {
+                    "type": "string",
+                    "enum": ["load", "networkidle", "domcontentloaded"],
+                    "description": "When to consider navigation complete",
+                    "default": "networkidle",
+                },
+            },
+            "required": ["url"],
+        },
+    },
+    {
+        "name": "click",
+        "description": "Click an element on the current page by CSS selector.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "selector": {"type": "string", "description": "CSS selector of the element to click"},
+            },
+            "required": ["selector"],
+        },
+    },
+    {
+        "name": "extract_data",
+        "description": "Extract structured data from the current page content.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "schema": {
+                    "type": "object",
+                    "description": "JSON schema describing the data to extract",
+                },
+                "instructions": {
+                    "type": "string",
+                    "description": "Natural language extraction instructions",
+                },
+            },
+            "required": ["instructions"],
+        },
+    },
+    {
+        "name": "scroll",
+        "description": "Scroll the page to load more content (infinite scroll).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "count": {"type": "integer", "description": "Number of scroll actions", "default": 3},
+            },
+        },
+    },
+    {
+        "name": "fill_form",
+        "description": "Fill a form and submit it.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "fields": {
+                    "type": "object",
+                    "description": "Mapping of CSS selector → value",
+                },
+                "submit_selector": {
+                    "type": "string",
+                    "description": "CSS selector of the submit button",
+                },
+            },
+            "required": ["fields", "submit_selector"],
+        },
+    },
+    {
+        "name": "finish",
+        "description": "Signal that harvesting is complete and return the final structured result.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "data": {
+                    "type": "object",
+                    "description": "The final harvested and structured data",
+                },
+                "summary": {
+                    "type": "string",
+                    "description": "Brief summary of what was harvested",
+                },
+                "pages_visited": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of URLs visited",
+                },
+            },
+            "required": ["data", "summary"],
+        },
+    },
+]
 
 
 class LLMMessage:
