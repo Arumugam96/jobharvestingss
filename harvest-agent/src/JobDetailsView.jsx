@@ -28,6 +28,26 @@ const LinkedInIcon = ({ size = 16 }) => (
   </svg>
 );
 
+function ContactAction({ glyph: Glyph, href, title, variant, newTab = true }) {
+  if (href) {
+    return (
+      <a
+        className={`ha-cbtn ha-cbtn-on-${variant}`}
+        href={href}
+        title={title}
+        {...(newTab ? { target: "_blank", rel: "noreferrer" } : {})}
+      >
+        <Glyph size={18} />
+      </a>
+    );
+  }
+  return (
+    <span className="ha-cbtn ha-cbtn-off" title={`${title} not available`} aria-disabled="true">
+      <Glyph size={18} />
+    </span>
+  );
+}
+
 function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
   const linkOrDash = (url, label) =>
     url ? (
@@ -102,31 +122,25 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
             </div>
 
             <div className="ha-actions">
-              <a
-                className="ha-act ha-act-wa"
-                href={job.posterContact?.mobile ? `https://wa.me/${job.posterContact.mobile.replace(/\D/g, "")}` : undefined}
-                target="_blank"
-                rel="noreferrer"
+              <ContactAction
+                glyph={WhatsAppIcon}
+                variant="wa"
                 title="WhatsApp"
-              >
-                <WhatsAppIcon /> WhatsApp
-              </a>
-              <a
-                className="ha-act ha-act-mail"
-                href={job.posterContact?.email ? `mailto:${job.posterContact.email}` : undefined}
+                href={job.posterContact?.mobile ? `https://wa.me/${job.posterContact.mobile.replace(/\D/g, "")}` : null}
+              />
+              <ContactAction
+                glyph={Mail}
+                variant="mail"
                 title="Email"
-              >
-                <Mail size={16} /> Email
-              </a>
-              <a
-                className="ha-act ha-act-li"
-                href={job.posterLinkedIn || undefined}
-                target="_blank"
-                rel="noreferrer"
+                newTab={false}
+                href={job.posterContact?.email ? `mailto:${job.posterContact.email}` : null}
+              />
+              <ContactAction
+                glyph={LinkedInIcon}
+                variant="li"
                 title="LinkedIn"
-              >
-                <LinkedInIcon /> LinkedIn
-              </a>
+                href={job.posterLinkedIn || null}
+              />
             </div>
           </div>
         </section>
@@ -258,17 +272,17 @@ const styles = `
   .ha-poster-name { font-size: 14.5px; font-weight: 600; }
   .ha-poster-title { font-size: 12.5px; color: #64748B; }
 
-  .ha-actions { display: flex; gap: 8px; margin-top: 16px; }
-  .ha-act { flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 6px;
-    font-size: 12.5px; font-weight: 600; text-decoration: none; cursor: pointer;
-    padding: 10px 8px; border-radius: 9px; border: 1px solid transparent; }
-  .ha-act:focus-visible { outline: 2px solid #2563EB; outline-offset: 2px; }
-  .ha-act-wa { color: #1A7F4B; background: #ECFBF2; border-color: #C8EFD7; }
-  .ha-act-wa:hover { background: #DDF6E7; }
-  .ha-act-mail { color: #1E40AF; background: #EFF4FF; border-color: #DBE6FF; }
-  .ha-act-mail:hover { background: #E2EBFF; }
-  .ha-act-li { color: #0A66C2; background: #EAF3FB; border-color: #CBE3F6; }
-  .ha-act-li:hover { background: #DBECF8; }
+  .ha-actions { display: flex; gap: 10px; margin-top: 16px; }
+  .ha-cbtn { width: 44px; height: 44px; display: inline-flex; align-items: center; justify-content: center;
+    border-radius: 10px; border: 1px solid transparent; text-decoration: none; transition: .15s; }
+  .ha-cbtn:focus-visible { outline: 2px solid #2563EB; outline-offset: 2px; }
+  .ha-cbtn-off { background: #F1F5F9; border-color: #E7ECF2; color: #B9C2CC; cursor: not-allowed; }
+  .ha-cbtn-on-wa { background: #fff; border-color: #C8EFD7; color: #1A7F4B; cursor: pointer; }
+  .ha-cbtn-on-wa:hover { background: #ECFBF2; }
+  .ha-cbtn-on-mail { background: #fff; border-color: #93C5FD; color: #2563EB; cursor: pointer; }
+  .ha-cbtn-on-mail:hover { background: #EFF4FF; }
+  .ha-cbtn-on-li { background: #0A66C2; border-color: #0A66C2; color: #fff; cursor: pointer; }
+  .ha-cbtn-on-li:hover { background: #084d92; }
 
   @media (max-width: 900px) {
     .ha-grid { grid-template-columns: 1fr; }
