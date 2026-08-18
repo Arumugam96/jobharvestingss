@@ -448,7 +448,7 @@ export default function RuleEngineConfig({
       {/* Sidebar */}
       <aside className="rec-sidebar">
         <div className="rec-brand">
-          <img className="rec-logo-img" src={`${process.env.PUBLIC_URL}/sight_spectrum_logo.jpg`} alt="SS jobharvesting Agent" width="200" height="200" />
+          <img className="rec-logo-img" src={`${process.env.PUBLIC_URL}/sight_spectrum_logo.jpg`} alt="SS jobharvesting Agent" width="150" height="150" />
           <div className="rec-tagline">Contract Sourcing Automation</div>
         </div>
         <nav className="rec-nav">
@@ -777,7 +777,7 @@ const styles = `
   .rec-brand { padding:6px 10px 18px; }
   .rec-logo { font-size:20px; font-weight:800; color:#fff; letter-spacing:-0.3px; }
   .rec-logo span { color:#60A5FA; }
-  .rec-logo-img { width:200px; max-width:100%; height:auto; display:block; border-radius:8px; }
+  .rec-logo-img { width:150px; height:150px; max-width:100%; object-fit:cover; display:block; border-radius:50%; }
   .rec-tagline { margin-top:6px; font-size:10px; letter-spacing:1.2px; font-weight:600; text-transform:uppercase; color:#64748B; }
   .rec-nav { display:flex; flex-direction:column; gap:2px; }
   .rec-nav-section { font-size:10.5px; letter-spacing:1.4px; font-weight:700; text-transform:uppercase; color:#475569; padding:16px 10px 6px; }

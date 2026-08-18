@@ -44,7 +44,7 @@ const ThemeStyles = () => (
     @media(min-width:768px){.ha-sidebar{display:flex;}}
     .ha-logo{font-size:18px;font-weight:700;color:#fff;letter-spacing:-.01em;}
     .ha-logo span{color:${C.primary};}
-    .ha-logo-img{width:200px;max-width:100%;height:auto;display:block;border-radius:8px;}
+    .ha-logo-img{width:150px;height:150px;max-width:100%;object-fit:cover;display:block;border-radius:50%;}
     .ha-tagline{margin-top:4px;font-size:11px;text-transform:uppercase;letter-spacing:.14em;color:#94A3B8;}
     .ha-navhead{padding:0 12px 8px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.14em;color:#64748B;}
     .ha-nav{display:flex;width:100%;align-items:center;gap:12px;border:0;background:transparent;cursor:pointer;border-radius:8px;padding:8px 12px;font-size:14px;color:#CBD5E1;transition:.15s;}
@@ -301,7 +301,7 @@ function Sidebar({ activePage, onNavigate, jobsCount, runsCount }) {
   return (
     <aside className="ha-sidebar">
       <div style={{ padding: "0 12px" }}>
-        <img className="ha-logo-img" src={`${process.env.PUBLIC_URL}/sight_spectrum_logo.jpg`} alt="SS jobharvesting Agent" width="200" height="200" />
+        <img className="ha-logo-img" src={`${process.env.PUBLIC_URL}/sight_spectrum_logo.jpg`} alt="SS jobharvesting Agent" width="150" height="150" />
         <div className="ha-tagline">Contract Sourcing Automation</div>
       </div>
       <nav style={{ marginTop: 32, display: "flex", flexDirection: "column", gap: 24, flex: 1 }}>
