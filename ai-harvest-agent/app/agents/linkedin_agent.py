@@ -1332,7 +1332,9 @@ class LinkedInAgent:
             contact_info: dict = {"email": "", "phone": "", "headline": "", "location": ""}
             try:
                 contact_page = await page.context.new_page()
-                contact_info = await _extract_linkedin_contact_info(contact_page, norm_url)
+                contact_info = await _extract_linkedin_contact_info(
+                    contact_page, norm_url, llm_service=self._get_llm_service(),
+                )
 
                 if not contact_info.get("email") and not contact_info.get("phone"):
                     llm_contact = await self._llm_fallback_extract_contact(contact_page, norm_url)

@@ -481,6 +481,25 @@ def _score_confidence(result: ProspectResult, company_name: str, designation: st
     return "Low"
 
 
+_LI_PROFILE_RE = re.compile(r'linkedin\.com/in/([a-zA-Z0-9\-_%]+)', re.IGNORECASE)
+
+
+def _canonicalize_linkedin_profile_url(url: str) -> str:
+    """Reduce any LinkedIn profile URL to https://www.linkedin.com/in/<slug>/,
+    dropping /recent-activity/, /detail/, /overlay/… path suffixes and query
+    strings that would otherwise load an activity/feed page instead of the
+    profile top-card. Navigating to such a page makes the Contact-info modal
+    selectors miss, and the full-body fallback scan then picks up the FIRST
+    email/phone on the page — i.e. the first member in the activity feed —
+    rather than the target person's own contact. Non-`/in/` URLs (company/
+    school pages, malformed links) are returned untouched."""
+    m = _LI_PROFILE_RE.search(url or "")
+    if not m:
+        return url
+    slug = m.group(1).split("?")[0]
+    return f"https://www.linkedin.com/in/{slug}/"
+
+
 def _extract_email_from_text(text: str, company_domain: str = "") -> str:
     """
     Extract a work email from arbitrary text.
@@ -668,18 +687,78 @@ async def _ddg_linkedin_search(page: Any, person_name: str, company_name: str) -
     return {}
 
 
+_LLM_CONTACT_TEXT_MAX_CHARS = 6_000
+
+
+async def _llm_extract_contact_fields(
+    llm_service: Any, contact_text: str, source_url: str = ""
+) -> dict:
+    """Let the LLM extract a person's email / phone from their captured
+    LinkedIn contact-info text — the authoritative extractor when a service is
+    available. More reliable than the regex heuristics, which silently drop
+    valid addresses (e.g. anything on gmail.com / yahoo.com via
+    _SKIP_EMAIL_DOMAINS, or a phone in a format _PHONE_RE doesn't cover) — the
+    exact "email is present but wasn't scraped" case.
+
+    Extraction only: the LLM is instructed to return a field ONLY if it appears
+    verbatim in the text, never to guess or construct one (honours the module's
+    "email/phone are NEVER predicted" rule). Returns {"email": str, "phone": str}
+    with "" for any field not present. Best-effort — any LLM failure (including
+    provider outage) returns empties so the caller's regex result still stands.
+    """
+    out = {"email": "", "phone": ""}
+    text = (contact_text or "").strip()
+    if not llm_service or len(text) < 5:
+        return out
+    if len(text) > _LLM_CONTACT_TEXT_MAX_CHARS:
+        text = text[:_LLM_CONTACT_TEXT_MAX_CHARS]
+
+    schema_description = (
+        '{"email": str or null (ONLY if an email address appears verbatim in '
+        'the text — never guess or construct one; null otherwise), '
+        '"phone": str or null (ONLY if a phone number appears verbatim in the '
+        'text — never guess or construct one; null otherwise)}'
+    )
+    try:
+        extracted = await llm_service.extract_json(
+            content=text,
+            schema_description=schema_description,
+            system=(
+                "You extract only explicitly-stated contact details from a "
+                "LinkedIn profile's contact-info section. Never fabricate, "
+                "guess, or construct an email or phone number that is not "
+                "literally present in the text. Return only the fields in the "
+                "schema, no commentary."
+            ),
+            job_url=source_url or None,
+        )
+    except Exception as exc:
+        logger.debug("llm_contact_extract_failed", url=source_url, error=str(exc))
+        return out
+
+    if extracted.get("email"):
+        out["email"] = str(extracted["email"]).strip()
+    if extracted.get("phone"):
+        out["phone"] = str(extracted["phone"]).strip()
+    return out
+
+
 async def _extract_linkedin_contact_info(
-    page: Any, linkedin_url: str, company_domain: str = ""
+    page: Any, linkedin_url: str, company_domain: str = "", llm_service: Any = None
 ) -> dict:
     """
     Step 2: Visit a LinkedIn profile and extract publicly visible email / phone.
 
     Strategy
     ────────
-    1. Navigate to profile page.
+    1. Navigate to profile page (URL canonicalised to /in/<slug>).
     2. Try to click the "Contact info" link to open the modal.
-    3. Extract email / phone from modal text.
-    4. Fall back to scanning the full page body if modal failed.
+    3. Capture the contact-info text (modal, then scoped profile card).
+    4. When an `llm_service` is provided, let the LLM decide email / phone from
+       that captured text — authoritative over the regex heuristics, which drop
+       valid gmail/yahoo addresses and non-matching phone formats. The regex
+       result is kept only as a fallback when no LLM is available or it returns
+       nothing.
 
     Returns:
         {email, phone, profile_opened, contact_section_found, headline, location}
@@ -692,6 +771,14 @@ async def _extract_linkedin_contact_info(
         "headline":              "",
         "location":              "",
     }
+
+    # Reduce activity/overlay/detail URLs (and query strings) to the canonical
+    # /in/<slug> profile — otherwise the page loads a feed and the fallback
+    # scan below grabs the first activity-feed member's contact, not this
+    # person's. See _canonicalize_linkedin_profile_url.
+    linkedin_url = _canonicalize_linkedin_profile_url(linkedin_url)
+
+    contact_text = ""   # captured contact-info text, handed to the LLM extractor
 
     try:
         resp = await page.goto(linkedin_url, wait_until="domcontentloaded", timeout=20000)
@@ -748,6 +835,7 @@ async def _extract_linkedin_contact_info(
 
             if modal_text:
                 out["contact_section_found"] = True
+                contact_text += modal_text + "\n"
                 e = _extract_email_from_text(modal_text, company_domain)
                 p = _extract_phone_from_text(modal_text)
                 if e:
@@ -755,13 +843,49 @@ async def _extract_linkedin_contact_info(
                 if p:
                     out["phone"] = p
 
-        # ── Fallback: scan full rendered page text ────────────────────────────
+        # ── Fallback: scan the profile top-card region (NOT the whole body) ───
+        # A whole-body scan grabs the first email/phone anywhere on the page —
+        # on an activity feed / "people also viewed" list that is a DIFFERENT
+        # person. Restrict to the profile's own top-card/main containers, and
+        # only widen to <body> when we're demonstrably still on the canonical
+        # /in/<slug> profile page (never an activity/feed page).
         if not out["email"] or not out["phone"]:
-            body = await page.inner_text("body")
-            if not out["email"]:
-                out["email"] = _extract_email_from_text(body, company_domain)
-            if not out["phone"]:
-                out["phone"] = _extract_phone_from_text(body)
+            scoped_text = ""
+            for sel in (".pv-top-card", "section.artdeco-card", "main .scaffold-layout__main", "main"):
+                try:
+                    el = await page.query_selector(sel)
+                    if el:
+                        scoped_text = (await el.inner_text()).strip()
+                        if scoped_text:
+                            break
+                except Exception:
+                    pass
+
+            if not scoped_text and "/in/" in page.url.split("?")[0].rstrip("/"):
+                try:
+                    scoped_text = await page.inner_text("body")
+                except Exception:
+                    scoped_text = ""
+
+            if scoped_text:
+                contact_text += scoped_text
+                if not out["email"]:
+                    out["email"] = _extract_email_from_text(scoped_text, company_domain)
+                if not out["phone"]:
+                    out["phone"] = _extract_phone_from_text(scoped_text)
+
+        # ── LLM-authoritative extraction ──────────────────────────────────────
+        # Let the LLM decide email/phone from the captured contact text — it
+        # catches valid addresses the regex drops (gmail/yahoo, unusual phone
+        # formats). Overrides the regex result whenever the LLM finds a value.
+        if llm_service and contact_text.strip():
+            llm = await _llm_extract_contact_fields(llm_service, contact_text, linkedin_url)
+            if llm.get("email"):
+                out["email"] = llm["email"]
+            if llm.get("phone"):
+                out["phone"] = llm["phone"]
+            if llm.get("email") or llm.get("phone"):
+                out["contact_section_found"] = True
 
     except Exception as exc:
         logger.debug("linkedin_contact_extract_failed", url=linkedin_url, error=str(exc))
@@ -919,6 +1043,17 @@ class ProspectIntelligenceAgent:
 
     def __init__(self, concurrency: int = _DEFAULT_CONCURRENCY) -> None:
         self._concurrency = max(1, min(concurrency, 5))
+        self._llm_service: Any = None
+
+    def _get_llm_service(self) -> Any:
+        """Lazily build an LLMService from Settings — used as the authoritative
+        email/phone extractor over the captured LinkedIn contact-info text (see
+        _extract_linkedin_contact_info). Built once per agent, not per prospect."""
+        if self._llm_service is None:
+            from app.config import get_settings
+            from app.services.llm_service import LLMService
+            self._llm_service = LLMService(get_settings())
+        return self._llm_service
 
     async def run(self, xlsx_path: str) -> ProspectIntelligenceResult:
         started_at = datetime.now(timezone.utc)
@@ -1134,7 +1269,9 @@ class ProspectIntelligenceAgent:
 
             if linkedin_url:
                 result.linkedin_url = linkedin_url
-                contact_info = await _extract_linkedin_contact_info(page, linkedin_url, domain)
+                contact_info = await _extract_linkedin_contact_info(
+                    page, linkedin_url, domain, llm_service=self._get_llm_service(),
+                )
 
                 result.profile_opened        = contact_info["profile_opened"]
                 result.contact_section_found = contact_info["contact_section_found"]

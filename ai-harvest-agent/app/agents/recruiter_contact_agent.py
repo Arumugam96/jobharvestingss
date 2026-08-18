@@ -410,6 +410,17 @@ class RecruiterContactAgent:
 
     def __init__(self, concurrency: int = _DEFAULT_CONCURRENCY) -> None:
         self._concurrency = max(1, min(concurrency, 5))
+        self._llm_service: Any = None
+
+    def _get_llm_service(self) -> Any:
+        """Lazily build an LLMService from Settings — used as the authoritative
+        email/phone extractor over the captured LinkedIn contact-info text (see
+        _extract_linkedin_contact_info). Built once per agent, not per profile."""
+        if self._llm_service is None:
+            from app.config import get_settings
+            from app.services.llm_service import LLMService
+            self._llm_service = LLMService(get_settings())
+        return self._llm_service
 
     async def run(
         self,
@@ -675,7 +686,9 @@ class RecruiterContactAgent:
 
             if linkedin_url:
                 result.linkedin_url  = linkedin_url
-                contact_info = await _extract_linkedin_contact_info(page, linkedin_url, domain)
+                contact_info = await _extract_linkedin_contact_info(
+                    page, linkedin_url, domain, llm_service=self._get_llm_service(),
+                )
 
                 result.profile_opened        = contact_info["profile_opened"]
                 result.contact_section_found = contact_info["contact_section_found"]
