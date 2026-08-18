@@ -44,6 +44,7 @@ const ThemeStyles = () => (
     @media(min-width:768px){.ha-sidebar{display:flex;}}
     .ha-logo{font-size:18px;font-weight:700;color:#fff;letter-spacing:-.01em;}
     .ha-logo span{color:${C.primary};}
+    .ha-logo-img{width:200px;max-width:100%;height:auto;display:block;border-radius:8px;}
     .ha-tagline{margin-top:4px;font-size:11px;text-transform:uppercase;letter-spacing:.14em;color:#94A3B8;}
     .ha-navhead{padding:0 12px 8px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.14em;color:#64748B;}
     .ha-nav{display:flex;width:100%;align-items:center;gap:12px;border:0;background:transparent;cursor:pointer;border-radius:8px;padding:8px 12px;font-size:14px;color:#CBD5E1;transition:.15s;}
@@ -300,7 +301,7 @@ function Sidebar({ activePage, onNavigate, jobsCount, runsCount }) {
   return (
     <aside className="ha-sidebar">
       <div style={{ padding: "0 12px" }}>
-        <div className="ha-logo">Harvest<span>Agent</span></div>
+        <img className="ha-logo-img" src={`${process.env.PUBLIC_URL}/sight_spectrum_logo.jpg`} alt="SS jobharvesting Agent" width="200" height="200" />
         <div className="ha-tagline">Contract Sourcing Automation</div>
       </div>
       <nav style={{ marginTop: 32, display: "flex", flexDirection: "column", gap: 24, flex: 1 }}>
@@ -369,8 +370,6 @@ function RunDetailView({ runId, onBack, onView }) {
   // to this run's jobs. Dropdown options are derived from `jobs` below, so they
   // only ever list companies/titles/POCs present in this single run.
   const [filters, setFilters] = useState({ company: "all", contact: "all", job: "all", poc: "all", status: "all" });
-  const [startDate, setStartDate] = useState("");
-  const [endDate, setEndDate] = useState("");
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState({ col: "posted", dir: "desc" });
 
@@ -388,8 +387,6 @@ function RunDetailView({ runId, onBack, onView }) {
       if (filters.contact === "linkedin" && !j.linkedin) return false;
       if (filters.status === "qualified" && !j.passedFilter) return false;
       if (filters.status === "flagged" && j.passedFilter) return false;
-      if (startDate && j.postedDate.slice(0, 10) < startDate) return false;
-      if (endDate && j.postedDate.slice(0, 10) > endDate) return false;
       if (query.trim()) {
         const q = query.toLowerCase();
         if (!((j.title + " " + j.company + " " + j.source + " " + (j.poc || "") + " " + (j.email || "") + " " + (j.mobile || "")).toLowerCase().includes(q))) return false;
@@ -407,7 +404,7 @@ function RunDetailView({ runId, onBack, onView }) {
         default: return 0;
       }
     });
-  }, [jobs, filters, startDate, endDate, query, sort]);
+  }, [jobs, filters, query, sort]);
 
   const jobStats = useMemo(() => ({
     total: filtered.length,
@@ -468,16 +465,6 @@ function RunDetailView({ runId, onBack, onView }) {
                     <span><b style={{ color: C.text }}>{jobStats.companies}</b> companies</span>
                     <span><b style={{ color: C.text }}>{jobStats.pocs}</b> POCs</span>
                   </div>
-                </div>
-
-                <div className="ha-daterow" style={{ marginTop: 16 }}>
-                  <span style={{ fontSize: 14, fontWeight: 600, color: C.text }}>Posted between</span>
-                  <input type="date" className="ha-input" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
-                  <span style={{ color: C.textSoft }}>to</span>
-                  <input type="date" className="ha-input" value={endDate} onChange={(e) => setEndDate(e.target.value)} />
-                  {(startDate || endDate) && (
-                    <button className="ha-btn ha-btn-secondary" style={{ height: 38, boxSizing: "border-box", padding: "0 14px" }} onClick={() => { setStartDate(""); setEndDate(""); }}>Clear dates</button>
-                  )}
                 </div>
 
                 <div className="ha-card ha-filterbar" style={{ padding: "16px 20px", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", marginTop: 14 }}>
