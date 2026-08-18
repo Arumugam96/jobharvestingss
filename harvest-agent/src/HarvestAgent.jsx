@@ -312,10 +312,16 @@ function Sidebar({ activePage, onNavigate, jobsCount, runsCount }) {
 }
 
 /* Run detail page */
-function RunDetailView({ runId, onBack }) {
+function RunDetailView({ runId, onBack, onView }) {
   const [entry, setEntry] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+
+  // This run's harvested jobs (GET /jobs?run_id=…) — same list→detail pattern
+  // as the global Harvested Jobs page, scoped to this single run.
+  const [jobs, setJobs] = useState([]);
+  const [jobsLoading, setJobsLoading] = useState(true);
+  const [jobsError, setJobsError] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -326,6 +332,35 @@ function RunDetailView({ runId, onBack }) {
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [runId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setJobsLoading(true);
+    setJobsError("");
+    (async () => {
+      try {
+        const PAGE_SIZE = 500;
+        const first = await getJobs({ run_id: runId, page: 1, page_size: PAGE_SIZE, sort_by: "posted_date", sort_order: "desc" });
+        let all = first.jobs || [];
+        for (let page = 2; page <= (first.total_pages || 1); page++) {
+          const next = await getJobs({ run_id: runId, page, page_size: PAGE_SIZE, sort_by: "posted_date", sort_order: "desc" });
+          all = all.concat(next.jobs || []);
+        }
+        if (!cancelled) setJobs(all.map(mapApiJob));
+      } catch (err) {
+        if (!cancelled) { setJobsError(err instanceof ApiError ? err.message : "Could not load this run's jobs."); setJobs([]); }
+      } finally {
+        if (!cancelled) setJobsLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [runId]);
+
+  const jobStats = useMemo(() => ({
+    total: jobs.length,
+    companies: new Set(jobs.map((j) => j.company)).size,
+    pocs: jobs.filter((j) => j.poc).length,
+  }), [jobs]);
 
   return (
     <div className="ha-root">
@@ -362,6 +397,74 @@ function RunDetailView({ runId, onBack }) {
                   <div className="ha-detail-stat"><b>{entry.gcc}</b><span>GCC</span></div>
                   <div className="ha-detail-stat"><b>{entry.staffingFirms}</b><span>Staffing firms</span></div>
                   <div className="ha-detail-stat"><b>{entry.ambiguous}</b><span>Ambiguous</span></div>
+                </div>
+              </div>
+
+              <div className="ha-detail-card">
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12 }}>
+                  <div style={{ fontSize: 12, color: C.textSoft, fontWeight: 700, letterSpacing: ".05em", textTransform: "uppercase" }}>
+                    Harvested jobs in this run
+                  </div>
+                  <div style={{ display: "flex", gap: 16, fontSize: 13, color: C.textSoft }}>
+                    <span><b style={{ color: C.text }}>{jobStats.total}</b> jobs</span>
+                    <span><b style={{ color: C.text }}>{jobStats.companies}</b> companies</span>
+                    <span><b style={{ color: C.text }}>{jobStats.pocs}</b> POCs</span>
+                  </div>
+                </div>
+
+                {jobsError && <div className="ha-errbanner" style={{ marginTop: 14 }}>{jobsError}</div>}
+
+                <div className="ha-card" style={{ overflow: "hidden", marginTop: 14 }}>
+                  <div className="ha-table-scroll">
+                    <table className="ha-table" style={{ minWidth: 1040 }}>
+                      <thead className="ha-thead">
+                        <tr>
+                          <PlainHeader label="Job title" width={260} />
+                          <PlainHeader label="Company" width={190} />
+                          <PlainHeader label="Source" width={100} />
+                          <PlainHeader label="Filter status" align="center" width={120} />
+                          <PlainHeader label="POC" width={150} />
+                          <PlainHeader label="Posted date" width={130} />
+                          <PlainHeader label="Email" width={200} />
+                          <PlainHeader label="Action" align="center" width={80} />
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {jobsLoading && (
+                          <tr><td className="ha-td" colSpan={8} style={{ textAlign: "center", padding: "40px 16px", color: "#94A3B8" }}>
+                            Loading this run's jobs…
+                          </td></tr>
+                        )}
+                        {!jobsLoading && jobs.map((j) => (
+                          <tr key={j.id} className="ha-row">
+                            <td className="ha-td">
+                              <button className="ha-link" onClick={() => onView && onView({ mode: "view", job: mapJobToDetail(j) })}>{j.title}</button>
+                            </td>
+                            <td className="ha-td" style={{ color: C.text }}>{j.company}</td>
+                            <td className="ha-td"><SourceChip source={j.source} /></td>
+                            <td className="ha-td" style={{ textAlign: "center" }}>
+                              <FilterStatusBadge passed={j.passedFilter} reason={j.filterReason} />
+                            </td>
+                            <td className="ha-td" style={{ color: C.text }}>{j.poc || <span style={{ color: "#94A3B8" }}>—</span>}</td>
+                            <td className="ha-td" style={{ whiteSpace: "nowrap", color: C.textSoft }}>{j.postedDate || "—"}</td>
+                            <td className="ha-td">
+                              {j.email ? <a className="ha-mail" href={"mailto:" + j.email}>{j.email}</a> : <span style={{ color: "#94A3B8" }}>—</span>}
+                            </td>
+                            {/* <td className="ha-td">
+                              <div style={{ display: "flex", justifyContent: "center" }}>
+                                <button className="ha-act" title="View" onClick={() => onView && onView({ mode: "view", job: mapJobToDetail(j) })}><Eye size={16} /></button>
+                              </div>
+                            </td> */}
+                          </tr>
+                        ))}
+                        {!jobsLoading && !jobsError && jobs.length === 0 && (
+                          <tr><td className="ha-td" colSpan={8} style={{ textAlign: "center", padding: "40px 16px", color: "#94A3B8" }}>
+                            No jobs recorded for this run.
+                          </td></tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               </div>
             </>
@@ -522,7 +625,14 @@ function JobsPage({ jobs, total, loading, error, onRefresh, onNavigate, onView }
                 )}
                 {!loading && filtered.map((j) => (
                   <tr key={j.id} className="ha-row">
-                    <td className="ha-td"><span className="ha-link">{j.title}</span></td>
+                    <td className="ha-td">
+                      <span className="ha-link" role="button" tabIndex={0} style={{ cursor: "pointer" }}
+                        title="View details"
+                        onClick={() => onView({ mode: "view", job: mapJobToDetail(j) })}
+                        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onView({ mode: "view", job: mapJobToDetail(j) }); } }}>
+                        {j.title}
+                      </span>
+                    </td>
                     <td className="ha-td" style={{ color: C.text }}>{j.company}</td>
                     <td className="ha-td"><SourceChip source={j.source} /></td>
                     <td className="ha-td" style={{ textAlign: "center" }}>
@@ -1191,7 +1301,7 @@ export default function HarvestAgent() {
   }
 
   if (viewingRunId) {
-    return <RunDetailView runId={viewingRunId} onBack={() => setViewingRunId(null)} />;
+    return <RunDetailView runId={viewingRunId} onBack={() => setViewingRunId(null)} onView={setDetailView} />;
   }
 
   return (

@@ -729,9 +729,12 @@ class LinkedInFormScraper:
         from urllib.parse import urlencode
         params: dict[str, str] = {
             "keywords": keywords,
-            "location": location,
             "sortBy":   "DD",
         }
+        # location is optional — only constrain the search when one is provided
+        # (mirrors dice_scraper._build_search_url).
+        if location:
+            params["location"] = location
         wt  = _WORK_MODE_MAP.get(work_mode, "")
         jt  = _JOB_TYPE_MAP.get(job_type, "")
         tpr = _DATE_MAP.get(search_window_hours, "")

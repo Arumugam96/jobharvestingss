@@ -39,7 +39,7 @@ from bs4 import BeautifulSoup
 from dateutil import parser as dateutil_parser
 from playwright.async_api import ElementHandle, Page
 
-from app.core.domain_keywords import domain_matches, domain_search_terms, infer_domain
+from app.core.domain_keywords import domain_search_terms
 from app.core.exceptions import LLMUnavailableError
 from app.core.text_formatting import format_job_description
 from app.models.harvest_models import FiltersConfig
@@ -60,7 +60,7 @@ _LOGIN_WAIT_POLL_S    = 2
 
 StatusCallback = Callable[[str], Awaitable[None]]
 
-_LINKEDIN_SEARCH_URL = "https://www.linkedin.com/jobs/search/?"
+_LINKEDIN_SEARCH_URL = "https://www.linkedin.com/jobs/search-results/?"
 
 # URLs that indicate we are NOT logged in
 _GATED_PATHS = ("/login", "/checkpoint", "/challenge", "/authwall", "/uas/", "login.live.com", "login.microsoftonline.com")
@@ -94,12 +94,31 @@ _DATE_MAP: dict[int, str] = {
     720: "r2592000",
 }
 
-# Cap on how many domain keywords are OR-ed into the search query for a specific
-# sub-domain bucket (Cloud, SAP, …). Bounded so the refinement narrows results
-# without producing an overlong / over-broad boolean expression. The coarse "IT"
-# umbrella samples one term per bucket instead (see domain_search_terms); only
-# "Non-IT"/"Any" push nothing and rely on the post-scrape domain check.
-_DOMAIN_TERM_CAP = 5
+# Domain → LinkedIn native job-function filter (f_F). Applying the domain via
+# LinkedIn's own search filter (instead of OR-ing domain keywords into the query)
+# makes LinkedIn's filtered result set the source of truth: the board returns
+# only jobs in the chosen function, so no post-scrape domain re-classification is
+# needed and non-function jobs don't leak in. f_F codes are LinkedIn's own job-
+# function URN short codes; multiple may be comma-joined. Domains with no clean
+# function mapping (Non-IT / Any) push nothing and fall back to the user keyword.
+_DOMAIN_FUNCTION_MAP: dict[str, str] = {
+    "Data Engineering": "it",
+    "Data Science":     "it",
+    "AI/ML":            "it",
+    "SAP":              "it",
+    "Cloud":            "it",
+    "ERP":              "it",
+    "Cyber Security":   "it",
+    "Infrastructure":   "it",
+    "IT":               "it",
+    "Digital":          "it",
+    "UX/UI":            "dsgn",
+    "Engineering":      "eng",
+    "Finance":          "fin",
+    "Operations":       "ops",
+    "Non-IT":           "",
+    "Any":              "",
+}
 
 
 # ── Scraped job dataclass ─────────────────────────────────────────────────────
@@ -434,12 +453,6 @@ def _resolve_posted_date(raw_text: str, harvest_date: datetime) -> str | None:
                 return None
         return (harvest_date - timedelta(days=delta_days)).strftime("%Y-%m-%d")
 
-    # Catch-all for absolute dates spelled out in other formats LinkedIn
-    # sometimes uses (e.g. "Aug 5, 2025") that the patterns above don't cover.
-    # fuzzy=True lets it pull a date out of a longer sentence rather than
-    # requiring the whole string to be a date; anything dateutil can't parse
-    # at all, or resolves to something clearly implausible (future-dated
-    # relative to the harvest, or absurdly old), is treated as no match.
     try:
         parsed = dateutil_parser.parse(raw_text, fuzzy=True, default=harvest_date)
     except (ValueError, OverflowError):
@@ -499,25 +512,6 @@ def _test_mode_max_jobs() -> int | None:
         logger.warning("linkedin_test_max_jobs_invalid", value=raw)
         return None
     return value if value > 0 else None
-
-
-# Consecutive pages yielding zero domain-matching jobs before pagination stops
-# early (only when a specific domain filter is active).
-_DEFAULT_MATCH_DRY_PAGES = 2
-
-
-def _match_dry_pages() -> int:
-    """How many consecutive no-domain-match pages trigger an early stop. Read
-    from LINKEDIN_MATCH_DRY_PAGES (.env); unset/blank/non-positive → default."""
-    raw = os.getenv("LINKEDIN_MATCH_DRY_PAGES", "").strip()
-    if not raw:
-        return _DEFAULT_MATCH_DRY_PAGES
-    try:
-        value = int(raw)
-    except ValueError:
-        logger.warning("linkedin_match_dry_pages_invalid", value=raw)
-        return _DEFAULT_MATCH_DRY_PAGES
-    return value if value > 0 else _DEFAULT_MATCH_DRY_PAGES
 
 
 async def _delay(page: Page, lo: int, hi: int) -> None:
@@ -1122,10 +1116,6 @@ class LinkedInAgent:
         batch_size:  int                      = 25
         safety_cap:  int                      = f.max_jobs if f.max_jobs > 0 else 5_000
         empty_pages: int                      = 0
-        # Early-stop-on-domain-match-dry-up state (only used when f.domain != "Any")
-        empty_match_pages: int                = 0
-        match_total:       int                = 0
-        dry_page_limit:    int                = _match_dry_pages()
 
         test_cap = _test_mode_max_jobs()
         if test_cap is not None:
@@ -1230,38 +1220,13 @@ class LinkedInAgent:
                         new_jobs.append(j)
                 logger.info("next_page_found", source="linkedin", page=page_num + 1, jobs_this_page=len(page_jobs))
 
-                # ── Early-stop on domain-match dry-up ─────────────────────────
-                # When a specific domain filter is active, stop paginating once
-                # pages stop yielding domain-matching jobs. LinkedIn is date-
-                # sorted, so once relevant results run out, later pages are just
-                # wasted detail-fetches. Keyword-based match — consistent with
-                # the post-scrape filter and the domain terms pushed to search.
-                if f.domain != "Any" and new_jobs:
-                    page_matches = sum(
-                        1 for j in new_jobs
-                        if domain_matches(
-                            infer_domain(j.job_title, j.job_description, j.skills, j.industry_hint),
-                            f.domain,
-                        )
-                    )
-                    match_total += page_matches
-                    if page_matches == 0:
-                        empty_match_pages += 1
-                        logger.info(
-                            "linkedin_page_no_domain_match",
-                            page=page_num + 1, consecutive=empty_match_pages,
-                            domain=f.domain, new_jobs=len(new_jobs), matching_so_far=match_total,
-                        )
-                        if empty_match_pages >= dry_page_limit:
-                            logger.info(
-                                "linkedin_early_stop_no_matches",
-                                page=page_num + 1, domain=f.domain,
-                                dry_pages=empty_match_pages, total=len(all_jobs),
-                                matching_so_far=match_total,
-                            )
-                            break
-                    else:
-                        empty_match_pages = 0
+                # No domain-match early-stop: the domain filter is now applied by
+                # LinkedIn's own native job-function filter (f_F, see
+                # _build_search_url), so LinkedIn's filtered result set is the
+                # source of truth. Pagination stops only on result exhaustion
+                # (empty pages) or the max_jobs safety cap — re-classifying cards
+                # here with the substring domain matcher would diverge from what
+                # LinkedIn actually returned.
 
             logger.info("linkedin_page_done", page=page_num + 1, page_new=len(page_jobs), total=len(all_jobs))
             logger.info("page_processed", source="linkedin", page=page_num + 1, jobs_this_page=len(page_jobs), total_collected=len(all_jobs))
@@ -1509,38 +1474,32 @@ class LinkedInAgent:
     # ── Search URL builder ─────────────────────────────────────────────────────
 
     @staticmethod
-    def _domain_query_fragment(domain: str) -> str:
-        """LinkedIn boolean-OR fragment for a domain choice, e.g.
-        Cloud → ("cloud engineer" OR "cloud architect" OR aws OR azure OR gcp);
-        IT → the umbrella OR-set (one term per bucket). Returns "" for domains
-        with no terms (Any / Non-IT), which fall back to the post-scrape check."""
-        terms = domain_search_terms(domain, cap=_DOMAIN_TERM_CAP)
-        if not terms:
-            return ""
-        quoted = [f'"{t}"' if " " in t else t for t in terms]
-        return "(" + " OR ".join(quoted) + ")"
-
-    @staticmethod
     def _compose_keyword_query(keyword: str, domain: str) -> str:
-        """AND-combine the user's keyword with the domain OR-set so LinkedIn
-        returns domain-relevant jobs. Edge cases: no bucket → keyword only;
-        empty keyword → the domain fragment becomes the whole query."""
-        keyword  = (keyword or "").strip()
-        fragment = LinkedInAgent._domain_query_fragment(domain)
-        if not fragment:
-            return keyword
-        if not keyword:
-            return fragment
-        return f"{keyword} AND {fragment}"
+        """The LinkedIn `keywords=` value: the user's keyword, verbatim.
+
+        The domain is no longer OR-injected into the query — it is applied via
+        LinkedIn's native job-function filter (f_F) in _build_search_url, so
+        LinkedIn's own filtered results are authoritative. `domain` is accepted
+        for signature stability but intentionally unused here."""
+        return (keyword or "").strip()
 
     @staticmethod
     def _build_search_url(f: FiltersConfig, start: int = 0) -> str:
+        # The domain is applied via LinkedIn's native job-function filter (f_F,
+        # see _DOMAIN_FUNCTION_MAP) rather than by OR-ing domain keywords into
+        # the query — LinkedIn's filtered results become the source of truth.
+        # The user's keyword is passed verbatim (empty is fine: with f_F set,
+        # LinkedIn still constrains to that function).
         keyword_query = LinkedInAgent._compose_keyword_query(f.keyword, f.domain)
         params: list[str] = [
             f"keywords={quote_plus(keyword_query)}",
-            f"location={quote_plus(f.location)}",
-            "sortBy=DD",
         ]
+        # location is optional — only constrain the search when one is provided.
+        if f.location:
+            params.append(f"location={quote_plus(f.location)}")
+        params.append("sortBy=DD")
+        if ff := _DOMAIN_FUNCTION_MAP.get(f.domain, ""):
+            params.append(f"f_F={ff}")
         if wt := _WORK_MODE_MAP.get(f.work_mode, ""):
             params.append(f"f_WT={wt}")
         if jt := _JOB_TYPE_MAP.get(f.job_type, ""):

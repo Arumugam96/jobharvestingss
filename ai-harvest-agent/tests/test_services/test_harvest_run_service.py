@@ -258,6 +258,46 @@ async def test_get_by_job_id_returns_none_when_missing(db_session) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# list_scraped_jobs — run_id scoping (backs GET /jobs?run_id=…)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@pytest.mark.asyncio
+async def test_list_scraped_jobs_run_id_scopes_to_that_run(db_session) -> None:
+    """GET /jobs?run_id=<display id> must return only that run's jobs. The
+    caller passes the human-facing display run_id; list_scraped_jobs resolves
+    it to the HarvestRunORM PK(s) via subquery."""
+    svc = HarvestRunService(db_session)
+
+    run_a = await svc.create_run(run_id="20260807_200001", source="LinkedIn")
+    run_b = await svc.create_run(run_id="20260807_200002", source="LinkedIn")
+    await svc.bulk_insert_scraped_jobs(run_a, [
+        _unified_job_dict(job_title="A-one", job_url="https://linkedin.com/jobs/view/a1"),
+        _unified_job_dict(job_title="A-two", job_url="https://linkedin.com/jobs/view/a2"),
+    ])
+    await svc.bulk_insert_scraped_jobs(run_b, [
+        _unified_job_dict(job_title="B-one", job_url="https://linkedin.com/jobs/view/b1"),
+    ])
+
+    scoped, total = await svc.list_scraped_jobs(run_id="20260807_200001")
+    assert total == 2
+    assert {j.job_title for j in scoped} == {"A-one", "A-two"}
+
+    all_jobs, all_total = await svc.list_scraped_jobs()
+    assert all_total == 3
+
+
+@pytest.mark.asyncio
+async def test_list_scraped_jobs_unknown_run_id_returns_empty(db_session) -> None:
+    svc = HarvestRunService(db_session)
+    run = await svc.create_run(run_id="20260807_200003", source="LinkedIn")
+    await svc.bulk_insert_scraped_jobs(run, [_unified_job_dict()])
+
+    scoped, total = await svc.list_scraped_jobs(run_id="does_not_exist")
+    assert scoped == []
+    assert total == 0
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Shared view helpers
 # ══════════════════════════════════════════════════════════════════════════════
 

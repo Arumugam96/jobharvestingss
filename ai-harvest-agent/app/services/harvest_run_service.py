@@ -307,6 +307,7 @@ class HarvestRunService:
         work_mode:     str | None = None,
         date_from:     str | None = None,
         date_to:       str | None = None,
+        run_id:        str | None = None,
         sort_by:       str = "posted_date",
         sort_order:    str = "desc",
         page:          int = 1,
@@ -346,6 +347,17 @@ class HarvestRunService:
             stmt = stmt.where(func.substr(ScrapedJobORM.posted_date, 1, 10) >= date_from[:10])
         if date_to:
             stmt = stmt.where(func.substr(ScrapedJobORM.posted_date, 1, 10) <= date_to[:10])
+        if run_id:
+            # ScrapedJobORM.run_id is the HarvestRunORM PK (uuid); the caller
+            # passes the human-facing display run_id (e.g. "20260817_110703"),
+            # so resolve it through a subquery. A display run_id can map to more
+            # than one HarvestRunORM row (the orchestrator run plus any
+            # single-source runs sharing the timestamp), hence IN (...).
+            stmt = stmt.where(
+                ScrapedJobORM.run_id.in_(
+                    select(HarvestRunORM.id).where(HarvestRunORM.run_id == run_id)
+                )
+            )
 
         total = (
             await self._db.execute(select(func.count()).select_from(stmt.subquery()))

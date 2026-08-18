@@ -244,7 +244,6 @@ export default function RuleEngineConfig({
 
   const errors = {
     jobSource: !Object.values(sources).some(Boolean),
-    location: !location.trim(),
     jobType: !jobType,
     domain: !domain,
     hiring: !hiringEntity,
@@ -710,7 +709,7 @@ export default function RuleEngineConfig({
                   </div>
                 </Card>
 
-                <Card title="Location" required invalid={showErr("location")} desc="Free-text location forwarded to every source agent's search query.">
+                <Card title="Location" desc="Free-text location forwarded to every source agent's search query.">
                   <input className="rec-input" type="text" placeholder="e.g. Bangalore, India" value={location}
                     onChange={(e) => { setLocation(e.target.value); markDirty(); }} />
                 </Card>

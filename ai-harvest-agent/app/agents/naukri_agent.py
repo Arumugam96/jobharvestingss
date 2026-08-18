@@ -1339,8 +1339,12 @@ class NaukriAgent:
         """Encode all active filter params into the Naukri search URL."""
         params: dict[str, str] = {
             "k": f.keyword,
-            "l": f.location,
         }
+        # location is optional — only constrain the search when one is provided
+        # (mirrors dice_scraper._build_search_url); an empty l= would otherwise
+        # narrow Naukri to a blank-location search.
+        if f.location:
+            params["l"] = f.location
         if tpr := _DATE_MAP.get(f.search_window_hours, ""):
             params["jobAge"] = tpr
         if wt := _WORK_MODE_MAP.get(f.work_mode, ""):

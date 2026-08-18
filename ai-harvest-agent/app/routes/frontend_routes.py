@@ -139,11 +139,19 @@ def _apply_job_filters(jobs: list[dict], **f: Any) -> list[dict]:
     source        = (f.get("source")        or "").lower()
     hiring_entity = (f.get("hiring_entity") or "").lower()
     work_mode     = (f.get("work_mode")     or "").lower()
+    run_id        = (f.get("run_id")        or "")
     date_from     = f.get("date_from")
     date_to       = f.get("date_to")
 
     result = jobs
 
+    if run_id:
+        # The JSON file store isn't run-scoped (it only ever holds the latest
+        # combined run and its job dicts carry no run_id), so a run_id filter
+        # can only match if a job dict happens to carry one. This keeps the
+        # DB path authoritative for run-scoped reads and never leaks another
+        # run's jobs when falling back to JSON.
+        result = [j for j in result if j.get("run_id") == run_id]
     if keyword:
         result = [
             j for j in result
@@ -226,6 +234,7 @@ async def list_jobs(
     source:        str = Query("",                        description="Filter by source: LinkedIn | Naukri | Dice"),
     hiring_entity: str = Query("",                        description="Filter: Direct Client | GCC | Staffing Firm | Ambiguous"),
     work_mode:     str = Query("",                        description="Filter: Remote | Hybrid | Onsite"),
+    run_id:        str = Query("",                        description="Filter to a single harvest run's jobs (display run id, e.g. 20260817_110703)"),
     date_from:     str = Query("",                        description="Filter jobs posted on or after this date (YYYY-MM-DD)"),
     date_to:       str = Query("",                        description="Filter jobs posted on or before this date (YYYY-MM-DD)"),
 ) -> dict:
@@ -259,6 +268,7 @@ async def list_jobs(
             source        = source,
             hiring_entity = hiring_entity,
             work_mode     = work_mode,
+            run_id        = run_id or None,
             date_from     = date_from or None,
             date_to       = date_to   or None,
         )
@@ -274,6 +284,7 @@ async def list_jobs(
             source        = source        or None,
             hiring_entity = hiring_entity or None,
             work_mode     = work_mode     or None,
+            run_id        = run_id        or None,
             date_from     = date_from     or None,
             date_to       = date_to       or None,
             sort_by       = sort_by,
@@ -306,6 +317,7 @@ async def list_jobs(
             "source":        source        or None,
             "hiring_entity": hiring_entity or None,
             "work_mode":     work_mode     or None,
+            "run_id":        run_id        or None,
             "date_from":     date_from     or None,
             "date_to":       date_to       or None,
         },
