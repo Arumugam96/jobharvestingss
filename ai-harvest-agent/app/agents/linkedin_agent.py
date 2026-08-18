@@ -39,7 +39,6 @@ from bs4 import BeautifulSoup
 from dateutil import parser as dateutil_parser
 from playwright.async_api import ElementHandle, Page
 
-from app.core.domain_keywords import domain_search_terms
 from app.core.exceptions import LLMUnavailableError
 from app.core.text_formatting import format_job_description
 from app.models.harvest_models import FiltersConfig
@@ -93,33 +92,6 @@ _DATE_MAP: dict[int, str] = {
     168: "r604800",
     720: "r2592000",
 }
-
-# Domain → LinkedIn native job-function filter (f_F). Applying the domain via
-# LinkedIn's own search filter (instead of OR-ing domain keywords into the query)
-# makes LinkedIn's filtered result set the source of truth: the board returns
-# only jobs in the chosen function, so no post-scrape domain re-classification is
-# needed and non-function jobs don't leak in. f_F codes are LinkedIn's own job-
-# function URN short codes; multiple may be comma-joined. Domains with no clean
-# function mapping (Non-IT / Any) push nothing and fall back to the user keyword.
-_DOMAIN_FUNCTION_MAP: dict[str, str] = {
-    "Data Engineering": "it",
-    "Data Science":     "it",
-    "AI/ML":            "it",
-    "SAP":              "it",
-    "Cloud":            "it",
-    "ERP":              "it",
-    "Cyber Security":   "it",
-    "Infrastructure":   "it",
-    "IT":               "it",
-    "Digital":          "it",
-    "UX/UI":            "dsgn",
-    "Engineering":      "eng",
-    "Finance":          "fin",
-    "Operations":       "ops",
-    "Non-IT":           "",
-    "Any":              "",
-}
-
 
 # ── Scraped job dataclass ─────────────────────────────────────────────────────
   
@@ -1475,21 +1447,27 @@ class LinkedInAgent:
 
     @staticmethod
     def _compose_keyword_query(keyword: str, domain: str) -> str:
-        """The LinkedIn `keywords=` value: the user's keyword, verbatim.
+        """The LinkedIn `keywords=` value.
 
-        The domain is no longer OR-injected into the query — it is applied via
-        LinkedIn's native job-function filter (f_F) in _build_search_url, so
-        LinkedIn's own filtered results are authoritative. `domain` is accepted
-        for signature stability but intentionally unused here."""
-        return (keyword or "").strip()
+        A user-typed keyword always wins. Otherwise the chosen domain label is
+        placed into the search box exactly as-is — e.g. "Data Engineering",
+        "AI/ML", "Cyber Security", "IT" — so LinkedIn searches for that role
+        directly (no boolean OR-set, no native function filter). This makes
+        LinkedIn's own filtered results the source of truth. "Any" and "Non-IT"
+        have no meaningful search term, so they contribute nothing (LinkedIn
+        returns its unfiltered result set)."""
+        keyword = (keyword or "").strip()
+        if keyword:
+            return keyword
+        if domain in ("", "Any", "Non-IT"):
+            return ""
+        return domain
 
     @staticmethod
     def _build_search_url(f: FiltersConfig, start: int = 0) -> str:
-        # The domain is applied via LinkedIn's native job-function filter (f_F,
-        # see _DOMAIN_FUNCTION_MAP) rather than by OR-ing domain keywords into
-        # the query — LinkedIn's filtered results become the source of truth.
-        # The user's keyword is passed verbatim (empty is fine: with f_F set,
-        # LinkedIn still constrains to that function).
+        # The domain is placed into the `keywords=` search box as-is (see
+        # _compose_keyword_query) — no boolean OR-set, no native function filter.
+        # LinkedIn's own filtered results are the source of truth.
         keyword_query = LinkedInAgent._compose_keyword_query(f.keyword, f.domain)
         params: list[str] = [
             f"keywords={quote_plus(keyword_query)}",
@@ -1498,12 +1476,14 @@ class LinkedInAgent:
         if f.location:
             params.append(f"location={quote_plus(f.location)}")
         params.append("sortBy=DD")
-        if ff := _DOMAIN_FUNCTION_MAP.get(f.domain, ""):
-            params.append(f"f_F={ff}")
         if wt := _WORK_MODE_MAP.get(f.work_mode, ""):
             params.append(f"f_WT={wt}")
         if jt := _JOB_TYPE_MAP.get(f.job_type, ""):
             params.append(f"f_JT={jt}")
+        # The time window is applied ONLY through LinkedIn's native date filter
+        # (f_TPR) — never mixed into `keywords`. Keep it that way: putting "past
+        # 24 hours" into the keyword would make LinkedIn search job TEXT for those
+        # words instead of restricting by post date.
         if tpr := _DATE_MAP.get(f.search_window_hours, ""):
             params.append(f"f_TPR={tpr}")
         if start > 0:
@@ -1672,20 +1652,48 @@ class LinkedInAgent:
         import json as _json
         jobs: list[LinkedInScrapedJob] = []
 
+        # ── Phase A: enumerate ALL cards on this page up front ─────────────────
+        # Read every card's list-view fields (title + stable /jobs/view/<id> URL)
+        # into a plain list BEFORE opening any detail page. This captures the full
+        # page's cards in order, and — because no ElementHandle is touched after
+        # this phase — removes any stale-locator risk from the detail navigation
+        # that follows. Dedup here against jobs already collected on earlier pages
+        # (seen_urls) and against duplicates within this page (page_seen).
+        enumerated: list[dict] = []
+        page_seen: set[str] = set()
         for idx, card_el in enumerate(raw):
+            # Stop reading cards once we've gathered `remaining` of them — no
+            # point parsing the rest of the page when the cap (e.g.
+            # LINKEDIN_TEST_MAX_JOBS) will only let Phase B fetch that many.
+            # For a real harvest `remaining` is far larger than a page's card
+            # count, so this simply enumerates the whole page.
+            if len(enumerated) >= remaining:
+                break
+            try:
+                list_data = await self._parse_card_list_view(card_el)
+            except Exception as exc:
+                logger.warning("linkedin_card_list_view_failed", index=idx, error=str(exc))
+                continue
+            if not list_data or not list_data.get("url"):
+                continue
+            norm_url = list_data["url"].split("?")[0].rstrip("/").lower()
+            if norm_url and (norm_url in seen_urls or norm_url in page_seen):
+                continue
+            if norm_url:
+                page_seen.add(norm_url)
+            list_data["idx"] = idx
+            enumerated.append(list_data)
+
+        logger.info("linkedin_cards_enumerated", count=len(enumerated), page_cards=len(raw))
+
+        # ── Phase B: fetch each enumerated card's detail (new tab, by URL) ─────
+        for list_data in enumerated:
             if len(jobs) >= remaining:
                 break
 
+            idx = list_data.get("idx", 0)
+            url = list_data["url"]
             try:
-                # ── Quick list-view pass (title, company, location, posted, url) ──
-                list_data = await self._parse_card_list_view(card_el)
-                if not list_data or not list_data.get("url"):
-                    continue
-                url = list_data["url"]
-                norm_url = url.split("?")[0].rstrip("/").lower()
-                if norm_url and norm_url in seen_urls:
-                    continue
-
                 # ── Fetch job detail by navigating directly to its own URL ─────────
                 # (not by clicking the card — see _fetch_job_detail for why)
                 detail_data = await self._fetch_job_detail(

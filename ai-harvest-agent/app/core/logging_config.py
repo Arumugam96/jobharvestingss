@@ -84,3 +84,12 @@ def configure_logging(level: str = "INFO") -> None:
     )
 
     logging.getLogger("uvicorn.access").addFilter(_QuietPollingFilter())
+
+    # Silence low-level DB chatter. aiosqlite emits one DEBUG record per
+    # cursor/execute/fetch ("executing functools.partial(<...sqlite3...>)"),
+    # which floods the console when LOG_LEVEL=DEBUG. Pinning these loggers to
+    # WARNING drops those records before they reach either handler while still
+    # surfacing real DB errors/warnings. SQLAlchemy engine echo stays off
+    # (Settings.db_echo=False); these overrides are the belt-and-suspenders.
+    for _noisy in ("aiosqlite", "sqlalchemy", "sqlalchemy.engine", "sqlalchemy.pool"):
+        logging.getLogger(_noisy).setLevel(logging.WARNING)
