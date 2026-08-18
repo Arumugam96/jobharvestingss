@@ -429,24 +429,30 @@ function RunDetailView({ runId, onBack, onView }) {
                 <div className="ha-runhead">
                   <div className="ha-runhead-meta">
                     <div style={{ fontSize: 12, color: C.textSoft, fontWeight: 600, letterSpacing: ".04em", textTransform: "uppercase" }}>Run ID</div>
-                    <div style={{ fontSize: 20, fontWeight: 700 }}>{entry.runId}</div>
+                    <div style={{ fontSize: 22, fontWeight: 700, color: C.secondary, letterSpacing: "-.01em" }}>{entry.runId}</div>
                     <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
                       {entry.sources.map((s) => <SourceChip key={s} source={s} />)}
                     </div>
-                    <div style={{ display: "flex", gap: 24, marginTop: 16, fontSize: 13.5, color: C.textSoft, flexWrap: "wrap" }}>
-                      <span>Started: <b style={{ color: C.text }}>{fmtDate(entry.startedAt)}</b></span>
-                      <span>Completed: <b style={{ color: C.text }}>{fmtDate(entry.completedAt)}</b></span>
+                    <div style={{ display: "flex", gap: 32, marginTop: 18, flexWrap: "wrap" }}>
+                      <div>
+                        <div style={{ fontSize: 11, color: C.textSoft, fontWeight: 600, letterSpacing: ".05em", textTransform: "uppercase" }}>Started</div>
+                        <div style={{ fontSize: 14, fontWeight: 600, color: C.text, marginTop: 3 }}>{fmtDate(entry.startedAt)}</div>
+                      </div>
+                      <div>
+                        <div style={{ fontSize: 11, color: C.textSoft, fontWeight: 600, letterSpacing: ".05em", textTransform: "uppercase" }}>Completed</div>
+                        <div style={{ fontSize: 14, fontWeight: 600, color: C.text, marginTop: 3 }}>{fmtDate(entry.completedAt)}</div>
+                      </div>
                     </div>
                   </div>
                   <div className="ha-runhead-right">
                     <StatusPill status={entry.status} />
                     <div className="ha-runstats">
-                      <div className="ha-runstat"><b>{entry.jobsFound}</b><span>Jobs found</span></div>
-                      <div className="ha-runstat"><b>{entry.verifiedJobs}</b><span>Verified contacts</span></div>
-                      <div className="ha-runstat"><b>{entry.directClients}</b><span>Direct clients</span></div>
-                      <div className="ha-runstat"><b>{entry.gcc}</b><span>GCC companies</span></div>
-                      <div className="ha-runstat"><b>{entry.staffingFirms}</b><span>Staffing firms</span></div>
-                      <div className="ha-runstat"><b>{entry.ambiguous}</b><span>Needs review</span></div>
+                      <div className="ha-runstat"><b style={{ color: C.accent }}>{entry.jobsFound}</b><span>Jobs found</span></div>
+                      <div className="ha-runstat"><b style={{ color: "#059669" }}>{entry.verifiedJobs}</b><span>Verified contacts</span></div>
+                      <div className="ha-runstat"><b style={{ color: C.primary }}>{entry.directClients}</b><span>Direct clients</span></div>
+                      <div className="ha-runstat"><b style={{ color: C.secondary }}>{entry.gcc}</b><span>GCC companies</span></div>
+                      <div className="ha-runstat"><b style={{ color: "#7C3AED" }}>{entry.staffingFirms}</b><span>Staffing firms</span></div>
+                      <div className="ha-runstat"><b style={{ color: "#D97706" }}>{entry.ambiguous}</b><span>Needs review</span></div>
                     </div>
                   </div>
                 </div>
