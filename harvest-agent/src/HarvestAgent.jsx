@@ -106,6 +106,15 @@ const ThemeStyles = () => (
     .ha-detail-stat{background:${C.pale};border-radius:10px;padding:14px 16px;}
     .ha-detail-stat b{display:block;font-size:22px;color:${C.text};}
     .ha-detail-stat span{font-size:12px;color:${C.textSoft};}
+    .ha-runhead{display:flex;justify-content:space-between;align-items:flex-start;gap:24px;flex-wrap:wrap;}
+    .ha-runhead-meta{flex:0 1 auto;min-width:220px;}
+    .ha-runhead-right{flex:1 1 440px;min-width:280px;display:flex;flex-direction:column;align-items:flex-end;gap:12px;}
+    .ha-runstats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;width:100%;}
+    .ha-runstat{background:${C.pale};border:1px solid ${C.border};border-radius:10px;padding:11px 14px;}
+    .ha-runstat b{display:block;font-size:22px;font-weight:700;line-height:1.1;color:${C.text};}
+    .ha-runstat span{display:block;margin-top:3px;font-size:11.5px;font-weight:500;color:${C.textSoft};}
+    @media(max-width:720px){.ha-runhead-right{align-items:stretch;flex-basis:100%;}.ha-runhead-right .ha-pill{align-self:flex-start;}}
+    @media(max-width:520px){.ha-runstats{grid-template-columns:repeat(2,minmax(0,1fr));}}
   `}</style>
 );
 
@@ -356,11 +365,55 @@ function RunDetailView({ runId, onBack, onView }) {
     return () => { cancelled = true; };
   }, [runId]);
 
+  // Filter/sort state — mirrors the Harvested Jobs page filter bar, but scoped
+  // to this run's jobs. Dropdown options are derived from `jobs` below, so they
+  // only ever list companies/titles/POCs present in this single run.
+  const [filters, setFilters] = useState({ company: "all", contact: "all", job: "all", poc: "all", status: "all" });
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate] = useState("");
+  const [query, setQuery] = useState("");
+  const [sort, setSort] = useState({ col: "posted", dir: "desc" });
+
+  const companies = useMemo(() => Array.from(new Set(jobs.map((j) => j.company))).sort(), [jobs]);
+  const jobTitles = useMemo(() => Array.from(new Set(jobs.map((j) => j.title))).sort(), [jobs]);
+  const pocNames = useMemo(() => Array.from(new Set(jobs.filter((j) => j.poc).map((j) => j.poc))).sort(), [jobs]);
+
+  const filtered = useMemo(() => {
+    let rows = jobs.filter((j) => {
+      if (filters.company !== "all" && j.company !== filters.company) return false;
+      if (filters.job !== "all" && j.title !== filters.job) return false;
+      if (filters.poc !== "all" && j.poc !== filters.poc) return false;
+      if (filters.contact === "email" && !j.email) return false;
+      if (filters.contact === "mobile" && !j.mobile) return false;
+      if (filters.contact === "linkedin" && !j.linkedin) return false;
+      if (filters.status === "qualified" && !j.passedFilter) return false;
+      if (filters.status === "flagged" && j.passedFilter) return false;
+      if (startDate && j.postedDate.slice(0, 10) < startDate) return false;
+      if (endDate && j.postedDate.slice(0, 10) > endDate) return false;
+      if (query.trim()) {
+        const q = query.toLowerCase();
+        if (!((j.title + " " + j.company + " " + j.source + " " + (j.poc || "") + " " + (j.email || "") + " " + (j.mobile || "")).toLowerCase().includes(q))) return false;
+      }
+      return true;
+    });
+    const dir = sort.dir === "asc" ? 1 : -1;
+    return [...rows].sort((a, b) => {
+      switch (sort.col) {
+        case "title": return a.title.localeCompare(b.title) * dir;
+        case "company": return a.company.localeCompare(b.company) * dir;
+        case "poc": return (a.poc || "").localeCompare(b.poc || "") * dir;
+        case "source": return a.source.localeCompare(b.source) * dir;
+        case "posted": return a.postedDate.localeCompare(b.postedDate) * dir;
+        default: return 0;
+      }
+    });
+  }, [jobs, filters, startDate, endDate, query, sort]);
+
   const jobStats = useMemo(() => ({
-    total: jobs.length,
-    companies: new Set(jobs.map((j) => j.company)).size,
-    pocs: jobs.filter((j) => j.poc).length,
-  }), [jobs]);
+    total: filtered.length,
+    companies: new Set(filtered.map((j) => j.company)).size,
+    pocs: filtered.filter((j) => j.poc).length,
+  }), [filtered]);
 
   return (
     <div className="ha-root">
@@ -373,30 +426,29 @@ function RunDetailView({ runId, onBack, onView }) {
           {entry && !loading && (
             <>
               <div className="ha-detail-card">
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12 }}>
-                  <div>
+                <div className="ha-runhead">
+                  <div className="ha-runhead-meta">
                     <div style={{ fontSize: 12, color: C.textSoft, fontWeight: 600, letterSpacing: ".04em", textTransform: "uppercase" }}>Run ID</div>
                     <div style={{ fontSize: 20, fontWeight: 700 }}>{entry.runId}</div>
+                    <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
+                      {entry.sources.map((s) => <SourceChip key={s} source={s} />)}
+                    </div>
+                    <div style={{ display: "flex", gap: 24, marginTop: 16, fontSize: 13.5, color: C.textSoft, flexWrap: "wrap" }}>
+                      <span>Started: <b style={{ color: C.text }}>{fmtDate(entry.startedAt)}</b></span>
+                      <span>Completed: <b style={{ color: C.text }}>{fmtDate(entry.completedAt)}</b></span>
+                    </div>
                   </div>
-                  <StatusPill status={entry.status} />
-                </div>
-                <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
-                  {entry.sources.map((s) => <SourceChip key={s} source={s} />)}
-                </div>
-                <div style={{ display: "flex", gap: 24, marginTop: 16, fontSize: 13.5, color: C.textSoft, flexWrap: "wrap" }}>
-                  <span>Started: <b style={{ color: C.text }}>{fmtDate(entry.startedAt)}</b></span>
-                  <span>Completed: <b style={{ color: C.text }}>{fmtDate(entry.completedAt)}</b></span>
-                </div>
-              </div>
-              <div className="ha-detail-card">
-                <div style={{ fontSize: 12, color: C.textSoft, fontWeight: 700, letterSpacing: ".05em", textTransform: "uppercase" }}>Results</div>
-                <div className="ha-detail-grid">
-                  <div className="ha-detail-stat"><b>{entry.jobsFound}</b><span>Jobs found</span></div>
-                  <div className="ha-detail-stat"><b>{entry.verifiedJobs}</b><span>Verified</span></div>
-                  <div className="ha-detail-stat"><b>{entry.directClients}</b><span>Direct clients</span></div>
-                  <div className="ha-detail-stat"><b>{entry.gcc}</b><span>GCC</span></div>
-                  <div className="ha-detail-stat"><b>{entry.staffingFirms}</b><span>Staffing firms</span></div>
-                  <div className="ha-detail-stat"><b>{entry.ambiguous}</b><span>Ambiguous</span></div>
+                  <div className="ha-runhead-right">
+                    <StatusPill status={entry.status} />
+                    <div className="ha-runstats">
+                      <div className="ha-runstat"><b>{entry.jobsFound}</b><span>Jobs found</span></div>
+                      <div className="ha-runstat"><b>{entry.verifiedJobs}</b><span>Verified contacts</span></div>
+                      <div className="ha-runstat"><b>{entry.directClients}</b><span>Direct clients</span></div>
+                      <div className="ha-runstat"><b>{entry.gcc}</b><span>GCC companies</span></div>
+                      <div className="ha-runstat"><b>{entry.staffingFirms}</b><span>Staffing firms</span></div>
+                      <div className="ha-runstat"><b>{entry.ambiguous}</b><span>Needs review</span></div>
+                    </div>
+                  </div>
                 </div>
               </div>
 
@@ -412,6 +464,31 @@ function RunDetailView({ runId, onBack, onView }) {
                   </div>
                 </div>
 
+                <div className="ha-daterow" style={{ marginTop: 16 }}>
+                  <span style={{ fontSize: 14, fontWeight: 600, color: C.text }}>Posted between</span>
+                  <input type="date" className="ha-input" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
+                  <span style={{ color: C.textSoft }}>to</span>
+                  <input type="date" className="ha-input" value={endDate} onChange={(e) => setEndDate(e.target.value)} />
+                  {(startDate || endDate) && (
+                    <button className="ha-btn ha-btn-secondary" style={{ height: 38, boxSizing: "border-box", padding: "0 14px" }} onClick={() => { setStartDate(""); setEndDate(""); }}>Clear dates</button>
+                  )}
+                </div>
+
+                <div className="ha-card ha-filterbar" style={{ padding: "16px 20px", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", marginTop: 14 }}>
+                  <Select label="Company" value={filters.company} onChange={(v) => setFilters((f) => ({ ...f, company: v }))}
+                    options={[{ value: "all", label: "All" }, ...companies.map((c) => ({ value: c, label: c }))]} />
+                  <Select label="Contact" value={filters.contact} onChange={(v) => setFilters((f) => ({ ...f, contact: v }))}
+                    options={[{ value: "all", label: "All" }, { value: "email", label: "Email" }, { value: "mobile", label: "Mobile" }, { value: "linkedin", label: "LinkedIn" }]} />
+                  <Select label="Job" value={filters.job} onChange={(v) => setFilters((f) => ({ ...f, job: v }))}
+                    options={[{ value: "all", label: "All" }, ...jobTitles.map((t) => ({ value: t, label: t }))]} />
+                  <Select label="POC" value={filters.poc} onChange={(v) => setFilters((f) => ({ ...f, poc: v }))}
+                    options={[{ value: "all", label: "All" }, ...pocNames.map((p) => ({ value: p, label: p }))]} />
+                  <div className="ha-filter-search">
+                    <Search size={16} />
+                    <input className="ha-input" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search…" />
+                  </div>
+                </div>
+
                 {jobsError && <div className="ha-errbanner" style={{ marginTop: 14 }}>{jobsError}</div>}
 
                 <div className="ha-card" style={{ overflow: "hidden", marginTop: 14 }}>
@@ -419,12 +496,12 @@ function RunDetailView({ runId, onBack, onView }) {
                     <table className="ha-table" style={{ minWidth: 1040 }}>
                       <thead className="ha-thead">
                         <tr>
-                          <PlainHeader label="Job title" width={260} />
-                          <PlainHeader label="Company" width={190} />
-                          <PlainHeader label="Source" width={100} />
+                          <SortHeader label="Job title" col="title" sort={sort} setSort={setSort} width={260} />
+                          <SortHeader label="Company" col="company" sort={sort} setSort={setSort} width={190} />
+                          <SortHeader label="Source" col="source" sort={sort} setSort={setSort} width={100} />
                           <PlainHeader label="Filter status" align="center" width={120} />
-                          <PlainHeader label="POC" width={150} />
-                          <PlainHeader label="Posted date" width={130} />
+                          <SortHeader label="POC" col="poc" sort={sort} setSort={setSort} width={150} />
+                          <SortHeader label="Posted date" col="posted" sort={sort} setSort={setSort} width={130} />
                           <PlainHeader label="Email" width={200} />
                           <PlainHeader label="Action" align="center" width={80} />
                         </tr>
@@ -435,7 +512,7 @@ function RunDetailView({ runId, onBack, onView }) {
                             Loading this run's jobs…
                           </td></tr>
                         )}
-                        {!jobsLoading && jobs.map((j) => (
+                        {!jobsLoading && filtered.map((j) => (
                           <tr key={j.id} className="ha-row">
                             <td className="ha-td">
                               <button className="ha-link" onClick={() => onView && onView({ mode: "view", job: mapJobToDetail(j) })}>{j.title}</button>
@@ -457,9 +534,9 @@ function RunDetailView({ runId, onBack, onView }) {
                             </td> */}
                           </tr>
                         ))}
-                        {!jobsLoading && !jobsError && jobs.length === 0 && (
+                        {!jobsLoading && !jobsError && filtered.length === 0 && (
                           <tr><td className="ha-td" colSpan={8} style={{ textAlign: "center", padding: "40px 16px", color: "#94A3B8" }}>
-                            No jobs recorded for this run.
+                            {jobs.length === 0 ? "No jobs recorded for this run." : "No jobs match your filters."}
                           </td></tr>
                         )}
                       </tbody>

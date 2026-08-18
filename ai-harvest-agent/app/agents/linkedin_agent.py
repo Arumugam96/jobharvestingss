@@ -59,7 +59,12 @@ _LOGIN_WAIT_POLL_S    = 2
 
 StatusCallback = Callable[[str], Awaitable[None]]
 
-_LINKEDIN_SEARCH_URL = "https://www.linkedin.com/jobs/search-results/?"
+# Canonical jobs deep-link. LinkedIn resolves the free-text `location=` param
+# into the correct geoId server-side on THIS path and applies it. The
+# `/jobs/search-results/` SPA route does NOT — given only location text (no
+# geoId) it silently falls back to the logged-in account's home location
+# (e.g. Chennai), ignoring location=india. Keep this as /jobs/search/.
+_LINKEDIN_SEARCH_URL = "https://www.linkedin.com/jobs/search/?"
 
 # URLs that indicate we are NOT logged in
 _GATED_PATHS = ("/login", "/checkpoint", "/challenge", "/authwall", "/uas/", "login.live.com", "login.microsoftonline.com")
