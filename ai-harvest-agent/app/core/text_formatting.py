@@ -11,6 +11,7 @@ sanitization.
 from __future__ import annotations
 
 import re
+from html import escape as _escape
 
 from bs4 import BeautifulSoup
 
@@ -126,3 +127,62 @@ def sanitize_description_html(html: str) -> str:
 
     container = soup.body or soup
     return container.decode_contents().strip()
+
+
+# ── Deterministic plain-text → HTML (job-description fallback) ─────────────────
+
+def description_text_to_html(text: str) -> str:
+    """Convert already-formatted plain-text job-description into safe HTML.
+
+    Input is the output of format_job_description (or any similarly structured
+    text): `• ` bullet lines, short "Header:" lines, and blank-line-separated
+    paragraphs. Produces `<ul><li>…</li></ul>`, `<h3>…</h3>`, and `<p>…</p>`
+    blocks. All text is HTML-escaped, so the result is safe to render. Returns
+    "" for empty/whitespace input.
+
+    Used as the guaranteed fallback for job_description_html when neither the
+    DOM capture nor the LLM's own HTML is available — the text already came from
+    the extraction LLM, so this is "the LLM's content in an aesthetic format".
+    """
+    if not text or not text.strip():
+        return ""
+
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    out: list[str] = []
+    para: list[str] = []
+    bullets: list[str] = []
+
+    def _flush_para() -> None:
+        if para:
+            out.append("<p>" + "<br>".join(_escape(l) for l in para) + "</p>")
+            para.clear()
+
+    def _flush_bullets() -> None:
+        if bullets:
+            out.append("<ul>" + "".join(f"<li>{_escape(b)}</li>" for b in bullets) + "</ul>")
+            bullets.clear()
+
+    for raw_line in normalized.split("\n"):
+        line = raw_line.strip()
+        if not line:
+            _flush_bullets()
+            _flush_para()
+            continue
+
+        bullet = _BULLET_PREFIX.match(line)
+        if bullet:
+            _flush_para()
+            bullets.append(line[bullet.end():].strip())
+            continue
+
+        # Non-bullet line ends any open list.
+        _flush_bullets()
+        if _SECTION_HEADER.match(line):
+            _flush_para()
+            out.append(f"<h3>{_escape(line)}</h3>")
+        else:
+            para.append(line)
+
+    _flush_bullets()
+    _flush_para()
+    return "".join(out)

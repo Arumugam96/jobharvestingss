@@ -40,7 +40,11 @@ from dateutil import parser as dateutil_parser
 from playwright.async_api import ElementHandle, Page
 
 from app.core.exceptions import LLMUnavailableError
-from app.core.text_formatting import format_job_description, sanitize_description_html
+from app.core.text_formatting import (
+    description_text_to_html,
+    format_job_description,
+    sanitize_description_html,
+)
 from app.models.harvest_models import FiltersConfig
 from app.scrapers.browser_manager import PersistentBrowserManager
 
@@ -1735,6 +1739,19 @@ class LinkedInAgent:
                     detail_data.get("emp_type", "") + " " + location
                 )
 
+                # Description: formatted plain text (for reports) + rich HTML
+                # (for the UI). HTML is resolved first-non-empty-wins: the DOM
+                # container capture (truest, but LinkedIn's obfuscated auth page
+                # rarely matches), else the LLM's own clean HTML (sanitized),
+                # else a deterministic conversion of the formatted plain text —
+                # so the UI always gets formatted HTML when a description exists.
+                formatted_desc = format_job_description(detail_data.get("description", ""))
+                description_html = (
+                    detail_data.get("job_description_html", "")
+                    or sanitize_description_html(detail_data.get("description_html", ""))
+                    or description_text_to_html(formatted_desc)
+                )
+
                 job = LinkedInScrapedJob(
                     job_title               = _clean(title),
                     company                 = _clean(company),
@@ -1745,8 +1762,8 @@ class LinkedInAgent:
                         detail_data.get("posted") or list_data.get("posted") or ""
                     ),
                     job_url                 = url,
-                    job_description         = format_job_description(detail_data.get("description", "")),
-                    job_description_html    = detail_data.get("job_description_html", ""),
+                    job_description         = formatted_desc,
+                    job_description_html    = description_html,
                     skills                  = detail_data.get("skills", []),
                     work_mode               = work_mode,
                     company_url             = detail_data.get("company_url", ""),
@@ -2127,6 +2144,11 @@ class LinkedInAgent:
             "\"description\": str (the COMPLETE job description / \"About the job\" "
             "text — include every paragraph and bullet point verbatim, do not "
             "summarize or shorten it; empty string if not present), "
+            "\"description_html\": str (the SAME complete description formatted as "
+            "clean, simple HTML using ONLY these tags: <p>, <ul>, <li>, <strong>, "
+            "<em>, <h3>, <br> — preserve headings, paragraphs and bullet lists; no "
+            "attributes, styles, classes, scripts, or any other tag; empty string "
+            "if not present), "
             "\"employment_type\": str (e.g. Full-time, Contract; empty if not stated), "
             "\"salary\": str (empty if not disclosed), "
             "\"job_insights\": str (employment type/seniority/company size/industry "
@@ -2170,9 +2192,13 @@ class LinkedInAgent:
                     "already stripped) — work from the text content only. "
                     "Prioritize returning the COMPLETE job description and any "
                     "recruiter contact details that are explicitly present. "
-                    "Never fabricate an email, phone number, url, or any other "
-                    "field that is not literally present in the text or link "
-                    "list. Return only the fields in the schema, no commentary."
+                    "For description_html, reproduce the same description as "
+                    "clean HTML using ONLY <p>, <ul>, <li>, <strong>, <em>, "
+                    "<h3>, <br> — never add attributes, classes, styles, or "
+                    "scripts. Never fabricate an email, phone number, url, or "
+                    "any other field that is not literally present in the text "
+                    "or link list. Return only the fields in the schema, no "
+                    "commentary."
                 ),
                 debug_dir=_DEBUG_DIR,
                 job_url=url,
@@ -2210,6 +2236,8 @@ class LinkedInAgent:
             result["posted"] = str(extracted["posted"]).strip()
         if extracted.get("description"):
             result["description"] = str(extracted["description"]).strip()[:20_000]
+        if extracted.get("description_html"):
+            result["description_html"] = str(extracted["description_html"]).strip()[:40_000]
         if extracted.get("employment_type"):
             result["emp_type"] = str(extracted["employment_type"]).strip()
         if extracted.get("salary"):

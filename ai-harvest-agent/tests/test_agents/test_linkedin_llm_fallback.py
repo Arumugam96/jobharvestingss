@@ -199,6 +199,21 @@ async def test_llm_fallback_ollama_returns_identical_shape(httpx_mock) -> None:
 
 
 @pytest.mark.asyncio
+async def test_llm_fallback_parses_description_html(httpx_mock) -> None:
+    """The LLM's clean-HTML description variant is parsed into the result so
+    _extract_cards can use it for job_description_html."""
+    payload = dict(EXPECTED_EXTRACTION)
+    payload["description_html"] = "<h3>About</h3><p>We build things.</p><ul><li>SQL</li></ul>"
+    httpx_mock.add_response(
+        method="POST", url=ANTHROPIC_MESSAGES_URL,
+        json=_anthropic_response(json.dumps(payload)),
+    )
+    result = await _run_fallback(LLMService(_settings("claude")))
+
+    assert result["description_html"] == "<h3>About</h3><p>We build things.</p><ul><li>SQL</li></ul>"
+
+
+@pytest.mark.asyncio
 async def test_llm_fallback_respects_per_run_call_cap(httpx_mock) -> None:
     # No mock registered — the cap must short-circuit before any HTTP call is made.
     agent = LinkedInAgent(llm_service=LLMService(_settings("claude")))

@@ -1,8 +1,12 @@
 """Tests for text_formatting.sanitize_description_html — the allow-list HTML
-sanitizer used to store LinkedIn job-description rich HTML safely."""
+sanitizer used to store LinkedIn job-description rich HTML safely — and
+description_text_to_html, the deterministic plain-text -> HTML fallback."""
 from __future__ import annotations
 
-from app.core.text_formatting import sanitize_description_html as s
+from app.core.text_formatting import (
+    description_text_to_html as h,
+    sanitize_description_html as s,
+)
 
 
 def test_keeps_structural_tags() -> None:
@@ -44,3 +48,33 @@ def test_empty_and_none() -> None:
     assert s("") == ""
     assert s("   ") == ""
     assert s(None) == ""
+
+
+# ── description_text_to_html ──────────────────────────────────────────────────
+
+def test_converter_headers_bullets_paragraphs() -> None:
+    out = h("Responsibilities:\n• A\n• B\n\nWe build things.")
+    assert out == "<h3>Responsibilities:</h3><ul><li>A</li><li>B</li></ul><p>We build things.</p>"
+
+
+def test_converter_escapes_html() -> None:
+    out = h("Line with <tag> & amp\nSecond line")
+    assert "<tag>" not in out
+    assert "&lt;tag&gt;" in out and "&amp;" in out
+    assert "<br>" in out  # single-newline lines join within one paragraph
+
+
+def test_converter_multiple_paragraphs() -> None:
+    out = h("First para.\n\nSecond para.")
+    assert out == "<p>First para.</p><p>Second para.</p>"
+
+
+def test_converter_bullets_then_text_closes_list() -> None:
+    out = h("• one\n• two\nA trailing sentence.")
+    assert out == "<ul><li>one</li><li>two</li></ul><p>A trailing sentence.</p>"
+
+
+def test_converter_empty() -> None:
+    assert h("") == ""
+    assert h("   ") == ""
+    assert h(None) == ""
