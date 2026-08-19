@@ -68,6 +68,12 @@ class ScrapedJobORM(Base):
     posted_date: Mapped[str] = mapped_column(String(100), nullable=False, default="")
     job_url: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     job_description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # Sanitized inner HTML of the LinkedIn description container, kept separate
+    # from the plain-text job_description so the JSON/Excel reports (which read
+    # job_description via scraped_job_view) stay tag-free. Empty for Naukri/Dice
+    # and any job where the description container couldn't be captured — the UI
+    # falls back to rendering the plain-text job_description in that case.
+    job_description_html: Mapped[str] = mapped_column(Text, nullable=False, default="")
     skills: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     work_mode: Mapped[str] = mapped_column(String(20), nullable=False, default="not_specified")
     # Present on LinkedIn/Dice's own scraped dataclasses (and their *Job response

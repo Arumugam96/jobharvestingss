@@ -40,7 +40,7 @@ from dateutil import parser as dateutil_parser
 from playwright.async_api import ElementHandle, Page
 
 from app.core.exceptions import LLMUnavailableError
-from app.core.text_formatting import format_job_description
+from app.core.text_formatting import format_job_description, sanitize_description_html
 from app.models.harvest_models import FiltersConfig
 from app.scrapers.browser_manager import PersistentBrowserManager
 
@@ -65,6 +65,19 @@ StatusCallback = Callable[[str], Awaitable[None]]
 # geoId) it silently falls back to the logged-in account's home location
 # (e.g. Chennai), ignoring location=india. Keep this as /jobs/search/.
 _LINKEDIN_SEARCH_URL = "https://www.linkedin.com/jobs/search/?"
+
+# Job-description container selectors, in priority order — reused from the
+# proven chain in app/scrapers/linkedin_scraper.py::_Sel.DESCRIPTION. Used to
+# capture the container's inner HTML (rich formatting) for job_description_html.
+_DESCRIPTION_SELECTORS: tuple[str, ...] = (
+    "div.show-more-less-html__markup",          # public /jobs/view/
+    "div#job-details",                          # alternate public layout
+    "div.description__text",                    # authenticated view
+    "section.description .description__text",
+    "article.jobs-description__container",
+    "div[class*='description__text']",
+    "div[class*='job-view-layout'] div[class*='details']",
+)
 
 # URLs that indicate we are NOT logged in
 _GATED_PATHS = ("/login", "/checkpoint", "/challenge", "/authwall", "/uas/", "login.live.com", "login.microsoftonline.com")
@@ -110,6 +123,7 @@ class LinkedInScrapedJob:
     posted_date:     str
     job_url:         str
     job_description: str
+    job_description_html: str  = ""   # sanitized rich HTML of the description container
     skills:          list[str] = field(default_factory=list)
     work_mode:       str       = "not_specified"
     company_url:     str       = ""
@@ -1732,6 +1746,7 @@ class LinkedInAgent:
                     ),
                     job_url                 = url,
                     job_description         = format_job_description(detail_data.get("description", "")),
+                    job_description_html    = detail_data.get("job_description_html", ""),
                     skills                  = detail_data.get("skills", []),
                     work_mode               = work_mode,
                     company_url             = detail_data.get("company_url", ""),
@@ -1956,6 +1971,25 @@ class LinkedInAgent:
                 except Exception:
                     continue
 
+            # Capture the description container's own inner HTML AFTER expanding
+            # "Show more", preserving LinkedIn's rich formatting (headings,
+            # bullet lists, bold, links). Sanitized to a safe display subset and
+            # stored in job_description_html — separate from the LLM's plain-text
+            # description so the JSON/Excel reports stay tag-free. Best-effort:
+            # if no container matches, the UI falls back to the plain text.
+            desc_html = ""
+            for sel in _DESCRIPTION_SELECTORS:
+                try:
+                    el = await detail_page.query_selector(sel)
+                    if el:
+                        raw_html = await el.inner_html()
+                        if raw_html and raw_html.strip():
+                            desc_html = sanitize_description_html(raw_html)
+                            if desc_html:
+                                break
+                except Exception:
+                    continue
+
             # LinkedIn drifts/obfuscates its detail-page CSS classes constantly
             # (in production, hardcoded selectors matched 0 of the jobs in a
             # run — see linkedin_detail_panel_not_found history). Rather than
@@ -1965,6 +1999,8 @@ class LinkedInAgent:
                 detail_page, idx, url, card_text=card_text, card_links=card_links,
             )
             detail.update(llm_detail)
+            if desc_html:
+                detail["job_description_html"] = desc_html
 
             if not detail.get("description"):
                 logger.info("linkedin_description_still_empty", idx=idx, url=url)

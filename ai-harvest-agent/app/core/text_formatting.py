@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import re
 
+from bs4 import BeautifulSoup
+
 _BULLET_PREFIX = re.compile(
     r"^(?:[•‣▪●○◦*·]|-|\d{1,2}[.)]|\([a-zA-Z0-9]\))\s+"
 )
@@ -68,3 +70,59 @@ def format_job_description(text: str) -> str:
         out_lines.pop()
 
     return "\n".join(out_lines)
+
+
+# ── HTML sanitization (job-description rich rendering) ─────────────────────────
+
+# Structural/formatting tags kept for display. Everything else is unwrapped
+# (text preserved, tag dropped) or, for dangerous containers, decomposed.
+_ALLOWED_HTML_TAGS = {
+    "p", "br", "ul", "ol", "li", "strong", "b", "em", "i", "u",
+    "h1", "h2", "h3", "h4", "span", "a",
+}
+_ALLOWED_HTML_ATTRS: dict[str, set[str]] = {"a": {"href", "target", "rel"}}
+_DROP_HTML_CONTAINERS = [
+    "script", "style", "noscript", "iframe", "svg", "img",
+    "button", "input", "form", "link", "meta",
+]
+
+
+def sanitize_description_html(html: str) -> str:
+    """Sanitize scraped job-description HTML down to a safe display subset.
+
+    Keeps only structural/formatting tags (paragraphs, lists, emphasis,
+    headings, links); strips scripts/styles/event handlers/inline styles and
+    any tag or attribute not on the allow-list. Links are forced to
+    rel="noopener noreferrer" target="_blank" and javascript: hrefs removed.
+    Returns "" for empty/whitespace input or on any parse error. Uses bs4 +
+    lxml, already project dependencies — no new package. The frontend also runs
+    DOMPurify as defense-in-depth.
+    """
+    if not html or not html.strip():
+        return ""
+    try:
+        soup = BeautifulSoup(html, "lxml")
+    except Exception:
+        return ""
+
+    for tag in soup(_DROP_HTML_CONTAINERS):
+        tag.decompose()
+
+    for tag in soup.find_all(True):
+        if tag.name not in _ALLOWED_HTML_TAGS:
+            tag.unwrap()  # keep the text, drop the tag
+            continue
+        allowed = _ALLOWED_HTML_ATTRS.get(tag.name, set())
+        for attr in list(tag.attrs):
+            if attr not in allowed:
+                del tag[attr]
+        if tag.name == "a":
+            href = (tag.get("href") or "").strip()
+            if href.lower().startswith("javascript:"):
+                del tag["href"]
+            else:
+                tag["target"] = "_blank"
+                tag["rel"]    = "noopener noreferrer"
+
+    container = soup.body or soup
+    return container.decode_contents().strip()

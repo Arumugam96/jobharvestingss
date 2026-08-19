@@ -44,6 +44,11 @@ class UnifiedJob:
     work_mode:       str        # "remote" | "hybrid" | "onsite" | "not_specified"
     source:          str        # "LinkedIn" | "Naukri" | "Dice"
 
+    # Sanitized rich HTML of the description container (LinkedIn only for now);
+    # kept separate from the plain-text job_description so the JSON/Excel reports
+    # stay tag-free. Empty for sources/jobs without a captured container.
+    job_description_html: str = ""
+
     # Present on LinkedIn/Dice's scraped dataclasses; persisted to
     # ScrapedJobORM.company_url / employment_type — without these here the
     # orchestrator flow silently dropped them before the DB insert.
@@ -89,6 +94,7 @@ class UnifiedJob:
             "posted_date":            self.posted_date,
             "job_url":                self.job_url,
             "job_description":        self.job_description,
+            "job_description_html":   self.job_description_html,
             "skills":                 self.skills,
             "work_mode":              self.work_mode,
             "source":                 self.source,

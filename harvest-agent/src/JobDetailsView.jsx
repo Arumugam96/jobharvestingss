@@ -1,4 +1,5 @@
 import React from "react";
+import DOMPurify from "dompurify";
 import {
   ArrowLeft,
   MapPin,
@@ -149,14 +150,24 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
           <main className="ha-main">
             <section className="ha-section">
               <div className="ha-label"><FileText size={14} /> Job Description</div>
-              <p className="ha-jd">{job.jd || "No description provided."}</p>
+              {job.jdHtml ? (
+                // Rich LinkedIn description HTML. Sanitized server-side; DOMPurify
+                // here is defense-in-depth before dangerouslySetInnerHTML.
+                <div
+                  className="ha-jd ha-jd-html"
+                  dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(job.jdHtml) }}
+                />
+              ) : (
+                <p className="ha-jd">{job.jd || "No description provided."}</p>
+              )}
             </section>
           </main>
 
           <aside className="ha-rail">
             <section className="ha-section">
-              <div className="ha-label"><Filter size={14} /> Filter status</div>
+              <div className="ha-label"><Filter size={14} /> Classification</div>
               <div className="ha-rows">
+                {/* Filter status hidden for now.
                 <div className="ha-row">
                   <span className="ha-key">Status</span>
                   <span className="ha-val" style={{ color: job.passedFilter === false ? "#B45309" : "#047857", fontWeight: 600 }}>
@@ -169,6 +180,7 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
                     <span className="ha-val">{job.filterReason || <span className="ha-muted">—</span>}</span>
                   </div>
                 )}
+                */}
                 <div className="ha-row">
                   <span className="ha-key">Hiring</span>
                   <span className="ha-val">{job.hiringEntity || <span className="ha-muted">—</span>}</span>
@@ -253,6 +265,18 @@ const styles = `
   .ha-label svg { color: #2563EB; }
 
   .ha-jd { font-size: 14.5px; line-height: 1.7; color: #334155; margin: 0; white-space: pre-wrap; }
+  /* Rich (HTML) description branch — real block elements, so no pre-wrap. */
+  .ha-jd-html { white-space: normal; }
+  .ha-jd-html h1, .ha-jd-html h2, .ha-jd-html h3, .ha-jd-html h4 {
+    font-size: 15px; font-weight: 700; color: #1E293B; margin: 16px 0 6px; }
+  .ha-jd-html p { margin: 0 0 10px; }
+  .ha-jd-html ul, .ha-jd-html ol { margin: 0 0 10px; padding-left: 22px; }
+  .ha-jd-html li { margin: 2px 0; }
+  .ha-jd-html strong, .ha-jd-html b { font-weight: 700; color: #1E293B; }
+  .ha-jd-html a { color: #2563EB; text-decoration: none; }
+  .ha-jd-html a:hover { text-decoration: underline; }
+  .ha-jd-html > *:first-child { margin-top: 0; }
+  .ha-jd-html > *:last-child { margin-bottom: 0; }
 
   .ha-rows { display: flex; flex-direction: column; gap: 11px; }
   .ha-row { display: grid; grid-template-columns: 92px 1fr; gap: 12px; align-items: start; }

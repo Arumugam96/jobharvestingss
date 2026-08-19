@@ -217,6 +217,7 @@ def _linkedin_to_unified(j: LinkedInScrapedJob) -> UnifiedJob:
         posted_date             = j.posted_date,
         job_url                 = j.job_url,
         job_description         = j.job_description,
+        job_description_html    = getattr(j, "job_description_html", ""),
         skills                  = j.skills,
         work_mode               = j.work_mode,
         source                  = "LinkedIn",

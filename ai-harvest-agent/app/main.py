@@ -59,6 +59,7 @@ def _ensure_scraped_jobs_columns(sync_conn) -> None:
         ("recruiter_id",  "ALTER TABLE scraped_jobs ADD COLUMN recruiter_id VARCHAR(36)"),
         ("passed_filter", "ALTER TABLE scraped_jobs ADD COLUMN passed_filter BOOLEAN NOT NULL DEFAULT 1"),
         ("filter_reason", "ALTER TABLE scraped_jobs ADD COLUMN filter_reason VARCHAR(255) NOT NULL DEFAULT ''"),
+        ("job_description_html", "ALTER TABLE scraped_jobs ADD COLUMN job_description_html TEXT NOT NULL DEFAULT ''"),
     ]
     for name, ddl in pending:
         if name not in existing_cols:

@@ -725,10 +725,13 @@ async def _llm_extract_contact_fields(
             schema_description=schema_description,
             system=(
                 "You extract only explicitly-stated contact details from a "
-                "LinkedIn profile's contact-info section. Never fabricate, "
-                "guess, or construct an email or phone number that is not "
-                "literally present in the text. Return only the fields in the "
-                "schema, no commentary."
+                "LinkedIn profile's contact-info section. Extract ONLY the "
+                "profile owner's own email/phone — ignore any address or number "
+                "that appears inside reposts, the activity feed, comments, job "
+                "posts, or other people's content. Never fabricate, guess, or "
+                "construct an email or phone number that is not literally "
+                "present in the text. Return only the fields in the schema, no "
+                "commentary."
             ),
             job_url=source_url or None,
         )
@@ -820,9 +823,10 @@ async def _extract_linkedin_contact_info(
             except Exception:
                 pass
 
+        # Collect text from the contact modal — the profile owner's own
+        # contact-info panel, the authoritative source for email/phone.
+        modal_text = ""
         if clicked:
-            # Collect text from the contact modal
-            modal_text = ""
             for sel in _LI_MODAL_SELECTORS:
                 try:
                     els = await page.query_selector_all(sel)
@@ -836,22 +840,17 @@ async def _extract_linkedin_contact_info(
             if modal_text:
                 out["contact_section_found"] = True
                 contact_text += modal_text + "\n"
-                e = _extract_email_from_text(modal_text, company_domain)
-                p = _extract_phone_from_text(modal_text)
-                if e:
-                    out["email"] = e
-                if p:
-                    out["phone"] = p
 
-        # ── Fallback: scan the profile top-card region (NOT the whole body) ───
-        # A whole-body scan grabs the first email/phone anywhere on the page —
-        # on an activity feed / "people also viewed" list that is a DIFFERENT
-        # person. Restrict to the profile's own top-card/main containers, and
-        # only widen to <body> when we're demonstrably still on the canonical
-        # /in/<slug> profile page (never an activity/feed page).
+        # ── Owner-scoped fallback: ONLY the profile owner's own nodes ──────────
+        # Never read `main` / `body` / the activity feed. Those contain reposts
+        # and "More profiles for you" entries belonging to OTHER people, whose
+        # email/phone would otherwise leak in (the reported bug). We look only at
+        # the contact modal (above) and the profile top card here — the owner's
+        # own region. If neither yields text we capture nothing and the contact
+        # stays NOT_FOUND, which is the correct outcome.
         if not out["email"] or not out["phone"]:
             scoped_text = ""
-            for sel in (".pv-top-card", "section.artdeco-card", "main .scaffold-layout__main", "main"):
+            for sel in (".pv-top-card", "section.artdeco-card.pv-top-card", ".pv-text-details__left-panel"):
                 try:
                     el = await page.query_selector(sel)
                     if el:
@@ -861,23 +860,15 @@ async def _extract_linkedin_contact_info(
                 except Exception:
                     pass
 
-            if not scoped_text and "/in/" in page.url.split("?")[0].rstrip("/"):
-                try:
-                    scoped_text = await page.inner_text("body")
-                except Exception:
-                    scoped_text = ""
-
             if scoped_text:
                 contact_text += scoped_text
-                if not out["email"]:
-                    out["email"] = _extract_email_from_text(scoped_text, company_domain)
-                if not out["phone"]:
-                    out["phone"] = _extract_phone_from_text(scoped_text)
 
-        # ── LLM-authoritative extraction ──────────────────────────────────────
-        # Let the LLM decide email/phone from the captured contact text — it
-        # catches valid addresses the regex drops (gmail/yahoo, unusual phone
-        # formats). Overrides the regex result whenever the LLM finds a value.
+        # ── LLM is the SOLE authority for email/phone ─────────────────────────
+        # Regex over profile text is not trustworthy (it returns any address
+        # appearing anywhere in the captured region), so the LLM decides.
+        # `contact_text` now only ever holds the owner's contact modal + top
+        # card, so the LLM never sees another person's details. When the LLM
+        # returns null, email/phone are correctly left empty (NOT_FOUND).
         if llm_service and contact_text.strip():
             llm = await _llm_extract_contact_fields(llm_service, contact_text, linkedin_url)
             if llm.get("email"):
@@ -886,6 +877,15 @@ async def _extract_linkedin_contact_info(
                 out["phone"] = llm["phone"]
             if llm.get("email") or llm.get("phone"):
                 out["contact_section_found"] = True
+        elif not llm_service and modal_text:
+            # No-LLM deployments only: fall back to regex, but ONLY over the
+            # contact modal (never the top card / body) so the leak can't recur.
+            e = _extract_email_from_text(modal_text, company_domain)
+            p = _extract_phone_from_text(modal_text)
+            if e:
+                out["email"] = e
+            if p:
+                out["phone"] = p
 
     except Exception as exc:
         logger.debug("linkedin_contact_extract_failed", url=linkedin_url, error=str(exc))

@@ -182,6 +182,7 @@ function mapApiJob(j) {
     linkedin: j.linkedin_profile_url || null,
     source: j.source || "—",
     jobDescription: j.job_description || "",
+    jobDescriptionHtml: j.job_description_html || "",
     location: j.location || "",
     salary: j.salary || "",
     jobType: j.job_type || "",
@@ -203,6 +204,7 @@ function mapJobToDetail(j) {
   return {
     jobTitle: j.title,
     jd: j.jobDescription,
+    jdHtml: j.jobDescriptionHtml || "",
     company: j.company,
     location: j.location,
     jobType: j.jobType,
@@ -492,7 +494,7 @@ function RunDetailView({ runId, onBack, onView }) {
                           <SortHeader label="Job title" col="title" sort={sort} setSort={setSort} width={260} />
                           <SortHeader label="Company" col="company" sort={sort} setSort={setSort} width={190} />
                           <SortHeader label="Source" col="source" sort={sort} setSort={setSort} width={100} />
-                          <PlainHeader label="Filter status" align="center" width={120} />
+                          {/* <PlainHeader label="Filter status" align="center" width={120} /> */}
                           <SortHeader label="POC" col="poc" sort={sort} setSort={setSort} width={150} />
                           <SortHeader label="Posted date" col="posted" sort={sort} setSort={setSort} width={130} />
                           <PlainHeader label="Email" width={200} />
@@ -501,7 +503,7 @@ function RunDetailView({ runId, onBack, onView }) {
                       </thead>
                       <tbody>
                         {jobsLoading && (
-                          <tr><td className="ha-td" colSpan={8} style={{ textAlign: "center", padding: "40px 16px", color: "#94A3B8" }}>
+                          <tr><td className="ha-td" colSpan={7} style={{ textAlign: "center", padding: "40px 16px", color: "#94A3B8" }}>
                             Loading this run's jobs…
                           </td></tr>
                         )}
@@ -512,9 +514,9 @@ function RunDetailView({ runId, onBack, onView }) {
                             </td>
                             <td className="ha-td" style={{ color: C.text }}>{j.company}</td>
                             <td className="ha-td"><SourceChip source={j.source} /></td>
-                            <td className="ha-td" style={{ textAlign: "center" }}>
+                            {/* <td className="ha-td" style={{ textAlign: "center" }}>
                               <FilterStatusBadge passed={j.passedFilter} reason={j.filterReason} />
-                            </td>
+                            </td> */}
                             <td className="ha-td" style={{ color: C.text }}>{j.poc || <span style={{ color: "#94A3B8" }}>—</span>}</td>
                             <td className="ha-td" style={{ whiteSpace: "nowrap", color: C.textSoft }}>{j.postedDate || "—"}</td>
                             <td className="ha-td">
@@ -528,7 +530,7 @@ function RunDetailView({ runId, onBack, onView }) {
                           </tr>
                         ))}
                         {!jobsLoading && !jobsError && filtered.length === 0 && (
-                          <tr><td className="ha-td" colSpan={8} style={{ textAlign: "center", padding: "40px 16px", color: "#94A3B8" }}>
+                          <tr><td className="ha-td" colSpan={7} style={{ textAlign: "center", padding: "40px 16px", color: "#94A3B8" }}>
                             {jobs.length === 0 ? "No jobs recorded for this run." : "No jobs match your filters."}
                           </td></tr>
                         )}
@@ -678,7 +680,7 @@ function JobsPage({ jobs, total, loading, error, onRefresh, onNavigate, onView }
                   <SortHeader label="Job title" col="title" sort={sort} setSort={setSort} width={230} />
                   <SortHeader label="Company" col="company" sort={sort} setSort={setSort} width={170} />
                   <SortHeader label="Source" col="source" sort={sort} setSort={setSort} width={100} />
-                  <PlainHeader label="Filter status" align="center" width={120} />
+                  {/* <PlainHeader label="Filter status" align="center" width={120} /> */}
                   <SortHeader label="POC" col="poc" sort={sort} setSort={setSort} width={150} />
                   <SortHeader label="Posted date" col="posted" sort={sort} setSort={setSort} width={130} />
                   <PlainHeader label="Email" width={200} />
@@ -689,7 +691,7 @@ function JobsPage({ jobs, total, loading, error, onRefresh, onNavigate, onView }
               </thead>
               <tbody>
                 {loading && (
-                  <tr><td className="ha-td" colSpan={10} style={{ textAlign: "center", padding: "48px 16px", color: "#94A3B8" }}>
+                  <tr><td className="ha-td" colSpan={9} style={{ textAlign: "center", padding: "48px 16px", color: "#94A3B8" }}>
                     Loading harvested jobs…
                   </td></tr>
                 )}
@@ -705,9 +707,9 @@ function JobsPage({ jobs, total, loading, error, onRefresh, onNavigate, onView }
                     </td>
                     <td className="ha-td" style={{ color: C.text }}>{j.company}</td>
                     <td className="ha-td"><SourceChip source={j.source} /></td>
-                    <td className="ha-td" style={{ textAlign: "center" }}>
+                    {/* <td className="ha-td" style={{ textAlign: "center" }}>
                       <FilterStatusBadge passed={j.passedFilter} reason={j.filterReason} />
-                    </td>
+                    </td> */}
                     <td className="ha-td" style={{ color: C.text }}>
                       {j.poc || <span style={{ color: "#94A3B8" }}>—</span>}
                     </td>
@@ -740,7 +742,7 @@ function JobsPage({ jobs, total, loading, error, onRefresh, onNavigate, onView }
                   </tr>
                 ))}
                 {!loading && !error && filtered.length === 0 && (
-                  <tr><td className="ha-td" colSpan={10} style={{ textAlign: "center", padding: "48px 16px", color: "#94A3B8" }}>
+                  <tr><td className="ha-td" colSpan={9} style={{ textAlign: "center", padding: "48px 16px", color: "#94A3B8" }}>
                     No postings match your search. Run a harvest from the Rule Engine to collect jobs.
                   </td></tr>
                 )}

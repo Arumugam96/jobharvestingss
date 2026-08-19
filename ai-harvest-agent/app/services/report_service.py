@@ -25,8 +25,17 @@ logger = structlog.get_logger(__name__)
 
 def merged_job_dicts(jobs: list[ScrapedJobORM]) -> list[dict[str, Any]]:
     """ScrapedJobORM rows -> job dicts with recruiter contact info merged in
-    (same view GET /jobs serves, so UI / downloads / email always agree)."""
-    return [scraped_job_view(j) for j in jobs]
+    (same view GET /jobs serves, so UI / downloads / email always agree).
+
+    Drops job_description_html: the reports keep only the plain-text
+    job_description so the JSON/Excel downloads stay tag-free — the HTML field
+    exists purely for the UI's rich rendering."""
+    out: list[dict[str, Any]] = []
+    for j in jobs:
+        view = scraped_job_view(j)
+        view.pop("job_description_html", None)
+        out.append(view)
+    return out
 
 
 def build_json_report_bytes(
