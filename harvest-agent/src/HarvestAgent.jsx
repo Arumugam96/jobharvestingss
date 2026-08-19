@@ -40,11 +40,11 @@ const ThemeStyles = () => (
   <style>{`
     .ha-root{display:flex;min-height:100vh;font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:${C.bg};color:${C.text};}
     .ha-main{flex:1;overflow-x:hidden;}
-    .ha-sidebar{display:none;width:240px;flex-shrink:0;flex-direction:column;padding:20px 12px;background:${C.sidebar};}
+    .ha-sidebar{display:none;width:240px;flex-shrink:0;flex-direction:column;padding:5px 5px;background:${C.sidebar};}
     @media(min-width:768px){.ha-sidebar{display:flex;}}
     .ha-logo{font-size:18px;font-weight:700;color:#fff;letter-spacing:-.01em;}
     .ha-logo span{color:${C.primary};}
-    .ha-logo-img{width:150px;height:150px;max-width:100%;object-fit:cover;display:block;border-radius:50%;}
+    .ha-logo-img{width:150px;height:150px;max-width:100%;object-fit:cover;display:block;border-radius:50%;padding:5px 0px 5px}
     .ha-tagline{margin-top:4px;font-size:11px;text-transform:uppercase;letter-spacing:.14em;color:#94A3B8;}
     .ha-navhead{padding:0 12px 8px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.14em;color:#64748B;}
     .ha-nav{display:flex;width:100%;align-items:center;gap:12px;border:0;background:transparent;cursor:pointer;border-radius:8px;padding:8px 12px;font-size:14px;color:#CBD5E1;transition:.15s;}
@@ -300,11 +300,11 @@ function NavItem({ glyph: Glyph, children, active, badge, onClick }) {
 function Sidebar({ activePage, onNavigate, jobsCount, runsCount }) {
   return (
     <aside className="ha-sidebar">
-      <div style={{ padding: "0 12px" }}>
+      <div style={{ padding: "0 5px", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
         <img className="ha-logo-img" src={`${process.env.PUBLIC_URL}/sight_spectrum_logo.jpg`} alt="SS jobharvesting Agent" width="150" height="150" />
         <div className="ha-tagline">Contract Sourcing Automation</div>
       </div>
-      <nav style={{ marginTop: 32, display: "flex", flexDirection: "column", gap: 24, flex: 1 }}>
+      <nav style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 24, flex: 1 }}>
         <div><div className="ha-navhead">Configuration</div>
           <NavItem glyph={SlidersHorizontal} active={activePage === "rules"} onClick={() => onNavigate("rules")}>Rule Engine</NavItem></div>
         <div><div className="ha-navhead">Operations</div>
