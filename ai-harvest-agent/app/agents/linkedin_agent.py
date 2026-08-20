@@ -377,6 +377,31 @@ def _trim_to_relevant(text: str, max_chars: int) -> str:
     return f"{head}\n…\n{body}"
 
 
+# Marker for the start of a LinkedIn profile's "Activity" section — the member's
+# posts/reposts/comments feed. Crucially this feed also surfaces OTHER people's
+# content (reposts of colleagues' hiring posts, comments) that carry THEIR own
+# emails/phones. The profile section header reads "Activity <n> followers",
+# which is specific enough not to collide with the word "Activity" appearing
+# inside a headline or About paragraph.
+_PROFILE_ACTIVITY_CUTOFF_RE = re.compile(r"\bActivity\s+[\d,]+\s+followers?\b", re.IGNORECASE)
+
+
+def _cut_profile_text_before_activity(text: str) -> str:
+    """Drop everything from a LinkedIn profile's Activity feed onward.
+
+    On a profile page the top card + contact info + About come first, then the
+    Activity section — reposts/comments that belong to OTHER members. Only the
+    region before Activity is the profile owner's own data, so the recruiter-
+    contact LLM fallback must never see past it: otherwise another member's
+    email/phone from a repost gets extracted and saved as THIS person's contact
+    (confirmed live — a profile with no public contact fell through to this
+    fallback and the feed leaked colleagues' addresses into the prompt)."""
+    m = _PROFILE_ACTIVITY_CUTOFF_RE.search(text)
+    if m:
+        return text[: m.start()].rstrip()
+    return text
+
+
 def _infer_work_mode(text: str) -> str:
     t = (text or "").lower()
     if "remote" in t:
@@ -1424,7 +1449,14 @@ class LinkedInAgent:
             logger.debug("recruiter_llm_fallback_text_read_failed", url=profile_url, error=str(exc))
             return {}
 
-        text = _trim_to_relevant(_html_to_text(html), self._LLM_FALLBACK_TEXT_MAX_CHARS)
+        # Keep ONLY the profile owner's own region (top card + contact info +
+        # About). Cut the text at the Activity section so the LLM never sees the
+        # feed of reposts/comments — those belong to other members and would
+        # otherwise leak their emails/phones in as this recruiter's contact.
+        text = _trim_to_relevant(
+            _cut_profile_text_before_activity(_html_to_text(html)),
+            self._LLM_FALLBACK_TEXT_MAX_CHARS,
+        )
         if len(text) < 50:
             return {}
 
