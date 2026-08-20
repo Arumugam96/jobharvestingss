@@ -12,7 +12,7 @@ if sys.platform == "win32" and hasattr(sys.stdout, "buffer"):
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import inspect as sa_inspect, text as sa_text
 from app.config import get_settings
@@ -20,7 +20,7 @@ from app.core.logging_config import configure_logging
 
 configure_logging(get_settings().log_level)
 
-from app.core.dependencies import get_engine
+from app.core.dependencies import get_current_user, get_engine
 from app.core.exceptions import HarvestException, harvest_exception_handler
 from app.core.middleware import LoggingMiddleware, RateLimitMiddleware
 import app.models.auth  # noqa: F401 — registers users / otp_verifications on Base.metadata
@@ -210,16 +210,20 @@ def create_app() -> FastAPI:
     app.include_router(linkedin_harvest.router,  prefix=f"{prefix}/jobs/linkedin",  tags=["LinkedIn Harvest"], include_in_schema=False)
 
     # ── Public endpoints (Swagger-visible) ────────────────────────────────────
+    # auth_router stays open (login must be reachable pre-token). Every other
+    # public router requires a logged-in user; when settings.auth_enabled is
+    # False, get_current_user short-circuits to a dev user so these still work.
+    protected = [Depends(get_current_user)]
     app.include_router(auth_router)                   # POST /auth/request-otp, /auth/verify-otp, GET /auth/me
-    app.include_router(frontend_router)               # GET /jobs, /lead-intelligence, /download/*, /health
-    app.include_router(run_harvest_agent_router)      # POST /run-harvest-agent, GET /harvest-status/{id}, /run-history
-    app.include_router(linkedin_agent_router)         # POST /run-linkedin-agent  +  results endpoints
-    app.include_router(harvest_agent_router)          # POST /run-harvest  +  management endpoints
-    app.include_router(naukri_agent_router)           # POST /run-naukri-agent  +  results endpoints
-    app.include_router(dice_agent_router)             # POST /run-dice-agent  +  dice results endpoints
-    app.include_router(prospect_intelligence_router)  # POST /run-prospect-intelligence
-    app.include_router(recruiter_discovery_router)    # POST /run-recruiter-discovery
-    app.include_router(lead_intelligence_router)      # POST /run-lead-intelligence, GET /lead-intelligence, /download/lead-intelligence/*
+    app.include_router(frontend_router, dependencies=protected)               # GET /jobs, /lead-intelligence, /download/*, /health
+    app.include_router(run_harvest_agent_router, dependencies=protected)      # POST /run-harvest-agent, GET /harvest-status/{id}, /run-history
+    app.include_router(linkedin_agent_router, dependencies=protected)         # POST /run-linkedin-agent  +  results endpoints
+    app.include_router(harvest_agent_router, dependencies=protected)          # POST /run-harvest  +  management endpoints
+    app.include_router(naukri_agent_router, dependencies=protected)           # POST /run-naukri-agent  +  results endpoints
+    app.include_router(dice_agent_router, dependencies=protected)             # POST /run-dice-agent  +  dice results endpoints
+    app.include_router(prospect_intelligence_router, dependencies=protected)  # POST /run-prospect-intelligence
+    app.include_router(recruiter_discovery_router, dependencies=protected)    # POST /run-recruiter-discovery
+    app.include_router(lead_intelligence_router, dependencies=protected)      # POST /run-lead-intelligence, GET /lead-intelligence, /download/lead-intelligence/*
 
     return app
 

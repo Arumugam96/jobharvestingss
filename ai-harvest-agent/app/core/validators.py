@@ -16,19 +16,28 @@ from app.config import get_settings
 
 @lru_cache
 def _domain_pattern(domain: str) -> re.Pattern[str]:
-    # fullmatch anchors both ends so "sightspectrum.com.evil.com" or
-    # "sightspectrum.co.in" can never match — the domain must be exact.
-    return re.compile(rf"^[^@\s]+@{re.escape(domain)}$", re.IGNORECASE)
+    # Accept the company's second-level label ("sightspectrum") under ANY
+    # single-label TLD — sightspectrum.com / .in / .org / .io …. The base label
+    # is derived from settings.allowed_email_domain. Restricting the TLD to a
+    # single dotless label ([a-z]{2,}) still blocks look-alikes whose
+    # registrable domain isn't sightspectrum.*: multi-label suffixes like
+    # "sightspectrum.co.in" and "sightspectrum.com.evil.com", and the
+    # subdomain-of-evil case "sightspectrum.evil.com", can never match.
+    base = re.escape(domain.split(".", 1)[0])
+    return re.compile(rf"^[^@\s]+@{base}\.[a-z]{{2,}}$", re.IGNORECASE)
 
 
 def validate_company_email(email: str) -> str:
-    """Return the (lightly normalized) email if it belongs to the allowed
-    company domain, otherwise raise ``ValueError``."""
+    """Return the (lightly normalized) email if it belongs to the company —
+    the ``sightspectrum`` second-level domain under any TLD — otherwise raise
+    ``ValueError``."""
     settings = get_settings()
     email = email.strip()
     pattern = _domain_pattern(settings.allowed_email_domain.lower())
     if not pattern.fullmatch(email):
+        base = settings.allowed_email_domain.split(".", 1)[0]
         raise ValueError(
-            f"Email must be a valid @{settings.allowed_email_domain} address"
+            f"Email must be a valid @{base} company address "
+            f"(e.g. name@{settings.allowed_email_domain})"
         )
     return email.lower()

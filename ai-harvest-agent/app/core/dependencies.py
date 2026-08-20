@@ -117,6 +117,16 @@ async def get_current_user(
     Use as ``current_user: AuthenticatedUser = Depends(get_current_user)`` on
     any route that requires a logged-in user.
     """
+    # Dev bypass: when login enforcement is off, every protected route (and
+    # /auth/me) resolves to a synthetic user without needing a token.
+    if not settings.auth_enabled:
+        return AuthenticatedUser(
+            id="dev",
+            email=f"dev@{settings.allowed_email_domain}",
+            is_active=True,
+            is_verified=True,
+        )
+
     unauthorized = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Not authenticated",

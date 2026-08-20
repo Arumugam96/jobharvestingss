@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { Circle } from "lucide-react";
-import { getHealth } from "./api";
+import { getHealth } from "../api";
 
 /**
  * Small backend-liveness pill for GET /health.

@@ -100,6 +100,10 @@ class Settings(BaseSettings):
     s3_bucket: str = "harvest-results"
 
     # ── Auth / OTP ───────────────────────────────────────────────────────────────
+    # Master switch for login enforcement. Default True (login required). Set
+    # AUTH_ENABLED=false in dev to bypass the OTP gate — get_current_user then
+    # returns a synthetic dev user so protected routes accept tokenless calls.
+    auth_enabled: bool = True
     allowed_email_domain: str = "sightspectrum.com"
     otp_length: int = 6
     otp_expiry_seconds: int = 300

@@ -1,13 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  SlidersHorizontal, Download, LayoutList, History, Send, BarChart3,
+  SlidersHorizontal, Download,
   Search, Mail, ArrowUpDown, ArrowUp, ArrowDown, Eye, Pencil, RefreshCw, ArrowLeft,
-  CheckCircle2, XCircle, Loader2, HelpCircle, Radar, UserSearch, Play, FileJson, FileSpreadsheet,
+  CheckCircle2, XCircle, Loader2, HelpCircle, Play, FileJson, FileSpreadsheet,
   AlertTriangle,
 } from "lucide-react";
 import JobDetailsView from "./JobDetailsView";
 import RuleEngineConfig from "./RuleEngineConfig";
-import HealthBadge from "./HealthBadge";
+import Sidebar from "./components/Sidebar";
 import {
   getJobs, getRunHistory, getRunHistoryEntry, getActiveRun, ApiError,
   runLinkedinAgent, getLinkedinResults, getLinkedinResult,
@@ -40,17 +40,7 @@ const ThemeStyles = () => (
   <style>{`
     .ha-root{display:flex;min-height:100vh;font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:${C.bg};color:${C.text};}
     .ha-main{flex:1;overflow-x:hidden;}
-    .ha-sidebar{display:none;width:240px;flex-shrink:0;flex-direction:column;padding:5px 5px;background:${C.sidebar};}
-    @media(min-width:768px){.ha-sidebar{display:flex;}}
-    .ha-logo{font-size:18px;font-weight:700;color:#fff;letter-spacing:-.01em;}
-    .ha-logo span{color:${C.primary};}
-    .ha-logo-img{width:150px;height:150px;max-width:100%;object-fit:cover;display:block;border-radius:50%;padding:5px 0px 5px}
-    .ha-tagline{margin-top:4px;font-size:11px;text-transform:uppercase;letter-spacing:.14em;color:#94A3B8;}
-    .ha-navhead{padding:0 12px 8px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.14em;color:#64748B;}
-    .ha-nav{display:flex;width:100%;align-items:center;gap:12px;border:0;background:transparent;cursor:pointer;border-radius:8px;padding:8px 12px;font-size:14px;color:#CBD5E1;transition:.15s;}
-    .ha-nav:hover{background:rgba(255,255,255,.06);color:#fff;}
-    .ha-nav-active{background:rgba(37,99,235,.28);color:#fff;box-shadow:inset 0 0 0 1px rgba(37,99,235,.55);}
-    .ha-badge{background:${C.accent};color:#1E293B;border-radius:999px;padding:2px 8px;font-size:12px;font-weight:700;}
+    /* Sidebar styles now live in Sidebar.jsx (the shared component). */
     .ha-card{background:#fff;border:1px solid ${C.border};border-radius:12px;box-shadow:0 1px 2px rgba(15,23,42,.04);}
     .ha-input{box-sizing:border-box;height:38px;padding:0 12px;border:1px solid #CBD5E1;background:#fff;color:${C.text};border-radius:8px;font-size:14px;}
     .ha-input:focus{outline:none;border-color:${C.primary};box-shadow:0 0 0 2px rgba(37,99,235,.25);}
@@ -67,7 +57,7 @@ const ThemeStyles = () => (
     .ha-table-scroll::-webkit-scrollbar-thumb{background:#CBD5E1;border-radius:99px;}
     .ha-table-scroll::-webkit-scrollbar-thumb:hover{background:#94A3B8;}
     .ha-thead{background:${C.pale};text-align:left;position:sticky;top:0;z-index:1;}
-    .ha-th{padding:12px 16px;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;color:${C.textSoft};position:sticky;top:0;background:${C.pale};z-index:1;}
+    .ha-th{padding:12px 16px;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;color:${C.textSoft};text-align:left;position:sticky;top:0;background:${C.pale};z-index:1;}
     .ha-sortbtn{display:inline-flex;align-items:center;gap:4px;border:0;background:transparent;cursor:pointer;font:inherit;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;}
     .ha-td{padding:14px 16px;vertical-align:middle;}
     .ha-row{border-top:1px solid #EEF2F7;}
@@ -289,39 +279,7 @@ function ContactIcon({ glyph: Glyph, href, title }) {
   );
 }
 
-/* Sidebar */
-function NavItem({ glyph: Glyph, children, active, badge, onClick }) {
-  return (
-    <button className={"ha-nav" + (active ? " ha-nav-active" : "")} onClick={onClick}>
-      <Glyph size={18} />
-      <span style={{ flex: 1, textAlign: "left" }}>{children}</span>
-      {badge != null && <span className="ha-badge">{badge}</span>}
-    </button>
-  );
-}
-function Sidebar({ activePage, onNavigate, jobsCount, runsCount }) {
-  return (
-    <aside className="ha-sidebar">
-      <div style={{ padding: "0 5px", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
-        <img className="ha-logo-img" src={`${process.env.PUBLIC_URL}/sight_spectrum_logo.jpg`} alt="SS jobharvesting Agent" width="150" height="150" />
-        <div className="ha-tagline">Contract Sourcing Automation</div>
-      </div>
-      <nav style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 24, flex: 1 }}>
-        <div><div className="ha-navhead">Configuration</div>
-          <NavItem glyph={SlidersHorizontal} active={activePage === "rules"} onClick={() => onNavigate("rules")}>Rule Engine</NavItem></div>
-        <div><div className="ha-navhead">Operations</div>
-          <NavItem glyph={LayoutList} active={activePage === "jobs"} badge={jobsCount} onClick={() => onNavigate("jobs")}>Harvested Jobs</NavItem>
-          <NavItem glyph={History} active={activePage === "history"} badge={runsCount} onClick={() => onNavigate("history")}>Run History</NavItem>
-          <NavItem glyph={Radar} active={activePage === "sources"} onClick={() => onNavigate("sources")}>Source Runs</NavItem>
-          <NavItem glyph={UserSearch} active={activePage === "leads"} onClick={() => onNavigate("leads")}>Lead Intelligence</NavItem>
-          <NavItem glyph={Send}>Outreach</NavItem></div>
-        <div><div className="ha-navhead">Reports</div>
-          <NavItem glyph={BarChart3}>Analytics</NavItem></div>
-      </nav>
-      <div style={{ padding: "0 12px" }}><HealthBadge /></div>
-    </aside>
-  );
-}
+/* Sidebar lives in Sidebar.jsx — the single shared nav used by every page. */
 
 /* Run detail page */
 function RunDetailView({ runId, onBack, onView }) {
@@ -488,7 +446,7 @@ function RunDetailView({ runId, onBack, onView }) {
 
                 <div className="ha-card" style={{ overflow: "hidden", marginTop: 14 }}>
                   <div className="ha-table-scroll">
-                    <table className="ha-table" style={{ minWidth: 1040 }}>
+                    <table className="ha-table" style={{ minWidth: 1180 }}>
                       <thead className="ha-thead">
                         <tr>
                           <SortHeader label="Job title" col="title" sort={sort} setSort={setSort} width={260} />
@@ -498,12 +456,13 @@ function RunDetailView({ runId, onBack, onView }) {
                           <SortHeader label="POC" col="poc" sort={sort} setSort={setSort} width={150} />
                           <SortHeader label="Posted date" col="posted" sort={sort} setSort={setSort} width={130} />
                           <PlainHeader label="Email" width={200} />
-                          <PlainHeader label="Action" align="center" width={80} />
+                          <PlainHeader label="Mobile" width={140} />
+                          {/* <PlainHeader label="Action" align="center" width={80} /> */}
                         </tr>
                       </thead>
                       <tbody>
                         {jobsLoading && (
-                          <tr><td className="ha-td" colSpan={7} style={{ textAlign: "center", padding: "40px 16px", color: "#94A3B8" }}>
+                          <tr><td className="ha-td" colSpan={8} style={{ textAlign: "center", padding: "40px 16px", color: "#94A3B8" }}>
                             Loading this run's jobs…
                           </td></tr>
                         )}
@@ -522,6 +481,9 @@ function RunDetailView({ runId, onBack, onView }) {
                             <td className="ha-td">
                               {j.email ? <a className="ha-mail" href={"mailto:" + j.email}>{j.email}</a> : <span style={{ color: "#94A3B8" }}>—</span>}
                             </td>
+                            <td className="ha-td" style={{ whiteSpace: "nowrap" }}>
+                              {j.mobile ? <a className="ha-tel" href={"tel:" + j.mobile}>{j.mobile}</a> : <span style={{ color: "#94A3B8" }}>—</span>}
+                            </td>
                             {/* <td className="ha-td">
                               <div style={{ display: "flex", justifyContent: "center" }}>
                                 <button className="ha-act" title="View" onClick={() => onView && onView({ mode: "view", job: mapJobToDetail(j) })}><Eye size={16} /></button>
@@ -530,7 +492,7 @@ function RunDetailView({ runId, onBack, onView }) {
                           </tr>
                         ))}
                         {!jobsLoading && !jobsError && filtered.length === 0 && (
-                          <tr><td className="ha-td" colSpan={7} style={{ textAlign: "center", padding: "40px 16px", color: "#94A3B8" }}>
+                          <tr><td className="ha-td" colSpan={8} style={{ textAlign: "center", padding: "40px 16px", color: "#94A3B8" }}>
                             {jobs.length === 0 ? "No jobs recorded for this run." : "No jobs match your filters."}
                           </td></tr>
                         )}
@@ -1268,7 +1230,7 @@ function LeadIntelligencePage() {
 }
 
 /* Page */
-export default function HarvestAgent() {
+export default function HarvestAgent({ onLogout }) {
   const [activePage, setActivePage] = useState("jobs");
   const [detailView, setDetailView] = useState(null); // null | { mode: "view"|"edit", job }
   const [viewingRunId, setViewingRunId] = useState(null);
@@ -1379,7 +1341,7 @@ export default function HarvestAgent() {
   return (
     <div className="ha-root">
       <ThemeStyles />
-      <Sidebar activePage={activePage} onNavigate={setActivePage} jobsCount={jobsTotal} runsCount={runs.length} />
+      <Sidebar activePage={activePage} onNavigate={setActivePage} jobsCount={jobsTotal} runsCount={runs.length} onLogout={onLogout} />
       {activePage === "history" ? (
         <RunHistoryPage runs={runs} loading={runsLoading} error={runsError} onRefresh={fetchRuns} onNavigate={setActivePage} onView={setViewingRunId} />
       ) : activePage === "sources" ? (

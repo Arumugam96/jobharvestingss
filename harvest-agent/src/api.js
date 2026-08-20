@@ -1,6 +1,8 @@
+import { getToken, clearToken } from "./auth";
+
 // `??` (not `||`) so an explicit empty string — same-origin deployment behind
 // nginx, see harvest-agent/Dockerfile — isn't overridden by the dev default.
-const API_BASE = process.env.REACT_APP_API_BASE_URL ?? "http://localhost:8001";
+const API_BASE = process.env.REACT_APP_API_BASE_URL ?? "http://localhost:8000";
 
 class ApiError extends Error {
   constructor(message, status, body) {
@@ -11,8 +13,13 @@ class ApiError extends Error {
 }
 
 async function request(path, options = {}) {
+  const token = getToken();
   const res = await fetch(`${API_BASE}${path}`, {
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(options.headers || {}),
+    },
     ...options,
   });
   let body = null;
@@ -22,6 +29,13 @@ async function request(path, options = {}) {
     // no JSON body
   }
   if (!res.ok) {
+    // A 401 on any non-auth endpoint means the session expired or was revoked
+    // (token missing/invalid). Drop it and signal App.js to fall back to login;
+    // the /auth/* calls handle their own 401s (wrong OTP) inline.
+    if (res.status === 401 && !path.startsWith("/auth/")) {
+      clearToken();
+      window.dispatchEvent(new Event("auth:logout"));
+    }
     // FastAPI uses {detail}; our HarvestException handler nests it under
     // {error: {message}} (e.g. the 409 "a harvest is already running").
     const message =
@@ -46,6 +60,25 @@ function qs(params) {
   const s = usp.toString();
   return s ? `?${s}` : "";
 }
+
+// ── Auth (OTP email login) ─────────────────────────────────────────────────────
+
+/** POST /auth/request-otp — email a login OTP. 429 (with Retry-After) if on cooldown; 422 if not an @sightspectrum.com address. */
+export function requestOtp(email) {
+  return request("/auth/request-otp", { method: "POST", body: JSON.stringify({ email }) });
+}
+
+/** POST /auth/verify-otp — exchange the OTP for a JWT; returns {access_token, token_type}. Generic 401 on wrong/expired/consumed/too-many. */
+export function verifyOtp(email, otp) {
+  return request("/auth/verify-otp", { method: "POST", body: JSON.stringify({ email, otp }) });
+}
+
+/** GET /auth/me — the current authenticated user; used to validate a stored token on load. */
+export function getMe() {
+  return request("/auth/me");
+}
+
+// ── Jobs ─────────────────────────────────────────────────────────────────────
 
 /** GET /jobs — paginated, filterable, sortable list of harvested jobs. */
 export function getJobs(params = {}) {

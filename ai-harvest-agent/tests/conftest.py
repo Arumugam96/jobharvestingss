@@ -21,6 +21,7 @@ async def engine():
     from app.models.harvest import Base
     import app.models.auth  # noqa: F401 — registers users / otp_verifications on Base.metadata
     import app.models.harvest_run  # noqa: F401 — registers harvest_runs / scraped_jobs / llm_calls on Base.metadata
+    import app.models.recruiter  # noqa: F401 — registers recruiters (scraped_jobs.recruiter_id FK target) on Base.metadata
 
     eng = create_async_engine(TEST_DB_URL, echo=False)
     async with eng.begin() as conn:

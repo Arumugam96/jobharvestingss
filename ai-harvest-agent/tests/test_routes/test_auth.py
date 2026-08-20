@@ -15,13 +15,31 @@ async def test_request_otp_rejects_wrong_domain(client: AsyncClient) -> None:
 
 @pytest.mark.asyncio
 async def test_request_otp_rejects_lookalike_domain(client: AsyncClient) -> None:
+    # Multi-label suffixes and subdomain-of-evil look-alikes stay rejected — their
+    # registrable domain isn't sightspectrum.*.
     for email in (
-        "jane@sightspectrum.org",
         "jane@sightspectrum.co.in",
         "jane@sightspectrum.com.evil.com",
+        "jane@sightspectrum.evil.com",
+        "jane@notsightspectrum.com",
     ):
         resp = await client.post("/auth/request-otp", json={"email": email})
         assert resp.status_code == 422, email
+
+
+@pytest.mark.asyncio
+async def test_request_otp_accepts_any_sightspectrum_tld(
+    client: AsyncClient, mock_email_sender
+) -> None:
+    # The company uses more than .com — any single-label TLD is accepted.
+    for email in ("jane@sightspectrum.in", "jane@sightspectrum.org", "jane@sightspectrum.io"):
+        resp = await client.post("/auth/request-otp", json={"email": email})
+        assert resp.status_code == 200, email
+    assert {r for r, _ in mock_email_sender.sent} == {
+        "jane@sightspectrum.in",
+        "jane@sightspectrum.org",
+        "jane@sightspectrum.io",
+    }
 
 
 @pytest.mark.asyncio

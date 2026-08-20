@@ -1,14 +1,14 @@
 import React, { useEffect, useRef, useState } from "react";
 import {
-  SlidersHorizontal, Table2, History, Send, BarChart3, Radar, UserSearch,
+  SlidersHorizontal,
   Play, Save, Clock, Info, AlertTriangle, ChevronDown, Check, Loader2, LogIn, Eye,
 } from "lucide-react";
 import {
   getHarvestConfig, saveHarvestConfig, runHarvestAgent, getHarvestStatus,
   getRunHistory, getRunHistoryEntry, setupLinkedinSession, setupNaukriSession, ApiError,
 } from "./api";
-import HealthBadge from "./HealthBadge";
-import LiveBrowserView from "./LiveBrowserView";
+import Sidebar from "./components/Sidebar";
+import LiveBrowserView from "./components/LiveBrowserView";
 
 const NaukriIcon = () => (
   <svg width="34" height="34" viewBox="0 0 34 34" aria-hidden="true">
@@ -445,44 +445,9 @@ export default function RuleEngineConfig({
         />
       )}
 
-      {/* Sidebar */}
-      <aside className="rec-sidebar">
-        <div className="rec-brand">
-          <img className="rec-logo-img" src={`${process.env.PUBLIC_URL}/sight_spectrum_logo.jpg`} alt="SS jobharvesting Agent" width="150" height="150" />
-          <div className="rec-tagline">Contract Sourcing Automation</div>
-        </div>
-        <nav className="rec-nav">
-          <div className="rec-nav-section">Configuration</div>
-          <button className="rec-nav-item is-active">
-            <SlidersHorizontal size={18} /><span>Rule Engine</span>
-          </button>
-
-          <div className="rec-nav-section">Operations</div>
-          <button className="rec-nav-item" onClick={() => onNavigate("jobs")}>
-            <Table2 size={18} /><span>Harvested Jobs</span>
-            <span className="rec-badge">{jobsCount}</span>
-          </button>
-          <button className="rec-nav-item" onClick={() => onNavigate("history")}>
-            <History size={18} /><span>Run History</span>
-            <span className="rec-badge">{runsCount}</span>
-          </button>
-          <button className="rec-nav-item" onClick={() => onNavigate("sources")}>
-            <Radar size={18} /><span>Source Runs</span>
-          </button>
-          <button className="rec-nav-item" onClick={() => onNavigate("leads")}>
-            <UserSearch size={18} /><span>Lead Intelligence</span>
-          </button>
-          <button className="rec-nav-item">
-            <Send size={18} /><span>Outreach</span>
-          </button>
-
-          <div className="rec-nav-section">Reports</div>
-          <button className="rec-nav-item">
-            <BarChart3 size={18} /><span>Analytics</span>
-          </button>
-        </nav>
-        <div style={{ padding: "0 10px", marginTop: "auto" }}><HealthBadge /></div>
-      </aside>
+      {/* Sidebar — shared component (Sidebar.jsx). This screen *is* the Rule
+          Engine, so "rules" is always the active page. */}
+      <Sidebar activePage="rules" onNavigate={onNavigate} jobsCount={jobsCount} runsCount={runsCount} />
 
       {/* Main */}
       <main className="rec-main">
@@ -772,20 +737,7 @@ const styles = `
   }
   .rec-root * { box-sizing:border-box; }
 
-  /* Sidebar */
-  .rec-sidebar { width:236px; flex:0 0 236px; background:var(--sidebar); color:#CBD5E1; padding:22px 14px; display:flex; flex-direction:column; gap:6px; }
-  .rec-brand { padding:6px 10px 18px; }
-  .rec-logo { font-size:20px; font-weight:800; color:#fff; letter-spacing:-0.3px; }
-  .rec-logo span { color:#60A5FA; }
-  .rec-logo-img { width:150px; height:150px; max-width:100%; object-fit:cover; display:block; border-radius:50%; }
-  .rec-tagline { margin-top:6px; font-size:10px; letter-spacing:1.2px; font-weight:600; text-transform:uppercase; color:#64748B; }
-  .rec-nav { display:flex; flex-direction:column; gap:2px; }
-  .rec-nav-section { font-size:10.5px; letter-spacing:1.4px; font-weight:700; text-transform:uppercase; color:#475569; padding:16px 10px 6px; }
-  .rec-nav-item { display:flex; align-items:center; gap:11px; padding:10px 12px; border-radius:9px; color:#CBD5E1; cursor:pointer; font-weight:500; user-select:none; transition:background .15s,color .15s; background:transparent; border:none; width:100%; text-align:left; }
-  .rec-nav-item:hover { background:rgba(148,163,184,.12); color:#fff; }
-  .rec-nav-item.is-active { background:#fff; color:var(--sidebar); font-weight:600; }
-  .rec-nav-item span:nth-child(2) { flex:1; }
-  .rec-badge { background:var(--primary); color:#fff; font-size:11px; font-weight:700; border-radius:999px; padding:2px 9px; min-width:24px; text-align:center; }
+  /* Sidebar styles now live in Sidebar.jsx (the shared component). */
 
   /* Main */
   .rec-main { flex:1; min-width:0; display:flex; flex-direction:column; overflow:hidden; }
@@ -908,7 +860,6 @@ const styles = `
 
   @media (max-width:880px) {
     .rec-grid--2 { grid-template-columns:1fr; }
-    .rec-sidebar { display:none; }
     .rec-header { flex-direction:column; }
   }
 `;

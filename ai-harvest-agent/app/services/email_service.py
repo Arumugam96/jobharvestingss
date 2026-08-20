@@ -34,7 +34,7 @@ def render_otp_email(otp: str, expiry_seconds: int) -> str:
         f"This OTP expires in {minutes} minute(s).\n\n"
         "If you did not request this OTP, please ignore this email.\n\n"
         "Regards,\n"
-        "Sightspectrum"
+        "SS Harvesting Agent"
     )
 
 
@@ -50,7 +50,7 @@ class EmailSender:
         log.debug("otp_email_build_start")
         message = EmailMessage()
         message["Subject"] = OTP_EMAIL_SUBJECT
-        message["From"] = settings.smtp_from_email
+        message["From"] = f"SS - {settings.smtp_from_email}"
         message["To"] = recipient
         message.set_content(render_otp_email(otp, settings.otp_expiry_seconds))
 
