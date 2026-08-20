@@ -39,7 +39,7 @@ const LinkedInIcon = ({ size = 16 }) => (
 const ThemeStyles = () => (
   <style>{`
     .ha-root{display:flex;min-height:100vh;font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:${C.bg};color:${C.text};}
-    .ha-main{flex:1;overflow-x:hidden;}
+    .ha-main{flex:1;min-width:0;overflow-x:hidden;}
     /* Sidebar styles now live in Sidebar.jsx (the shared component). */
     .ha-card{background:#fff;border:1px solid ${C.border};border-radius:12px;box-shadow:0 1px 2px rgba(15,23,42,.04);}
     .ha-input{box-sizing:border-box;height:38px;padding:0 12px;border:1px solid #CBD5E1;background:#fff;color:${C.text};border-radius:8px;font-size:14px;}
@@ -62,7 +62,7 @@ const ThemeStyles = () => (
     .ha-td{padding:14px 16px;vertical-align:middle;}
     .ha-row{border-top:1px solid #EEF2F7;}
     .ha-row:hover{background:#F1F5F9;}
-    .ha-link{color:${C.primary};font-weight:600;background:none;border:0;padding:0;cursor:pointer;font-size:inherit;font-family:inherit;}
+    .ha-link{color:${C.primary};font-weight:600;background:none;border:0;padding:0;cursor:pointer;font-size:inherit;font-family:inherit;text-align:left;}
     .ha-statnum{font-size:30px;font-weight:700;line-height:1;}
     .ha-statlbl{margin-top:8px;font-size:14px;color:${C.textSoft};}
     .ha-select{cursor:pointer;flex:1 1 auto;min-width:0;box-sizing:border-box;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}

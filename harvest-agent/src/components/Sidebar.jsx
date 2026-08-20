@@ -71,7 +71,7 @@ export default function Sidebar({ activePage, onNavigate = () => {}, jobsCount, 
 /* Sidebar-only styles — previously duplicated across HarvestAgent's ThemeStyles
    and RuleEngineConfig's `rec-sidebar` block; now defined once, here. */
 const styles = `
-  .ha-sidebar{display:none;width:240px;flex-shrink:0;flex-direction:column;padding:5px 5px;background:#1E293B;font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;}
+  .ha-sidebar{display:none;width:240px;flex-shrink:0;flex-direction:column;padding:5px 5px;background:#1E293B;font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;position:sticky;top:0;align-self:flex-start;height:100vh;overflow-y:auto;}
   @media(min-width:768px){.ha-sidebar{display:flex;}}
   .ha-logo-img{width:150px;height:150px;max-width:100%;object-fit:cover;display:block;border-radius:50%;padding:5px 0px 5px;}
   .ha-tagline{margin-top:4px;font-size:11px;text-transform:uppercase;letter-spacing:.14em;color:#94A3B8;white-space:nowrap;}
