@@ -1,9 +1,9 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   SlidersHorizontal, Download,
   Search, Mail, ArrowUpDown, ArrowUp, ArrowDown, Eye, Pencil, RefreshCw, ArrowLeft,
   CheckCircle2, XCircle, Loader2, HelpCircle, Play, FileJson, FileSpreadsheet,
-  AlertTriangle,
+  AlertTriangle, ChevronDown,
 } from "lucide-react";
 import JobDetailsView from "./JobDetailsView";
 import RuleEngineConfig from "./RuleEngineConfig";
@@ -66,6 +66,13 @@ const ThemeStyles = () => (
     .ha-statnum{font-size:30px;font-weight:700;line-height:1;}
     .ha-statlbl{margin-top:8px;font-size:14px;color:${C.textSoft};}
     .ha-select{cursor:pointer;flex:1 1 auto;min-width:0;box-sizing:border-box;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+    .ha-multiselect-btn{display:flex;align-items:center;justify-content:space-between;gap:8px;font:inherit;color:inherit;text-align:left;}
+    .ha-multiselect-btn svg{flex-shrink:0;color:#94A3B8;}
+    .ha-multiselect-summary{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+    .ha-multiselect-panel{position:absolute;top:calc(100% + 6px);left:0;z-index:10;min-width:100%;width:max-content;max-width:260px;max-height:240px;overflow-y:auto;background:#fff;border:1px solid ${C.border};border-radius:8px;box-shadow:0 8px 20px rgba(15,23,42,.12);padding:6px;}
+    .ha-multiselect-opt{display:flex;align-items:center;gap:8px;padding:7px 8px;border-radius:6px;font-size:14px;color:${C.text};cursor:pointer;white-space:nowrap;}
+    .ha-multiselect-opt:hover{background:${C.pale};}
+    .ha-multiselect-opt input{cursor:pointer;}
     .ha-filterbar{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px 16px;align-items:center;width:100%;max-width:100%;box-sizing:border-box;}
     .ha-daterow{display:flex;flex-wrap:wrap;align-items:center;gap:12px;max-width:100%;box-sizing:border-box;}
     .ha-filter-field{display:flex;align-items:center;gap:8px;width:100%;min-width:0;box-sizing:border-box;}
@@ -264,6 +271,54 @@ function Select({ label, value, onChange, options }) {
   );
 }
 
+// Multi-select filter field: checkboxes for each option plus an "All" option
+// that clears the selection (empty array == no filter == "All").
+function MultiSelect({ label, options, selected, onChange }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) return;
+    function onDocMouseDown(e) {
+      if (rootRef.current && !rootRef.current.contains(e.target)) setOpen(false);
+    }
+    document.addEventListener("mousedown", onDocMouseDown);
+    return () => document.removeEventListener("mousedown", onDocMouseDown);
+  }, [open]);
+
+  const summary = selected.length === 0
+    ? "All"
+    : options.filter((o) => selected.includes(o.value)).map((o) => o.label).join(", ");
+
+  function toggle(value) {
+    onChange(selected.includes(value) ? selected.filter((v) => v !== value) : [...selected, value]);
+  }
+
+  return (
+    <div className="ha-filter-field" ref={rootRef} style={{ position: "relative" }}>
+      <span>{label}</span>
+      <button type="button" className="ha-input ha-select ha-multiselect-btn" onClick={() => setOpen((o) => !o)}>
+        <span className="ha-multiselect-summary">{summary}</span>
+        <ChevronDown size={14} />
+      </button>
+      {open && (
+        <div className="ha-multiselect-panel">
+          <label className="ha-multiselect-opt">
+            <input type="checkbox" checked={selected.length === 0} onChange={() => onChange([])} />
+            <span>All</span>
+          </label>
+          {options.map((o) => (
+            <label key={o.value} className="ha-multiselect-opt">
+              <input type="checkbox" checked={selected.includes(o.value)} onChange={() => toggle(o.value)} />
+              <span>{o.label}</span>
+            </label>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ContactIcon({ glyph: Glyph, href, title }) {
   if (href) {
     return (
@@ -329,7 +384,7 @@ function RunDetailView({ runId, onBack, onView }) {
   // Filter/sort state — mirrors the Harvested Jobs page filter bar, but scoped
   // to this run's jobs. Dropdown options are derived from `jobs` below, so they
   // only ever list companies/titles/POCs present in this single run.
-  const [filters, setFilters] = useState({ company: "all", contact: "all", job: "all", poc: "all", status: "all" });
+  const [filters, setFilters] = useState({ company: "all", contact: [], job: "all", poc: "all", status: "all" });
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState({ col: "posted", dir: "desc" });
 
@@ -342,9 +397,12 @@ function RunDetailView({ runId, onBack, onView }) {
       if (filters.company !== "all" && j.company !== filters.company) return false;
       if (filters.job !== "all" && j.title !== filters.job) return false;
       if (filters.poc !== "all" && j.poc !== filters.poc) return false;
-      if (filters.contact === "email" && !j.email) return false;
-      if (filters.contact === "mobile" && !j.mobile) return false;
-      if (filters.contact === "linkedin" && !j.linkedin) return false;
+      if (filters.contact.length > 0) {
+        const matches = (filters.contact.includes("email") && j.email)
+          || (filters.contact.includes("mobile") && j.mobile)
+          || (filters.contact.includes("linkedin") && j.linkedin);
+        if (!matches) return false;
+      }
       if (filters.status === "qualified" && !j.passedFilter) return false;
       if (filters.status === "flagged" && j.passedFilter) return false;
       if (query.trim()) {
@@ -371,6 +429,18 @@ function RunDetailView({ runId, onBack, onView }) {
     companies: new Set(filtered.map((j) => j.company)).size,
     pocs: filtered.filter((j) => j.poc).length,
   }), [filtered]);
+
+  function exportCsv() {
+    const header = ["Job title", "Company", "Source", "POC", "Posted date", "Email", "Mobile"];
+    const lines = jobs.map((j) =>
+      [j.title, j.company, j.source, j.poc || "—", j.postedDate || "—", j.email || "—", j.mobile || "—"]
+        .map((c) => '"' + String(c).replace(/"/g, '""') + '"').join(","));
+    const blob = new Blob([[header.join(","), ...lines].join("\n")], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `jobs_${runId}.csv`; a.click();
+    URL.revokeObjectURL(url);
+  }
 
   return (
     <div className="ha-root">
@@ -420,18 +490,21 @@ function RunDetailView({ runId, onBack, onView }) {
                   <div style={{ fontSize: 12, color: C.textSoft, fontWeight: 700, letterSpacing: ".05em", textTransform: "uppercase" }}>
                     Harvested jobs in this run
                   </div>
-                  <div style={{ display: "flex", gap: 16, fontSize: 13, color: C.textSoft }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 16, fontSize: 13, color: C.textSoft }}>
                     <span><b style={{ color: C.text }}>{jobStats.total}</b> jobs</span>
                     <span><b style={{ color: C.text }}>{jobStats.companies}</b> companies</span>
                     <span><b style={{ color: C.text }}>{jobStats.pocs}</b> POCs</span>
+                    <button className="ha-btn ha-btn-primary" onClick={exportCsv} disabled={jobs.length === 0}>
+                      <Download size={16} /> Export CSV
+                    </button>
                   </div>
                 </div>
 
                 <div className="ha-card ha-filterbar" style={{ padding: "16px 20px", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", marginTop: 14 }}>
                   <Select label="Company" value={filters.company} onChange={(v) => setFilters((f) => ({ ...f, company: v }))}
                     options={[{ value: "all", label: "All" }, ...companies.map((c) => ({ value: c, label: c }))]} />
-                  <Select label="Contact" value={filters.contact} onChange={(v) => setFilters((f) => ({ ...f, contact: v }))}
-                    options={[{ value: "all", label: "All" }, { value: "email", label: "Email" }, { value: "mobile", label: "Mobile" }, { value: "linkedin", label: "LinkedIn" }]} />
+                  <MultiSelect label="Contact" selected={filters.contact} onChange={(v) => setFilters((f) => ({ ...f, contact: v }))}
+                    options={[{ value: "email", label: "Email" }, { value: "mobile", label: "Mobile" }, { value: "linkedin", label: "LinkedIn" }]} />
                   <Select label="Job" value={filters.job} onChange={(v) => setFilters((f) => ({ ...f, job: v }))}
                     options={[{ value: "all", label: "All" }, ...jobTitles.map((t) => ({ value: t, label: t }))]} />
                   <Select label="POC" value={filters.poc} onChange={(v) => setFilters((f) => ({ ...f, poc: v }))}
@@ -511,7 +584,7 @@ function RunDetailView({ runId, onBack, onView }) {
 
 /* ── Harvested Jobs page ─────────────────────────────────────────────── */
 function JobsPage({ jobs, total, loading, error, onRefresh, onNavigate, onView }) {
-  const [filters, setFilters] = useState({ company: "all", contact: "all", job: "all", poc: "all", status: "all" });
+  const [filters, setFilters] = useState({ company: "all", contact: [], job: "all", poc: "all", status: "all" });
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
   const [query, setQuery] = useState("");
@@ -537,9 +610,12 @@ function JobsPage({ jobs, total, loading, error, onRefresh, onNavigate, onView }
       if (filters.company !== "all" && j.company !== filters.company) return false;
       if (filters.job !== "all" && j.title !== filters.job) return false;
       if (filters.poc !== "all" && j.poc !== filters.poc) return false;
-      if (filters.contact === "email" && !j.email) return false;
-      if (filters.contact === "mobile" && !j.mobile) return false;
-      if (filters.contact === "linkedin" && !j.linkedin) return false;
+      if (filters.contact.length > 0) {
+        const matches = (filters.contact.includes("email") && j.email)
+          || (filters.contact.includes("mobile") && j.mobile)
+          || (filters.contact.includes("linkedin") && j.linkedin);
+        if (!matches) return false;
+      }
       if (filters.status === "qualified" && !j.passedFilter) return false;
       if (filters.status === "flagged" && j.passedFilter) return false;
       if (startDate && j.postedDate.slice(0, 10) < startDate) return false;
@@ -621,8 +697,8 @@ function JobsPage({ jobs, total, loading, error, onRefresh, onNavigate, onView }
         <div className="ha-card ha-filterbar" style={{ padding: "16px 20px", gridTemplateColumns: "repeat(4, minmax(0, 1fr))" }}>
           <Select label="Company" value={filters.company} onChange={(v) => setFilters((f) => ({ ...f, company: v }))}
             options={[{ value: "all", label: "All" }, ...companies.map((c) => ({ value: c, label: c }))]} />
-          <Select label="Contact" value={filters.contact} onChange={(v) => setFilters((f) => ({ ...f, contact: v }))}
-            options={[{ value: "all", label: "All" }, { value: "email", label: "Email" }, { value: "mobile", label: "Mobile" }, { value: "linkedin", label: "LinkedIn" }]} />
+          <MultiSelect label="Contact" selected={filters.contact} onChange={(v) => setFilters((f) => ({ ...f, contact: v }))}
+            options={[{ value: "email", label: "Email" }, { value: "mobile", label: "Mobile" }, { value: "linkedin", label: "LinkedIn" }]} />
           <Select label="Job" value={filters.job} onChange={(v) => setFilters((f) => ({ ...f, job: v }))}
             options={[{ value: "all", label: "All" }, ...jobTitles.map((t) => ({ value: t, label: t }))]} />
           <Select label="POC" value={filters.poc} onChange={(v) => setFilters((f) => ({ ...f, poc: v }))}
