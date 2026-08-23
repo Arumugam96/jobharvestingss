@@ -92,7 +92,10 @@ class ScrapedJobORM(Base):
     passed_filter: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     filter_reason: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     job_poster_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    job_poster_designation: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # LinkedIn "poster headline" free text — no real length ceiling (scraped
+    # values exceed 255 chars), so Text not String(255). Mirrors
+    # RecruiterORM.designation / linkedin_headline.
+    job_poster_designation: Mapped[str | None] = mapped_column(Text, nullable=True)
     linkedin_profile_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     current_company: Mapped[str | None] = mapped_column(String(255), nullable=True)
     email_id: Mapped[str | None] = mapped_column(String(255), nullable=True)

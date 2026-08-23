@@ -33,7 +33,10 @@ class RecruiterORM(Base):
     linkedin_profile_url: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
     person_name: Mapped[str] = mapped_column(String(255), nullable=False)
     company_name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
-    designation: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    # LinkedIn headline / role free text — no real length ceiling (scraped
+    # values exceed 255 chars), so Text not String(255). Same data class as
+    # ScrapedJobORM.job_poster_designation and linkedin_headline below.
+    designation: Mapped[str] = mapped_column(Text, nullable=False, default="")
     harvest_source: Mapped[str] = mapped_column(String(50), nullable=False, default="")
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     last_seen_at: Mapped[datetime] = mapped_column(
