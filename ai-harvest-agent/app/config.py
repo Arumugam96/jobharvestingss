@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     max_jobs_per_day: int = 0
 
     # ── Database ─────────────────────────────────────────────────────────────────
-    database_url: str = "sqlite+aiosqlite:///./data/harvest.db"
+    database_url: str = "postgresql+asyncpg://harvest:harvest_password@localhost:5432/harvest_db"
     db_pool_size: int = 10
     db_max_overflow: int = 20
     db_echo: bool = False

@@ -1,18 +1,66 @@
-# Full-stack deployment (backend + frontend + live browser view) — intended
-# for the EC2 target.
+# Single compose file for every deployment mode (the former
+# ai-harvest-agent/docker-compose.yml has been merged into this one):
+#
+#   Full stack (EC2 / production):   docker compose up -d
+#   Backend-only (local dev):        docker compose up -d api
+#     (depends_on pulls postgres up automatically; the frontend is skipped)
+#
+# Data layout: there is exactly ONE data directory — ./ai-harvest-agent/data.
+# It holds the Chrome profile, harvest_config.json, master lists, logs and
+# results, and is bind-mounted into the api container at /app/data (where the
+# code's anchored paths resolve). Application/job data itself lives in
+# PostgreSQL (named volume "pgdata"), NOT in the data directory.
+#
+# PostgreSQL host binding is env-driven so the same file works locally and on
+# EC2 (see .env.example at the repo root):
+#   POSTGRES_BIND_IP=127.0.0.1 (default) — reachable from the host machine
+#     only (local dev tools, or SSH-tunnelled access on EC2). Never expose
+#     5432 publicly; on EC2 keep the default and use an SSH tunnel.
+#   POSTGRES_HOST_PORT=5432 (default) — host port for the binding above.
 
 services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-harvest_db}
+      POSTGRES_USER: ${POSTGRES_USER:-harvest}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-harvest_password}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      # Bound to localhost only — host tools (psql/DBeaver/pgAdmin, the
+      # migration script) connect via localhost:5432; other machines cannot.
+      - "${POSTGRES_BIND_IP:-127.0.0.1}:${POSTGRES_HOST_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-harvest} -d ${POSTGRES_DB:-harvest_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
   api:
     build: ./ai-harvest-agent
-    # No host port publishing — nginx (the "frontend" service) reaches this
-    # container over the internal Docker network (http://api:8000, /vnc/ ->
-    # http://api:6080) 
-    expose:
-      - "8000"
-      - "6080"
+    ports:
+      # Published for backend-only local dev (docker compose up -d api).
+      # Bound to localhost by default so nothing new is exposed publicly on
+      # EC2 — nginx (the "frontend" service) reaches this container over the
+      # internal Docker network regardless (http://api:8000, /vnc/ ->
+      # http://api:6080).
+      - "${API_BIND_IP:-127.0.0.1}:8000:8000"
+      - "${API_BIND_IP:-127.0.0.1}:6080:6080"   # noVNC/websockify — live view of the manual LinkedIn/Naukri login browser
     env_file: ./ai-harvest-agent/.env
+    environment:
+      # Overrides the env_file value: inside the Docker network the DB host is
+      # the "postgres" service, not localhost.
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-harvest}:${POSTGRES_PASSWORD:-harvest_password}@postgres:5432/${POSTGRES_DB:-harvest_db}
     volumes:
-      - ./data:/app/data
+      # The ONE data directory (see header). Do not mount ./data — a repo-root
+      # data/ dir is NOT used by anything anymore.
+      - ./ai-harvest-agent/data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
     shm_size: "1gb"   # Chromium under Xvfb needs more than Docker's 64MB default /dev/shm
 
@@ -23,3 +71,6 @@ services:
     depends_on:
       - api
     restart: unless-stopped
+
+volumes:
+  pgdata:

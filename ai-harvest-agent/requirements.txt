@@ -10,6 +10,9 @@ pydantic-settings==2.6.1
 # ── Database ────────────────────────────────────────────────────────────────────
 sqlalchemy[asyncio]==2.0.36
 asyncpg==0.30.0
+alembic==1.14.0
+# aiosqlite is kept for the in-memory test DB (tests/conftest.py) and as the
+# read driver during SQLite -> PostgreSQL data migration.
 aiosqlite==0.20.0
 
 # ── AI / LLM ────────────────────────────────────────────────────────────────────

@@ -17,8 +17,8 @@ Two parts to this document:
                                                                           (persistent Chrome profile)
 ```
 
-- Two services only: `api` (FastAPI + Playwright + Xvfb/x11vnc/websockify, all under `supervisord`) and `frontend` (nginx serving the React build and reverse-proxying the rest).
-- No Postgres/Redis/Celery — confirmed unused by the app (harvests run as in-process asyncio background tasks; the only DB-backed route is a legacy CRUD API the frontend never calls).
+- Three services: `postgres` (PostgreSQL 16, the app's database — named volume `pgdata`), `api` (FastAPI + Playwright + Xvfb/x11vnc/websockify, all under `supervisord`) and `frontend` (nginx serving the React build and reverse-proxying the rest). See `POSTGRES_MIGRATION.md` for the SQLite→PostgreSQL migration details.
+- One compose file (repo root) and one data directory: `ai-harvest-agent/data` (Chrome profile, harvest config, master lists, logs, results), bind-mounted at `/app/data`. Redis/Celery remain unused — harvests run as in-process asyncio background tasks.
 - LinkedIn/Naukri login is **manual** by design — there's no credential automation. A human logs in once through the **live browser view** in the React UI (backed by the Xvfb/VNC stack above), and the session persists in a Chrome profile for all future harvest runs.
 
 ---
@@ -87,8 +87,13 @@ docker compose build frontend   # npm ci + react build + nginx
 
 # 3. Bring it up
 docker compose up -d
-docker compose ps               # both "api" and "frontend" should show Up
+docker compose ps               # "postgres", "api" and "frontend" should show Up
 ```
+
+Backend-only (no frontend/nginx, e.g. when iterating on the API against the
+containerized stack): `docker compose up -d api` — postgres comes up
+automatically via `depends_on`, and the api is published on
+`localhost:8000` / noVNC on `localhost:6080` (`API_BIND_IP` overrides the bind).
 
 **Verify layer by layer:**
 ```powershell
@@ -107,7 +112,7 @@ curl -o NUL -s -w "%{http_code}`n" http://localhost/
 2. Rule Engine → Connect Accounts → **Connect** under LinkedIn.
 3. The `LiveBrowserView` panel should go "Connecting…" → "Connected — click in to type", showing the real LinkedIn login page rendered live.
 4. Click into it and type — confirms keystrokes reach the remote browser.
-5. `docker compose restart api`, then confirm `data/chrome_profile` on disk is populated and a later "Run Now" doesn't re-prompt login.
+5. `docker compose restart api`, then confirm `ai-harvest-agent/data/chrome_profile` on disk is populated and a later "Run Now" doesn't re-prompt login.
 
 **Logs / debugging:**
 ```powershell
@@ -178,11 +183,16 @@ git clone https://github.com/<your-org>/jobharvestingss.git
 cd jobharvestingss
 cp ai-harvest-agent/.env.example ai-harvest-agent/.env
 nano ai-harvest-agent/.env
-mkdir -p data
+# The data directory is ai-harvest-agent/data — the seed files (master lists,
+# default config) ship in the repo; no mkdir needed. If this instance ran an
+# older version that used a repo-root data/ dir, merge that dir's contents into
+# ai-harvest-agent/data/ BEFORE the first `docker compose up` (it holds the
+# saved LinkedIn session in chrome_profile/).
 ```
 
-What matters in `.env` (the rest — `DATABASE_URL`, `REDIS_URL`, `CELERY_*` — is unused dead config, safe to leave as-is):
+What matters in `.env` (`REDIS_URL` / `CELERY_*` are unused dead config, safe to leave as-is):
 - `APP_ENV=production`, `APP_DEBUG=false`
+- `DATABASE_URL` + `POSTGRES_DB/USER/PASSWORD` — the app's PostgreSQL database (see `POSTGRES_MIGRATION.md`)
 - `ANTHROPIC_API_KEY` / `GEMINI_API_KEY` — required for job parsing
 - `CORS_ORIGINS` — comma-separated origins; harmless to leave the default since frontend+backend share one nginx origin
 - `API_KEY` — currently only guards a couple of internal/unused endpoints; the routes the React app actually calls have no auth yet. Revisit before this holds real production accounts long-term.
@@ -201,7 +211,7 @@ Then verify exactly like the local Docker pass, against the public IP instead of
 2. Connect Accounts → **Connect** under LinkedIn → live view renders the real login page.
 3. Log in for real (this is the one-time setup).
 4. "Run Now" completes without re-prompting login.
-5. `docker compose restart api` — session in `data/chrome_profile` survives.
+5. `docker compose restart api` — session in `ai-harvest-agent/data/chrome_profile` survives.
 
 ### Step 5 — TLS (optional, once you have a domain)
 
@@ -221,8 +231,10 @@ git pull && docker compose build && docker compose up -d
 docker compose logs -f api
 docker compose logs -f frontend
 
-# Backup the only stateful data (Chrome profile + harvest results)
-tar czf backup-$(date +%Y%m%d).tar.gz data/
+# Backup the stateful data: the data dir (Chrome profile + config + results)
+# and the PostgreSQL database
+tar czf backup-$(date +%Y%m%d).tar.gz ai-harvest-agent/data/
+docker compose exec -T postgres pg_dump -U harvest harvest_db | gzip > pgdump-$(date +%Y%m%d).sql.gz
 ```
 Both services are `restart: unless-stopped`, and Docker itself is enabled as a systemd service by the install steps above, so a full instance reboot recovers on its own.
 

@@ -54,10 +54,11 @@ def _ensure_scraped_jobs_columns(sync_conn) -> None:
     if "scraped_jobs" not in inspector.get_table_names():
         return  # brand-new DB — create_all above already made this table with the columns
     existing_cols = {c["name"] for c in inspector.get_columns("scraped_jobs")}
-    # (column name, ADD COLUMN DDL) — SQLite requires a constant DEFAULT here.
+    # (column name, ADD COLUMN DDL) — constant DEFAULTs, portable SQL only.
+    # TRUE works as a boolean default on both PostgreSQL and SQLite (>=3.23).
     pending = [
         ("recruiter_id",  "ALTER TABLE scraped_jobs ADD COLUMN recruiter_id VARCHAR(36)"),
-        ("passed_filter", "ALTER TABLE scraped_jobs ADD COLUMN passed_filter BOOLEAN NOT NULL DEFAULT 1"),
+        ("passed_filter", "ALTER TABLE scraped_jobs ADD COLUMN passed_filter BOOLEAN NOT NULL DEFAULT TRUE"),
         ("filter_reason", "ALTER TABLE scraped_jobs ADD COLUMN filter_reason VARCHAR(255) NOT NULL DEFAULT ''"),
         ("job_description_html", "ALTER TABLE scraped_jobs ADD COLUMN job_description_html TEXT NOT NULL DEFAULT ''"),
     ]

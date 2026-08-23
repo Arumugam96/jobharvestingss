@@ -20,7 +20,7 @@ build/
 .venv/
 venv/
 env/
-
+.venv*
 # ── Pytest / Coverage ─────────────────────────────────────────────────────────
 .pytest_cache/
 .coverage

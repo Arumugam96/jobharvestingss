@@ -129,7 +129,8 @@ ai-harvest-agent/
 ├── .env.example                         ← Environment variable template
 ├── requirements.txt                     ← Python dependencies
 ├── Dockerfile                           ← Container definition
-├── docker-compose.yml                   ← Multi-service compose file
+│                                          (compose file lives at the REPO ROOT: ../docker-compose.yml —
+│                                           full stack `docker compose up -d`, backend-only `docker compose up -d api`)
 └── run.py                               ← Uvicorn launcher
 ```
 

@@ -1,0 +1,20 @@
+# Keep the runtime data directory OUT of the image: it is always bind-mounted
+# at /app/data by docker-compose (so baking it in only bloats the image and
+# leaks the Chrome profile / session cookies into image layers).
+data/
+
+# Secrets are injected at runtime via compose `env_file:` — never bake them in.
+.env
+.env.*
+!.env.example
+
+# Local dev clutter
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.git/
+docker-compose.yml

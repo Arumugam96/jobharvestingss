@@ -425,11 +425,22 @@ def _format_posted(raw: str) -> str:
 
 
 _ABSOLUTE_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+# LinkedIn only ever renders posting age as a relative phrase ("12 minutes
+# ago", "3 weeks ago", "yesterday", …). Sub-day units (seconds/minutes/hours)
+# all mean "today". Order the alternatives longest-first so e.g. "minutes"
+# is preferred over the bare "min" abbreviation and "months" over "mo".
 _RELATIVE_DATE_RE = re.compile(
-    r"(?P<num>\d+)\s*(?P<unit>hours?|h|days?|d|weeks?|w|months?)\s*ago"
+    r"(?P<num>\d+)\s*(?P<unit>seconds?|s|minutes?|min|hours?|h|days?|d|weeks?|w|months?|mo|years?|yr)\s*ago"
     r"|(?P<yesterday>yesterday)"
     r"|(?P<now>just now|moments ago)",
     re.IGNORECASE,
+)
+# A date-parse fallback is only safe on text that actually contains a month
+# name — running dateutil's fuzzy parser over arbitrary card/detail text makes
+# it grab any stray integer ("1 week", "12 applicants") as a day-of-month and
+# emit a confidently-wrong date.
+_MONTH_NAME_RE = re.compile(
+    r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)", re.IGNORECASE
 )
 
 
@@ -461,18 +472,25 @@ def _resolve_posted_date(raw_text: str, harvest_date: datetime) -> str | None:
         else:
             num  = int(m.group("num"))
             unit = m.group("unit").lower()
-            if unit.startswith("h"):
+            if unit.startswith(("s", "min", "h")):   # seconds / minutes / hours → today
                 delta_days = 0
             elif unit.startswith("d"):
                 delta_days = num
             elif unit.startswith("w"):
                 delta_days = num * 7
-            elif unit.startswith("month"):
+            elif unit.startswith(("month", "mo")):
                 delta_days = num * 30
+            elif unit.startswith(("year", "yr", "y")):
+                delta_days = num * 365
             else:
                 return None
         return (harvest_date - timedelta(days=delta_days)).strftime("%Y-%m-%d")
 
+    # No relative phrase matched. Only try a date parse when a month name is
+    # actually present — otherwise stray integers in unrelated text get parsed
+    # as bogus dates (see _MONTH_NAME_RE).
+    if not _MONTH_NAME_RE.search(raw_text):
+        return None
     try:
         parsed = dateutil_parser.parse(raw_text, fuzzy=True, default=harvest_date)
     except (ValueError, OverflowError):
@@ -1483,7 +1501,10 @@ class LinkedInAgent:
                     "that is not literally present in the text. Return only "
                     "the fields in the schema, no commentary."
                 ),
-                debug_dir=_DEBUG_DIR,
+                # debug_dir intentionally not passed — we no longer persist
+                # per-call LLM prompt/response JSON artifacts to data/debug/
+                # (extract_json's file dump is a no-op without it; the in-memory
+                # call log / get_call_log() still records every call).
                 job_url=profile_url,
             )
         except LLMUnavailableError:
@@ -2232,7 +2253,9 @@ class LinkedInAgent:
                     "or link list. Return only the fields in the schema, no "
                     "commentary."
                 ),
-                debug_dir=_DEBUG_DIR,
+                # debug_dir intentionally not passed — no per-call LLM
+                # prompt/response JSON artifacts on disk (see note at the
+                # recruiter-contact extract_json call).
                 job_url=url,
             )
         except LLMUnavailableError:

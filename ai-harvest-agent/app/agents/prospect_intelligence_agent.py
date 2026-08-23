@@ -877,15 +877,18 @@ async def _extract_linkedin_contact_info(
                 out["phone"] = llm["phone"]
             if llm.get("email") or llm.get("phone"):
                 out["contact_section_found"] = True
-        elif not llm_service and modal_text:
-            # No-LLM deployments only: fall back to regex, but ONLY over the
-            # contact modal (never the top card / body) so the leak can't recur.
-            e = _extract_email_from_text(modal_text, company_domain)
-            p = _extract_phone_from_text(modal_text)
-            if e:
-                out["email"] = e
-            if p:
-                out["phone"] = p
+        # ── LLM-ONLY MODE: regex fallback disabled ────────────────────────────
+        # Per requirement, contact info must be extracted ONLY via the LLM call.
+        # The regex-over-modal-text fallback below is intentionally commented out.
+        # elif not llm_service and modal_text:
+        #     # No-LLM deployments only: fall back to regex, but ONLY over the
+        #     # contact modal (never the top card / body) so the leak can't recur.
+        #     e = _extract_email_from_text(modal_text, company_domain)
+        #     p = _extract_phone_from_text(modal_text)
+        #     if e:
+        #         out["email"] = e
+        #     if p:
+        #         out["phone"] = p
 
     except Exception as exc:
         logger.debug("linkedin_contact_extract_failed", url=linkedin_url, error=str(exc))
@@ -1228,27 +1231,30 @@ class ProspectIntelligenceAgent:
         result.company_website = website
 
         # ══════════════════════════════════════════════════════════════════════
-        # Step 1 — Company website scraping (VERIFIED)
+        # Step 1 — Company website scraping (VERIFIED)  [DISABLED — LLM-ONLY MODE]
         # ══════════════════════════════════════════════════════════════════════
-        if website:
-            try:
-                contact = await _scrape_company_website_contacts(
-                    page, website, prospect.person_name, domain
-                )
-                if contact["email"]:
-                    result.official_email_id = contact["email"]
-                    result.email_status      = "VERIFIED"
-                    sources.append("Company Website")
-                    audit.append(f"S1 VERIFIED email: {contact['email']} (page:{contact['source_page']})")
-                else:
-                    audit.append(f"S1 website scraped — no personal email found (domain:{domain})")
-                if contact["phone"]:
-                    result.contact_number = contact["phone"]
-                    result.phone_status   = "VERIFIED"
-                    sources.append("Company Website (Phone)")
-                    audit.append(f"S1 VERIFIED phone: {contact['phone']}")
-            except Exception as exc:
-                audit.append(f"S1 error: {exc}")
+        # Per requirement, contact info must come ONLY from the LLM call (Step 2).
+        # This step uses web scraping + regex extraction and is intentionally
+        # commented out.
+        # if website:
+        #     try:
+        #         contact = await _scrape_company_website_contacts(
+        #             page, website, prospect.person_name, domain
+        #         )
+        #         if contact["email"]:
+        #             result.official_email_id = contact["email"]
+        #             result.email_status      = "VERIFIED"
+        #             sources.append("Company Website")
+        #             audit.append(f"S1 VERIFIED email: {contact['email']} (page:{contact['source_page']})")
+        #         else:
+        #             audit.append(f"S1 website scraped — no personal email found (domain:{domain})")
+        #         if contact["phone"]:
+        #             result.contact_number = contact["phone"]
+        #             result.phone_status   = "VERIFIED"
+        #             sources.append("Company Website (Phone)")
+        #             audit.append(f"S1 VERIFIED phone: {contact['phone']}")
+        #     except Exception as exc:
+        #         audit.append(f"S1 error: {exc}")
 
         # ══════════════════════════════════════════════════════════════════════
         # Step 2 — LinkedIn profile visit (PUBLIC)
@@ -1325,28 +1331,31 @@ class ProspectIntelligenceAgent:
             audit.append(f"S2 error: {exc}")
 
         # ══════════════════════════════════════════════════════════════════════
-        # Step 3 — Naukri cross-source (PUBLIC)
+        # Step 3 — Naukri cross-source (PUBLIC)  [DISABLED — LLM-ONLY MODE]
         # ══════════════════════════════════════════════════════════════════════
-        if result.email_status == "NOT_FOUND" or result.phone_status == "NOT_FOUND":
-            try:
-                naukri = await _search_naukri_contact(
-                    page, prospect.person_name, prospect.company_name, domain
-                )
-                if naukri["profile_url"]:
-                    sources.append("Naukri")
-                    audit.append(f"S3 Naukri profile found: {naukri['profile_url']}")
-                if naukri["email"] and result.email_status == "NOT_FOUND":
-                    result.official_email_id = naukri["email"]
-                    result.email_status      = "PUBLIC"
-                    audit.append(f"S3 PUBLIC email from Naukri: {naukri['email']}")
-                if naukri["phone"] and result.phone_status == "NOT_FOUND":
-                    result.contact_number = naukri["phone"]
-                    result.phone_status   = "PUBLIC"
-                    audit.append(f"S3 PUBLIC phone from Naukri: {naukri['phone']}")
-                if not naukri["profile_url"]:
-                    audit.append("S3 Naukri: no profile found")
-            except Exception as exc:
-                audit.append(f"S3 Naukri error: {exc}")
+        # Per requirement, contact info must come ONLY from the LLM call (Step 2).
+        # This step uses DuckDuckGo web scraping + regex extraction and is
+        # intentionally commented out.
+        # if result.email_status == "NOT_FOUND" or result.phone_status == "NOT_FOUND":
+        #     try:
+        #         naukri = await _search_naukri_contact(
+        #             page, prospect.person_name, prospect.company_name, domain
+        #         )
+        #         if naukri["profile_url"]:
+        #             sources.append("Naukri")
+        #             audit.append(f"S3 Naukri profile found: {naukri['profile_url']}")
+        #         if naukri["email"] and result.email_status == "NOT_FOUND":
+        #             result.official_email_id = naukri["email"]
+        #             result.email_status      = "PUBLIC"
+        #             audit.append(f"S3 PUBLIC email from Naukri: {naukri['email']}")
+        #         if naukri["phone"] and result.phone_status == "NOT_FOUND":
+        #             result.contact_number = naukri["phone"]
+        #             result.phone_status   = "PUBLIC"
+        #             audit.append(f"S3 PUBLIC phone from Naukri: {naukri['phone']}")
+        #         if not naukri["profile_url"]:
+        #             audit.append("S3 Naukri: no profile found")
+        #     except Exception as exc:
+        #         audit.append(f"S3 Naukri error: {exc}")
 
         # ── Update email_found / phone_found diagnostics ───────────────────────
         result.email_found = result.email_status in ("VERIFIED", "PUBLIC")
