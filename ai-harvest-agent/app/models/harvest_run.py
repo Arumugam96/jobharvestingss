@@ -63,8 +63,12 @@ class ScrapedJobORM(Base):
     job_title: Mapped[str] = mapped_column(String(500), nullable=False)
     company: Mapped[str] = mapped_column(String(500), nullable=False)
     location: Mapped[str] = mapped_column(String(500), nullable=False)
-    salary: Mapped[str] = mapped_column(String(255), nullable=False, default="")
-    experience: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    # Scraped free text with no reliable length ceiling — Text, not String(255).
+    # Job boards occasionally emit long descriptive salary/experience strings
+    # that overflow 255 in larger datasets (they were short in the small local
+    # sample but not on the full EC2 data).
+    salary: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    experience: Mapped[str] = mapped_column(Text, nullable=False, default="")
     posted_date: Mapped[str] = mapped_column(String(100), nullable=False, default="")
     job_url: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     job_description: Mapped[str] = mapped_column(Text, nullable=False, default="")
@@ -90,15 +94,15 @@ class ScrapedJobORM(Base):
     # flags them. passed_filter=False means the job failed a filter rule but is
     # still retained/shown; filter_reason records the first failing stage+value.
     passed_filter: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    filter_reason: Mapped[str] = mapped_column(String(255), nullable=False, default="")
-    job_poster_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    filter_reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    job_poster_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     # LinkedIn "poster headline" free text — no real length ceiling (scraped
     # values exceed 255 chars), so Text not String(255). Mirrors
     # RecruiterORM.designation / linkedin_headline.
     job_poster_designation: Mapped[str | None] = mapped_column(Text, nullable=True)
     linkedin_profile_url: Mapped[str | None] = mapped_column(Text, nullable=True)
-    current_company: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    email_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    current_company: Mapped[str | None] = mapped_column(Text, nullable=True)
+    email_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     contact_number: Mapped[str | None] = mapped_column(String(50), nullable=True)
     # Canonical recruiter identity (app/models/recruiter.py), resolved at
     # insert time by app/services/recruiter_service.py::upsert_recruiter.
