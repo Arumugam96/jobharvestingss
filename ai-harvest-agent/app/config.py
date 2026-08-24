@@ -115,6 +115,23 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 30
 
+    # ── Persistent session (HttpOnly cookie, survives refresh/restart) ────────────
+    # After OTP verification we mint an opaque server-side session and set it as a
+    # secure HttpOnly cookie. The session slides: any authenticated request within
+    # the lifetime window pushes its expiry forward, so daily users rarely re-OTP.
+    session_cookie_name: str = "ha_session"
+    session_lifetime_days: int = 30           # sliding window — each use extends expiry by this
+    session_renew_interval_minutes: int = 60  # throttle: only extend once per this interval
+    # Secure=True means the cookie is only sent over HTTPS (localhost is treated as
+    # a secure context by modern browsers, so it still works in dev). Set
+    # SESSION_COOKIE_SECURE=false only if you serve the app over plain HTTP on a
+    # non-localhost host. SameSite=lax is correct for the same-origin (nginx) prod
+    # deploy and the same-site localhost dev setup; use "none" only for a truly
+    # cross-site frontend (which then also requires Secure=true).
+    session_cookie_secure: bool = True
+    session_cookie_samesite: Literal["lax", "strict", "none"] = "lax"
+    session_cookie_domain: str = ""           # empty → host-only cookie
+
     # ── SMTP ─────────────────────────────────────────────────────────────────────
     smtp_host: str = ""
     smtp_port: int = 587

@@ -8,7 +8,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
-from app.core.security import create_access_token, generate_otp, hash_otp, verify_otp_hash
+from app.core.security import generate_otp, hash_otp, verify_otp_hash
 from app.models.auth import OTPPurpose, OTPVerificationORM, UserORM
 from app.services.email_service import EmailSender
 
@@ -91,7 +91,7 @@ class AuthService:
 
     # ── Verify OTP ───────────────────────────────────────────────────────────────
 
-    async def verify_otp(self, email: str, otp: str, purpose: str = OTPPurpose.LOGIN) -> str:
+    async def verify_otp(self, email: str, otp: str, purpose: str = OTPPurpose.LOGIN) -> UserORM:
         settings = self._settings
         now = datetime.now(timezone.utc)
 
@@ -136,7 +136,9 @@ class AuthService:
 
         user = await self._get_or_create_user(email)
         logger.info("otp_verified", email=email, purpose=purpose, user_id=user.id)
-        return create_access_token(subject=user.id, email=user.email, settings=settings)
+        # Return the user; the route mints the access token and persistent session
+        # (it owns the Response needed to set the session cookie).
+        return user
 
     # ── Internals ────────────────────────────────────────────────────────────────
 

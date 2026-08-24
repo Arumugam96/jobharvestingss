@@ -54,6 +54,22 @@ def verify_otp_hash(otp: str, otp_hash: str, settings: Settings) -> bool:
     return hmac.compare_digest(hash_otp(otp, settings), otp_hash)
 
 
+# ── Session tokens (persistent HttpOnly-cookie login) ─────────────────────────────
+#
+# The session token is a high-entropy opaque secret (256 bits) — no need for a
+# slow KDF. We only ever persist its SHA-256, so the raw value (in the cookie)
+# is the sole thing that can resolve a session; a DB leak yields only hashes.
+
+def generate_session_token() -> str:
+    """Cryptographically secure, URL-safe opaque session token (~43 chars)."""
+    return secrets.token_urlsafe(32)
+
+
+def hash_session_token(token: str) -> str:
+    """SHA-256 hex digest — the form stored in user_sessions.token_hash."""
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
 # ── JWT access tokens ────────────────────────────────────────────────────────────
 
 class InvalidTokenError(Exception):

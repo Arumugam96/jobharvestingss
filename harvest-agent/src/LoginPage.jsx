@@ -10,7 +10,6 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import { requestOtp, verifyOtp, ApiError } from "./api";
-import { setToken } from "./auth";
 
 /* ------------------------------------------------------------------ */
 /* config                                                              */
@@ -292,8 +291,10 @@ export default function LoginPage({ onAuthenticated }) {
     setError("");
     setNotice("");
     try {
-      const res = await verifyOtp(email.trim(), code);
-      setToken(res.access_token);
+      // On success the backend sets the Secure HttpOnly session cookie — there's
+      // no token to stash in JS. The returned access_token is intentionally
+      // ignored; the app authenticates via the cookie from here on.
+      await verifyOtp(email.trim(), code);
       setBusy(false);
       onAuthenticated?.({ email: email.trim() });
       return;

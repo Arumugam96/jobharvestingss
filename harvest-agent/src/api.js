@@ -1,5 +1,3 @@
-import { getToken, clearToken } from "./auth";
-
 // `??` (not `||`) so an explicit empty string — same-origin deployment behind
 // nginx, see harvest-agent/Dockerfile — isn't overridden by the dev default.
 const API_BASE = process.env.REACT_APP_API_BASE_URL ?? "http://localhost:8000";
@@ -13,11 +11,13 @@ class ApiError extends Error {
 }
 
 async function request(path, options = {}) {
-  const token = getToken();
   const res = await fetch(`${API_BASE}${path}`, {
+    // Send the HttpOnly session cookie on every call — this is how the browser
+    // authenticates now (no bearer token is stored in JS). Required for the
+    // cross-origin dev setup (localhost:3000 → :8000) to include credentials.
+    credentials: "include",
     headers: {
       "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(options.headers || {}),
     },
     ...options,
@@ -29,11 +29,10 @@ async function request(path, options = {}) {
     // no JSON body
   }
   if (!res.ok) {
-    // A 401 on any non-auth endpoint means the session expired or was revoked
-    // (token missing/invalid). Drop it and signal App.js to fall back to login;
-    // the /auth/* calls handle their own 401s (wrong OTP) inline.
+    // A 401 on any non-auth endpoint means the session expired or was revoked.
+    // Signal App.js to fall back to login; the /auth/* calls handle their own
+    // 401s (wrong OTP / unauthenticated /auth/me on startup) inline.
     if (res.status === 401 && !path.startsWith("/auth/")) {
-      clearToken();
       window.dispatchEvent(new Event("auth:logout"));
     }
     // FastAPI uses {detail}; our HarvestException handler nests it under
@@ -73,9 +72,14 @@ export function verifyOtp(email, otp) {
   return request("/auth/verify-otp", { method: "POST", body: JSON.stringify({ email, otp }) });
 }
 
-/** GET /auth/me — the current authenticated user; used to validate a stored token on load. */
+/** GET /auth/me — the current authenticated user; used to validate the session cookie on load. */
 export function getMe() {
   return request("/auth/me");
+}
+
+/** POST /auth/logout — revoke the current session and clear its cookie. */
+export function logout() {
+  return request("/auth/logout", { method: "POST" });
 }
 
 // ── Jobs ─────────────────────────────────────────────────────────────────────

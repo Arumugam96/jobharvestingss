@@ -398,9 +398,20 @@ function RunDetailView({ runId, onBack, onView }) {
       if (filters.job !== "all" && j.title !== filters.job) return false;
       if (filters.poc !== "all" && j.poc !== filters.poc) return false;
       if (filters.contact.length > 0) {
-        const matches = (filters.contact.includes("email") && j.email)
-          || (filters.contact.includes("mobile") && j.mobile)
-          || (filters.contact.includes("linkedin") && j.linkedin);
+        // Positive tokens match rows that HAVE that channel; "no_*" tokens match
+        // rows MISSING it; "none" matches rows with no contact data at all.
+        // Tokens are OR-combined (a row passes if it satisfies any selected one).
+        const has = { email: !!j.email, mobile: !!j.mobile, linkedin: !!j.linkedin };
+        const none = !has.email && !has.mobile && !has.linkedin;
+        const matches = filters.contact.some((c) =>
+          c === "email" ? has.email
+            : c === "mobile" ? has.mobile
+            : c === "linkedin" ? has.linkedin
+            : c === "no_email" ? !has.email
+            : c === "no_mobile" ? !has.mobile
+            : c === "no_linkedin" ? !has.linkedin
+            : c === "none" ? none
+            : false);
         if (!matches) return false;
       }
       if (filters.status === "qualified" && !j.passedFilter) return false;
@@ -432,10 +443,12 @@ function RunDetailView({ runId, onBack, onView }) {
 
   function exportCsv() {
     const header = ["Job title", "Company", "Source", "POC", "Posted date", "Email", "Mobile"];
-    const lines = jobs.map((j) =>
+    const lines = filtered.map((j) =>
       [j.title, j.company, j.source, j.poc || "—", j.postedDate || "—", j.email || "—", j.mobile || "—"]
         .map((c) => '"' + String(c).replace(/"/g, '""') + '"').join(","));
-    const blob = new Blob([[header.join(","), ...lines].join("\n")], { type: "text/csv;charset=utf-8;" });
+    // Prepend a UTF-8 BOM so Excel detects the encoding — without it Excel reads
+    // the file as Windows-1252 and turns the "—" placeholder into "â€"".
+    const blob = new Blob([String.fromCharCode(0xFEFF) + [header.join(","), ...lines].join("\n")], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url; a.download = `jobs_${runId}.csv`; a.click();
@@ -494,7 +507,7 @@ function RunDetailView({ runId, onBack, onView }) {
                     <span><b style={{ color: C.text }}>{jobStats.total}</b> jobs</span>
                     <span><b style={{ color: C.text }}>{jobStats.companies}</b> companies</span>
                     <span><b style={{ color: C.text }}>{jobStats.pocs}</b> POCs</span>
-                    <button className="ha-btn ha-btn-primary" onClick={exportCsv} disabled={jobs.length === 0}>
+                    <button className="ha-btn ha-btn-primary" onClick={exportCsv} disabled={filtered.length === 0}>
                       <Download size={16} /> Export CSV
                     </button>
                   </div>
@@ -504,7 +517,11 @@ function RunDetailView({ runId, onBack, onView }) {
                   <Select label="Company" value={filters.company} onChange={(v) => setFilters((f) => ({ ...f, company: v }))}
                     options={[{ value: "all", label: "All" }, ...companies.map((c) => ({ value: c, label: c }))]} />
                   <MultiSelect label="Contact" selected={filters.contact} onChange={(v) => setFilters((f) => ({ ...f, contact: v }))}
-                    options={[{ value: "email", label: "Email" }, { value: "mobile", label: "Mobile" }, { value: "linkedin", label: "LinkedIn" }]} />
+                    options={[
+                      { value: "email", label: "Has Email" }, { value: "mobile", label: "Has Mobile" }, { value: "linkedin", label: "Has LinkedIn" },
+                      { value: "no_email", label: "No Email" }, { value: "no_mobile", label: "No Mobile" }, { value: "no_linkedin", label: "No LinkedIn" },
+                      { value: "none", label: "No Contact Info" },
+                    ]} />
                   <Select label="Job" value={filters.job} onChange={(v) => setFilters((f) => ({ ...f, job: v }))}
                     options={[{ value: "all", label: "All" }, ...jobTitles.map((t) => ({ value: t, label: t }))]} />
                   <Select label="POC" value={filters.poc} onChange={(v) => setFilters((f) => ({ ...f, poc: v }))}
@@ -611,9 +628,20 @@ function JobsPage({ jobs, total, loading, error, onRefresh, onNavigate, onView }
       if (filters.job !== "all" && j.title !== filters.job) return false;
       if (filters.poc !== "all" && j.poc !== filters.poc) return false;
       if (filters.contact.length > 0) {
-        const matches = (filters.contact.includes("email") && j.email)
-          || (filters.contact.includes("mobile") && j.mobile)
-          || (filters.contact.includes("linkedin") && j.linkedin);
+        // Positive tokens match rows that HAVE that channel; "no_*" tokens match
+        // rows MISSING it; "none" matches rows with no contact data at all.
+        // Tokens are OR-combined (a row passes if it satisfies any selected one).
+        const has = { email: !!j.email, mobile: !!j.mobile, linkedin: !!j.linkedin };
+        const none = !has.email && !has.mobile && !has.linkedin;
+        const matches = filters.contact.some((c) =>
+          c === "email" ? has.email
+            : c === "mobile" ? has.mobile
+            : c === "linkedin" ? has.linkedin
+            : c === "no_email" ? !has.email
+            : c === "no_mobile" ? !has.mobile
+            : c === "no_linkedin" ? !has.linkedin
+            : c === "none" ? none
+            : false);
         if (!matches) return false;
       }
       if (filters.status === "qualified" && !j.passedFilter) return false;
@@ -644,7 +672,9 @@ function JobsPage({ jobs, total, loading, error, onRefresh, onNavigate, onView }
     const lines = filtered.map((j) =>
       [j.title, j.company, j.source, j.passedFilter ? "Qualified" : "Flagged", j.filterReason || "—", j.poc || "—", j.postedDate || "—", j.email || "—", j.mobile || "—", j.whatsapp || "—", j.linkedin || "—"]
         .map((c) => '"' + String(c).replace(/"/g, '""') + '"').join(","));
-    const blob = new Blob([[header.join(","), ...lines].join("\n")], { type: "text/csv;charset=utf-8;" });
+    // Prepend a UTF-8 BOM so Excel detects the encoding — without it Excel reads
+    // the file as Windows-1252 and turns the "—" placeholder into "â€"".
+    const blob = new Blob([String.fromCharCode(0xFEFF) + [header.join(","), ...lines].join("\n")], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url; a.download = "harvested-jobs.csv"; a.click();
@@ -838,7 +868,9 @@ function RunHistoryPage({ runs, loading, error, onRefresh, onNavigate, onView })
     const lines = filtered.map((r) =>
       [r.runId, r.sources.join("|"), r.status, r.startedAt, r.completedAt, r.jobsFound, r.verifiedJobs, r.directClients, r.gcc, r.staffingFirms, r.ambiguous]
         .map((c) => '"' + String(c).replace(/"/g, '""') + '"').join(","));
-    const blob = new Blob([[header.join(","), ...lines].join("\n")], { type: "text/csv;charset=utf-8;" });
+    // Prepend a UTF-8 BOM so Excel detects the encoding — without it Excel reads
+    // the file as Windows-1252 and turns the "—" placeholder into "â€"".
+    const blob = new Blob([String.fromCharCode(0xFEFF) + [header.join(","), ...lines].join("\n")], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url; a.download = "run-history.csv"; a.click();

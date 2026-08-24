@@ -31,6 +31,29 @@ class UserORM(Base):
     )
 
 
+class UserSessionORM(Base):
+    """Server-side persistent session created after OTP verification.
+
+    The raw session token lives only in the client's HttpOnly cookie; we store
+    just its SHA-256 hash, so a DB leak never exposes usable tokens. `expires_at`
+    slides forward on use (see SessionService) to keep daily users signed in."""
+
+    __tablename__ = "user_sessions"
+    __table_args__ = (
+        Index("ix_user_sessions_user_id", "user_id"),
+        Index("ix_user_sessions_expires_at", "expires_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    user_agent: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class OTPVerificationORM(Base):
     __tablename__ = "otp_verifications"
     __table_args__ = (

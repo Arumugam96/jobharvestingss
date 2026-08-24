@@ -108,14 +108,18 @@ _bearer_scheme = HTTPBearer(auto_error=False)
 
 
 async def get_current_user(
+    request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
     db: AsyncSession = Depends(get_db_session),
     settings: Settings = Depends(get_settings),
 ) -> AuthenticatedUser:
-    """Validate the bearer JWT and return the authenticated user.
+    """Return the authenticated user from either the persistent session cookie
+    or a bearer JWT.
 
     Use as ``current_user: AuthenticatedUser = Depends(get_current_user)`` on
-    any route that requires a logged-in user.
+    any route that requires a logged-in user. The cookie is checked first (it's
+    what the browser app uses); the bearer path is kept intact for Swagger and
+    programmatic API clients.
     """
     # Dev bypass: when login enforcement is off, every protected route (and
     # /auth/me) resolves to a synthetic user without needing a token.
@@ -132,6 +136,22 @@ async def get_current_user(
         detail="Not authenticated",
         headers={"WWW-Authenticate": "Bearer"},
     )
+
+    # ── 1. Persistent session cookie (the browser app's normal path) ──────────
+    cookie_token = request.cookies.get(settings.session_cookie_name)
+    if cookie_token:
+        from app.services.session_service import SessionService  # avoid import cycle
+
+        session = await SessionService(db, settings).resolve(cookie_token)
+        if session is not None:
+            result = await db.execute(select(UserORM).where(UserORM.id == session.user_id))
+            user = result.scalar_one_or_none()
+            if user is not None and user.is_active:
+                return AuthenticatedUser.model_validate(user)
+        # Cookie present but stale/revoked — fall through to the bearer path
+        # rather than 401 outright, so a client sending both still works.
+
+    # ── 2. Bearer JWT (Swagger / API clients) ─────────────────────────────────
     if credentials is None:
         raise unauthorized
 
