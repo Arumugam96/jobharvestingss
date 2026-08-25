@@ -67,6 +67,21 @@ class Settings(BaseSettings):
     gemini_max_output_tokens: int = 2048
     gemini_temperature: float = 0.0
 
+    # ── Apollo.io (contact enrichment fallback) ───────────────────────────────────
+    # Used only as a last-resort tier: when the LLM/regex LinkedIn extraction returns
+    # no email/phone, look the person up on Apollo by their LinkedIn URL. Credit-metered
+    # (Basic plan), so calls are cached on the recruiters table and gated. Leave
+    # apollo_api_key empty to disable the integration entirely (every call no-ops).
+    apollo_api_key: str = ""
+    apollo_base_url: str = "https://api.apollo.io/api/v1"
+    apollo_timeout_s: float = 20.0
+    # Phone reveal is asynchronous on Apollo (delivered via a webhook we don't expose),
+    # and costs ~8x an email reveal — off by default; only emails resolve synchronously.
+    apollo_reveal_phone: bool = False
+    # Per-profile cooldown: don't re-call Apollo for a recruiter enriched/attempted
+    # within this many days (prevents re-spending on the same no-match profile).
+    apollo_recheck_days: int = 30
+
     # ── Playwright ───────────────────────────────────────────────────────────────
     playwright_browser: Literal["chromium", "firefox", "webkit"] = "chromium"
     playwright_headless: bool = True

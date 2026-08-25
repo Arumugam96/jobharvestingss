@@ -146,6 +146,8 @@ async def save_enrichment(
     department: str = "",
     confidence_score: str = "Low",
     verified: bool = False,
+    enrichment_source: str = "",
+    apollo_attempted: bool = False,
 ) -> None:
     """Cache one recruiter's scraped contact-discovery result on their
     RecruiterORM row, so RecruiterContactAgent and ProspectIntelligenceAgent
@@ -187,10 +189,15 @@ async def save_enrichment(
     _apply("department", department)
     if confidence_score and confidence_score != "Low":
         recruiter.confidence_score = confidence_score
+    _apply("enrichment_source", enrichment_source)
     now = datetime.now(timezone.utc)
     recruiter.last_enriched_at = now
     if verified:
         recruiter.last_verified = now
+    if apollo_attempted:
+        # Stamp every Apollo attempt (hit or miss) so the recheck cooldown can
+        # skip this profile on subsequent runs.
+        recruiter.apollo_enriched_at = now
     await db.flush()
 
 

@@ -25,6 +25,15 @@ const C = {
   border: "#E2E8F0", sidebar: "#1E293B", pale: "#EFF6FF",
 };
 
+// Labels for the Run Detail classification cards / active-filter chip.
+const BUCKET_LABELS = {
+  verified: "Verified contacts",
+  direct: "Direct clients",
+  gcc: "GCC companies",
+  staffing: "Staffing firms",
+  ambiguous: "Needs review",
+};
+
 const WhatsAppIcon = ({ size = 16 }) => (
   <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor">
     <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51l-.57-.01c-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 0 1-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 0 1-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 0 1 2.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0 0 12.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 0 0 5.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 0 0-3.48-8.413Z"/>
@@ -111,6 +120,10 @@ const ThemeStyles = () => (
     .ha-runstat{background:${C.pale};border:1px solid ${C.border};border-radius:10px;padding:11px 14px;}
     .ha-runstat b{display:block;font-size:22px;font-weight:700;line-height:1.1;color:${C.text};}
     .ha-runstat span{display:block;margin-top:3px;font-size:11.5px;font-weight:500;color:${C.textSoft};}
+    .ha-runstat-btn{border:1px solid ${C.border};font:inherit;text-align:left;width:100%;box-sizing:border-box;cursor:pointer;transition:box-shadow .15s,background .15s,transform .05s;}
+    .ha-runstat-btn:hover{background:#E0EAFF;}
+    .ha-runstat-btn:active{transform:translateY(1px);}
+    .ha-runstat-active{background:#fff;}
     @media(max-width:720px){.ha-runhead-right{align-items:stretch;flex-basis:100%;}.ha-runhead-right .ha-pill{align-self:flex-start;}}
     @media(max-width:520px){.ha-runstats{grid-template-columns:repeat(2,minmax(0,1fr));}}
   `}</style>
@@ -189,6 +202,7 @@ function mapApiJob(j) {
     posterTitle: j.job_poster_designation || "",
     domain: j.domain || "",
     hiringEntity: j.hiring_entity || "",
+    verificationStatus: j.verification_status || "",
     isGcc: !!j.is_gcc,
     // Business-filter annotation — the backend no longer drops jobs, it flags
     // them. passed_filter defaults to true for legacy rows lacking the column.
@@ -384,7 +398,9 @@ function RunDetailView({ runId, onBack, onView }) {
   // Filter/sort state — mirrors the Harvested Jobs page filter bar, but scoped
   // to this run's jobs. Dropdown options are derived from `jobs` below, so they
   // only ever list companies/titles/POCs present in this single run.
-  const [filters, setFilters] = useState({ company: "all", contact: [], job: "all", poc: "all", status: "all" });
+  // `bucket` is the classification filter driven by the clickable stat cards
+  // ("all" | "verified" | "direct" | "gcc" | "staffing" | "ambiguous").
+  const [filters, setFilters] = useState({ company: "all", contact: [], job: "all", poc: "all", status: "all", bucket: "all" });
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState({ col: "posted", dir: "desc" });
 
@@ -416,6 +432,14 @@ function RunDetailView({ runId, onBack, onView }) {
       }
       if (filters.status === "qualified" && !j.passedFilter) return false;
       if (filters.status === "flagged" && j.passedFilter) return false;
+      // Classification bucket from the clickable stat cards. Predicates mirror the
+      // backend run-summary counts (hiring_entity / verification_status), so a
+      // card's number matches the rows shown. "all" = Jobs found (no filter).
+      if (filters.bucket === "verified" && j.verificationStatus !== "verified") return false;
+      if (filters.bucket === "direct" && j.hiringEntity !== "Direct Client") return false;
+      if (filters.bucket === "gcc" && j.hiringEntity !== "GCC") return false;
+      if (filters.bucket === "staffing" && j.hiringEntity !== "Staffing Firm") return false;
+      if (filters.bucket === "ambiguous" && j.hiringEntity !== "Ambiguous") return false;
       if (query.trim()) {
         const q = query.toLowerCase();
         if (!((j.title + " " + j.company + " " + j.source + " " + (j.poc || "") + " " + (j.email || "") + " " + (j.mobile || "")).toLowerCase().includes(q))) return false;
@@ -442,9 +466,9 @@ function RunDetailView({ runId, onBack, onView }) {
   }), [filtered]);
 
   function exportCsv() {
-    const header = ["Job title", "Company", "Source", "POC", "Posted date", "Email", "Mobile"];
+    const header = ["Job title", "Company", "Source", "POC", "Posted date", "Email", "Mobile", "Job description"];
     const lines = filtered.map((j) =>
-      [j.title, j.company, j.source, j.poc || "—", j.postedDate || "—", j.email || "—", j.mobile || "—"]
+      [j.title, j.company, j.source, j.poc || "—", j.postedDate || "—", j.email || "—", j.mobile || "—", j.jobDescription || "—"]
         .map((c) => '"' + String(c).replace(/"/g, '""') + '"').join(","));
     // Prepend a UTF-8 BOM so Excel detects the encoding — without it Excel reads
     // the file as Windows-1252 and turns the "—" placeholder into "â€"".
@@ -487,12 +511,29 @@ function RunDetailView({ runId, onBack, onView }) {
                   <div className="ha-runhead-right">
                     <StatusPill status={entry.status} />
                     <div className="ha-runstats">
-                      <div className="ha-runstat"><b style={{ color: C.accent }}>{entry.jobsFound}</b><span>Jobs found</span></div>
-                      <div className="ha-runstat"><b style={{ color: "#059669" }}>{entry.verifiedJobs}</b><span>Verified contacts</span></div>
-                      <div className="ha-runstat"><b style={{ color: C.primary }}>{entry.directClients}</b><span>Direct clients</span></div>
-                      <div className="ha-runstat"><b style={{ color: C.secondary }}>{entry.gcc}</b><span>GCC companies</span></div>
-                      <div className="ha-runstat"><b style={{ color: "#7C3AED" }}>{entry.staffingFirms}</b><span>Staffing firms</span></div>
-                      <div className="ha-runstat"><b style={{ color: "#D97706" }}>{entry.ambiguous}</b><span>Needs review</span></div>
+                      {[
+                        { bucket: "all",       value: entry.jobsFound,     label: "Jobs found",        color: C.accent },
+                        { bucket: "verified",  value: entry.verifiedJobs,  label: "Verified contacts", color: "#059669" },
+                        { bucket: "direct",    value: entry.directClients, label: "Direct clients",    color: C.primary },
+                        { bucket: "gcc",       value: entry.gcc,           label: "GCC companies",     color: C.secondary },
+                        { bucket: "staffing",  value: entry.staffingFirms, label: "Staffing firms",    color: "#7C3AED" },
+                        { bucket: "ambiguous", value: entry.ambiguous,     label: "Needs review",      color: "#D97706" },
+                      ].map((card) => {
+                        const active = filters.bucket === card.bucket;
+                        return (
+                          <button
+                            key={card.bucket}
+                            type="button"
+                            className={"ha-runstat ha-runstat-btn" + (active ? " ha-runstat-active" : "")}
+                            aria-pressed={active}
+                            title={card.bucket === "all" ? "Show all jobs" : `Filter this run's jobs to ${card.label}`}
+                            onClick={() => setFilters((f) => ({ ...f, bucket: f.bucket === card.bucket ? "all" : card.bucket }))}
+                            style={active ? { boxShadow: `inset 0 0 0 2px ${card.color}` } : undefined}
+                          >
+                            <b style={{ color: card.color }}>{card.value}</b><span>{card.label}</span>
+                          </button>
+                        );
+                      })}
                     </div>
                   </div>
                 </div>
@@ -500,8 +541,17 @@ function RunDetailView({ runId, onBack, onView }) {
 
               <div className="ha-detail-card">
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12 }}>
-                  <div style={{ fontSize: 12, color: C.textSoft, fontWeight: 700, letterSpacing: ".05em", textTransform: "uppercase" }}>
-                    Harvested jobs in this run
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                    <div style={{ fontSize: 12, color: C.textSoft, fontWeight: 700, letterSpacing: ".05em", textTransform: "uppercase" }}>
+                      Harvested jobs in this run
+                    </div>
+                    {filters.bucket !== "all" && (
+                      <button className="ha-pill" onClick={() => setFilters((f) => ({ ...f, bucket: "all" }))}
+                        title="Clear card filter"
+                        style={{ background: C.pale, color: C.secondary, border: "1px solid " + C.border, display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+                        {BUCKET_LABELS[filters.bucket]} <XCircle size={12} />
+                      </button>
+                    )}
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 16, fontSize: 13, color: C.textSoft }}>
                     <span><b style={{ color: C.text }}>{jobStats.total}</b> jobs</span>
@@ -668,9 +718,9 @@ function JobsPage({ jobs, total, loading, error, onRefresh, onNavigate, onView }
   }, [jobs, filters, startDate, endDate, query, sort]);
 
   function exportCsv() {
-    const header = ["Job title", "Company", "Source", "Filter status", "Filter reason", "POC", "Posted date", "Email", "Mobile", "WhatsApp", "LinkedIn"];
+    const header = ["Job title", "Company", "Source", "Filter status", "Filter reason", "POC", "Posted date", "Email", "Mobile", "WhatsApp", "LinkedIn", "Job description"];
     const lines = filtered.map((j) =>
-      [j.title, j.company, j.source, j.passedFilter ? "Qualified" : "Flagged", j.filterReason || "—", j.poc || "—", j.postedDate || "—", j.email || "—", j.mobile || "—", j.whatsapp || "—", j.linkedin || "—"]
+      [j.title, j.company, j.source, j.passedFilter ? "Qualified" : "Flagged", j.filterReason || "—", j.poc || "—", j.postedDate || "—", j.email || "—", j.mobile || "—", j.whatsapp || "—", j.linkedin || "—", j.jobDescription || "—"]
         .map((c) => '"' + String(c).replace(/"/g, '""') + '"').join(","));
     // Prepend a UTF-8 BOM so Excel detects the encoding — without it Excel reads
     // the file as Windows-1252 and turns the "—" placeholder into "â€"".

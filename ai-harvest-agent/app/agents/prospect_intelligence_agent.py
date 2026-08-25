@@ -1331,6 +1331,82 @@ class ProspectIntelligenceAgent:
             audit.append(f"S2 error: {exc}")
 
         # ══════════════════════════════════════════════════════════════════════
+        # Step 2.5 — Apollo.io (last resort) when LinkedIn yielded no email
+        # ══════════════════════════════════════════════════════════════════════
+        if not result.official_email_id and result.linkedin_url:
+            try:
+                from app.config import get_settings
+                from app.core.dependencies import get_session_factory
+                from app.services.apollo_enrichment import apollo_contact_fallback
+                from app.services.recruiter_service import save_enrichment, upsert_recruiter
+
+                settings = get_settings()
+                session_factory = get_session_factory(settings)
+                recruiter_id: str | None = None
+                apollo_last = None
+                # Warm the shared recruiter cache: resolve/create the row so the
+                # Apollo recheck cooldown is honored across all three pipelines.
+                try:
+                    async with session_factory() as db:
+                        recruiter = await upsert_recruiter(
+                            db,
+                            person_name=prospect.person_name,
+                            company_name=prospect.company_name,
+                            designation=prospect.designation or "",
+                            linkedin_profile_url=result.linkedin_url,
+                            harvest_source="ProspectIntelligence",
+                        )
+                        if recruiter is not None:
+                            recruiter_id = recruiter.id
+                            apollo_last = recruiter.apollo_enriched_at
+                        await db.commit()
+                except Exception as exc:
+                    audit.append(f"S2.5 recruiter cache read error: {exc}")
+
+                apollo = await apollo_contact_fallback(
+                    settings=settings,
+                    linkedin_url=result.linkedin_url,
+                    person_name=prospect.person_name,
+                    company_name=prospect.company_name,
+                    company_domain=domain,
+                    already_email=result.email_status in ("VERIFIED", "PUBLIC"),
+                    already_phone=result.phone_status in ("VERIFIED", "PUBLIC"),
+                    apollo_enriched_at=apollo_last,
+                )
+                if apollo.email:
+                    result.official_email_id = apollo.email
+                    result.email_status      = "VERIFIED"
+                    sources.append("Apollo")
+                    audit.append(f"S2.5 VERIFIED email from Apollo: {apollo.email}")
+                if apollo.phone and result.phone_status != "VERIFIED":
+                    result.contact_number = apollo.phone
+                    result.phone_status   = "PUBLIC"
+                    sources.append("Apollo (Phone)")
+                    audit.append(f"S2.5 phone from Apollo: {apollo.phone}")
+                if apollo.attempted and not apollo.email:
+                    audit.append("S2.5 Apollo: no email found")
+
+                # Persist Apollo's result + attempt stamp back to the shared cache.
+                if recruiter_id and apollo.attempted:
+                    try:
+                        async with session_factory() as db:
+                            await save_enrichment(
+                                db, recruiter_id,
+                                official_email_id = apollo.email or "",
+                                email_status      = "VERIFIED" if apollo.email else "NOT_FOUND",
+                                contact_number    = apollo.phone or "",
+                                phone_status      = "PUBLIC" if apollo.phone else "NOT_FOUND",
+                                enrichment_source = "apollo" if apollo.source else "",
+                                apollo_attempted  = True,
+                                verified          = bool(apollo.email or apollo.phone),
+                            )
+                            await db.commit()
+                    except Exception as exc:
+                        audit.append(f"S2.5 apollo cache write error: {exc}")
+            except Exception as exc:
+                audit.append(f"S2.5 Apollo error: {exc}")
+
+        # ══════════════════════════════════════════════════════════════════════
         # Step 3 — Naukri cross-source (PUBLIC)  [DISABLED — LLM-ONLY MODE]
         # ══════════════════════════════════════════════════════════════════════
         # Per requirement, contact info must come ONLY from the LLM call (Step 2).

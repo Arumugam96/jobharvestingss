@@ -1330,9 +1330,11 @@ class LinkedInAgent:
         from app.config import get_settings
         from app.core.dependencies import get_session_factory
         from app.agents.prospect_intelligence_agent import _extract_linkedin_contact_info, _infer_department
+        from app.services.apollo_enrichment import apollo_contact_fallback
         from app.services.recruiter_service import link_recruiter_jobs_by_url, save_enrichment, upsert_recruiter
 
-        session_factory = get_session_factory(get_settings())
+        settings = get_settings()
+        session_factory = get_session_factory(settings)
         visited = 0
 
         logger.info(
@@ -1363,6 +1365,7 @@ class LinkedInAgent:
                     recruiter_id  = recruiter.id
                     already_email = recruiter.email_status in ("VERIFIED", "PUBLIC")
                     already_phone = recruiter.phone_status in ("VERIFIED", "PUBLIC")
+                    apollo_last   = recruiter.apollo_enriched_at  # for the Apollo recheck cooldown
                     await db.commit()
             except Exception as exc:
                 logger.warning("recruiter_upsert_failed", url=norm_url, error=str(exc))
@@ -1391,6 +1394,7 @@ class LinkedInAgent:
             visited += 1
             contact_page: Page | None = None
             contact_info: dict = {"email": "", "phone": "", "headline": "", "location": ""}
+            apollo_result = None
             try:
                 contact_page = await page.context.new_page()
                 contact_info = await _extract_linkedin_contact_info(
@@ -1403,6 +1407,22 @@ class LinkedInAgent:
                         contact_info["email"] = llm_contact["email"]
                     if llm_contact.get("phone"):
                         contact_info["phone"] = llm_contact["phone"]
+
+                # Last-resort tier: LLM/regex found no email → ask Apollo by URL.
+                if not contact_info.get("email"):
+                    apollo_result = await apollo_contact_fallback(
+                        settings=settings,
+                        linkedin_url=norm_url,
+                        person_name=person_name,
+                        company_name=company_name,
+                        already_email=bool(contact_info.get("email")),
+                        already_phone=bool(contact_info.get("phone")),
+                        apollo_enriched_at=apollo_last,
+                    )
+                    if apollo_result.email:
+                        contact_info["email"] = apollo_result.email
+                    if apollo_result.phone:
+                        contact_info["phone"] = apollo_result.phone
             except Exception as exc:
                 logger.warning("recruiter_contact_visit_failed", url=norm_url, error=str(exc))
             finally:
@@ -1429,6 +1449,8 @@ class LinkedInAgent:
                             sample.job_poster_designation or "", contact_info.get("headline", ""),
                         ),
                         verified = found_email or found_phone,
+                        enrichment_source = "apollo" if (apollo_result and apollo_result.source) else "",
+                        apollo_attempted  = bool(apollo_result and apollo_result.attempted),
                     )
                     await link_recruiter_jobs_by_url(db, recruiter_id, norm_url)
                     await db.commit()

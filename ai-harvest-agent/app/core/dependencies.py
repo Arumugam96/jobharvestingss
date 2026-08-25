@@ -102,6 +102,16 @@ def get_email_sender(settings: Settings = Depends(get_settings)) -> EmailSender:
     return EmailSender(settings)
 
 
+# ── Apollo.io contact-enrichment client ──────────────────────────────────────────
+
+
+def get_apollo_client(settings: Settings = Depends(get_settings)) -> "ApolloClient":
+    """FastAPI factory for the Apollo client (agents instantiate it directly;
+    this exists for any future route that needs Apollo)."""
+    from app.services.apollo_client import ApolloClient
+    return ApolloClient(settings)
+
+
 # ── Current user (OTP/JWT email login) ───────────────────────────────────────────
 
 _bearer_scheme = HTTPBearer(auto_error=False)

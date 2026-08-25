@@ -71,6 +71,13 @@ class RecruiterORM(Base):
     # enrichment pass (not merely attempted) — see
     # app/services/recruiter_service.py::save_enrichment's `verified` kwarg.
     last_verified: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Provenance of the last contact hit: "" (scraped) | "apollo" | future sources.
+    # Lets us distinguish Apollo-sourced contacts and audit credit spend.
+    enrichment_source: Mapped[str] = mapped_column(String(50), nullable=False, default="")
+    # Timestamp of the last Apollo lookup *attempt* (hit or miss) — the recheck
+    # cooldown (settings.apollo_recheck_days) reads this to avoid re-billing the
+    # same profile every run. Stays null until Apollo is first tried.
+    apollo_enriched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # CRM/lead-pipeline status (e.g. "New", "Contacted", "Qualified") — set by
     # whatever downstream CRM sync exists; this table doesn't manage its
     # lifecycle, just carries it alongside the recruiter's identity.

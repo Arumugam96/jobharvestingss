@@ -68,6 +68,27 @@ def _ensure_scraped_jobs_columns(sync_conn) -> None:
             logger.info("scraped_jobs_column_added", column=name)
 
 
+def _ensure_recruiter_columns(sync_conn) -> None:
+    """One-time, idempotent ADD COLUMN backfill for columns added to the
+    pre-existing recruiters table (Apollo enrichment provenance). Mirrors
+    _ensure_scraped_jobs_columns — create_all never alters an existing table."""
+    inspector = sa_inspect(sync_conn)
+    if "recruiters" not in inspector.get_table_names():
+        return  # brand-new DB — create_all already made this table with the columns
+    existing_cols = {c["name"] for c in inspector.get_columns("recruiters")}
+    # Postgres wants TIMESTAMPTZ to match DateTime(timezone=True); SQLite ignores
+    # the type affinity, so a plain TIMESTAMP is fine there.
+    ts_type = "TIMESTAMPTZ" if sync_conn.dialect.name == "postgresql" else "TIMESTAMP"
+    pending = [
+        ("enrichment_source",  "ALTER TABLE recruiters ADD COLUMN enrichment_source VARCHAR(50) NOT NULL DEFAULT ''"),
+        ("apollo_enriched_at", f"ALTER TABLE recruiters ADD COLUMN apollo_enriched_at {ts_type}"),
+    ]
+    for name, ddl in pending:
+        if name not in existing_cols:
+            sync_conn.execute(sa_text(ddl))
+            logger.info("recruiters_column_added", column=name)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Startup: launch browser pool + scheduler. Shutdown: clean up both."""
@@ -87,6 +108,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # (recruiter_id, passed_filter, filter_reason) each need a one-time,
         # idempotent ADD COLUMN here.
         await conn.run_sync(_ensure_scraped_jobs_columns)
+        # recruiters gained Apollo provenance columns (enrichment_source,
+        # apollo_enriched_at) — same idempotent ADD COLUMN treatment.
+        await conn.run_sync(_ensure_recruiter_columns)
 
     # Reconcile stale 'running' runs left by a previous process (a harvest runs
     # in a detached task that doesn't survive a restart). Without this, the

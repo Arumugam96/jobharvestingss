@@ -204,6 +204,9 @@ Copy `.env.example` to `.env` and configure:
 |---|---|---|
 | `ANTHROPIC_API_KEY` | Yes | Anthropic Claude API key (`sk-ant-...`) |
 | `GEMINI_API_KEY` | No | Google Gemini API key (job_parser_service only) |
+| `APOLLO_API_KEY` | No | Apollo.io API key — contact-enrichment fallback when LinkedIn extraction finds no email. Get it from **Apollo dashboard → Settings → API Keys**. Empty = Apollo disabled. |
+| `APOLLO_REVEAL_PHONE` | No | Reveal phone numbers via Apollo (default `false`). Phone reveal is async — Apollo delivers numbers to a **publicly accessible HTTPS webhook**, which this app does not expose, so only emails resolve synchronously. |
+| `APOLLO_RECHECK_DAYS` | No | Per-profile cooldown (default `30`) before re-querying Apollo for the same recruiter, to conserve credits. |
 | `APP_SECRET_KEY` | Yes | 32+ char random string for internal signing |
 | `FASTAPI_HOST` | No | Server bind host (default: `0.0.0.0`) |
 | `FASTAPI_PORT` | No | Server port (default: `8001`) |

@@ -1,8 +1,8 @@
 {
   "sources": {
     "linkedin": true,
-    "naukri": true,
-    "dice": true
+    "naukri": false,
+    "dice": false
   },
   "filters": {
     "keyword": "",

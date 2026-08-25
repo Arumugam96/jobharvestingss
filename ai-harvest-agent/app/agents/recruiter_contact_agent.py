@@ -60,6 +60,7 @@ from app.core.dependencies import get_session_factory
 from app.models.harvest_run import HarvestRunORM, ScrapedJobORM
 from app.models.prospect_models import ProspectResult
 from app.models.recruiter import RecruiterORM
+from app.services.apollo_enrichment import apollo_contact_fallback
 from app.services.harvest_run_service import data_source_mode, db_write, resolve_read
 from app.services.recruiter_service import save_discovery_run, save_enrichment, upsert_recruiter
 from app.agents.prospect_intelligence_agent import (
@@ -118,6 +119,12 @@ class RecruiterRecord:
     # (_load_recruiters_from_harvest); _persist_enrichment resolves/creates the
     # row by identity in that case instead.
     recruiter_id:      str  = ""
+    # Last Apollo lookup timestamp (from the DB row) — feeds the Apollo recheck
+    # cooldown. apollo_attempted/apollo_source are set during enrichment and read
+    # by _persist_enrichment to record provenance on the row.
+    apollo_enriched_at: datetime | None = None
+    apollo_attempted:  bool = False
+    apollo_source:     str  = ""
 
 
 # ── Run summary ────────────────────────────────────────────────────────────────
@@ -333,6 +340,7 @@ async def _load_recruiters_from_db(
                 existing_linkedin = recruiter.linkedin_profile_url or "",
                 harvest_source    = scraped_job.source or "",
                 recruiter_id      = recruiter.id,
+                apollo_enriched_at = recruiter.apollo_enriched_at,
             )
             grouped[recruiter.id] = rec
         if scraped_job.job_title and scraped_job.job_title not in rec.job_titles_posted:
@@ -389,6 +397,8 @@ async def _persist_enrichment(rec: RecruiterRecord, result: ProspectResult) -> N
             company_industry    = result.company_industry,
             company_size        = result.company_size,
             confidence_score    = result.confidence_score,
+            enrichment_source   = "apollo" if rec.apollo_source else "",
+            apollo_attempted    = rec.apollo_attempted,
         )
 
     await db_write(_write)
@@ -765,6 +775,38 @@ class RecruiterContactAgent:
                     audit.append("S3 Naukri: no profile found")
             except Exception as exc:
                 audit.append(f"S3 Naukri error: {exc}")
+
+        # ══════════════════════════════════════════════════════════════════════
+        # Step 3.5 — Apollo.io (last resort, by LinkedIn URL) when email missing
+        # ══════════════════════════════════════════════════════════════════════
+        if not result.official_email_id and result.linkedin_url:
+            try:
+                apollo = await apollo_contact_fallback(
+                    settings=get_settings(),
+                    linkedin_url=result.linkedin_url,
+                    person_name=rec.person_name,
+                    company_name=rec.company_name,
+                    company_domain=domain,
+                    already_email=result.email_status in ("VERIFIED", "PUBLIC"),
+                    already_phone=result.phone_status in ("VERIFIED", "PUBLIC"),
+                    apollo_enriched_at=rec.apollo_enriched_at,
+                )
+                rec.apollo_attempted = apollo.attempted
+                rec.apollo_source = apollo.source
+                if apollo.email:
+                    result.official_email_id = apollo.email
+                    result.email_status      = "VERIFIED"
+                    sources.append("Apollo")
+                    audit.append(f"S3.5 VERIFIED email from Apollo: {apollo.email}")
+                if apollo.phone and result.phone_status == "NOT_FOUND":
+                    result.contact_number = apollo.phone
+                    result.phone_status   = "PUBLIC"
+                    sources.append("Apollo (Phone)")
+                    audit.append(f"S3.5 phone from Apollo: {apollo.phone}")
+                if apollo.attempted and not apollo.email:
+                    audit.append("S3.5 Apollo: no email found")
+            except Exception as exc:
+                audit.append(f"S3.5 Apollo error: {exc}")
 
         # ── Diagnostics ────────────────────────────────────────────────────────
         result.email_found = result.email_status in ("VERIFIED", "PUBLIC")
