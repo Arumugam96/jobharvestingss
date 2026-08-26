@@ -1392,13 +1392,19 @@ class ProspectIntelligenceAgent:
                         async with session_factory() as db:
                             await save_enrichment(
                                 db, recruiter_id,
-                                official_email_id = apollo.email or "",
-                                email_status      = "VERIFIED" if apollo.email else "NOT_FOUND",
-                                contact_number    = apollo.phone or "",
-                                phone_status      = "PUBLIC" if apollo.phone else "NOT_FOUND",
-                                enrichment_source = "apollo" if apollo.source else "",
-                                apollo_attempted  = True,
-                                verified          = bool(apollo.email or apollo.phone),
+                                official_email_id    = apollo.email or "",
+                                email_status         = "VERIFIED" if apollo.email else "NOT_FOUND",
+                                contact_number       = apollo.phone or "",
+                                phone_status         = "PUBLIC" if apollo.phone else "NOT_FOUND",
+                                secondary_email      = apollo.secondary_email,
+                                company_linkedin_url = apollo.company_linkedin_url,
+                                address              = apollo.address,
+                                city                 = apollo.city,
+                                state                = apollo.state,
+                                country              = apollo.country,
+                                enrichment_source    = "apollo" if apollo.source else "",
+                                apollo_attempted     = True,
+                                verified             = bool(apollo.email or apollo.phone),
                             )
                             await db.commit()
                     except Exception as exc:

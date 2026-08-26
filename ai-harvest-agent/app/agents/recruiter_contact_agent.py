@@ -125,6 +125,14 @@ class RecruiterRecord:
     apollo_enriched_at: datetime | None = None
     apollo_attempted:  bool = False
     apollo_source:     str  = ""
+    # Extra details from the Apollo people match (set in the S3.5 block, persisted
+    # by _persist_enrichment). Apollo-only — blank from scraped-only enrichment.
+    apollo_secondary_email:      str = ""
+    apollo_company_linkedin_url: str = ""
+    apollo_address:              str = ""
+    apollo_city:                 str = ""
+    apollo_state:                str = ""
+    apollo_country:              str = ""
 
 
 # ── Run summary ────────────────────────────────────────────────────────────────
@@ -397,6 +405,12 @@ async def _persist_enrichment(rec: RecruiterRecord, result: ProspectResult) -> N
             company_industry    = result.company_industry,
             company_size        = result.company_size,
             confidence_score    = result.confidence_score,
+            secondary_email      = rec.apollo_secondary_email,
+            company_linkedin_url = rec.apollo_company_linkedin_url,
+            address              = rec.apollo_address,
+            city                 = rec.apollo_city,
+            state                = rec.apollo_state,
+            country              = rec.apollo_country,
             enrichment_source   = "apollo" if rec.apollo_source else "",
             apollo_attempted    = rec.apollo_attempted,
         )
@@ -793,6 +807,12 @@ class RecruiterContactAgent:
                 )
                 rec.apollo_attempted = apollo.attempted
                 rec.apollo_source = apollo.source
+                rec.apollo_secondary_email      = apollo.secondary_email
+                rec.apollo_company_linkedin_url = apollo.company_linkedin_url
+                rec.apollo_address              = apollo.address
+                rec.apollo_city                 = apollo.city
+                rec.apollo_state                = apollo.state
+                rec.apollo_country              = apollo.country
                 if apollo.email:
                     result.official_email_id = apollo.email
                     result.email_status      = "VERIFIED"

@@ -52,10 +52,22 @@ class RecruiterORM(Base):
     company_website: Mapped[str] = mapped_column(String(500), nullable=False, default="")
     official_email_id: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     email_status: Mapped[str] = mapped_column(String(20), nullable=False, default="NOT_FOUND")
+    # Second/personal address from the Apollo people match — the primary stays
+    # in official_email_id. Apollo-only, so default "".
+    secondary_email: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     contact_number: Mapped[str] = mapped_column(String(50), nullable=False, default="")
     phone_status: Mapped[str] = mapped_column(String(20), nullable=False, default="NOT_FOUND")
     linkedin_headline: Mapped[str] = mapped_column(Text, nullable=False, default="")
     location: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    # Structured person location + company LinkedIn URL — populated from the
+    # Apollo people match (app/services/apollo_enrichment.py). The free-text
+    # `location` above stays the scraped-profile value; these are Apollo-only
+    # and default "" so scraped-only runs leave them blank.
+    address: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    city: Mapped[str] = mapped_column(String(120), nullable=False, default="")
+    state: Mapped[str] = mapped_column(String(120), nullable=False, default="")
+    country: Mapped[str] = mapped_column(String(120), nullable=False, default="")
+    company_linkedin_url: Mapped[str] = mapped_column(Text, nullable=False, default="")
     reporting_hierarchy: Mapped[str] = mapped_column(Text, nullable=False, default="")
     position_level: Mapped[str] = mapped_column(String(50), nullable=False, default="NOT_FOUND")
     employment_type: Mapped[str] = mapped_column(String(50), nullable=False, default="NOT_FOUND")

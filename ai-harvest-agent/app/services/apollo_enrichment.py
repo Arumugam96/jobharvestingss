@@ -32,6 +32,14 @@ logger = structlog.get_logger(__name__)
 class ApolloFallbackResult:
     email: str = ""
     phone: str = ""
+    # Extra details Apollo returns alongside the match (no extra credit) —
+    # merged onto the recruiter row by each caller's save_enrichment(...).
+    secondary_email: str = ""
+    company_linkedin_url: str = ""
+    address: str = ""
+    city: str = ""
+    state: str = ""
+    country: str = ""
     matched: bool = False
     attempted: bool = False          # True once an Apollo call was actually issued
     source: str = ""                 # "apollo" when Apollo supplied the email
@@ -118,9 +126,18 @@ async def apollo_contact_fallback(
         email_found=bool(email),
         phone_found=bool(phone),
     )
+    org = person.organization
     return ApolloFallbackResult(
         email=email,
         phone=phone,
+        # These ride along with the match (no extra reveal/credit), so pass them
+        # through whenever Apollo matched — independent of email/phone reveal.
+        secondary_email=person.secondary_email or "",
+        company_linkedin_url=(org.linkedin_url if org else "") or "",
+        address=person.address or "",
+        city=person.city or "",
+        state=person.state or "",
+        country=person.country or "",
         matched=person.matched,
         attempted=True,
         source="apollo" if email else "",

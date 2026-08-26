@@ -131,10 +131,16 @@ async def save_enrichment(
     company_website: str = "",
     official_email_id: str = "",
     email_status: str = "NOT_FOUND",
+    secondary_email: str = "",
     contact_number: str = "",
     phone_status: str = "NOT_FOUND",
     linkedin_headline: str = "",
     location: str = "",
+    address: str = "",
+    city: str = "",
+    state: str = "",
+    country: str = "",
+    company_linkedin_url: str = "",
     reporting_hierarchy: str = "",
     position_level: str = "NOT_FOUND",
     employment_type: str = "NOT_FOUND",
@@ -173,11 +179,17 @@ async def save_enrichment(
     _apply("official_email_id", official_email_id)
     if email_status != "NOT_FOUND":
         recruiter.email_status = email_status
+    _apply("secondary_email", secondary_email)
     _apply("contact_number", contact_number)
     if phone_status != "NOT_FOUND":
         recruiter.phone_status = phone_status
     _apply("linkedin_headline", linkedin_headline)
     _apply("location", location)
+    _apply("address", address)
+    _apply("city", city)
+    _apply("state", state)
+    _apply("country", country)
+    _apply("company_linkedin_url", company_linkedin_url)
     _apply("reporting_hierarchy", reporting_hierarchy)
     _apply("position_level", position_level, "NOT_FOUND")
     _apply("employment_type", employment_type, "NOT_FOUND")

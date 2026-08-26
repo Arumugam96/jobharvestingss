@@ -6,14 +6,14 @@
   },
   "filters": {
     "keyword": "",
-    "location": "India",
+    "location": "",
     "job_type": "Contract",
     "work_mode": "Any",
     "search_window_hours": 24,
     "max_jobs": 0,
     "domain": "IT",
     "hiring_entity": "Direct Client",
-    "gcc_mode": "gcc_only",
+    "gcc_mode": "include_gcc",
     "salary_min": null,
     "salary_max": null,
     "salary_currency": "INR",
@@ -34,11 +34,13 @@
   "browser": {
     "headless": false,
     "slow_mo_ms": 0,
-    "chrome_profile": "data/chrome_profile"
+    "chrome_profile": "/app/data/chrome_profile"
   },
   "notifications": {
     "enabled": true,
-    "recipients": ["harijordan95@gmail.com"],
+    "recipients": [
+      "harijordan95@gmail.com"
+    ],
     "report_format": "both",
     "subject_template": "Harvest Report — {run_id} ({status}, {total_jobs} jobs)"
   }

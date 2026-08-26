@@ -82,6 +82,13 @@ def _ensure_recruiter_columns(sync_conn) -> None:
     pending = [
         ("enrichment_source",  "ALTER TABLE recruiters ADD COLUMN enrichment_source VARCHAR(50) NOT NULL DEFAULT ''"),
         ("apollo_enriched_at", f"ALTER TABLE recruiters ADD COLUMN apollo_enriched_at {ts_type}"),
+        # Extra Apollo people-match details mapped onto the recruiter row.
+        ("secondary_email",      "ALTER TABLE recruiters ADD COLUMN secondary_email VARCHAR(255) NOT NULL DEFAULT ''"),
+        ("address",              "ALTER TABLE recruiters ADD COLUMN address TEXT NOT NULL DEFAULT ''"),
+        ("city",                 "ALTER TABLE recruiters ADD COLUMN city VARCHAR(120) NOT NULL DEFAULT ''"),
+        ("state",                "ALTER TABLE recruiters ADD COLUMN state VARCHAR(120) NOT NULL DEFAULT ''"),
+        ("country",              "ALTER TABLE recruiters ADD COLUMN country VARCHAR(120) NOT NULL DEFAULT ''"),
+        ("company_linkedin_url", "ALTER TABLE recruiters ADD COLUMN company_linkedin_url TEXT NOT NULL DEFAULT ''"),
     ]
     for name, ddl in pending:
         if name not in existing_cols:

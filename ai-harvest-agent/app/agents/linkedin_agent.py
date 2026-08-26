@@ -1449,6 +1449,12 @@ class LinkedInAgent:
                             sample.job_poster_designation or "", contact_info.get("headline", ""),
                         ),
                         verified = found_email or found_phone,
+                        secondary_email      = apollo_result.secondary_email if apollo_result else "",
+                        company_linkedin_url = apollo_result.company_linkedin_url if apollo_result else "",
+                        address              = apollo_result.address if apollo_result else "",
+                        city                 = apollo_result.city if apollo_result else "",
+                        state                = apollo_result.state if apollo_result else "",
+                        country              = apollo_result.country if apollo_result else "",
                         enrichment_source = "apollo" if (apollo_result and apollo_result.source) else "",
                         apollo_attempted  = bool(apollo_result and apollo_result.attempted),
                     )

@@ -69,6 +69,7 @@ class ApolloOrgResult(BaseModel):
     name: str | None = None
     domain: str | None = None
     website: str | None = None
+    linkedin_url: str | None = None
     industry: str | None = None
     size: int | None = None
 
@@ -80,6 +81,7 @@ class ApolloOrgResult(BaseModel):
             name=org.get("name"),
             domain=org.get("primary_domain") or org.get("domain"),
             website=org.get("website_url"),
+            linkedin_url=_clean_str(org.get("linkedin_url")),
             industry=org.get("industry"),
             size=org.get("estimated_num_employees"),
         )
@@ -96,7 +98,12 @@ class ApolloPersonResult(BaseModel):
     linkedin_url: str | None = None
     email: str | None = None
     email_status: str | None = None
+    secondary_email: str | None = None
     phone: str | None = None
+    city: str | None = None
+    state: str | None = None
+    country: str | None = None
+    address: str | None = None
     organization: ApolloOrgResult | None = None
 
     @classmethod
@@ -107,6 +114,7 @@ class ApolloPersonResult(BaseModel):
     def from_person(cls, person: dict[str, Any] | None) -> "ApolloPersonResult":
         if not person:
             return cls.no_match()
+        primary = _clean_email(person.get("email"))
         return cls(
             matched=True,
             id=person.get("id"),
@@ -114,9 +122,14 @@ class ApolloPersonResult(BaseModel):
             or " ".join(p for p in (person.get("first_name"), person.get("last_name")) if p) or None,
             title=person.get("title"),
             linkedin_url=person.get("linkedin_url"),
-            email=_clean_email(person.get("email")),
+            email=primary,
             email_status=person.get("email_status"),
+            secondary_email=_secondary_email(person.get("personal_emails"), primary),
             phone=_first_phone(person.get("phone_numbers")),
+            city=_clean_str(person.get("city")),
+            state=_clean_str(person.get("state")),
+            country=_clean_str(person.get("country")),
+            address=_clean_str(person.get("present_raw_address") or person.get("formatted_address")),
             organization=ApolloOrgResult.from_dict(person.get("organization")),
         )
 
@@ -136,6 +149,29 @@ def _clean_email(email: str | None) -> str | None:
     if _LOCKED_EMAIL_MARKER in email.lower():
         return None
     return email.strip() or None
+
+
+def _clean_str(value: Any) -> str | None:
+    """Trim to a real string, or None for empty/missing values."""
+    if not value:
+        return None
+    s = str(value).strip()
+    return s or None
+
+
+def _secondary_email(personal_emails: Any, primary: str | None) -> str | None:
+    """First revealed personal/secondary email that isn't the primary. Apollo
+    returns `personal_emails` as a list of plain strings (occasionally dicts);
+    skip the locked-email sentinel and the primary address itself."""
+    if not personal_emails:
+        return None
+    primary_l = (primary or "").lower()
+    for item in personal_emails:
+        addr = item.get("email") if isinstance(item, dict) else item
+        cleaned = _clean_email(addr) if isinstance(addr, str) else None
+        if cleaned and cleaned.lower() != primary_l:
+            return cleaned
+    return None
 
 
 def _first_phone(phone_numbers: list[dict[str, Any]] | None) -> str | None:
