@@ -10,7 +10,9 @@ app/services/harvest_notification_service.py) depends on
 from __future__ import annotations
 
 import asyncio
+import html as html_lib
 import mimetypes
+import re
 import smtplib
 from email.message import EmailMessage
 from pathlib import Path
@@ -22,6 +24,35 @@ from app.config import Settings
 logger = structlog.get_logger(__name__)
 
 OTP_EMAIL_SUBJECT = "Your Sightspectrum Login OTP"
+
+# Matches an email address inside the plain-text outreach body so it can be
+# rendered as a bold, clickable mailto link in the HTML part (the reach-out line).
+_BODY_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
+
+
+def _outreach_body_to_html(body: str) -> str:
+    """Render the plain-text outreach body as HTML: preserve line breaks and turn
+    any line containing an email address (the appended reach-out line) into a bold
+    line whose address is a clickable mailto link — so the recipient can reply to
+    the sender in one click. All other text is HTML-escaped verbatim."""
+    out_lines: list[str] = []
+    for line in (body or "").split("\n"):
+        escaped = html_lib.escape(line)
+        if _BODY_EMAIL_RE.search(line):
+            escaped = _BODY_EMAIL_RE.sub(
+                lambda m: f'<a href="mailto:{m.group(0)}" style="color:#5f7fd0;">{m.group(0)}</a>',
+                escaped,
+            )
+            escaped = f"<strong>{escaped}</strong>"
+        out_lines.append(escaped)
+    inner = "<br>\n".join(out_lines)
+    return (
+        '<!DOCTYPE html><html><body style="margin:0;padding:0;">'
+        "<div style=\"font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',"
+        'Roboto,Helvetica,Arial,sans-serif;font-size:14px;line-height:1.6;color:#222222;">'
+        f"{inner}"
+        "</div></body></html>"
+    )
 
 # Inline logo shipped with the backend. Embedded into the HTML email as a CID
 # attachment (see EmailSender.send_otp) so it renders without being blocked as
@@ -197,17 +228,31 @@ class EmailSender:
         body: str,
         attachment_paths: list[str] | None = None,
         attachment_blobs: list[tuple[str, bytes]] | None = None,
+        from_email: str | None = None,
+        reply_to: str | None = None,
+        as_html: bool = False,
     ) -> None:
         """Generic SMTP send with attachments — same transport/credentials as
         send_otp. Attachments come as file paths and/or as in-memory
         (filename, bytes) blobs; the harvest report is generated from the DB
-        in memory and attached as a blob."""
+        in memory and attached as a blob.
+
+        `from_email`/`reply_to` set the visible From and add a Reply-To (the
+        recruiter-outreach flow passes the logged-in user's address so the email
+        comes from them). The SMTP envelope sender stays the authenticated mailbox
+        (settings.smtp_username) so providers don't reject a header From they
+        didn't authorize — see _send_with_attachments_sync.
+
+        `as_html=True` adds an HTML alternative part rendered from `body`
+        (outreach: bold, clickable mailto reach-out line). Plain callers (the
+        harvest report) leave it False and send text-only, unchanged."""
         paths = attachment_paths or []
         blobs = attachment_blobs or []
         log = logger.bind(recipients=recipients, subject=subject, attachments=len(paths) + len(blobs))
         log.debug("email_with_attachments_start")
         await asyncio.to_thread(
-            self._send_with_attachments_sync, recipients, subject, body, paths, blobs, log
+            self._send_with_attachments_sync,
+            recipients, subject, body, paths, blobs, from_email, reply_to, as_html, log,
         )
         log.info("email_with_attachments_sent")
 
@@ -218,13 +263,26 @@ class EmailSender:
         body: str,
         attachment_paths: list[str],
         attachment_blobs: list[tuple[str, bytes]],
+        from_email: str | None,
+        reply_to: str | None,
+        as_html: bool,
         log,
     ) -> None:
+        # Visible From is the caller-supplied address (outreach: the logged-in
+        # user); fall back to the authenticated mailbox — NOT smtp_from_email,
+        # which may be a display-name string rather than an address.
+        header_from = from_email or self._settings.smtp_username or self._settings.smtp_from_email
         message = EmailMessage()
         message["Subject"] = subject
-        message["From"] = self._settings.smtp_from_email
+        message["From"] = header_from
+        if reply_to or from_email:
+            message["Reply-To"] = reply_to or from_email
         message["To"] = ", ".join(recipients)
         message.set_content(body)
+        if as_html:
+            # Add the HTML alternative before any attachments so the MIME tree is
+            # multipart/mixed[ multipart/alternative[text, html], attachments… ].
+            message.add_alternative(_outreach_body_to_html(body), subtype="html")
 
         for raw_path in attachment_paths:
             path = Path(raw_path)
@@ -249,9 +307,13 @@ class EmailSender:
                 content_type=f"{maintype}/{subtype}",
             )
 
-        self._send_sync(message, log)
+        # Envelope sender stays the authenticated mailbox even when the From
+        # header is a custom (logged-in-user) address. Use smtp_username (a real
+        # address) rather than smtp_from_email, which may be a display name.
+        envelope_from = self._settings.smtp_username or self._settings.smtp_from_email
+        self._send_sync(message, log, from_addr=envelope_from)
 
-    def _send_sync(self, message: EmailMessage, log=None) -> None:
+    def _send_sync(self, message: EmailMessage, log=None, from_addr: str | None = None) -> None:
         log = log or logger
         settings = self._settings
         log.debug(
@@ -261,7 +323,7 @@ class EmailSender:
             use_tls=settings.smtp_use_tls,
         )
         try:
-            with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=10) as server:
+            with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=settings.smtp_timeout_seconds) as server:
                 log.debug("smtp_connected")
                 if settings.smtp_use_tls:
                     server.starttls()
@@ -271,7 +333,10 @@ class EmailSender:
                     server.login(settings.smtp_username, settings.smtp_password)
                     log.debug("smtp_login_ok")
                 log.debug("smtp_sending_message", to=message["To"])
-                server.send_message(message)
+                if from_addr:
+                    server.send_message(message, from_addr=from_addr)
+                else:
+                    server.send_message(message)
                 log.debug("smtp_send_message_ok")
         except Exception:
             log.exception(

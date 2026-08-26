@@ -231,6 +231,32 @@ export function runRecruiterDiscovery({ source_filter, run_ids, max_files, concu
   return request("/run-recruiter-discovery", { method: "POST", body: JSON.stringify(body) });
 }
 
+// ── Outreach (LLM email / LinkedIn generation + send) ──────────────────────────
+
+/** POST /outreach/generate-email — draft a recruiter email; returns {subject, body, from_email, to_email, client_type, tone, fallback_used, attachment_name}. */
+export function generateOutreachEmail({ job_id, mode, regenerate } = {}) {
+  return request("/outreach/generate-email", {
+    method: "POST",
+    body: JSON.stringify({ job_id, mode, regenerate: !!regenerate }),
+  });
+}
+
+/** POST /outreach/generate-linkedin — draft a LinkedIn outreach message; returns {message, fallback_used}. */
+export function generateLinkedinMessage({ job_id, regenerate } = {}) {
+  return request("/outreach/generate-linkedin", {
+    method: "POST",
+    body: JSON.stringify({ job_id, regenerate: !!regenerate }),
+  });
+}
+
+/** POST /outreach/send-email — send the (possibly edited) email with the pptx attached; returns {status, error}. */
+export function sendOutreachEmail({ job_id, to_email, from_email, subject, body, tone, client_type, fallback_used } = {}) {
+  return request("/outreach/send-email", {
+    method: "POST",
+    body: JSON.stringify({ job_id, to_email, from_email, subject, body, tone, client_type, fallback_used: !!fallback_used }),
+  });
+}
+
 // ── Downloads ────────────────────────────────────────────────────────────────
 
 /** GET /download/json — latest combined harvest JSON (URL for direct download). */

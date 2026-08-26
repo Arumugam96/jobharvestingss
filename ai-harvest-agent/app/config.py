@@ -75,9 +75,14 @@ class Settings(BaseSettings):
     apollo_api_key: str = ""
     apollo_base_url: str = "https://api.apollo.io/api/v1"
     apollo_timeout_s: float = 20.0
-    # Phone reveal is asynchronous on Apollo (delivered via a webhook we don't expose),
-    # and costs ~8x an email reveal — off by default; only emails resolve synchronously.
+    # Phone reveal is asynchronous on Apollo (delivered via a webhook), and costs
+    # ~8x an email reveal — off by default; only emails resolve synchronously.
     apollo_reveal_phone: bool = False
+    # Apollo REQUIRES a webhook_url whenever reveal_phone_number is set — without
+    # it the whole /people/match request 400s (taking the email down with it).
+    # Leave empty and phone reveal is silently downgraded to email-only so the
+    # email still resolves; set it to a receiver URL to actually get phones.
+    apollo_webhook_url: str = ""
     # Per-profile cooldown: don't re-call Apollo for a recruiter enriched/attempted
     # within this many days (prevents re-spending on the same no-match profile).
     apollo_recheck_days: int = 30
@@ -154,6 +159,12 @@ class Settings(BaseSettings):
     smtp_password: str = ""
     smtp_from_email: str = ""
     smtp_use_tls: bool = True
+    # Socket timeout (seconds) for the whole SMTP exchange, including the DATA
+    # write. 10s is fine for the tiny OTP email but too tight to upload the
+    # ~9 MB (base64) corporate-overview attachment on the outreach email — that
+    # write times out and the server drops the connection. 60s covers a multi-MB
+    # attachment on a modest uplink; raise SMTP_TIMEOUT_SECONDS if sends still time out.
+    smtp_timeout_seconds: int = 60
 
     # ── CORS ─────────────────────────────────────────────────────────────────────
     # Kept as a plain str (not list[str]) — pydantic-settings' env source treats

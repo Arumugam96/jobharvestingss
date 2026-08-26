@@ -20,7 +20,7 @@ from sqlalchemy.orm import noload
 
 from app.config import get_settings
 from app.core.dependencies import get_session_factory
-from app.models.harvest_run import HarvestRunORM, LlmCallORM, ScrapedJobORM
+from app.models.harvest_run import HarvestRunORM, LlmCallORM, LlmCallType, ScrapedJobORM
 from app.services.recruiter_service import upsert_recruiter
 
 logger = structlog.get_logger(__name__)
@@ -210,6 +210,7 @@ class HarvestRunService:
                 LlmCallORM(
                     id=str(uuid.uuid4()),
                     run_id=run_pk,
+                    call_type=c.get("call_type", LlmCallType.HARVEST),
                     job_url=c.get("job_url"),
                     provider=c["provider"],
                     model=c["model"],
@@ -390,6 +391,51 @@ class HarvestRunService:
             select(ScrapedJobORM).order_by(ScrapedJobORM.posted_date.desc())
         )
         return list(result.scalars())
+
+
+# ── Ad-hoc LLM call audit (non-run-scoped) ──────────────────────────────────────
+
+async def insert_llm_call(
+    db: AsyncSession,
+    *,
+    call_type: str,
+    provider: str,
+    model: str,
+    prompt: str = "",
+    response: str | None = None,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+    latency_ms: int | None = None,
+    success: bool = True,
+    error_message: str | None = None,
+    job_url: str | None = None,
+    run_id: str | None = None,
+) -> None:
+    """Record one LLM call in the shared `llm_calls` table. Unlike
+    HarvestRunService.bulk_insert_llm_calls (harvest-run-scoped), this takes any
+    session and defaults run_id=None, so the outreach flow (email/linkedin
+    generation) can audit its calls without a harvest run. prompt/response char
+    counts are derived so callers only pass the text."""
+    db.add(
+        LlmCallORM(
+            id=str(uuid.uuid4()),
+            run_id=run_id,
+            call_type=call_type,
+            job_url=job_url,
+            provider=provider,
+            model=model,
+            prompt=prompt or "",
+            response=response,
+            prompt_chars=len(prompt or ""),
+            response_chars=len(response or ""),
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            latency_ms=latency_ms,
+            success=success,
+            error_message=error_message,
+        )
+    )
+    await db.flush()
 
 
 # ── Shared read-side view helpers ───────────────────────────────────────────────

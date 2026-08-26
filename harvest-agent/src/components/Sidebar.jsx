@@ -73,7 +73,7 @@ export default function Sidebar({ activePage, onNavigate = () => {}, jobsCount, 
 const styles = `
   .ha-sidebar{display:none;width:240px;flex-shrink:0;flex-direction:column;padding:5px 5px;background:#1E293B;font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;position:sticky;top:0;align-self:flex-start;height:100vh;overflow-y:auto;}
   @media(min-width:768px){.ha-sidebar{display:flex;}}
-  .ha-logo-img{width:150px;height:150px;max-width:100%;object-fit:cover;display:block;border-radius:50%;padding:5px 0px 5px;}
+  .ha-logo-img{width:100px;height:100px;max-width:100%;object-fit:cover;display:block;border-radius:50%;padding:5px 0px 5px;}
   .ha-tagline{margin-top:4px;font-size:11px;text-transform:uppercase;letter-spacing:.14em;color:#94A3B8;white-space:nowrap;}
   .ha-navhead{padding:0 12px 8px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.14em;color:#64748B;}
   .ha-nav{display:flex;width:100%;align-items:center;gap:12px;border:0;background:transparent;cursor:pointer;border-radius:8px;padding:8px 12px;font-size:14px;color:#CBD5E1;transition:.15s;}

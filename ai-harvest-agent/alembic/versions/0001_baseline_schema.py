@@ -25,6 +25,7 @@ from alembic import op
 import app.models.auth  # noqa: F401
 import app.models.harvest_run  # noqa: F401
 import app.models.recruiter  # noqa: F401
+import app.models.outreach  # noqa: F401
 from app.models.harvest import Base
 
 # revision identifiers, used by Alembic.

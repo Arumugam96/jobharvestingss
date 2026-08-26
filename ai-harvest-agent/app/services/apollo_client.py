@@ -13,9 +13,12 @@ every call that reveals data emits an ``apollo_credits_used`` log line. Callers
 are responsible for gating/caching (see ``apollo_enrichment.apollo_contact_fallback``).
 
 Phone reveal note: Apollo returns phone numbers *asynchronously* via a webhook,
-not in the match response. We pass ``reveal_phone_number`` when asked, but with
-no webhook receiver configured phones will not resolve synchronously — only
-emails do. Kept off by default (``settings.apollo_reveal_phone``).
+not in the match response, and it *requires* a ``webhook_url`` param whenever
+``reveal_phone_number`` is set — otherwise the whole request 400s (taking the
+email reveal down with it). So phone reveal is only sent when both
+``settings.apollo_reveal_phone`` AND ``settings.apollo_webhook_url`` are set;
+without a webhook it is silently downgraded to email-only so the email still
+resolves. Even with a webhook, phones arrive at that URL later, not inline.
 """
 from __future__ import annotations
 
@@ -196,6 +199,9 @@ class ApolloClient:
         self._api_key = settings.apollo_api_key
         self._base_url = settings.apollo_base_url.rstrip("/")
         self._timeout = settings.apollo_timeout_s
+        # Required by Apollo whenever reveal_phone_number is set; empty disables
+        # phone reveal (downgraded to email-only) so the request never 400s.
+        self._webhook_url = (settings.apollo_webhook_url or "").strip()
 
     @property
     def enabled(self) -> bool:
@@ -221,11 +227,17 @@ class ApolloClient:
         if not linkedin_url:
             return ApolloPersonResult.no_match()
 
+        # Only ask for a phone when a webhook_url is configured — Apollo 400s the
+        # whole request (email included) if reveal_phone_number is set without one.
+        want_phone = reveal_phone and self._phone_reveal_allowed(linkedin_url)
+
         params: dict[str, Any] = {
             "linkedin_url": linkedin_url,
             "reveal_personal_emails": _bool(reveal_email),
-            "reveal_phone_number": _bool(reveal_phone),
+            "reveal_phone_number": _bool(want_phone),
         }
+        if want_phone:
+            params["webhook_url"] = self._webhook_url
         if name:
             params["name"] = name
         if company:
@@ -250,14 +262,19 @@ class ApolloClient:
         Returns one ApolloPersonResult per input item, order-preserved."""
         if not self.enabled:
             raise ApolloAPIError("Apollo is not configured (APOLLO_API_KEY is empty)")
+        # Same webhook gate as the single-match path — a phone reveal without a
+        # webhook_url 400s the whole batch.
+        want_phone = reveal_phone and self._phone_reveal_allowed("bulk_match")
         results: list[ApolloPersonResult] = []
         for start in range(0, len(items), _BULK_MAX):
             chunk = items[start:start + _BULK_MAX]
-            payload = {
+            payload: dict[str, Any] = {
                 "details": chunk,
                 "reveal_personal_emails": reveal_email,
-                "reveal_phone_number": reveal_phone,
+                "reveal_phone_number": want_phone,
             }
+            if want_phone:
+                payload["webhook_url"] = self._webhook_url
             data = await self._request("/people/bulk_match", json=payload)
             matches = data.get("matches")
             if not isinstance(matches, list):
@@ -270,6 +287,19 @@ class ApolloClient:
         return results
 
     # ── Internals ──────────────────────────────────────────────────────────────
+
+    def _phone_reveal_allowed(self, context: str) -> bool:
+        """Phone reveal is only sent to Apollo when a webhook_url is configured;
+        otherwise the request would 400. Logs a one-off warning when a requested
+        reveal is downgraded so the miss is visible without breaking the call."""
+        if self._webhook_url:
+            return True
+        logger.warning(
+            "apollo_phone_reveal_downgraded_no_webhook",
+            context=context,
+            hint="set APOLLO_WEBHOOK_URL to enable phone reveal; email-only for now",
+        )
+        return False
 
     @retry(
         stop=stop_after_attempt(3),

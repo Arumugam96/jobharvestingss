@@ -8,6 +8,8 @@ import {
 import JobDetailsView from "./JobDetailsView";
 import RuleEngineConfig from "./RuleEngineConfig";
 import Sidebar from "./components/Sidebar";
+import EmailComposeModal from "./components/EmailComposeModal";
+import LinkedInMessageModal from "./components/LinkedInMessageModal";
 import {
   getJobs, getRunHistory, getRunHistoryEntry, getActiveRun, ApiError,
   runLinkedinAgent, getLinkedinResults, getLinkedinResult,
@@ -333,7 +335,11 @@ function MultiSelect({ label, options, selected, onChange }) {
   );
 }
 
-function ContactIcon({ glyph: Glyph, href, title }) {
+// Contact action in the jobs table. When `href` is set (WhatsApp) it's a link
+// that opens in a new tab. Otherwise it's a button: `available` rows call
+// `onClick` (open the Email/LinkedIn composer); unavailable rows also call
+// `onClick` (to surface the "no data" inline message) but render greyed out.
+function ContactActionBtn({ glyph: Glyph, title, available, href, onClick }) {
   if (href) {
     return (
       <a className="ha-cbtn ha-cbtn-on" href={href} target="_blank" rel="noreferrer" title={title}>
@@ -342,9 +348,15 @@ function ContactIcon({ glyph: Glyph, href, title }) {
     );
   }
   return (
-    <span className="ha-cbtn ha-cbtn-off" title={title + " not available"} aria-disabled="true">
+    <button
+      type="button"
+      className={"ha-cbtn " + (available ? "ha-cbtn-on" : "ha-cbtn-off")}
+      style={available ? undefined : { cursor: "pointer" }}
+      title={available ? title : title + " not available"}
+      onClick={onClick}
+    >
       <Glyph size={16} />
-    </span>
+    </button>
   );
 }
 
@@ -657,6 +669,18 @@ function JobsPage({ jobs, total, loading, error, onRefresh, onNavigate, onView }
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState({ col: "posted", dir: "desc" });
 
+  // Outreach modals + the per-row "no data on this channel" inline message.
+  const [emailModalJob, setEmailModalJob] = useState(null);
+  const [linkedinModalJob, setLinkedinModalJob] = useState(null);
+  const [noDataMsg, setNoDataMsg] = useState(null); // { jobId, channel }
+  const noDataTimer = useRef(null);
+  const showNoData = useCallback((jobId, channel) => {
+    setNoDataMsg({ jobId, channel });
+    if (noDataTimer.current) clearTimeout(noDataTimer.current);
+    noDataTimer.current = setTimeout(() => setNoDataMsg(null), 3000);
+  }, []);
+  useEffect(() => () => { if (noDataTimer.current) clearTimeout(noDataTimer.current); }, []);
+
   const counts = useMemo(() => ({
     all: jobs.length,
     email: jobs.filter((j) => j.email).length,
@@ -843,12 +867,21 @@ function JobsPage({ jobs, total, loading, error, onRefresh, onNavigate, onView }
                         : <span style={{ color: "#94A3B8" }}>—</span>}
                     </td>
                     <td className="ha-td">
-                      <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
-                        <ContactIcon glyph={WhatsAppIcon} title="WhatsApp"
-                          href={j.whatsapp ? "https://wa.me/" + j.whatsapp.replace(/[^0-9]/g, "") : null} />
-                        <ContactIcon glyph={Mail} title="Email"
-                          href={j.email ? "mailto:" + j.email : null} />
-                        <ContactIcon glyph={LinkedInIcon} title="LinkedIn" href={j.linkedin || null} />
+                      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
+                        <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
+                          <ContactActionBtn glyph={WhatsAppIcon} title="WhatsApp" available={!!j.whatsapp}
+                            href={j.whatsapp ? "https://wa.me/" + j.whatsapp.replace(/[^0-9]/g, "") : null}
+                            onClick={() => showNoData(j.id, "WhatsApp")} />
+                          <ContactActionBtn glyph={Mail} title="Email" available={!!j.email}
+                            onClick={() => (j.email ? setEmailModalJob(j) : showNoData(j.id, "email"))} />
+                          <ContactActionBtn glyph={LinkedInIcon} title="LinkedIn" available={!!j.linkedin}
+                            onClick={() => (j.linkedin ? setLinkedinModalJob(j) : showNoData(j.id, "LinkedIn"))} />
+                        </div>
+                        {noDataMsg && noDataMsg.jobId === j.id && (
+                          <small style={{ color: "#B91C1C", fontSize: 11, whiteSpace: "nowrap" }}>
+                            No {noDataMsg.channel} available
+                          </small>
+                        )}
                       </div>
                     </td>
                     <td className="ha-td">
@@ -873,6 +906,9 @@ function JobsPage({ jobs, total, loading, error, onRefresh, onNavigate, onView }
           </div>
         </div>
       </div>
+
+      {emailModalJob && <EmailComposeModal job={emailModalJob} onClose={() => setEmailModalJob(null)} />}
+      {linkedinModalJob && <LinkedInMessageModal job={linkedinModalJob} onClose={() => setLinkedinModalJob(null)} />}
     </main>
   );
 }

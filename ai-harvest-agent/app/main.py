@@ -26,6 +26,7 @@ from app.core.middleware import LoggingMiddleware, RateLimitMiddleware
 import app.models.auth  # noqa: F401 — registers users / otp_verifications on Base.metadata
 import app.models.harvest_run  # noqa: F401 — registers harvest_runs / scraped_jobs / llm_calls on Base.metadata
 import app.models.recruiter  # noqa: F401 — registers recruiters on Base.metadata
+import app.models.outreach  # noqa: F401 — registers email_outreach on Base.metadata
 from app.models.harvest import Base
 from app.routes import harvest, agents, tasks, health, job_parser, linkedin_harvest
 from app.routes.auth_routes import router as auth_router
@@ -38,6 +39,7 @@ from app.routes.frontend_routes import router as frontend_router
 from app.routes.prospect_routes import router as prospect_intelligence_router
 from app.routes.recruiter_routes import router as recruiter_discovery_router
 from app.routes.lead_intelligence_routes import router as lead_intelligence_router
+from app.routes.outreach_routes import router as outreach_router
 from app.services.job_tracker import JobTracker
 from app.services.playwright_service import PlaywrightService
 from app.services.scheduler_service import SchedulerService
@@ -96,6 +98,30 @@ def _ensure_recruiter_columns(sync_conn) -> None:
             logger.info("recruiters_column_added", column=name)
 
 
+def _ensure_llm_calls_columns(sync_conn) -> None:
+    """One-time, idempotent migration for the pre-existing llm_calls table so it
+    can also hold ad-hoc outreach LLM calls: add the `call_type` purpose tag and
+    drop NOT NULL on `run_id` (outreach generations have no harvest run). Mirrors
+    the other _ensure_* helpers — create_all never alters an existing table."""
+    inspector = sa_inspect(sync_conn)
+    if "llm_calls" not in inspector.get_table_names():
+        return  # brand-new DB — create_all already made this table from the model
+    columns = {c["name"]: c for c in inspector.get_columns("llm_calls")}
+    if "call_type" not in columns:
+        sync_conn.execute(sa_text(
+            "ALTER TABLE llm_calls ADD COLUMN call_type VARCHAR(30) NOT NULL DEFAULT 'harvest'"
+        ))
+        logger.info("llm_calls_column_added", column="call_type")
+    # Drop NOT NULL on run_id so outreach calls can be stored with run_id=NULL.
+    # Postgres-only: SQLite can't ALTER a column's nullability, but a fresh
+    # SQLite DB already gets nullable=True straight from the model via create_all.
+    if sync_conn.dialect.name == "postgresql":
+        run_id_col = columns.get("run_id")
+        if run_id_col is not None and not run_id_col.get("nullable", True):
+            sync_conn.execute(sa_text("ALTER TABLE llm_calls ALTER COLUMN run_id DROP NOT NULL"))
+            logger.info("llm_calls_run_id_nullable")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Startup: launch browser pool + scheduler. Shutdown: clean up both."""
@@ -118,6 +144,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # recruiters gained Apollo provenance columns (enrichment_source,
         # apollo_enriched_at) — same idempotent ADD COLUMN treatment.
         await conn.run_sync(_ensure_recruiter_columns)
+        # llm_calls gained a call_type tag + nullable run_id so it can also hold
+        # outreach (email/linkedin) generation calls, not just harvest calls.
+        await conn.run_sync(_ensure_llm_calls_columns)
 
     # Reconcile stale 'running' runs left by a previous process (a harvest runs
     # in a detached task that doesn't survive a restart). Without this, the
@@ -256,6 +285,7 @@ def create_app() -> FastAPI:
     app.include_router(prospect_intelligence_router, dependencies=protected)  # POST /run-prospect-intelligence
     app.include_router(recruiter_discovery_router, dependencies=protected)    # POST /run-recruiter-discovery
     app.include_router(lead_intelligence_router, dependencies=protected)      # POST /run-lead-intelligence, GET /lead-intelligence, /download/lead-intelligence/*
+    app.include_router(outreach_router, dependencies=protected)               # POST /outreach/generate-email, /generate-linkedin, /send-email
 
     return app
 

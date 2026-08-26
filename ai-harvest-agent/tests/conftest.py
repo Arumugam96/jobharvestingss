@@ -22,6 +22,7 @@ async def engine():
     import app.models.auth  # noqa: F401 — registers users / otp_verifications on Base.metadata
     import app.models.harvest_run  # noqa: F401 — registers harvest_runs / scraped_jobs / llm_calls on Base.metadata
     import app.models.recruiter  # noqa: F401 — registers recruiters (scraped_jobs.recruiter_id FK target) on Base.metadata
+    import app.models.outreach  # noqa: F401 — registers email_outreach on Base.metadata
 
     eng = create_async_engine(TEST_DB_URL, echo=False)
     async with eng.begin() as conn:
@@ -73,8 +74,14 @@ class MockLLMService:
         resp.content = [block]
         return resp
 
-    async def complete_text(self, prompt, system=""):
+    async def complete_text(self, prompt, system="", model=None):
         return "Mock strategy: navigate, extract, finish."
+
+    def resolve_target(self):
+        return ("claude", "mock-model")
+
+    async def generate_text(self, prompt, system="", *, json_mode=False, model=None):
+        return ("Mock generated text.", 100, 50, "claude", "mock-model")
 
     async def extract_json(self, content, schema_description, system="", debug_dir=None):
         return {"mock_field": "mock_value"}

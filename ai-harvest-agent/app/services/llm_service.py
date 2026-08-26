@@ -303,18 +303,58 @@ class LLMService:
             raise LLMUnavailableError(f"Anthropic API error: {exc}") from exc
 
     async def complete_text(self, prompt: str, system: str = "", model: str | None = None) -> str:
-        """Convenience wrapper returning plain text."""
-        response = await self.complete(
-            messages=[LLMMessage.user(prompt)],
-            system=system,
-            model=model,
+        """Convenience wrapper returning plain text, routed through the centrally
+        configured provider (EXTRACTION_LLM_MODEL) — see generate_text(). `model`
+        overrides the Claude model id only (ignored for local/OpenRouter)."""
+        text, _in, _out, _provider, _model = await self.generate_text(
+            prompt, system, json_mode=False, model=model,
         )
-        for block in response.content:
-            if block.type == "text":
-                return block.text
-        return ""
+        return text
+
+    async def generate_text(
+        self,
+        prompt: str,
+        system: str = "",
+        *,
+        json_mode: bool = False,
+        model: str | None = None,
+    ) -> tuple[str, int, int, str, str]:
+        """Free-text (or JSON) generation routed through the centrally configured
+        provider — the SAME selection extract_json() uses (EXTRACTION_LLM_MODEL,
+        with LOCAL_LLM_* / OPENROUTER_* as connection details). This is the single
+        entry point every non-extraction LLM call should go through so local-LLM /
+        OpenRouter / Claude is chosen once, from the env file.
+
+        Returns (text, input_tokens, output_tokens, provider, model). Set
+        json_mode=True to ask the provider for a JSON object (Ollama format=json /
+        OpenRouter response_format); leave False for plain text. `model` overrides
+        only the Claude model id (local/OpenRouter models come from config)."""
+        provider, resolved = self.resolve_target()
+        if provider == _PROVIDER_OLLAMA:
+            text, input_tokens, output_tokens = await self._complete_text_local(
+                prompt, system, resolved, json_mode=json_mode
+            )
+        elif provider == _PROVIDER_OPENROUTER:
+            text, input_tokens, output_tokens = await self._complete_text_openrouter(
+                prompt, system, resolved, json_mode=json_mode
+            )
+        else:
+            resolved = model or resolved
+            response = await self.complete(
+                messages=[LLMMessage.user(prompt)], system=system, model=resolved
+            )
+            text = self.get_text(response)
+            input_tokens, output_tokens = response.usage.input_tokens, response.usage.output_tokens
+        return text, input_tokens, output_tokens, provider, resolved
 
     # ── Provider selection ────────────────────────────────────────────────────
+
+    def resolve_target(self) -> tuple[str, str]:
+        """Public accessor for the centrally configured (provider, model) pair —
+        the same selection extraction and generation use. Callers (e.g.
+        OutreachService) use it to stamp the provider/model on an audit row even
+        when the call itself fails before generate_text() can report them back."""
+        return self._resolve_extraction_target()
 
     def _resolve_extraction_target(self) -> tuple[str, str]:
         """
@@ -363,15 +403,23 @@ class LLMService:
         reraise=True,
         after=_track_attempt,
     )
-    async def _complete_text_local(self, prompt: str, system: str, model: str) -> tuple[str, int, int]:
-        """Call a locally-deployed Ollama model. Returns (text, prompt_eval_count, eval_count)."""
+    async def _complete_text_local(
+        self, prompt: str, system: str, model: str, json_mode: bool = True
+    ) -> tuple[str, int, int]:
+        """Call a locally-deployed Ollama model. Returns (text, prompt_eval_count, eval_count).
+
+        json_mode=True forces Ollama's JSON output (format=json) — correct for
+        extraction and the outreach email. Pass False for free-text generation
+        (harvest strategy planning, LinkedIn messages) so the model isn't coerced
+        into emitting JSON."""
         url = f"{self._local_llm_url.rstrip('/')}/api/generate"
         payload: dict[str, Any] = {
             "model": model,
             "prompt": prompt,
             "stream": False,
-            "format": "json",
         }
+        if json_mode:
+            payload["format"] = "json"
         if system:
             payload["system"] = system
 
@@ -416,9 +464,14 @@ class LLMService:
         reraise=True,
         after=_track_attempt,
     )
-    async def _complete_text_openrouter(self, prompt: str, system: str, model: str) -> tuple[str, int, int]:
+    async def _complete_text_openrouter(
+        self, prompt: str, system: str, model: str, json_mode: bool = True
+    ) -> tuple[str, int, int]:
         """Call an OpenRouter chat-completions model (OpenAI-compatible REST API).
-        Returns (text, prompt_tokens, completion_tokens)."""
+        Returns (text, prompt_tokens, completion_tokens).
+
+        json_mode=True requests a JSON object (response_format) — correct for
+        extraction and the outreach email. Pass False for free-text generation."""
         if not self._openrouter_api_key:
             raise LLMUnavailableError("OpenRouter extraction requested but OPENROUTER_API_KEY is not set")
 
@@ -430,8 +483,9 @@ class LLMService:
         payload: dict[str, Any] = {
             "model": model,
             "messages": messages,
-            "response_format": {"type": "json_object"},
         }
+        if json_mode:
+            payload["response_format"] = {"type": "json_object"}
         headers = {
             "Authorization": f"Bearer {self._openrouter_api_key}",
             "Content-Type": "application/json",

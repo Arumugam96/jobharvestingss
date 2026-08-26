@@ -120,12 +120,29 @@ class ScrapedJobORM(Base):
     recruiter: Mapped["RecruiterORM | None"] = relationship(back_populates="jobs", lazy="selectin")
 
 
+class LlmCallType:
+    """Purpose discriminator for LlmCallORM.call_type — lets one audit table
+    cover every LLM call across the app, tagged by what it was for. Harvest/
+    contact-extraction calls come from the scrape pipeline (run-scoped);
+    email/linkedin generation come from the outreach flow (run_id is NULL)."""
+    HARVEST = "harvest"
+    CONTACT_EXTRACTION = "contact_extraction"
+    EMAIL_GENERATION = "email_generation"
+    LINKEDIN_GENERATION = "linkedin_generation"
+
+
 class LlmCallORM(Base):
     __tablename__ = "llm_calls"
     __table_args__ = (Index("ix_llm_calls_run_called_at", "run_id", "called_at"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    run_id: Mapped[str] = mapped_column(ForeignKey("harvest_runs.id"), nullable=False, index=True)
+    # Nullable: harvest/extraction calls belong to a run; ad-hoc outreach
+    # generations (email/linkedin from the UI) have no harvest run, so they are
+    # stored with run_id=NULL. FK constraint kept, only NOT NULL dropped.
+    run_id: Mapped[str | None] = mapped_column(ForeignKey("harvest_runs.id"), nullable=True, index=True)
+    # What this LLM call was for — see LlmCallType. Defaults to "harvest" so
+    # legacy rows (and existing harvest inserts) read as harvest calls.
+    call_type: Mapped[str] = mapped_column(String(30), nullable=False, default=LlmCallType.HARVEST)
     # Denormalized correlation key, not a hard FK — the LLM fallback fires mid-scrape,
     # before ScrapedJobORM rows exist for the run's final deduped job list.
     job_url: Mapped[str | None] = mapped_column(Text, nullable=True)
