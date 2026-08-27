@@ -139,7 +139,7 @@ EMAIL_SYSTEM_PROMPT = (
     "You are a business-development specialist at Sightspectrum, an IT staffing "
     "firm. You write short B2B outreach emails to recruiters/talent-acquisition "
     "contacts who have posted a job, offering Sightspectrum's staffing support. "
-    "Rules: keep it concise (roughly 120-200 words); plain text only (no "
+    "Rules: keep it concise (roughly 30-40 words); plain text only (no "
     "markdown, no HTML); do not invent facts, statistics, names, phone numbers, "
     "or email addresses; base the message on the provided reference text, "
     "preserving its intent and offer; personalize naturally to the recipient's "
@@ -150,11 +150,7 @@ EMAIL_SYSTEM_PROMPT = (
     '"Hello,". NEVER output a bracketed placeholder such as "[Recipient Name]", '
     '"[Name]", "[Company]", or "[Your Name]" — if a detail is unknown, omit it '
     "or rephrase neutrally. Write ONLY the pitch: do NOT add a closing sign-off "
-    "(no 'Best Regards', no 'Sightspectrum Team'), and do NOT add any contact "
-    "line, email address, or phone number — a reach-out line and the signature "
-    "are appended automatically after your message, so end right after the main "
-    "body. Do NOT mention or refer to an attachment or say 'attached'; a link to "
-    "our company overview is appended automatically when available. "
+    "(no 'Best Regards', no 'Sightspectrum Team')"
     'Return ONLY valid JSON of the form {"subject": "...", "body": "..."} with '
     "no commentary and no code fences."
 )
@@ -163,7 +159,7 @@ LINKEDIN_SYSTEM_PROMPT = (
     "You are a business-development specialist at Sightspectrum, an IT staffing "
     "firm. You write a short LinkedIn outreach message (a connection/InMail note) "
     "to a recruiter who posted a job, offering Sightspectrum's staffing support. "
-    "Rules: keep it under 120 words, ideally under 600 characters; plain text "
+    "Rules: keep it under 100 words, ideally under 500 characters; plain text "
     "only; friendly and professional; do not invent facts or contact details; "
     "personalize to the company and role. Greet the recipient by their first "
     'name when a recipient name is given (e.g. "Hi Jane,"); otherwise use a '
@@ -178,16 +174,12 @@ LINKEDIN_SYSTEM_PROMPT = (
 
 def _job_context(job: dict) -> str:
     company = (job.get("company") or "").strip() or "the company"
-    title = (job.get("job_title") or "").strip() or "the role"
     poster = (job.get("job_poster_name") or "").strip()
-    designation = (job.get("job_poster_designation") or "").strip()
-    location = (job.get("location") or "").strip()
     jd = (job.get("job_description") or "").strip()
     if len(jd) > 1500:  # keep the prompt bounded; the opening is the useful part
         jd = jd[:1500] + " …"
     lines = [
         f"Company: {company}",
-        f"Role posted: {title}",
     ]
     if poster:
         first_name = poster.split()[0]
@@ -200,10 +192,6 @@ def _job_context(job: dict) -> str:
             "Recipient name: unknown — use a neutral greeting (e.g. \"Hello,\"); "
             "do NOT invent a name and do NOT leave a bracketed placeholder"
         )
-    if designation:
-        lines.append(f"Recipient title: {designation}")
-    if location:
-        lines.append(f"Location: {location}")
     if jd:
         lines.append(f"Job description (for context, do not quote verbatim):\n{jd}")
     return "\n".join(lines)
