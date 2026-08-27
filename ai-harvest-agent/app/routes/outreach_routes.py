@@ -174,6 +174,7 @@ async def send_email(
     is persisted (raising would roll back the session)."""
     to_email = (body.to_email or "").strip()
     from_email = (body.from_email or "").strip()
+    logger.info(f"the Email from {from_email} is sent to {to_email}")
     if not _EMAIL_RE.match(to_email):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid recipient email")
     if from_email and not _EMAIL_RE.match(from_email):

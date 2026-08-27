@@ -47,6 +47,7 @@ from playwright.async_api import (
 )
 
 from app.config import get_settings
+from app.core.linkedin_geo import resolve_geo
 from app.models.harvest_models import FiltersConfig
 
 logger = structlog.get_logger(__name__)
@@ -731,10 +732,15 @@ class LinkedInFormScraper:
             "keywords": keywords,
             "sortBy":   "DD",
         }
-        # location is optional — only constrain the search when one is provided
-        # (mirrors dice_scraper._build_search_url).
-        if location:
-            params["location"] = location
+        # Geography is applied via LinkedIn's real geo filter (geoId), not the
+        # free-text location alone — without a geoId LinkedIn falls back to the
+        # scraping account's home location. A blank location resolves to
+        # Worldwide (global), a known name to its geoId; an unknown name is passed
+        # through as free-text for LinkedIn to resolve server-side.
+        geo_id, geo_label = resolve_geo(location)
+        params["location"] = geo_label
+        if geo_id:
+            params["geoId"] = geo_id
         wt  = _WORK_MODE_MAP.get(work_mode, "")
         jt  = _JOB_TYPE_MAP.get(job_type, "")
         tpr = _DATE_MAP.get(search_window_hours, "")

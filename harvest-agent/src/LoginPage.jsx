@@ -196,10 +196,15 @@ export default function LoginPage({ onAuthenticated }) {
           setError(err.message || `Please wait before requesting another code.`);
           return;
         }
+        // A non-ApiError here means fetch itself rejected — the request never
+        // reached the server. In practice that's an ad-blocker / privacy
+        // extension or an offline connection (classic "works in a private
+        // window but not the normal profile"), so point the user at that.
         setError(
           err instanceof ApiError
             ? err.message
-            : "Could not send the code — check your connection and try again."
+            : "Couldn't reach the server. A browser extension or ad-blocker may be "
+              + "blocking the request — try a private window or disabling extensions."
         );
         return;
       }

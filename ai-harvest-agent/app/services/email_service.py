@@ -280,10 +280,10 @@ class EmailSender:
         # Visible From is the caller-supplied address (outreach: the logged-in
         # user); fall back to the authenticated mailbox — NOT smtp_from_email,
         # which may be a display-name string rather than an address.
-        header_from = from_email or self._settings.smtp_username or self._settings.smtp_from_email
+        # header_from = from_email or self._settings.smtp_from_email
         message = EmailMessage()
         message["Subject"] = subject
-        message["From"] = header_from
+        message["From"] = from_email or self._settings.smtp_from_email
         if reply_to or from_email:
             message["Reply-To"] = reply_to or from_email
         message["To"] = ", ".join(recipients)
@@ -320,7 +320,7 @@ class EmailSender:
         # header is a custom (logged-in-user) address. Use smtp_username (a real
         # address) rather than smtp_from_email, which may be a display name.
         envelope_from = self._settings.smtp_username or self._settings.smtp_from_email
-        self._send_sync(message, log, from_addr=envelope_from)
+        self._send_sync(message, log, header_from)
 
     def _send_sync(self, message: EmailMessage, log=None, from_addr: str | None = None) -> None:
         log = log or logger

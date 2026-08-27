@@ -45,6 +45,7 @@ from app.core.text_formatting import (
     format_job_description,
     sanitize_description_html,
 )
+from app.core.linkedin_geo import resolve_geo
 from app.models.harvest_models import FiltersConfig
 from app.scrapers.browser_manager import PersistentBrowserManager
 
@@ -1578,9 +1579,15 @@ class LinkedInAgent:
         params: list[str] = [
             f"keywords={quote_plus(keyword_query)}",
         ]
-        # location is optional — only constrain the search when one is provided.
-        if f.location:
-            params.append(f"location={quote_plus(f.location)}")
+        # Geography is applied via LinkedIn's real geo filter (geoId), not the
+        # free-text location alone — without a geoId LinkedIn falls back to the
+        # scraping account's home location. A blank location resolves to
+        # Worldwide (global), a known name to its geoId; an unknown name is passed
+        # through as free-text for LinkedIn to resolve server-side.
+        geo_id, geo_label = resolve_geo(f.location)
+        params.append(f"location={quote_plus(geo_label)}")
+        if geo_id:
+            params.append(f"geoId={geo_id}")
         params.append("sortBy=DD")
         if wt := _WORK_MODE_MAP.get(f.work_mode, ""):
             params.append(f"f_WT={wt}")
