@@ -802,7 +802,11 @@ function JobsPage({ jobs, total, loading, error, onRefresh, onNavigate, onView }
           <Select label="Company" value={filters.company} onChange={(v) => setFilters((f) => ({ ...f, company: v }))}
             options={[{ value: "all", label: "All" }, ...companies.map((c) => ({ value: c, label: c }))]} />
           <MultiSelect label="Contact" selected={filters.contact} onChange={(v) => setFilters((f) => ({ ...f, contact: v }))}
-            options={[{ value: "email", label: "Email" }, { value: "mobile", label: "Mobile" }, { value: "linkedin", label: "LinkedIn" }]} />
+            options={[
+              { value: "email", label: "Has Email" }, { value: "mobile", label: "Has Mobile" }, { value: "linkedin", label: "Has LinkedIn" },
+              { value: "no_email", label: "No Email" }, { value: "no_mobile", label: "No Mobile" }, { value: "no_linkedin", label: "No LinkedIn" },
+              { value: "none", label: "No Contact Info" },
+            ]} />
           <Select label="Job" value={filters.job} onChange={(v) => setFilters((f) => ({ ...f, job: v }))}
             options={[{ value: "all", label: "All" }, ...jobTitles.map((t) => ({ value: t, label: t }))]} />
           <Select label="POC" value={filters.poc} onChange={(v) => setFilters((f) => ({ ...f, poc: v }))}
