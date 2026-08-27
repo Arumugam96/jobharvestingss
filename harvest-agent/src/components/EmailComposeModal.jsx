@@ -1,12 +1,13 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { X, RefreshCw, Copy, Check, Send, Sparkles, Paperclip, Loader2, AlertCircle } from "lucide-react";
+import { X, RefreshCw, Copy, Check, Send, Sparkles, Link, Loader2, AlertCircle } from "lucide-react";
 import { generateOutreachEmail, sendOutreachEmail, ApiError } from "../api";
 
 /* Recruiter outreach email composer. Opens from the Email icon on a Harvested
  * Jobs row (only when that row has a recruiter email). Generates a tone- and
  * audience-aware draft via the LLM (POST /outreach/generate-email), lets the
- * user edit From/To/Subject/Body, Regenerate, and Send (POST /outreach/send-email)
- * with the SightSpectrum corporate deck attached. Styling mirrors the app's
+ * user edit From/To/Subject/Body, Regenerate, and Send (POST /outreach/send-email);
+ * a link to the SightSpectrum corporate deck is included in the body when the
+ * backend has OUTREACH_DECK_URL configured. Styling mirrors the app's
  * self-contained-overlay pattern (LiveBrowserView.jsx) with an `ecm-` prefix. */
 
 const styles = `
@@ -53,7 +54,6 @@ const styles = `
 `;
 
 const TONES = ["Formal", "Friendly", "Direct"];
-const DEFAULT_ATTACHMENT = "SightSpectrum - Corporate Overview.pptx";
 
 const CLIENT_LABELS = {
   active: { label: "Active client", cls: "ecm-badge-active" },
@@ -69,7 +69,7 @@ export default function EmailComposeModal({ job = {}, onClose = () => {} }) {
   const [toEmail, setToEmail] = useState(job.email || "");
   const [clientType, setClientType] = useState("");
   const [fallbackUsed, setFallbackUsed] = useState(false);
-  const [attachmentName, setAttachmentName] = useState(DEFAULT_ATTACHMENT);
+  const [deckUrl, setDeckUrl] = useState("");
 
   const [generating, setGenerating] = useState(false);
   const [sending, setSending] = useState(false);
@@ -87,7 +87,7 @@ export default function EmailComposeModal({ job = {}, onClose = () => {} }) {
       setBody(res.body || "");
       setClientType(res.client_type || "");
       setFallbackUsed(!!res.fallback_used);
-      if (res.attachment_name) setAttachmentName(res.attachment_name);
+      setDeckUrl(res.deck_url || "");
       // Seed the editable From/To only on the first successful draft, so a user's
       // manual edits to those fields survive a tone change / regenerate.
       if (!metaLoaded.current) {
@@ -204,7 +204,9 @@ export default function EmailComposeModal({ job = {}, onClose = () => {} }) {
               disabled={generating} placeholder={generating ? "Generating draft…" : ""} />
           </div>
 
-          <div className="ecm-attach"><Paperclip size={14} /> {attachmentName} <span style={{ color: "#94A3B8" }}>· attached</span></div>
+          {deckUrl && (
+            <div className="ecm-attach"><Link size={14} /> Company overview link <span style={{ color: "#94A3B8" }}>· included in the message</span></div>
+          )}
 
           {fallbackUsed && !error && (
             <div className="ecm-note ecm-note-warn"><AlertCircle size={14} /> AI generation was unavailable — a standard template was used. Please review before sending.</div>

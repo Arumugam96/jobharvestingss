@@ -49,7 +49,7 @@ Sightspectrum is an empaneled vendor partner with {company}, and we have complet
 I request that you share your priority requirements with us, and we will support you with good profiles. Kindly share your contact details so we can discuss this further."""
 
 NEW_CLIENT_REFERENCE = """\
-I came across your LinkedIn post — you are looking for vendor support for your hiring needs, and Sightspectrum can support your requirements. Please find attached our company overview for your reference.
+I came across your LinkedIn post — you are looking for vendor support for your hiring needs, and Sightspectrum can support your requirements.
 
 Sightspectrum Technology specializes in IT staffing services, supporting clients across Contract, C2H, and Permanent hiring models, with a strong focus on Data Analytics, Cloud, and Digital technologies.
 
@@ -91,6 +91,9 @@ REACHOUT_TEMPLATE = (
     "Please feel free to reach out to me directly at {email} for any requirements "
     "or to take this forward."
 )
+# Appended only when a hosted deck URL is configured (OUTREACH_DECK_URL). Replaces
+# the old file attachment — rendered as a clickable link in the HTML email.
+DECK_LINK_TEMPLATE = "You can view our company overview here: {url}"
 
 _SIGNOFF_MARKERS = (
     "best regards", "warm regards", "kind regards", "best wishes", "best,",
@@ -115,13 +118,17 @@ def _strip_trailing_closing(pitch: str) -> str:
     return "\n".join(lines[: i + 1]).rstrip()
 
 
-def append_closing(pitch: str, sender_email: str) -> str:
-    """Append the reach-out line (to sender_email) and the Sightspectrum sign-off
-    to an LLM- or template-generated pitch. The sender email is left as plain text
-    here; it becomes a bold clickable mailto link when the email is sent as HTML."""
+def append_closing(pitch: str, sender_email: str, deck_url: str = "") -> str:
+    """Append the deck link (when deck_url is set), the reach-out line (to
+    sender_email) and the Sightspectrum sign-off to an LLM- or template-generated
+    pitch. The email/URL are left as plain text here; they become a bold clickable
+    mailto link and a clickable deck link when the email is sent as HTML."""
     body = _strip_trailing_closing(pitch)
     email = (sender_email or "").strip()
+    url = (deck_url or "").strip()
     parts = [body] if body else []
+    if url:
+        parts.append(DECK_LINK_TEMPLATE.format(url=url))
     if email:
         parts.append(REACHOUT_TEMPLATE.format(email=email))
     parts.append(SIGN_OFF)
@@ -146,7 +153,8 @@ EMAIL_SYSTEM_PROMPT = (
     "(no 'Best Regards', no 'Sightspectrum Team'), and do NOT add any contact "
     "line, email address, or phone number — a reach-out line and the signature "
     "are appended automatically after your message, so end right after the main "
-    "body. "
+    "body. Do NOT mention or refer to an attachment or say 'attached'; a link to "
+    "our company overview is appended automatically when available. "
     'Return ONLY valid JSON of the form {"subject": "...", "body": "..."} with '
     "no commentary and no code fences."
 )
@@ -228,12 +236,14 @@ def build_email_prompt(client_type: str, tone: str, job: dict) -> str:
     )
 
 
-def render_email_fallback(client_type: str, company: str, sender_email: str = "") -> tuple[str, str]:
+def render_email_fallback(
+    client_type: str, company: str, sender_email: str = "", deck_url: str = ""
+) -> tuple[str, str]:
     """Static fallback used when LLM generation fails — the reference message
     with the company interpolated, plus a default subject. `client_type` chooses
     the template; "active" requires a real company (classify_client only returns
-    "active" when one matched). The reach-out line + sign-off are appended the
-    same way as the LLM path so fallback emails carry the same closing."""
+    "active" when one matched). The deck link + reach-out line + sign-off are
+    appended the same way as the LLM path so fallback emails carry the same closing."""
     name = (company or "").strip()
     if client_type == "active":
         body = ACTIVE_CLIENT_REFERENCE.format(company=name or _GENERIC_COMPANY)
@@ -243,7 +253,7 @@ def render_email_fallback(client_type: str, company: str, sender_email: str = ""
         subject = f"{_FALLBACK_SUBJECTS.get(client_type, _FALLBACK_SUBJECTS['new'])}" + (
             f" — {name}" if name else ""
         )
-    return subject, append_closing(body, sender_email)
+    return subject, append_closing(body, sender_email, deck_url)
 
 
 # ── LinkedIn ─────────────────────────────────────────────────────────────────

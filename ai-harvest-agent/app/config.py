@@ -166,6 +166,14 @@ class Settings(BaseSettings):
     # attachment on a modest uplink; raise SMTP_TIMEOUT_SECONDS if sends still time out.
     smtp_timeout_seconds: int = 60
 
+    # ── Outreach ─────────────────────────────────────────────────────────────────
+    # Public URL of the hosted corporate-overview deck. When set, outreach emails
+    # include a clickable link to it instead of attaching the (~7 MB) file — which
+    # keeps the SMTP send fast (a few KB, ~1s). Leave empty to include no deck link
+    # and attach nothing. The business uploads the deck somewhere public (Drive /
+    # SharePoint / etc.) and pastes the share URL here.
+    outreach_deck_url: str = ""
+
     # ── CORS ─────────────────────────────────────────────────────────────────────
     # Kept as a plain str (not list[str]) — pydantic-settings' env source treats
     # list-typed fields as JSON and raises SettingsError on a comma-separated

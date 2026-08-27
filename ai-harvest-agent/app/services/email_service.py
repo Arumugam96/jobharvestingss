@@ -28,16 +28,25 @@ OTP_EMAIL_SUBJECT = "Your Sightspectrum Login OTP"
 # Matches an email address inside the plain-text outreach body so it can be
 # rendered as a bold, clickable mailto link in the HTML part (the reach-out line).
 _BODY_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
+# Matches an http(s) URL (the hosted company-overview deck link) so it can be
+# rendered as a clickable link in the HTML part.
+_BODY_URL_RE = re.compile(r'https?://[^\s<>"]+')
 
 
 def _outreach_body_to_html(body: str) -> str:
-    """Render the plain-text outreach body as HTML: preserve line breaks and turn
-    any line containing an email address (the appended reach-out line) into a bold
-    line whose address is a clickable mailto link — so the recipient can reply to
-    the sender in one click. All other text is HTML-escaped verbatim."""
+    """Render the plain-text outreach body as HTML: preserve line breaks, turn any
+    line containing an email address (the appended reach-out line) into a bold line
+    whose address is a clickable mailto link — so the recipient can reply to the
+    sender in one click — and turn any http(s) URL (the deck link) into a clickable
+    link. All other text is HTML-escaped verbatim."""
     out_lines: list[str] = []
     for line in (body or "").split("\n"):
         escaped = html_lib.escape(line)
+        if _BODY_URL_RE.search(line):
+            escaped = _BODY_URL_RE.sub(
+                lambda m: f'<a href="{m.group(0)}" style="color:#5f7fd0;">{m.group(0)}</a>',
+                escaped,
+            )
         if _BODY_EMAIL_RE.search(line):
             escaped = _BODY_EMAIL_RE.sub(
                 lambda m: f'<a href="mailto:{m.group(0)}" style="color:#5f7fd0;">{m.group(0)}</a>',

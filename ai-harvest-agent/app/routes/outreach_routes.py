@@ -18,6 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.core.dependencies import get_current_user, get_db_session, get_email_sender, get_llm_service
 from app.models.auth import AuthenticatedUser
 from app.models.harvest_run import LlmCallType
@@ -26,7 +27,7 @@ from app.services.active_clients import classify_client
 from app.services.email_service import EmailSender
 from app.services.harvest_run_service import HarvestRunService, insert_llm_call, scraped_job_view
 from app.services.llm_service import LLMService
-from app.services.outreach_service import ATTACHMENT_NAME, ATTACHMENT_PATH, OutreachService
+from app.services.outreach_service import OutreachService
 from app.prompts.outreach_prompts import TONES
 
 logger = structlog.get_logger(__name__)
@@ -87,9 +88,11 @@ async def generate_email(
     view = await _load_job_view(db, body.job_id)
     tone = body.mode if body.mode in TONES else "Formal"
     client_type = classify_client(view.get("company") or "")
+    deck_url = get_settings().outreach_deck_url
 
     draft = await OutreachService(llm_service).generate_email(
-        view, client_type, tone, regenerate=body.regenerate, sender_email=current_user.email
+        view, client_type, tone, regenerate=body.regenerate,
+        sender_email=current_user.email, deck_url=deck_url,
     )
 
     await insert_llm_call(
@@ -115,7 +118,7 @@ async def generate_email(
         "client_type": client_type,
         "tone": tone,
         "fallback_used": draft.fallback_used,
-        "attachment_name": ATTACHMENT_NAME,
+        "deck_url": deck_url,
     }
 
 
@@ -187,17 +190,14 @@ async def send_email(
             recruiter_id = job.recruiter_id
             client_type = classify_client(company)
 
-    attachments = [str(ATTACHMENT_PATH)] if ATTACHMENT_PATH.exists() else None
-    if attachments is None:
-        logger.warning("outreach_attachment_missing", path=str(ATTACHMENT_PATH))
-
+    # No file attachment: the corporate-overview deck is delivered as a link in the
+    # body (OUTREACH_DECK_URL) rather than a ~7 MB attachment, keeping the send fast.
     send_status, error_message = "sent", None
     try:
         await email_sender.send_email_with_attachments(
             recipients=[to_email],
             subject=body.subject,
             body=body.body,
-            attachment_paths=attachments,
             from_email=from_email or None,
             reply_to=from_email or None,
             as_html=True,
@@ -216,7 +216,7 @@ async def send_email(
         from_email=from_email,
         subject=body.subject,
         body=body.body,
-        attachment_name=ATTACHMENT_NAME if attachments else "",
+        attachment_name="",
         llm_generated=not body.fallback_used,
         fallback_used=body.fallback_used,
         status=send_status,
