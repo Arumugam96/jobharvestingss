@@ -122,6 +122,24 @@ def _ensure_llm_calls_columns(sync_conn) -> None:
             logger.info("llm_calls_run_id_nullable")
 
 
+def _ensure_harvest_runs_columns(sync_conn) -> None:
+    """One-time, idempotent ADD COLUMN backfill for columns added to the
+    pre-existing harvest_runs table. Mirrors the other _ensure_* helpers —
+    create_all never alters an existing table."""
+    inspector = sa_inspect(sync_conn)
+    if "harvest_runs" not in inspector.get_table_names():
+        return  # brand-new DB — create_all already made this table from the model
+    existing_cols = {c["name"] for c in inspector.get_columns("harvest_runs")}
+    # report_pending: a user-stopped run persists its jobs but defers its report
+    # email; the next successful run merges those jobs in and clears the flag.
+    # FALSE is a portable boolean default on PostgreSQL and SQLite (>=3.23).
+    if "report_pending" not in existing_cols:
+        sync_conn.execute(sa_text(
+            "ALTER TABLE harvest_runs ADD COLUMN report_pending BOOLEAN NOT NULL DEFAULT FALSE"
+        ))
+        logger.info("harvest_runs_column_added", column="report_pending")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Startup: launch browser pool + scheduler. Shutdown: clean up both."""
@@ -147,6 +165,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # llm_calls gained a call_type tag + nullable run_id so it can also hold
         # outreach (email/linkedin) generation calls, not just harvest calls.
         await conn.run_sync(_ensure_llm_calls_columns)
+        # harvest_runs gained report_pending (deferred report for user-stopped
+        # runs) — same idempotent ADD COLUMN treatment.
+        await conn.run_sync(_ensure_harvest_runs_columns)
 
     # Reconcile stale 'running' runs left by a previous process (a harvest runs
     # in a detached task that doesn't survive a restart). Without this, the

@@ -167,11 +167,12 @@ async def _run_harvest_background(
     now_iso:  str,
     enabled:  list[str],
     run_pk:   str | None = None,
+    wait_for_login: bool = True,
 ) -> None:
     """Background entry point — releases the single-flight guard no matter how
     the run ends (success, LLM outage, or unexpected failure)."""
     try:
-        await _run_harvest_background_impl(job_id, run_id, config, now_iso, enabled, run_pk)
+        await _run_harvest_background_impl(job_id, run_id, config, now_iso, enabled, run_pk, wait_for_login)
     finally:
         run_guard.end()
 
@@ -183,6 +184,7 @@ async def _run_harvest_background_impl(
     now_iso:  str,
     enabled:  list[str],
     run_pk:   str | None = None,
+    wait_for_login: bool = True,
 ) -> None:
     """Runs the full harvest in a background asyncio task, updating JobTracker."""
     log = logger.bind(job_id=job_id, run_id=run_id, sources=enabled)
@@ -198,19 +200,54 @@ async def _run_harvest_background_impl(
         JobTracker.update(job_id, message=msg)
         log.info("harvest_status_update", message=msg)
 
+    # ── Incremental persistence + live progress ───────────────────────────────
+    # As each LinkedIn page (and each other source) is scraped, persist those
+    # jobs to the DB immediately so a mid-scrape crash/kill keeps them — and bump
+    # a live "jobs saved" count the frontend polls via GET /harvest-status. These
+    # rows are RAW (pre-classification/dedup); the end-of-run reconcile below
+    # replaces them atomically with the final result.all_jobs.
+    main_loop = asyncio.get_event_loop()
+    saved_counter = {"n": 0}
+
+    async def _do_write(coro) -> None:
+        # On Windows --reload, run_all runs on a proactor worker thread; the
+        # asyncpg pool is bound to the main loop, so marshal DB writes back to it.
+        # On Linux/EC2 (needs_proactor False) run_all is on the main loop already.
+        if needs_proactor():
+            await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(coro, main_loop))
+        else:
+            await coro
+
+    async def _persist(unified: list) -> None:
+        if not run_pk or not unified:
+            return
+        try:
+            dicts = [j.to_dict() for j in unified]
+            await _do_write(db_write(lambda db: HarvestRunService(db).bulk_insert_scraped_jobs(run_pk, dicts)))
+            saved_counter["n"] += len(dicts)
+            n = saved_counter["n"]
+            msg = f"Harvesting… {n} jobs saved so far"
+            JobTracker.update(job_id, combined=n, message=msg)
+            await _do_write(db_write(lambda db: HarvestRunService(db).update_run(run_pk, combined_count=n, message=msg)))
+            log.info("harvest_incremental_persist", saved=n, batch=len(dicts))
+        except Exception as exc:
+            # Best-effort: a persist hiccup must never abort the scrape — the
+            # end-of-run reconcile re-writes the canonical set regardless.
+            log.warning("harvest_incremental_persist_failed", error=str(exc))
+
     try:
-        # wait_for_login=True: this is a manually-triggered run (POST
-        # /run-harvest-agent), so if LinkedIn isn't authenticated, pause and
-        # wait for a human to log in via "Watch Live Browser" instead of
-        # failing immediately — unlike the scheduled/unattended path, someone
-        # is expected to be present to complete it.
+        # wait_for_login: a manually-triggered run (POST /run-harvest-agent)
+        # passes True — if LinkedIn isn't authenticated, pause and wait for a
+        # human to log in via "Watch Live Browser" instead of failing
+        # immediately. The scheduled/unattended path passes False: no one is
+        # present to complete a login, so fail fast instead of hanging.
         if needs_proactor():
             log.debug("using_proactor_thread")
             result: OrchestratorResult = await run_in_proactor(
-                lambda: orch.run_all(wait_for_login=True, on_status=_on_status)
+                lambda: orch.run_all(wait_for_login=wait_for_login, on_status=_on_status, on_persist=_persist)
             )
         else:
-            result = await orch.run_all(wait_for_login=True, on_status=_on_status)
+            result = await orch.run_all(wait_for_login=wait_for_login, on_status=_on_status, on_persist=_persist)
     except LLMUnavailableError as exc:
         # The extraction LLM went down mid-run. Per product requirement: stop
         # the whole scrape, surface the provider error verbatim (the local-LLM
@@ -222,8 +259,10 @@ async def _run_harvest_background_impl(
 
         if run_pk and partial is not None:
             if partial.all_jobs:
+                # Replace any provisional incrementally-persisted rows with the
+                # partial set (delete + insert atomically).
                 scraped_dicts = [j.to_dict() for j in partial.all_jobs]
-                await db_write(lambda db: HarvestRunService(db).bulk_insert_scraped_jobs(run_pk, scraped_dicts))
+                await db_write(lambda db: HarvestRunService(db).replace_run_jobs(run_pk, scraped_dicts))
             if partial.llm_calls:
                 await db_write(lambda db: HarvestRunService(db).bulk_insert_llm_calls(run_pk, partial.llm_calls))
 
@@ -336,13 +375,23 @@ async def _run_harvest_background_impl(
     # The database is now the only store — per-source/combined JSON and Excel
     # result files are no longer written; reports are generated from these
     # rows on demand (GET /download/{json,excel}, the report email below).
+    # Reconcile: replace_run_jobs atomically deletes the provisional rows written
+    # incrementally during the scrape and inserts the final classified/deduped
+    # set, so the end state is exactly result.all_jobs with no duplicates.
     if run_pk:
         scraped_dicts = [j.to_dict() for j in result.all_jobs]
-        await db_write(lambda db: HarvestRunService(db).bulk_insert_scraped_jobs(run_pk, scraped_dicts))
+        await db_write(lambda db: HarvestRunService(db).replace_run_jobs(run_pk, scraped_dicts))
         await db_write(lambda db: HarvestRunService(db).bulk_insert_llm_calls(run_pk, result.llm_calls))
 
+    # A cooperative user-stop lets run_all() return normally with the jobs
+    # gathered so far (the scrape loops break and return early — see
+    # linkedin_agent). Persist them exactly like a normal completion, but mark
+    # the run "stopped", flag its report as owed (report_pending), and skip the
+    # email — the next successful run merges these jobs into its own report.
+    stopped = run_guard.is_stop_requested()
+
     # ── Update run history ────────────────────────────────────────────────────
-    status_str = "success" if result.total_jobs > 0 else "no_results"
+    status_str = "stopped" if stopped else ("success" if result.total_jobs > 0 else "no_results")
     history_entry = RunHistoryService.make_entry(
         run_id          = run_id,
         sources         = result.sources_executed,
@@ -377,11 +426,16 @@ async def _run_harvest_background_impl(
         token_usage    = result.token_usage.get("total", {}),
     )
 
+    final_message = (
+        f"Harvest stopped — {result.total_jobs} jobs saved"
+        if stopped
+        else f"Harvest complete — {result.total_jobs} jobs found"
+    )
     JobTracker.update(
         job_id,
         status       = status_str,
         progress     = 100,
-        message      = f"Harvest complete — {result.total_jobs} jobs found",
+        message      = final_message,
         completed_at = result.completed_at.isoformat(),
         excel_path   = result.excel_path   or "",
         json_path    = result.combined_path or "",
@@ -392,7 +446,7 @@ async def _run_harvest_background_impl(
             run_pk,
             status          = status_str,
             progress        = 100,
-            message         = f"Harvest complete — {result.total_jobs} jobs found",
+            message         = final_message,
             completed_at    = result.completed_at,
             excel_path      = result.excel_path or None,
             json_path       = result.combined_path or None,
@@ -403,7 +457,16 @@ async def _run_harvest_background_impl(
             staffing_firms  = result.staffing_firms,
             ambiguous       = result.ambiguous,
             sources         = result.sources_executed,
+            # A stopped run with jobs owes a deferred report; a stopped run with
+            # zero jobs has nothing to defer.
+            report_pending  = stopped and result.total_jobs > 0,
         ))
+
+    # A user-stopped run defers its report: jobs are saved and flagged
+    # report_pending above, and the email goes out with the next successful run.
+    if stopped:
+        log.info("harvest_stopped_report_deferred", run_id=run_id, total=result.total_jobs)
+        return
 
     # ── Email the report to configured recipients (best-effort) ──────────────
     # Attachments are built in memory from this run's DB rows so the
@@ -417,12 +480,32 @@ async def _run_harvest_background_impl(
     if not report_dicts:
         report_dicts = [j.to_dict() for j in result.all_jobs]
 
+    # ── Flush any deferred reports owed by previously user-stopped runs ───────
+    # Their jobs are merged into THIS report so a single email carries both.
+    # Only when notifications are enabled — otherwise leave them pending rather
+    # than silently clearing a report that never actually went out.
+    total_for_email = result.total_jobs
+    if config.notifications.enabled:
+        pending_runs = await db_read(lambda db: HarvestRunService(db).list_pending_report_runs()) or []
+        merged_pending = 0
+        for pend in pending_runs:
+            if pend.id == run_pk:
+                continue
+            pend_rows = await db_read(lambda db: HarvestRunService(db).list_jobs_for_run(pend.id))
+            if pend_rows:
+                report_dicts = report_dicts + merged_job_dicts(pend_rows)
+                merged_pending += len(pend_rows)
+            await db_write(lambda db: HarvestRunService(db).clear_report_pending(pend.id))
+        if merged_pending:
+            total_for_email = len(report_dicts)
+            log.info("deferred_reports_merged", runs=len(pending_runs), jobs=merged_pending)
+
     await send_harvest_report(
         EmailSender(get_settings()),
         config.notifications,
         run_id      = run_id,
         status      = status_str,
-        total_jobs  = result.total_jobs,
+        total_jobs  = total_for_email,
         sources     = result.sources_executed,
         job_dicts   = report_dicts,
     )
@@ -539,6 +622,39 @@ async def run_harvest_agent(body: HarvestAgentRequest = HarvestAgentRequest()) -
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# POST /run-harvest-agent/stop
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.post("/run-harvest-agent/stop", status_code=status.HTTP_200_OK)
+async def stop_harvest_agent() -> Any:
+    """Request a cooperative stop of the in-flight harvest.
+
+    Sets a stop flag the running scrape polls at its loop checkpoints; the run
+    then returns the jobs gathered so far, which are persisted to the DB and the
+    run is marked 'stopped'. No report email is sent now — those jobs are merged
+    into the next successful run's report. This never hard-kills the browser, so
+    the persistent Chrome profile closes cleanly (no lock corruption).
+
+    Safe to call when nothing is running (returns status 'idle').
+    """
+    active = run_guard.active_run()
+    if active is None:
+        return {"status": "idle", "message": "No harvest is currently running."}
+
+    run_guard.request_stop()
+    job_id = active.get("job_id")
+    if job_id:
+        JobTracker.update(job_id, message="Stop requested — finishing current step and saving jobs…")
+    logger.info("harvest_stop_requested", **active)
+    return {
+        "status":  "stopping",
+        "job_id":  job_id,
+        "run_id":  active.get("run_id"),
+        "message": "Stop requested — the run will halt shortly and save its jobs.",
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # GET /active-run
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -574,6 +690,7 @@ async def get_harvest_status(job_id: str) -> Any:
     - `success`    — harvest completed with results
     - `no_results` — harvest completed but found no matching jobs
     - `failed`     — harvest error (check `error` field)
+    - `stopped`    — harvest was stopped by the user (partial jobs saved; report deferred)
     """
     mode = data_source_mode()
     run, source = await resolve_read(
@@ -581,13 +698,25 @@ async def get_harvest_status(job_id: str) -> Any:
         lambda: db_read(lambda db: HarvestRunService(db).get_by_job_id(job_id)),
         lambda: JobTracker.get(job_id),
     )
+    # Global daily cap (MAX_JOBS_PER_DAY, 0 = unlimited) so the frontend progress
+    # cards can show Max / Saved / Remaining without duplicating the env value.
+    max_per_day = get_settings().max_jobs_per_day
+    # Live DB count of rows persisted today (across all of today's runs) — backs
+    # the "Jobs Saved" card so it reflects real scraped_jobs rows, climbing as
+    # each batch inserts. Best-effort: db_read returns None if the DB is
+    # unavailable → fall back to the run's own combined_count below.
+    saved_today = await db_read(lambda db: HarvestRunService(db).jobs_saved_today())
+
     if source == "database":
         if run is None:
             return JSONResponse(
                 status_code = 404,
                 content     = {"detail": f"No harvest job found with id '{job_id}'"},
             )
-        return _run_to_job_status_dict(run)
+        payload = _run_to_job_status_dict(run)
+        payload["max_jobs_per_day"] = max_per_day
+        payload["jobs_saved_today"] = saved_today if saved_today is not None else payload.get("combined", 0)
+        return payload
 
     # source == "json": run is whatever JobTracker.get() returned (predates
     # the DB mirror, or DATA_SOURCE=json / DB temporarily unavailable in "auto").
@@ -596,7 +725,10 @@ async def get_harvest_status(job_id: str) -> Any:
             status_code = 404,
             content     = {"detail": f"No harvest job found with id '{job_id}'"},
         )
-    return run.to_dict()
+    payload = run.to_dict()
+    payload["max_jobs_per_day"] = max_per_day
+    payload["jobs_saved_today"] = saved_today if saved_today is not None else payload.get("combined", 0)
+    return payload
 
 
 # ══════════════════════════════════════════════════════════════════════════════

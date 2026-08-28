@@ -118,12 +118,37 @@ def _strip_trailing_closing(pitch: str) -> str:
     return "\n".join(lines[: i + 1]).rstrip()
 
 
+# Salutations the model may open with — used to force the greeting onto its own
+# line. Matches a leading "Hi/Hello/Hey/Dear/Greetings … ," (up to the comma).
+_GREETING_RE = re.compile(r"^\s*((?:hi|hello|hey|dear|greetings)\b[^\n,]*,)[ \t]*", re.IGNORECASE)
+
+
+def _greeting_on_own_line(body: str) -> str:
+    """Put the opening greeting on its own line, with a blank line before the body:
+
+        Hi Nivetha,
+
+        Sightspectrum specializes …
+
+    The model often runs the greeting straight into the first sentence
+    ("Hi Nivetha, Sightspectrum …"); this splits it deterministically so every
+    email reads the same way regardless of how the model formatted it. Left
+    untouched when there's no recognizable greeting or it's already on its own line."""
+    text = (body or "").lstrip()
+    m = _GREETING_RE.match(text)
+    if not m:
+        return body
+    greeting = m.group(1).strip()
+    rest = text[m.end():].lstrip()
+    return f"{greeting}\n\n{rest}" if rest else greeting
+
+
 def append_closing(pitch: str, sender_email: str, deck_url: str = "") -> str:
     """Append the deck link (when deck_url is set), the reach-out line (to
     sender_email) and the Sightspectrum sign-off to an LLM- or template-generated
     pitch. The email/URL are left as plain text here; they become a bold clickable
     mailto link and a clickable deck link when the email is sent as HTML."""
-    body = _strip_trailing_closing(pitch)
+    body = _greeting_on_own_line(_strip_trailing_closing(pitch))
     email = (sender_email or "").strip()
     url = (deck_url or "").strip()
     parts = [body] if body else []
@@ -139,7 +164,10 @@ EMAIL_SYSTEM_PROMPT = (
     "You are a business-development specialist at Sightspectrum, an IT staffing "
     "firm. You write short B2B outreach emails to recruiters/talent-acquisition "
     "contacts who have posted a job, offering Sightspectrum's staffing support. "
-    "Rules: keep it concise (roughly 30-40 words); plain text only (no "
+    "Rules: keep it BRIEF — a greeting line plus at most 2 short sentences, "
+    "roughly 25-35 words of pitch total; get to the offer immediately, no "
+    "filler, no preamble, and do NOT restate or summarize the job description; "
+    "plain text only (no "
     "markdown, no HTML); do not invent facts, statistics, names, phone numbers, "
     "or email addresses; base the message on the provided reference text, "
     "preserving its intent and offer; personalize naturally to the recipient's "
@@ -147,7 +175,9 @@ EMAIL_SYSTEM_PROMPT = (
     "recipient by their first name when a recipient name is given (e.g. "
     '"Dear Jane," for a formal tone or "Hi Jane," for a warmer one); when no '
     'recipient name is given, use a neutral professional greeting such as '
-    '"Hello,". NEVER output a bracketed placeholder such as "[Recipient Name]", '
+    '"Hello,". Put the greeting on its OWN line, then a blank line, then the '
+    'message body (e.g. "Hi Jane,\\n\\nSightspectrum …"). '
+    'NEVER output a bracketed placeholder such as "[Recipient Name]", '
     '"[Name]", "[Company]", or "[Your Name]" — if a detail is unknown, omit it '
     "or rephrase neutrally. Write ONLY the pitch: do NOT add a closing sign-off "
     "(no 'Best Regards', no 'Sightspectrum Team')"
@@ -219,7 +249,9 @@ def build_email_prompt(client_type: str, tone: str, job: dict) -> str:
         f"\"\"\"\n{reference}\n\"\"\"\n\n"
         f"Recipient / role context:\n{_job_context(job)}\n\n"
         f"Write the outreach email BODY only — no sign-off and no contact details "
-        f"(these are appended automatically). "
+        f"(these are appended automatically). Keep it brief: a greeting line plus "
+        f"at most 2 short sentences (~25-35 words); lead with the offer, no filler, "
+        f"and do not restate the job description. "
         f'Return ONLY JSON: {{"subject": "...", "body": "..."}}'
     )
 

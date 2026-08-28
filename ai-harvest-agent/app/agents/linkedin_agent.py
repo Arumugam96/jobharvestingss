@@ -48,6 +48,7 @@ from app.core.text_formatting import (
 from app.core.linkedin_geo import resolve_geo
 from app.models.harvest_models import FiltersConfig
 from app.scrapers.browser_manager import PersistentBrowserManager
+from app.services import run_guard
 
 if TYPE_CHECKING:
     from app.services.llm_service import LLMService
@@ -948,6 +949,7 @@ class LinkedInAgent:
         f: FiltersConfig,
         wait_for_login: bool = False,
         on_status: StatusCallback | None = None,
+        on_batch: Callable[[list["LinkedInScrapedJob"]], Awaitable[None]] | None = None,
     ) -> list[LinkedInScrapedJob]:
         """
         Navigate directly to LinkedIn Jobs search.
@@ -960,6 +962,10 @@ class LinkedInAgent:
         on_status       Optional async callback fired with human-readable progress
                         messages (e.g. "waiting for login…") — lets the caller
                         surface live status to JobTracker / the frontend.
+        on_batch        Optional async callback fired after each results page with
+                        that page's freshly-scraped jobs — lets the caller persist
+                        them incrementally (crash safety + live progress) before
+                        the whole run finishes.
         """
         search_url = self._build_search_url(f, start=0)
         logger.info("search_started", source="linkedin", keyword=f.keyword, location=f.location)
@@ -992,7 +998,7 @@ class LinkedInAgent:
         logger.info("results_page_loaded", source="linkedin", url=current_url, title=page_title)
         logger.info("linkedin_session_active", url=current_url)
         await _screenshot(page, "02_after_search")
-        jobs = await self._paginate_and_collect(page, f)
+        jobs = await self._paginate_and_collect(page, f, on_batch=on_batch)
         logger.info("linkedin_jobs_returned", count=len(jobs))
 
         # Post-harvest recruiter contact-discovery pass — deliberately after
@@ -1139,7 +1145,10 @@ class LinkedInAgent:
         )
 
     async def _paginate_and_collect(
-        self, page: Page, f: FiltersConfig
+        self,
+        page: Page,
+        f: FiltersConfig,
+        on_batch: Callable[[list["LinkedInScrapedJob"]], Awaitable[None]] | None = None,
     ) -> list[LinkedInScrapedJob]:
         """
         Paginate through LinkedIn results using &start=0,25,50,…
@@ -1148,6 +1157,9 @@ class LinkedInAgent:
         • No cards found on a page (results exhausted)
         • Two consecutive pages yield zero new (non-duplicate) jobs
         • Safety cap: f.max_jobs (0 = unlimited, default 500)
+
+        on_batch, if given, is awaited after each page with that page's new
+        (deduped) jobs so the caller can persist them incrementally.
         """
         all_jobs:    list[LinkedInScrapedJob] = []
         seen_urls:   set[str]                 = set()
@@ -1176,6 +1188,13 @@ class LinkedInAgent:
         logger.info("linkedin_pagination_started", safety_cap=safety_cap)
 
         while len(all_jobs) < safety_cap:
+            # Cooperative stop: a user asked to halt the run. Stop paginating and
+            # return the jobs gathered so far so they can still be persisted; the
+            # browser context closes cleanly when this generator's caller exits.
+            if run_guard.is_stop_requested():
+                logger.info("linkedin_pagination_stopped_by_user", page=page_num + 1, collected=len(all_jobs))
+                break
+
             start      = page_num * batch_size
             search_url = self._build_search_url(f, start=start)
             logger.info("linkedin_page_start", page=page_num + 1, start=start, collected=len(all_jobs))
@@ -1235,7 +1254,10 @@ class LinkedInAgent:
 
             remaining = safety_cap - len(all_jobs)
             try:
-                page_jobs = await self._extract_cards(page, remaining, seen_urls)
+                # on_batch is forwarded down into Phase B so jobs persist every N
+                # cards AS they're scraped (steady live progress), rather than in
+                # one burst once the whole page's detail loop finishes.
+                page_jobs = await self._extract_cards(page, remaining, seen_urls, on_batch=on_batch)
             except Exception as exc:
                 # A page-wide extraction failure must not discard jobs already
                 # collected from earlier pages — stop paginating and return them.
@@ -1258,6 +1280,11 @@ class LinkedInAgent:
                         all_jobs.append(j)
                         new_jobs.append(j)
                 logger.info("next_page_found", source="linkedin", page=page_num + 1, jobs_this_page=len(page_jobs))
+
+                # (Incremental persistence now happens inside Phase B — see
+                # _parse_cards_with_detail — flushing every N cards as they are
+                # scraped, so the live counter ticks steadily instead of jumping
+                # once per ~25-card page here.)
 
                 # No domain-match early-stop: the domain filter is now applied by
                 # LinkedIn's own native job-function filter (f_F, see
@@ -1344,6 +1371,13 @@ class LinkedInAgent:
         )
 
         for norm_url, group_jobs in groups.items():
+            # Cooperative stop: skip the remaining (capped, best-effort) recruiter
+            # contact visits so a user-requested stop returns promptly. Jobs are
+            # already collected; enrichment is an optional enhancement.
+            if run_guard.is_stop_requested():
+                logger.info("linkedin_recruiter_enrichment_stopped_by_user", visited=visited)
+                break
+
             sample       = group_jobs[0]
             person_name  = (sample.job_poster_name or "").strip()
             company_name = (sample.job_poster_company or sample.company or "").strip()
@@ -1694,8 +1728,12 @@ class LinkedInAgent:
         page:      Page,
         remaining: int,
         seen_urls: set[str] | None = None,
+        on_batch:  Callable[[list["LinkedInScrapedJob"]], Awaitable[None]] | None = None,
     ) -> list[LinkedInScrapedJob]:
-        """Extract job cards from the current page. Returns only new (non-duplicate) jobs."""
+        """Extract job cards from the current page. Returns only new (non-duplicate) jobs.
+
+        on_batch, if given, is flushed every N cards during Phase B (detail
+        extraction) so jobs persist incrementally as they're scraped."""
         if seen_urls is None:
             seen_urls = set()
 
@@ -1753,7 +1791,7 @@ class LinkedInAgent:
 
         await _screenshot(page, "cards_found")
         logger.info("linkedin_cards_found", count=len(raw), selector=matched_card_sel)
-        return await self._parse_cards_with_detail(page, raw, remaining, seen_urls)
+        return await self._parse_cards_with_detail(page, raw, remaining, seen_urls, on_batch=on_batch)
 
     async def _parse_cards_with_detail(
         self,
@@ -1761,9 +1799,27 @@ class LinkedInAgent:
         raw:       list[ElementHandle],
         remaining: int,
         seen_urls: set[str],
+        on_batch:  Callable[[list["LinkedInScrapedJob"]], Awaitable[None]] | None = None,
     ) -> list[LinkedInScrapedJob]:
         import json as _json
         jobs: list[LinkedInScrapedJob] = []
+
+        # Incremental persistence: flush freshly-scraped jobs to the caller every
+        # N cards (env HARVEST_PERSIST_BATCH_SIZE, default 10) so they land in the
+        # DB and the live UI counter ticks steadily as detail extraction proceeds,
+        # rather than in one burst at page end. Best-effort — never abort scraping.
+        from app.config import get_settings
+        _persist_batch_n = max(1, get_settings().harvest_persist_batch_size)
+        _pending: list[LinkedInScrapedJob] = []
+
+        async def _flush_pending() -> None:
+            if on_batch and _pending:
+                batch = list(_pending)
+                _pending.clear()
+                try:
+                    await on_batch(batch)
+                except Exception as exc:
+                    logger.warning("linkedin_on_batch_failed", count=len(batch), error=str(exc))
 
         # ── Phase A: enumerate ALL cards on this page up front ─────────────────
         # Read every card's list-view fields (title + stable /jobs/view/<id> URL)
@@ -1802,6 +1858,13 @@ class LinkedInAgent:
         # ── Phase B: fetch each enumerated card's detail (new tab, by URL) ─────
         for list_data in enumerated:
             if len(jobs) >= remaining:
+                break
+
+            # Cooperative stop checkpoint. Detail fetch + LLM extraction is the
+            # slowest part of a run, so honoring a stop here makes it responsive:
+            # return the jobs parsed so far rather than grinding through the page.
+            if run_guard.is_stop_requested():
+                logger.info("linkedin_detail_loop_stopped_by_user", parsed=len(jobs), enumerated=len(enumerated))
                 break
 
             idx = list_data.get("idx", 0)
@@ -1866,6 +1929,11 @@ class LinkedInAgent:
                     job_poster_phone        = detail_data.get("recruiter_phone") or None,
                 )
                 jobs.append(job)
+                # Incremental flush: persist every N cards as they're scraped so
+                # the live counter climbs steadily and a mid-scrape crash keeps them.
+                _pending.append(job)
+                if len(_pending) >= _persist_batch_n:
+                    await _flush_pending()
                 logger.info(
                     "linkedin_job_extracted",
                     source  = "linkedin",
@@ -1885,6 +1953,10 @@ class LinkedInAgent:
                 # not discard every job already extracted from this page/run.
                 logger.warning("linkedin_card_extract_failed", index=idx, error=str(exc))
                 continue
+
+        # Flush any remaining buffered jobs (< N) so nothing on this page is left
+        # unpersisted before we return.
+        await _flush_pending()
 
         # Save raw jobs JSON artifact
         try:

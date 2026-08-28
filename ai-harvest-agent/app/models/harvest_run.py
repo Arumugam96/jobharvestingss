@@ -43,6 +43,10 @@ class HarvestRunORM(Base):
     excel_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     json_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     token_usage: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # A run that ended via user-requested stop persists its partial jobs but does
+    # NOT send its report email. report_pending=True marks it as owed; the next
+    # successful run merges these jobs into its own report, then clears the flag.
+    report_pending: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

@@ -2,13 +2,16 @@ import React, { useEffect, useRef, useState } from "react";
 import {
   SlidersHorizontal,
   Play, Save, Clock, Info, AlertTriangle, ChevronDown, Check, Loader2, LogIn, Eye,
+  Target, Database, Hourglass,
 } from "lucide-react";
 import {
   getHarvestConfig, saveHarvestConfig, runHarvestAgent, getHarvestStatus,
-  getRunHistory, getRunHistoryEntry, setupLinkedinSession, setupNaukriSession, ApiError,
+  getRunHistory, getRunHistoryEntry, getActiveRun, setupLinkedinSession, setupNaukriSession, ApiError,
 } from "./api";
 import Sidebar from "./components/Sidebar";
 import LiveBrowserView from "./components/LiveBrowserView";
+import StopHarvestButton from "./components/StopHarvestModal";
+import useCountUp from "./useCountUp";
 
 const NaukriIcon = () => (
   <svg width="34" height="34" viewBox="0 0 34 34" aria-hidden="true">
@@ -176,6 +179,8 @@ export default function RuleEngineConfig({
   const [lastSaved, setLastSaved] = useState("—");
   const [lastRun, setLastRun] = useState("—");
   const [harvested, setHarvested] = useState(0);
+  const [harvestedLive, setHarvestedLive] = useState(0); // jobs saved so far, updated live during a run
+  const [maxPerDay, setMaxPerDay] = useState(0);         // MAX_JOBS_PER_DAY from the backend (.env); 0 = unlimited
   const [runState, setRunState] = useState("idle"); // idle | running | success | failed
   const [runMessage, setRunMessage] = useState("");
   const [saving, setSaving] = useState(false);
@@ -185,6 +190,14 @@ export default function RuleEngineConfig({
 
   const pollTimer = useRef(null);
   useEffect(() => () => clearTimeout(pollTimer.current), []);
+
+  // Animated count-up for the live progress cards. `liveCount` is the real
+  // jobs-saved-to-DB count (status.combined); Remaining = Max − Saved, clamped
+  // at 0. When the daily cap is 0 (unlimited) Max/Remaining show ∞.
+  const unlimited = !(maxPerDay > 0);
+  const liveCount = useCountUp(harvestedLive);
+  const maxCount = useCountUp(maxPerDay);
+  const remainingCount = useCountUp(unlimited ? 0 : Math.max(0, maxPerDay - harvestedLive));
 
   useEffect(() => {
     let cancelled = false;
@@ -304,10 +317,16 @@ export default function RuleEngineConfig({
         const status = await getHarvestStatus(jobId);
         if (status.status === "running") {
           setRunMessage(status.message || "Running…");
-          // Harvest runs take minutes, not seconds — 10s keeps the UI
-          // responsive without hammering the server (was 3s, which flooded
-          // the API logs with a request every 3s for the whole run).
-          pollTimer.current = setTimeout(tick, 18000);
+          // `jobs_saved_today` is a live DB count of scraped_jobs rows persisted
+          // today (across all runs), so it reflects real saved rows and climbs as
+          // each batch inserts. Fall back to `combined` (this run's count) if the
+          // backend didn't send it.
+          setHarvestedLive(status.jobs_saved_today ?? status.combined ?? 0);
+          // Daily cap (MAX_JOBS_PER_DAY) drives the Max / Remaining cards.
+          setMaxPerDay(status.max_jobs_per_day ?? 0);
+          // Poll every 6s while running so the live count visibly ticks without
+          // hammering the server.
+          pollTimer.current = setTimeout(tick, 6000);
           return;
         }
         if (status.status === "failed") {
@@ -353,6 +372,29 @@ export default function RuleEngineConfig({
     tick();
   }
 
+  // Adopt an already-in-flight run this page didn't launch — e.g. one started by
+  // the scheduler, or from another tab/session — so its live progress shows here
+  // too. Runs once on mount; if /active-run reports an active job, start polling
+  // its status just like a locally-started run.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await getActiveRun();
+        if (!cancelled && res?.active && res.job_id) {
+          setRunState("running");
+          setRunMessage("Harvesting…");
+          setHarvestedLive(0);
+          pollHarvestStatus(res.job_id, res.run_id);
+        }
+      } catch {
+        /* backend unreachable — HealthBadge surfaces the outage */
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const handleRun = async () => {
     if (runState === "running") return;
     if (harvestRunning) {
@@ -371,6 +413,7 @@ export default function RuleEngineConfig({
     setRunState("running");
     setHarvestRunning(true);
     setRunMessage("Starting harvest…");
+    setHarvestedLive(0);
     try {
       const res = await runHarvestAgent();
       if (res.status === "failed") {
@@ -460,7 +503,10 @@ export default function RuleEngineConfig({
               <span>Last run: {lastRun}</span>
               <span className="rec-dot">·</span>
               {runState === "running" ? (
-                <span className="rec-status rec-status--run"><Loader2 size={14} className="rec-spin" /> {runMessage || "Running…"}</span>
+                <span className="rec-status rec-status--run">
+                  <Loader2 size={14} className="rec-spin" /> {runMessage || "Running…"}
+                  {harvestedLive > 0 && <> · <b>{harvestedLive}</b> saved</>}
+                </span>
               ) : runState === "failed" ? (
                 <span className="rec-status rec-status--err"><AlertTriangle size={14} /> {runMessage || "Harvest failed"}</span>
               ) : (
@@ -482,6 +528,8 @@ export default function RuleEngineConfig({
                 <Eye size={16} /> {needsLogin ? "Log in now — Watch Live Browser" : "Watch Live Browser"}
               </button>
             )}
+            <StopHarvestButton harvestRunning={harvestRunning}
+              onStopped={() => setRunMessage("Stop requested — the run will halt shortly and save its jobs. The report email is deferred to the next successful run.")} />
             <button
               className={"rec-btn rec-btn--run" + (harvestRunning && runState !== "running" ? " rec-btn--busy" : "")}
               onClick={handleRun}
@@ -496,6 +544,38 @@ export default function RuleEngineConfig({
             </button>
           </div>
         </header>
+
+        {runState === "running" && (
+          <div className="rec-prog">
+            {/* Max Jobs / Day — daily cap from the backend .env (MAX_JOBS_PER_DAY) */}
+            <div className="rec-prog-card">
+              <div className="rec-prog-chip"><Target size={18} /></div>
+              <div className="rec-prog-num">{unlimited ? "∞" : maxCount}</div>
+              <div className="rec-prog-label">Max Jobs / Day</div>
+              <div className="rec-prog-hint">daily harvest ceiling</div>
+              <div className="rec-prog-bar" />
+            </div>
+
+            {/* Jobs Saved — live count of rows actually persisted to the DB */}
+            <div className="rec-prog-card is-live">
+              <span className="rec-prog-tag"><i /> Live</span>
+              <div className="rec-prog-chip"><Database size={18} /></div>
+              <div className="rec-prog-num">{liveCount}</div>
+              <div className="rec-prog-label">Jobs Saved</div>
+              <div className="rec-prog-hint">persisted to database</div>
+              <div className="rec-prog-bar" />
+            </div>
+
+            {/* Remaining — Max − Saved, recomputed as Jobs Saved climbs */}
+            <div className="rec-prog-card">
+              <div className="rec-prog-chip"><Hourglass size={18} /></div>
+              <div className="rec-prog-num">{unlimited ? "∞" : remainingCount}</div>
+              <div className="rec-prog-label">Remaining Jobs</div>
+              <div className="rec-prog-hint">Max − Saved</div>
+              <div className="rec-prog-bar" />
+            </div>
+          </div>
+        )}
 
         {loadError && (
           <div className="rec-note rec-note--error" style={{ margin: "16px 28px 0" }}>
@@ -769,6 +849,57 @@ const styles = `
   @keyframes rec-pulse {
     0%, 100% { box-shadow: 0 0 0 0 rgba(245,158,11,.55); }
     50%      { box-shadow: 0 0 0 6px rgba(245,158,11,0); }
+  }
+
+  /* ── Live harvest progress cards (Max / Saved / Remaining) ─────────────── */
+  /* Compact + centered: capped width with auto side margins leaves breathing
+     room at the left/right of the page. */
+  .rec-prog { max-width:640px; margin:18px auto 4px; padding:0 24px; display:grid; gap:14px; grid-template-columns:repeat(3,minmax(0,1fr)); }
+  @media (max-width:640px) { .rec-prog { grid-template-columns:1fr; max-width:320px; } }
+  .rec-prog-card {
+    position:relative; overflow:hidden; text-align:center;
+    background:linear-gradient(160deg,#F6F3FF 0%,#fff 55%),#fff;
+    border:1px solid #ECEAF6; border-radius:12px; padding:14px 12px 18px;
+    box-shadow:0 1px 2px rgba(30,27,46,.05);
+    transition:transform .22s cubic-bezier(.2,.7,.3,1), box-shadow .22s ease, border-color .22s ease;
+  }
+  .rec-prog-card::before {
+    content:""; position:absolute; inset:0; pointer-events:none;
+    background:radial-gradient(120% 90% at 50% -10%, rgba(124,92,252,.14), rgba(124,92,252,0) 60%);
+    opacity:.9; transition:opacity .22s ease;
+  }
+  .rec-prog-card > * { position:relative; z-index:1; }
+  .rec-prog-card:hover {
+    transform:scale(1.035) translateY(-3px);
+    box-shadow:0 18px 40px -18px rgba(109,40,217,.45), 0 8px 18px -12px rgba(30,27,46,.25);
+    border-color:#DED9F2;
+  }
+  .rec-prog-card:hover::before { opacity:1; }
+  .rec-prog-card.is-live { border-color:#DED9F2; }
+  .rec-prog-tag {
+    position:absolute; top:8px; right:8px; z-index:2; display:inline-flex; align-items:center; gap:4px;
+    font-size:8.5px; font-weight:700; letter-spacing:.09em; text-transform:uppercase; color:#6D28D9;
+    background:#EDE7FF; padding:2px 6px; border-radius:99px; border:1px solid #DED9F2;
+  }
+  .rec-prog-tag i { width:5px; height:5px; border-radius:99px; background:#7C5CFC; animation:rec-pulse-dot 1.8s ease-out infinite; }
+  @keyframes rec-pulse-dot {
+    0%   { box-shadow:0 0 0 0 rgba(124,92,252,.5); }
+    70%  { box-shadow:0 0 0 6px rgba(124,92,252,0); }
+    100% { box-shadow:0 0 0 0 rgba(124,92,252,0); }
+  }
+  .rec-prog-chip {
+    width:38px; height:38px; margin:0 auto 9px; display:grid; place-items:center; border-radius:11px;
+    color:#6D28D9; background:linear-gradient(160deg,rgba(124,92,252,.18),rgba(124,92,252,.08));
+    border:1px solid #DED9F2; transition:transform .22s cubic-bezier(.2,.7,.3,1);
+  }
+  .rec-prog-card:hover .rec-prog-chip { transform:translateY(-1px) scale(1.06); }
+  .rec-prog-num { font-size:30px; font-weight:800; line-height:1; letter-spacing:-.02em; color:#1E1B2E; font-variant-numeric:tabular-nums; }
+  .rec-prog-label { margin-top:6px; font-size:10.5px; font-weight:600; letter-spacing:.05em; text-transform:uppercase; color:#6B6785; }
+  .rec-prog-hint { margin-top:2px; font-size:10px; color:#9A96B5; }
+  .rec-prog-bar { position:absolute; left:12px; right:12px; bottom:9px; height:4px; border-radius:99px; background:linear-gradient(90deg,#7C5CFC,#6D28D9); opacity:.9; }
+  @media (prefers-reduced-motion: reduce) {
+    .rec-prog-card, .rec-prog-chip { transition:none; }
+    .rec-prog-tag i { animation:none; }
   }
 
   /* Tabs */

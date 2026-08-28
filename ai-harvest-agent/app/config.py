@@ -35,6 +35,12 @@ class Settings(BaseSettings):
     # .env) — a new run is rejected once today's harvested total reaches this.
     max_jobs_per_day: int = 0
 
+    # How many scraped jobs to accumulate before persisting a batch to the DB and
+    # bumping the live "jobs saved" UI counter (HARVEST_PERSIST_BATCH_SIZE in
+    # .env). Smaller = smoother count-up + finer crash-granularity, but more DB
+    # round-trips (a recruiter upsert runs per job). Clamped to >= 1 at read time.
+    harvest_persist_batch_size: int = 10
+
     # ── Database ─────────────────────────────────────────────────────────────────
     database_url: str = "postgresql+asyncpg://harvest:harvest_password@localhost:5432/harvest_db"
     db_pool_size: int = 10

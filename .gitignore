@@ -83,8 +83,4 @@ temp/
 uploads/
 *.tmp
 
-# =================================
-# results directory
-# =================================
-data
-data/*
+ai-harvest-agent/data/config/

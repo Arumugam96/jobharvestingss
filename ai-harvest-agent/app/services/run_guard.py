@@ -22,6 +22,7 @@ Callers:
 """
 from __future__ import annotations
 
+import threading
 from contextlib import asynccontextmanager
 
 import structlog
@@ -34,6 +35,31 @@ logger = structlog.get_logger(__name__)
 
 # {"job_id", "run_id", "source"} while a run is in flight in THIS process; None otherwise.
 _active: dict | None = None
+
+# Cooperative-stop signal for the in-flight run. A user-triggered stop sets this;
+# the scrape loops (linkedin_agent) poll it and break, returning the jobs
+# collected so far so the run can persist a partial harvest and close the browser
+# cleanly. A threading.Event (not asyncio) is used deliberately: on Windows the
+# scrape runs on a separate proactor thread (app.core.proactor), and only a
+# thread-safe primitive is reliably visible from there. Single-flight guarantees
+# at most one run, so one process-global event is sufficient.
+_stop_event = threading.Event()
+
+
+def request_stop() -> None:
+    """Ask the in-flight run to stop cooperatively at the next loop checkpoint."""
+    _stop_event.set()
+    logger.info("run_guard_stop_requested", **(dict(_active) if _active else {}))
+
+
+def clear_stop() -> None:
+    """Reset the stop signal (called when a run begins/ends)."""
+    _stop_event.clear()
+
+
+def is_stop_requested() -> bool:
+    """True if a cooperative stop has been requested for the in-flight run."""
+    return _stop_event.is_set()
 
 
 def active_run() -> dict | None:
@@ -96,6 +122,7 @@ def try_begin(job_id: str | None, run_id: str, source: str | None) -> dict | Non
     global _active
     if _active is not None:
         return dict(_active)
+    clear_stop()  # fresh run — discard any stop signal left over from a prior one
     _active = {"job_id": job_id, "run_id": run_id, "source": source}
     logger.info("run_guard_begin", job_id=job_id, run_id=run_id, source=source)
     return None
@@ -118,6 +145,7 @@ def end() -> None:
     if _active is not None:
         logger.info("run_guard_end", **_active)
     _active = None
+    clear_stop()  # never leave a stop signal set once the run is over
 
 
 @asynccontextmanager

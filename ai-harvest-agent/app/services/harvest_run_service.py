@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, TypeVar
 
 import structlog
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import noload
 
@@ -202,6 +202,22 @@ class HarvestRunService:
         self._db.add_all(rows)
         await self._db.flush()
 
+    async def delete_jobs_for_run(self, run_pk: str) -> None:
+        """Delete all scraped-job rows for a run. Used by the end-of-run
+        reconcile: incremental persistence writes raw/unclassified rows during
+        the scrape (crash safety), then on completion those provisional rows are
+        deleted and replaced with the final classified/deduped set. run_id is
+        indexed, so this is cheap. Recruiters are NOT touched (they persist)."""
+        await self._db.execute(delete(ScrapedJobORM).where(ScrapedJobORM.run_id == run_pk))
+
+    async def replace_run_jobs(self, run_pk: str, jobs: list[dict[str, Any]]) -> None:
+        """Atomically swap a run's scraped jobs for a new set (delete + insert in
+        the same session/transaction), so the run's rows are never briefly empty
+        for a concurrent reader. Used to reconcile provisional incremental rows
+        with the final canonical list at end-of-run."""
+        await self.delete_jobs_for_run(run_pk)
+        await self.bulk_insert_scraped_jobs(run_pk, jobs)
+
     async def bulk_insert_llm_calls(self, run_pk: str, calls: list[dict[str, Any]]) -> None:
         if not calls:
             return
@@ -299,6 +315,23 @@ class HarvestRunService:
         )
         return int(result.scalar_one() or 0)
 
+    async def jobs_saved_today(self) -> int:
+        """Live count of scraped_jobs rows actually persisted since UTC midnight,
+        across every run today. Unlike jobs_scraped_today() (which sums
+        combined_count, only finalized at run completion), this counts real rows
+        as each incremental batch inserts — so the Rule Engine's "Jobs Saved"
+        card climbs while a harvest is in flight. Same naive-UTC-midnight
+        boundary as jobs_scraped_today()."""
+        start = datetime.now(timezone.utc).replace(
+            hour=0, minute=0, second=0, microsecond=0, tzinfo=None
+        )
+        result = await self._db.execute(
+            select(func.count())
+            .select_from(ScrapedJobORM)
+            .where(ScrapedJobORM.created_at >= start)
+        )
+        return int(result.scalar_one() or 0)
+
     async def list_scraped_jobs(
         self,
         *,
@@ -391,6 +424,27 @@ class HarvestRunService:
             select(ScrapedJobORM).order_by(ScrapedJobORM.posted_date.desc())
         )
         return list(result.scalars())
+
+    async def list_pending_report_runs(self) -> list[HarvestRunORM]:
+        """Runs that ended via a user stop and still owe a report email
+        (report_pending=True), oldest first. The next successful run merges
+        their jobs into its own report, then clears the flag."""
+        stmt = (
+            select(HarvestRunORM)
+            .options(noload(HarvestRunORM.jobs))  # jobs fetched separately via list_jobs_for_run
+            .where(HarvestRunORM.report_pending.is_(True))
+            .order_by(HarvestRunORM.created_at.asc())
+        )
+        result = await self._db.execute(stmt)
+        return list(result.scalars())
+
+    async def clear_report_pending(self, run_pk: str) -> None:
+        """Mark a stopped run's owed report as delivered."""
+        await self._db.execute(
+            update(HarvestRunORM)
+            .where(HarvestRunORM.id == run_pk)
+            .values(report_pending=False)
+        )
 
 
 # ── Ad-hoc LLM call audit (non-run-scoped) ──────────────────────────────────────

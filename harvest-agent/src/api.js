@@ -104,6 +104,14 @@ export function runHarvestAgent() {
   return request("/run-harvest-agent", { method: "POST", body: JSON.stringify({ config_id: "active" }) });
 }
 
+/** POST /run-harvest-agent/stop — cooperatively stop the in-flight harvest. The
+ * run saves the jobs gathered so far, is marked "stopped", and its report email
+ * is deferred (merged into the next successful run). Returns {status, job_id,
+ * run_id} — status "stopping" when a run was signalled, "idle" when none ran. */
+export function stopHarvest() {
+  return request("/run-harvest-agent/stop", { method: "POST" });
+}
+
 /** GET /run-history — all past harvest runs, newest first. */
 export function getRunHistory() {
   return request("/run-history");

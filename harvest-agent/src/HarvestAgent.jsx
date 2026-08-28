@@ -3,13 +3,15 @@ import {
   SlidersHorizontal, Download,
   Search, Mail, ArrowUpDown, ArrowUp, ArrowDown, Eye, Pencil, RefreshCw, ArrowLeft,
   CheckCircle2, XCircle, Loader2, HelpCircle, Play, FileJson, FileSpreadsheet,
-  AlertTriangle, ChevronDown,
+  AlertTriangle, ChevronDown, Square,
 } from "lucide-react";
 import JobDetailsView from "./JobDetailsView";
 import RuleEngineConfig from "./RuleEngineConfig";
 import Sidebar from "./components/Sidebar";
 import EmailComposeModal from "./components/EmailComposeModal";
 import LinkedInMessageModal from "./components/LinkedInMessageModal";
+import StopHarvestButton from "./components/StopHarvestModal";
+import useCountUp from "./useCountUp";
 import {
   getJobs, getRunHistory, getRunHistoryEntry, getActiveRun, ApiError,
   runLinkedinAgent, getLinkedinResults, getLinkedinResult,
@@ -145,6 +147,7 @@ const STATUS_TONES = {
   no_results: { background: "#F1F5F9", color: "#475569", Icon: HelpCircle },
   failed:     { background: "#FEF2F2", color: "#B91C1C", Icon: XCircle },
   running:    { background: "#FFFBEB", color: "#B45309", Icon: Loader2 },
+  stopped:    { background: "#FFF7ED", color: "#9A3412", Icon: Square },
 };
 const StatusPill = ({ status }) => {
   const tone = STATUS_TONES[status] || STATUS_TONES.no_results;
@@ -215,6 +218,12 @@ function mapApiJob(j) {
 
 function mapJobToDetail(j) {
   return {
+    // id/email/linkedin are carried through so the detail view's Email/LinkedIn
+    // icons can open the same LLM outreach composers the table rows use
+    // (EmailComposeModal/LinkedInMessageModal read job.id + job.email + job.company).
+    id: j.id,
+    email: j.email || "",
+    linkedin: j.linkedin || "",
     jobTitle: j.title,
     jd: j.jobDescription,
     jdHtml: j.jobDescriptionHtml || "",
@@ -252,6 +261,10 @@ function mapRun(entry) {
     ambiguous: entry.ambiguous ?? 0,
   };
 }
+
+// A number that eases toward its value (used for the live "Jobs found" count on
+// a running Run History row; finished rows have a stable value so it stays put).
+const AnimatedNumber = ({ value }) => useCountUp(Number(value) || 0);
 
 const StatCard = ({ value, label, color }) => (
   <div className="ha-card" style={{ flex: 1, minWidth: 160, padding: "16px 20px" }}>
@@ -304,7 +317,7 @@ function MultiSelect({ label, options, selected, onChange }) {
 
   const summary = selected.length === 0
     ? "All"
-    : options.filter((o) => selected.includes(o.value)).map((o) => o.label).join(", ");
+    : options.filter((o) => o.value && selected.includes(o.value)).map((o) => o.summaryLabel || o.label).join(", ");
 
   function toggle(value) {
     onChange(selected.includes(value) ? selected.filter((v) => v !== value) : [...selected, value]);
@@ -323,11 +336,18 @@ function MultiSelect({ label, options, selected, onChange }) {
             <input type="checkbox" checked={selected.length === 0} onChange={() => onChange([])} />
             <span>All</span>
           </label>
-          {options.map((o) => (
-            <label key={o.value} className="ha-multiselect-opt">
-              <input type="checkbox" checked={selected.includes(o.value)} onChange={() => toggle(o.value)} />
-              <span>{o.label}</span>
-            </label>
+          {options.map((o, i) => (
+            o.group ? (
+              <div key={"grp-" + i} className="ha-multiselect-group"
+                style={{ padding: "8px 10px 2px", fontSize: 11, fontWeight: 700, letterSpacing: ".04em", textTransform: "uppercase", color: C.textSoft }}>
+                {o.group}
+              </div>
+            ) : (
+              <label key={o.value} className="ha-multiselect-opt">
+                <input type="checkbox" checked={selected.includes(o.value)} onChange={() => toggle(o.value)} />
+                <span>{o.label}</span>
+              </label>
+            )
           ))}
         </div>
       )}
@@ -363,6 +383,220 @@ function ContactActionBtn({ glyph: Glyph, title, available, href, onClick }) {
 /* Sidebar lives in Sidebar.jsx — the single shared nav used by every page. */
 
 /* Run detail page */
+// Contact filter options — grouped for a professional dropdown. The option
+// VALUES and the OR-combined predicate (jobMatchesContact) are unchanged; only
+// the presentation is grouped. `summaryLabel` keeps the collapsed chip
+// unambiguous ("Has email" vs "No email") while the open list stays short
+// under its group header.
+const CONTACT_FILTER_OPTIONS = [
+  { group: "With contact" },
+  { value: "email",    label: "Email",    summaryLabel: "Has email" },
+  { value: "mobile",   label: "Phone",    summaryLabel: "Has phone" },
+  { value: "linkedin", label: "LinkedIn", summaryLabel: "Has LinkedIn" },
+  { group: "Without contact" },
+  { value: "no_email",    label: "Email",    summaryLabel: "No email" },
+  { value: "no_mobile",   label: "Phone",    summaryLabel: "No phone" },
+  { value: "no_linkedin", label: "LinkedIn", summaryLabel: "No LinkedIn" },
+  { value: "none", label: "None on file", summaryLabel: "No contact" },
+];
+
+// Positive tokens match rows that HAVE that channel; "no_*" tokens match rows
+// MISSING it; "none" matches rows with no contact at all. Tokens are OR-combined
+// (a row passes if it satisfies any selected one). Empty selection = no filter.
+function jobMatchesContact(j, contact) {
+  if (!contact || contact.length === 0) return true;
+  const has = { email: !!j.email, mobile: !!j.mobile, linkedin: !!j.linkedin };
+  const none = !has.email && !has.mobile && !has.linkedin;
+  return contact.some((c) =>
+    c === "email" ? has.email
+      : c === "mobile" ? has.mobile
+      : c === "linkedin" ? has.linkedin
+      : c === "no_email" ? !has.email
+      : c === "no_mobile" ? !has.mobile
+      : c === "no_linkedin" ? !has.linkedin
+      : c === "none" ? none
+      : false);
+}
+
+/**
+ * Shared jobs table used by both the Harvested Jobs page (JobsPage) and the
+ * run-history per-run view (RunDetailView). Owns the Company/Contact/Job/POC/
+ * search filter bar, sorting, the WhatsApp/Email/LinkedIn contact-action icons
+ * (with the LLM Email + LinkedIn composer modals), and — only when
+ * `showActionColumn` — the View/Edit Action column. `preFilter` lets the parent
+ * add its own predicate (date range on the Harvested Jobs page; classification
+ * bucket in the run view). The filtered+sorted rows are reported back via
+ * `onFilteredChange` so the parent can drive its own stats/export/footer.
+ */
+function JobsTable({
+  jobs,
+  onView,
+  showActionColumn = false,
+  preFilter = null,
+  loading = false,
+  emptyMessage = "No jobs match your filters.",
+  minWidth = 1180,
+  onFilteredChange = null,
+}) {
+  const [filters, setFilters] = useState({ company: "all", contact: [], job: "all", poc: "all" });
+  const [query, setQuery] = useState("");
+  const [sort, setSort] = useState({ col: "posted", dir: "desc" });
+
+  // Outreach modals + the per-row "no data on this channel" inline message.
+  const [emailModalJob, setEmailModalJob] = useState(null);
+  const [linkedinModalJob, setLinkedinModalJob] = useState(null);
+  const [noDataMsg, setNoDataMsg] = useState(null); // { jobId, channel }
+  const noDataTimer = useRef(null);
+  const showNoData = useCallback((jobId, channel) => {
+    setNoDataMsg({ jobId, channel });
+    if (noDataTimer.current) clearTimeout(noDataTimer.current);
+    noDataTimer.current = setTimeout(() => setNoDataMsg(null), 3000);
+  }, []);
+  useEffect(() => () => { if (noDataTimer.current) clearTimeout(noDataTimer.current); }, []);
+
+  const companies = useMemo(() => Array.from(new Set(jobs.map((j) => j.company))).sort(), [jobs]);
+  const jobTitles = useMemo(() => Array.from(new Set(jobs.map((j) => j.title))).sort(), [jobs]);
+  const pocNames = useMemo(() => Array.from(new Set(jobs.filter((j) => j.poc).map((j) => j.poc))).sort(), [jobs]);
+
+  const filtered = useMemo(() => {
+    const rows = jobs.filter((j) => {
+      if (filters.company !== "all" && j.company !== filters.company) return false;
+      if (filters.job !== "all" && j.title !== filters.job) return false;
+      if (filters.poc !== "all" && j.poc !== filters.poc) return false;
+      if (!jobMatchesContact(j, filters.contact)) return false;
+      if (preFilter && !preFilter(j)) return false;
+      if (query.trim()) {
+        const q = query.toLowerCase();
+        if (!((j.title + " " + j.company + " " + j.source + " " + (j.poc || "") + " " + (j.email || "") + " " + (j.mobile || "")).toLowerCase().includes(q))) return false;
+      }
+      return true;
+    });
+    const dir = sort.dir === "asc" ? 1 : -1;
+    return [...rows].sort((a, b) => {
+      switch (sort.col) {
+        case "title": return a.title.localeCompare(b.title) * dir;
+        case "company": return a.company.localeCompare(b.company) * dir;
+        case "poc": return (a.poc || "").localeCompare(b.poc || "") * dir;
+        case "source": return a.source.localeCompare(b.source) * dir;
+        case "posted": return a.postedDate.localeCompare(b.postedDate) * dir;
+        default: return 0;
+      }
+    });
+  }, [jobs, filters, query, sort, preFilter]);
+
+  useEffect(() => { if (onFilteredChange) onFilteredChange(filtered); }, [filtered, onFilteredChange]);
+
+  const colCount = showActionColumn ? 9 : 8;
+
+  return (
+    <>
+      <div className="ha-card ha-filterbar" style={{ padding: "16px 20px", gridTemplateColumns: "repeat(4, minmax(0, 1fr))" }}>
+        <Select label="Company" value={filters.company} onChange={(v) => setFilters((f) => ({ ...f, company: v }))}
+          options={[{ value: "all", label: "All" }, ...companies.map((c) => ({ value: c, label: c }))]} />
+        <MultiSelect label="Contact" selected={filters.contact} onChange={(v) => setFilters((f) => ({ ...f, contact: v }))}
+          options={CONTACT_FILTER_OPTIONS} />
+        <Select label="Job" value={filters.job} onChange={(v) => setFilters((f) => ({ ...f, job: v }))}
+          options={[{ value: "all", label: "All" }, ...jobTitles.map((t) => ({ value: t, label: t }))]} />
+        <Select label="POC" value={filters.poc} onChange={(v) => setFilters((f) => ({ ...f, poc: v }))}
+          options={[{ value: "all", label: "All" }, ...pocNames.map((p) => ({ value: p, label: p }))]} />
+        <div className="ha-filter-search">
+          <Search size={16} />
+          <input className="ha-input" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search…" />
+        </div>
+      </div>
+
+      <div className="ha-card" style={{ overflow: "hidden", marginTop: 14 }}>
+        <div className="ha-table-scroll">
+          <table className="ha-table" style={{ minWidth }}>
+            <thead className="ha-thead">
+              <tr>
+                <SortHeader label="Job title" col="title" sort={sort} setSort={setSort} width={230} />
+                <SortHeader label="Company" col="company" sort={sort} setSort={setSort} width={170} />
+                <SortHeader label="Source" col="source" sort={sort} setSort={setSort} width={100} />
+                <SortHeader label="POC" col="poc" sort={sort} setSort={setSort} width={150} />
+                <SortHeader label="Posted date" col="posted" sort={sort} setSort={setSort} width={130} />
+                <PlainHeader label="Email" width={200} />
+                <PlainHeader label="Mobile" width={140} />
+                <PlainHeader label="Contact" align="center" width={130} />
+                {showActionColumn && <PlainHeader label="Action" align="center" width={90} />}
+              </tr>
+            </thead>
+            <tbody>
+              {loading && (
+                <tr><td className="ha-td" colSpan={colCount} style={{ textAlign: "center", padding: "48px 16px", color: "#94A3B8" }}>
+                  Loading harvested jobs…
+                </td></tr>
+              )}
+              {!loading && filtered.map((j) => (
+                <tr key={j.id} className="ha-row">
+                  <td className="ha-td">
+                    <span className="ha-link" role="button" tabIndex={0} style={{ cursor: "pointer" }}
+                      title="View details"
+                      onClick={() => onView({ mode: "view", job: mapJobToDetail(j) })}
+                      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onView({ mode: "view", job: mapJobToDetail(j) }); } }}>
+                      {j.title}
+                    </span>
+                  </td>
+                  <td className="ha-td" style={{ color: C.text }}>{j.company}</td>
+                  <td className="ha-td"><SourceChip source={j.source} /></td>
+                  <td className="ha-td" style={{ color: C.text }}>
+                    {j.poc || <span style={{ color: "#94A3B8" }}>—</span>}
+                  </td>
+                  <td className="ha-td" style={{ whiteSpace: "nowrap", color: C.textSoft }}>{j.postedDate || "—"}</td>
+                  <td className="ha-td">
+                    {j.email
+                      ? <a className="ha-mail" href={"mailto:" + j.email}>{j.email}</a>
+                      : <span style={{ color: "#94A3B8" }}>—</span>}
+                  </td>
+                  <td className="ha-td" style={{ whiteSpace: "nowrap" }}>
+                    {j.mobile
+                      ? <a className="ha-tel" href={"tel:" + j.mobile}>{j.mobile}</a>
+                      : <span style={{ color: "#94A3B8" }}>—</span>}
+                  </td>
+                  <td className="ha-td">
+                    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
+                      <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
+                        <ContactActionBtn glyph={WhatsAppIcon} title="WhatsApp" available={!!j.whatsapp}
+                          href={j.whatsapp ? "https://wa.me/" + j.whatsapp.replace(/[^0-9]/g, "") : null}
+                          onClick={() => showNoData(j.id, "WhatsApp")} />
+                        <ContactActionBtn glyph={Mail} title="Email" available={!!j.email}
+                          onClick={() => (j.email ? setEmailModalJob(j) : showNoData(j.id, "email"))} />
+                        <ContactActionBtn glyph={LinkedInIcon} title="LinkedIn" available={!!j.linkedin}
+                          onClick={() => (j.linkedin ? setLinkedinModalJob(j) : showNoData(j.id, "LinkedIn"))} />
+                      </div>
+                      {noDataMsg && noDataMsg.jobId === j.id && (
+                        <small style={{ color: "#B91C1C", fontSize: 11, whiteSpace: "nowrap" }}>
+                          No {noDataMsg.channel} available
+                        </small>
+                      )}
+                    </div>
+                  </td>
+                  {showActionColumn && (
+                    <td className="ha-td">
+                      <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
+                        <button className="ha-act" title="View" onClick={() => onView({ mode: "view", job: mapJobToDetail(j) })}><Eye size={16} /></button>
+                        <button className="ha-act" title="Edit" onClick={() => onView({ mode: "edit", job: mapJobToDetail(j) })}><Pencil size={16} /></button>
+                      </div>
+                    </td>
+                  )}
+                </tr>
+              ))}
+              {!loading && filtered.length === 0 && (
+                <tr><td className="ha-td" colSpan={colCount} style={{ textAlign: "center", padding: "48px 16px", color: "#94A3B8" }}>
+                  {emptyMessage}
+                </td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {emailModalJob && <EmailComposeModal job={emailModalJob} onClose={() => setEmailModalJob(null)} />}
+      {linkedinModalJob && <LinkedInMessageModal job={linkedinModalJob} onClose={() => setLinkedinModalJob(null)} />}
+    </>
+  );
+}
+
 function RunDetailView({ runId, onBack, onView }) {
   const [entry, setEntry] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -407,79 +641,34 @@ function RunDetailView({ runId, onBack, onView }) {
     return () => { cancelled = true; };
   }, [runId]);
 
-  // Filter/sort state — mirrors the Harvested Jobs page filter bar, but scoped
-  // to this run's jobs. Dropdown options are derived from `jobs` below, so they
-  // only ever list companies/titles/POCs present in this single run.
-  // `bucket` is the classification filter driven by the clickable stat cards
-  // ("all" | "verified" | "direct" | "gcc" | "staffing" | "ambiguous").
-  const [filters, setFilters] = useState({ company: "all", contact: [], job: "all", poc: "all", status: "all", bucket: "all" });
-  const [query, setQuery] = useState("");
-  const [sort, setSort] = useState({ col: "posted", dir: "desc" });
+  // The classification bucket is driven by the clickable stat cards in the run
+  // header ("all" | "verified" | "direct" | "gcc" | "staffing" | "ambiguous").
+  // The rest of the filtering (company/contact/job/POC/search/sort) lives in the
+  // shared JobsTable, which reports its filtered rows back via onFilteredChange
+  // for the stats + CSV export below.
+  const [bucket, setBucket] = useState("all");
+  const [filteredRows, setFilteredRows] = useState([]);
 
-  const companies = useMemo(() => Array.from(new Set(jobs.map((j) => j.company))).sort(), [jobs]);
-  const jobTitles = useMemo(() => Array.from(new Set(jobs.map((j) => j.title))).sort(), [jobs]);
-  const pocNames = useMemo(() => Array.from(new Set(jobs.filter((j) => j.poc).map((j) => j.poc))).sort(), [jobs]);
-
-  const filtered = useMemo(() => {
-    let rows = jobs.filter((j) => {
-      if (filters.company !== "all" && j.company !== filters.company) return false;
-      if (filters.job !== "all" && j.title !== filters.job) return false;
-      if (filters.poc !== "all" && j.poc !== filters.poc) return false;
-      if (filters.contact.length > 0) {
-        // Positive tokens match rows that HAVE that channel; "no_*" tokens match
-        // rows MISSING it; "none" matches rows with no contact data at all.
-        // Tokens are OR-combined (a row passes if it satisfies any selected one).
-        const has = { email: !!j.email, mobile: !!j.mobile, linkedin: !!j.linkedin };
-        const none = !has.email && !has.mobile && !has.linkedin;
-        const matches = filters.contact.some((c) =>
-          c === "email" ? has.email
-            : c === "mobile" ? has.mobile
-            : c === "linkedin" ? has.linkedin
-            : c === "no_email" ? !has.email
-            : c === "no_mobile" ? !has.mobile
-            : c === "no_linkedin" ? !has.linkedin
-            : c === "none" ? none
-            : false);
-        if (!matches) return false;
-      }
-      if (filters.status === "qualified" && !j.passedFilter) return false;
-      if (filters.status === "flagged" && j.passedFilter) return false;
-      // Classification bucket from the clickable stat cards. Predicates mirror the
-      // backend run-summary counts (hiring_entity / verification_status), so a
-      // card's number matches the rows shown. "all" = Jobs found (no filter).
-      if (filters.bucket === "verified" && j.verificationStatus !== "verified") return false;
-      if (filters.bucket === "direct" && j.hiringEntity !== "Direct Client") return false;
-      if (filters.bucket === "gcc" && j.hiringEntity !== "GCC") return false;
-      if (filters.bucket === "staffing" && j.hiringEntity !== "Staffing Firm") return false;
-      if (filters.bucket === "ambiguous" && j.hiringEntity !== "Ambiguous") return false;
-      if (query.trim()) {
-        const q = query.toLowerCase();
-        if (!((j.title + " " + j.company + " " + j.source + " " + (j.poc || "") + " " + (j.email || "") + " " + (j.mobile || "")).toLowerCase().includes(q))) return false;
-      }
-      return true;
-    });
-    const dir = sort.dir === "asc" ? 1 : -1;
-    return [...rows].sort((a, b) => {
-      switch (sort.col) {
-        case "title": return a.title.localeCompare(b.title) * dir;
-        case "company": return a.company.localeCompare(b.company) * dir;
-        case "poc": return (a.poc || "").localeCompare(b.poc || "") * dir;
-        case "source": return a.source.localeCompare(b.source) * dir;
-        case "posted": return a.postedDate.localeCompare(b.postedDate) * dir;
-        default: return 0;
-      }
-    });
-  }, [jobs, filters, query, sort]);
+  const bucketPredicate = useCallback((j) => {
+    // Predicates mirror the backend run-summary counts (hiring_entity /
+    // verification_status), so a card's number matches the rows shown.
+    if (bucket === "verified" && j.verificationStatus !== "verified") return false;
+    if (bucket === "direct" && j.hiringEntity !== "Direct Client") return false;
+    if (bucket === "gcc" && j.hiringEntity !== "GCC") return false;
+    if (bucket === "staffing" && j.hiringEntity !== "Staffing Firm") return false;
+    if (bucket === "ambiguous" && j.hiringEntity !== "Ambiguous") return false;
+    return true;
+  }, [bucket]);
 
   const jobStats = useMemo(() => ({
-    total: filtered.length,
-    companies: new Set(filtered.map((j) => j.company)).size,
-    pocs: filtered.filter((j) => j.poc).length,
-  }), [filtered]);
+    total: filteredRows.length,
+    companies: new Set(filteredRows.map((j) => j.company)).size,
+    pocs: filteredRows.filter((j) => j.poc).length,
+  }), [filteredRows]);
 
   function exportCsv() {
     const header = ["Job title", "Company", "Source", "POC", "Posted date", "Email", "Mobile", "Job description"];
-    const lines = filtered.map((j) =>
+    const lines = filteredRows.map((j) =>
       [j.title, j.company, j.source, j.poc || "—", j.postedDate || "—", j.email || "—", j.mobile || "—", j.jobDescription || "—"]
         .map((c) => '"' + String(c).replace(/"/g, '""') + '"').join(","));
     // Prepend a UTF-8 BOM so Excel detects the encoding — without it Excel reads
@@ -531,7 +720,7 @@ function RunDetailView({ runId, onBack, onView }) {
                         { bucket: "staffing",  value: entry.staffingFirms, label: "Staffing firms",    color: "#7C3AED" },
                         { bucket: "ambiguous", value: entry.ambiguous,     label: "Needs review",      color: "#D97706" },
                       ].map((card) => {
-                        const active = filters.bucket === card.bucket;
+                        const active = bucket === card.bucket;
                         return (
                           <button
                             key={card.bucket}
@@ -539,7 +728,7 @@ function RunDetailView({ runId, onBack, onView }) {
                             className={"ha-runstat ha-runstat-btn" + (active ? " ha-runstat-active" : "")}
                             aria-pressed={active}
                             title={card.bucket === "all" ? "Show all jobs" : `Filter this run's jobs to ${card.label}`}
-                            onClick={() => setFilters((f) => ({ ...f, bucket: f.bucket === card.bucket ? "all" : card.bucket }))}
+                            onClick={() => setBucket((b) => b === card.bucket ? "all" : card.bucket)}
                             style={active ? { boxShadow: `inset 0 0 0 2px ${card.color}` } : undefined}
                           >
                             <b style={{ color: card.color }}>{card.value}</b><span>{card.label}</span>
@@ -557,11 +746,11 @@ function RunDetailView({ runId, onBack, onView }) {
                     <div style={{ fontSize: 12, color: C.textSoft, fontWeight: 700, letterSpacing: ".05em", textTransform: "uppercase" }}>
                       Harvested jobs in this run
                     </div>
-                    {filters.bucket !== "all" && (
-                      <button className="ha-pill" onClick={() => setFilters((f) => ({ ...f, bucket: "all" }))}
+                    {bucket !== "all" && (
+                      <button className="ha-pill" onClick={() => setBucket("all")}
                         title="Clear card filter"
                         style={{ background: C.pale, color: C.secondary, border: "1px solid " + C.border, display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
-                        {BUCKET_LABELS[filters.bucket]} <XCircle size={12} />
+                        {BUCKET_LABELS[bucket]} <XCircle size={12} />
                       </button>
                     )}
                   </div>
@@ -569,88 +758,24 @@ function RunDetailView({ runId, onBack, onView }) {
                     <span><b style={{ color: C.text }}>{jobStats.total}</b> jobs</span>
                     <span><b style={{ color: C.text }}>{jobStats.companies}</b> companies</span>
                     <span><b style={{ color: C.text }}>{jobStats.pocs}</b> POCs</span>
-                    <button className="ha-btn ha-btn-primary" onClick={exportCsv} disabled={filtered.length === 0}>
+                    <button className="ha-btn ha-btn-primary" onClick={exportCsv} disabled={filteredRows.length === 0}>
                       <Download size={16} /> Export CSV
                     </button>
                   </div>
                 </div>
 
-                <div className="ha-card ha-filterbar" style={{ padding: "16px 20px", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", marginTop: 14 }}>
-                  <Select label="Company" value={filters.company} onChange={(v) => setFilters((f) => ({ ...f, company: v }))}
-                    options={[{ value: "all", label: "All" }, ...companies.map((c) => ({ value: c, label: c }))]} />
-                  <MultiSelect label="Contact" selected={filters.contact} onChange={(v) => setFilters((f) => ({ ...f, contact: v }))}
-                    options={[
-                      { value: "email", label: "Has Email" }, { value: "mobile", label: "Has Mobile" }, { value: "linkedin", label: "Has LinkedIn" },
-                      { value: "no_email", label: "No Email" }, { value: "no_mobile", label: "No Mobile" }, { value: "no_linkedin", label: "No LinkedIn" },
-                      { value: "none", label: "No Contact Info" },
-                    ]} />
-                  <Select label="Job" value={filters.job} onChange={(v) => setFilters((f) => ({ ...f, job: v }))}
-                    options={[{ value: "all", label: "All" }, ...jobTitles.map((t) => ({ value: t, label: t }))]} />
-                  <Select label="POC" value={filters.poc} onChange={(v) => setFilters((f) => ({ ...f, poc: v }))}
-                    options={[{ value: "all", label: "All" }, ...pocNames.map((p) => ({ value: p, label: p }))]} />
-                  <div className="ha-filter-search">
-                    <Search size={16} />
-                    <input className="ha-input" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search…" />
-                  </div>
-                </div>
-
                 {jobsError && <div className="ha-errbanner" style={{ marginTop: 14 }}>{jobsError}</div>}
 
-                <div className="ha-card" style={{ overflow: "hidden", marginTop: 14 }}>
-                  <div className="ha-table-scroll">
-                    <table className="ha-table" style={{ minWidth: 1180 }}>
-                      <thead className="ha-thead">
-                        <tr>
-                          <SortHeader label="Job title" col="title" sort={sort} setSort={setSort} width={260} />
-                          <SortHeader label="Company" col="company" sort={sort} setSort={setSort} width={190} />
-                          <SortHeader label="Source" col="source" sort={sort} setSort={setSort} width={100} />
-                          {/* <PlainHeader label="Filter status" align="center" width={120} /> */}
-                          <SortHeader label="POC" col="poc" sort={sort} setSort={setSort} width={150} />
-                          <SortHeader label="Posted date" col="posted" sort={sort} setSort={setSort} width={130} />
-                          <PlainHeader label="Email" width={200} />
-                          <PlainHeader label="Mobile" width={140} />
-                          {/* <PlainHeader label="Action" align="center" width={80} /> */}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {jobsLoading && (
-                          <tr><td className="ha-td" colSpan={8} style={{ textAlign: "center", padding: "40px 16px", color: "#94A3B8" }}>
-                            Loading this run's jobs…
-                          </td></tr>
-                        )}
-                        {!jobsLoading && filtered.map((j) => (
-                          <tr key={j.id} className="ha-row">
-                            <td className="ha-td">
-                              <button className="ha-link" onClick={() => onView && onView({ mode: "view", job: mapJobToDetail(j) })}>{j.title}</button>
-                            </td>
-                            <td className="ha-td" style={{ color: C.text }}>{j.company}</td>
-                            <td className="ha-td"><SourceChip source={j.source} /></td>
-                            {/* <td className="ha-td" style={{ textAlign: "center" }}>
-                              <FilterStatusBadge passed={j.passedFilter} reason={j.filterReason} />
-                            </td> */}
-                            <td className="ha-td" style={{ color: C.text }}>{j.poc || <span style={{ color: "#94A3B8" }}>—</span>}</td>
-                            <td className="ha-td" style={{ whiteSpace: "nowrap", color: C.textSoft }}>{j.postedDate || "—"}</td>
-                            <td className="ha-td">
-                              {j.email ? <a className="ha-mail" href={"mailto:" + j.email}>{j.email}</a> : <span style={{ color: "#94A3B8" }}>—</span>}
-                            </td>
-                            <td className="ha-td" style={{ whiteSpace: "nowrap" }}>
-                              {j.mobile ? <a className="ha-tel" href={"tel:" + j.mobile}>{j.mobile}</a> : <span style={{ color: "#94A3B8" }}>—</span>}
-                            </td>
-                            {/* <td className="ha-td">
-                              <div style={{ display: "flex", justifyContent: "center" }}>
-                                <button className="ha-act" title="View" onClick={() => onView && onView({ mode: "view", job: mapJobToDetail(j) })}><Eye size={16} /></button>
-                              </div>
-                            </td> */}
-                          </tr>
-                        ))}
-                        {!jobsLoading && !jobsError && filtered.length === 0 && (
-                          <tr><td className="ha-td" colSpan={8} style={{ textAlign: "center", padding: "40px 16px", color: "#94A3B8" }}>
-                            {jobs.length === 0 ? "No jobs recorded for this run." : "No jobs match your filters."}
-                          </td></tr>
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
+                <div style={{ marginTop: 14 }}>
+                  <JobsTable
+                    jobs={jobs}
+                    onView={onView}
+                    loading={jobsLoading}
+                    preFilter={bucketPredicate}
+                    onFilteredChange={setFilteredRows}
+                    minWidth={1180}
+                    emptyMessage={jobs.length === 0 ? "No jobs recorded for this run." : "No jobs match your filters."}
+                  />
                 </div>
               </div>
             </>
@@ -663,23 +788,19 @@ function RunDetailView({ runId, onBack, onView }) {
 
 /* ── Harvested Jobs page ─────────────────────────────────────────────── */
 function JobsPage({ jobs, total, loading, error, onRefresh, onNavigate, onView }) {
-  const [filters, setFilters] = useState({ company: "all", contact: [], job: "all", poc: "all", status: "all" });
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
-  const [query, setQuery] = useState("");
-  const [sort, setSort] = useState({ col: "posted", dir: "desc" });
+  const [filteredRows, setFilteredRows] = useState([]);
 
-  // Outreach modals + the per-row "no data on this channel" inline message.
-  const [emailModalJob, setEmailModalJob] = useState(null);
-  const [linkedinModalJob, setLinkedinModalJob] = useState(null);
-  const [noDataMsg, setNoDataMsg] = useState(null); // { jobId, channel }
-  const noDataTimer = useRef(null);
-  const showNoData = useCallback((jobId, channel) => {
-    setNoDataMsg({ jobId, channel });
-    if (noDataTimer.current) clearTimeout(noDataTimer.current);
-    noDataTimer.current = setTimeout(() => setNoDataMsg(null), 3000);
-  }, []);
-  useEffect(() => () => { if (noDataTimer.current) clearTimeout(noDataTimer.current); }, []);
+  // Date-range predicate handed to the shared JobsTable. The rest of the filter
+  // bar (company/contact/job/POC/search/sort), the contact-action icons, and the
+  // Email/LinkedIn composer modals all live inside JobsTable, which reports its
+  // filtered rows back via onFilteredChange for the CSV export + footer below.
+  const dateFilter = useCallback((j) => {
+    if (startDate && j.postedDate.slice(0, 10) < startDate) return false;
+    if (endDate && j.postedDate.slice(0, 10) > endDate) return false;
+    return true;
+  }, [startDate, endDate]);
 
   const counts = useMemo(() => ({
     all: jobs.length,
@@ -692,58 +813,9 @@ function JobsPage({ jobs, total, loading, error, onRefresh, onNavigate, onView }
     flagged: jobs.filter((j) => !j.passedFilter).length,
   }), [jobs]);
 
-  const companies = useMemo(() => Array.from(new Set(jobs.map((j) => j.company))).sort(), [jobs]);
-  const jobTitles = useMemo(() => Array.from(new Set(jobs.map((j) => j.title))).sort(), [jobs]);
-  const pocNames = useMemo(() => Array.from(new Set(jobs.filter((j) => j.poc).map((j) => j.poc))).sort(), [jobs]);
-
-  const filtered = useMemo(() => {
-    let rows = jobs.filter((j) => {
-      if (filters.company !== "all" && j.company !== filters.company) return false;
-      if (filters.job !== "all" && j.title !== filters.job) return false;
-      if (filters.poc !== "all" && j.poc !== filters.poc) return false;
-      if (filters.contact.length > 0) {
-        // Positive tokens match rows that HAVE that channel; "no_*" tokens match
-        // rows MISSING it; "none" matches rows with no contact data at all.
-        // Tokens are OR-combined (a row passes if it satisfies any selected one).
-        const has = { email: !!j.email, mobile: !!j.mobile, linkedin: !!j.linkedin };
-        const none = !has.email && !has.mobile && !has.linkedin;
-        const matches = filters.contact.some((c) =>
-          c === "email" ? has.email
-            : c === "mobile" ? has.mobile
-            : c === "linkedin" ? has.linkedin
-            : c === "no_email" ? !has.email
-            : c === "no_mobile" ? !has.mobile
-            : c === "no_linkedin" ? !has.linkedin
-            : c === "none" ? none
-            : false);
-        if (!matches) return false;
-      }
-      if (filters.status === "qualified" && !j.passedFilter) return false;
-      if (filters.status === "flagged" && j.passedFilter) return false;
-      if (startDate && j.postedDate.slice(0, 10) < startDate) return false;
-      if (endDate && j.postedDate.slice(0, 10) > endDate) return false;
-      if (query.trim()) {
-        const q = query.toLowerCase();
-        if (!((j.title + " " + j.company + " " + j.source + " " + (j.poc || "") + " " + (j.email || "") + " " + (j.mobile || "")).toLowerCase().includes(q))) return false;
-      }
-      return true;
-    });
-    const dir = sort.dir === "asc" ? 1 : -1;
-    return [...rows].sort((a, b) => {
-      switch (sort.col) {
-        case "title": return a.title.localeCompare(b.title) * dir;
-        case "company": return a.company.localeCompare(b.company) * dir;
-        case "poc": return (a.poc || "").localeCompare(b.poc || "") * dir;
-        case "source": return a.source.localeCompare(b.source) * dir;
-        case "posted": return a.postedDate.localeCompare(b.postedDate) * dir;
-        default: return 0;
-      }
-    });
-  }, [jobs, filters, startDate, endDate, query, sort]);
-
   function exportCsv() {
     const header = ["Job title", "Company", "Source", "Filter status", "Filter reason", "POC", "Posted date", "Email", "Mobile", "WhatsApp", "LinkedIn", "Job description"];
-    const lines = filtered.map((j) =>
+    const lines = filteredRows.map((j) =>
       [j.title, j.company, j.source, j.passedFilter ? "Qualified" : "Flagged", j.filterReason || "—", j.poc || "—", j.postedDate || "—", j.email || "—", j.mobile || "—", j.whatsapp || "—", j.linkedin || "—", j.jobDescription || "—"]
         .map((c) => '"' + String(c).replace(/"/g, '""') + '"').join(","));
     // Prepend a UTF-8 BOM so Excel detects the encoding — without it Excel reads
@@ -798,121 +870,22 @@ function JobsPage({ jobs, total, loading, error, onRefresh, onNavigate, onView }
           <StatCard value={counts.pocs} label="POCs identified" color={C.primary} />
         </div>
 
-        <div className="ha-card ha-filterbar" style={{ padding: "16px 20px", gridTemplateColumns: "repeat(4, minmax(0, 1fr))" }}>
-          <Select label="Company" value={filters.company} onChange={(v) => setFilters((f) => ({ ...f, company: v }))}
-            options={[{ value: "all", label: "All" }, ...companies.map((c) => ({ value: c, label: c }))]} />
-          <MultiSelect label="Contact" selected={filters.contact} onChange={(v) => setFilters((f) => ({ ...f, contact: v }))}
-            options={[
-              { value: "email", label: "Has Email" }, { value: "mobile", label: "Has Mobile" }, { value: "linkedin", label: "Has LinkedIn" },
-              { value: "no_email", label: "No Email" }, { value: "no_mobile", label: "No Mobile" }, { value: "no_linkedin", label: "No LinkedIn" },
-              { value: "none", label: "No Contact Info" },
-            ]} />
-          <Select label="Job" value={filters.job} onChange={(v) => setFilters((f) => ({ ...f, job: v }))}
-            options={[{ value: "all", label: "All" }, ...jobTitles.map((t) => ({ value: t, label: t }))]} />
-          <Select label="POC" value={filters.poc} onChange={(v) => setFilters((f) => ({ ...f, poc: v }))}
-            options={[{ value: "all", label: "All" }, ...pocNames.map((p) => ({ value: p, label: p }))]} />
-          <div className="ha-filter-search">
-            <Search size={16} />
-            <input className="ha-input" value={query}
-              onChange={(e) => setQuery(e.target.value)} placeholder="Search…" />
-          </div>
-        </div>
+        <JobsTable
+          jobs={jobs}
+          onView={onView}
+          showActionColumn
+          loading={loading}
+          preFilter={dateFilter}
+          onFilteredChange={setFilteredRows}
+          minWidth={1340}
+          emptyMessage="No postings match your search. Run a harvest from the Rule Engine to collect jobs."
+        />
 
-        <div className="ha-card" style={{ overflow: "hidden" }}>
-          <div className="ha-table-scroll">
-            <table className="ha-table" style={{ minWidth: 1340 }}>
-              <thead className="ha-thead">
-                <tr>
-                  <SortHeader label="Job title" col="title" sort={sort} setSort={setSort} width={230} />
-                  <SortHeader label="Company" col="company" sort={sort} setSort={setSort} width={170} />
-                  <SortHeader label="Source" col="source" sort={sort} setSort={setSort} width={100} />
-                  {/* <PlainHeader label="Filter status" align="center" width={120} /> */}
-                  <SortHeader label="POC" col="poc" sort={sort} setSort={setSort} width={150} />
-                  <SortHeader label="Posted date" col="posted" sort={sort} setSort={setSort} width={130} />
-                  <PlainHeader label="Email" width={200} />
-                  <PlainHeader label="Mobile" width={140} />
-                  <PlainHeader label="Contact" align="center" width={130} />
-                  <PlainHeader label="Action" align="center" width={90} />
-                </tr>
-              </thead>
-              <tbody>
-                {loading && (
-                  <tr><td className="ha-td" colSpan={9} style={{ textAlign: "center", padding: "48px 16px", color: "#94A3B8" }}>
-                    Loading harvested jobs…
-                  </td></tr>
-                )}
-                {!loading && filtered.map((j) => (
-                  <tr key={j.id} className="ha-row">
-                    <td className="ha-td">
-                      <span className="ha-link" role="button" tabIndex={0} style={{ cursor: "pointer" }}
-                        title="View details"
-                        onClick={() => onView({ mode: "view", job: mapJobToDetail(j) })}
-                        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onView({ mode: "view", job: mapJobToDetail(j) }); } }}>
-                        {j.title}
-                      </span>
-                    </td>
-                    <td className="ha-td" style={{ color: C.text }}>{j.company}</td>
-                    <td className="ha-td"><SourceChip source={j.source} /></td>
-                    {/* <td className="ha-td" style={{ textAlign: "center" }}>
-                      <FilterStatusBadge passed={j.passedFilter} reason={j.filterReason} />
-                    </td> */}
-                    <td className="ha-td" style={{ color: C.text }}>
-                      {j.poc || <span style={{ color: "#94A3B8" }}>—</span>}
-                    </td>
-                    <td className="ha-td" style={{ whiteSpace: "nowrap", color: C.textSoft }}>{j.postedDate || "—"}</td>
-                    <td className="ha-td">
-                      {j.email
-                        ? <a className="ha-mail" href={"mailto:" + j.email}>{j.email}</a>
-                        : <span style={{ color: "#94A3B8" }}>—</span>}
-                    </td>
-                    <td className="ha-td" style={{ whiteSpace: "nowrap" }}>
-                      {j.mobile
-                        ? <a className="ha-tel" href={"tel:" + j.mobile}>{j.mobile}</a>
-                        : <span style={{ color: "#94A3B8" }}>—</span>}
-                    </td>
-                    <td className="ha-td">
-                      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
-                        <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
-                          <ContactActionBtn glyph={WhatsAppIcon} title="WhatsApp" available={!!j.whatsapp}
-                            href={j.whatsapp ? "https://wa.me/" + j.whatsapp.replace(/[^0-9]/g, "") : null}
-                            onClick={() => showNoData(j.id, "WhatsApp")} />
-                          <ContactActionBtn glyph={Mail} title="Email" available={!!j.email}
-                            onClick={() => (j.email ? setEmailModalJob(j) : showNoData(j.id, "email"))} />
-                          <ContactActionBtn glyph={LinkedInIcon} title="LinkedIn" available={!!j.linkedin}
-                            onClick={() => (j.linkedin ? setLinkedinModalJob(j) : showNoData(j.id, "LinkedIn"))} />
-                        </div>
-                        {noDataMsg && noDataMsg.jobId === j.id && (
-                          <small style={{ color: "#B91C1C", fontSize: 11, whiteSpace: "nowrap" }}>
-                            No {noDataMsg.channel} available
-                          </small>
-                        )}
-                      </div>
-                    </td>
-                    <td className="ha-td">
-                      <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
-                        <button className="ha-act" title="View" onClick={() => onView({ mode: "view", job: mapJobToDetail(j) })}><Eye size={16} /></button>
-                        <button className="ha-act" title="Edit" onClick={() => onView({ mode: "edit", job: mapJobToDetail(j) })}><Pencil size={16} /></button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-                {!loading && !error && filtered.length === 0 && (
-                  <tr><td className="ha-td" colSpan={9} style={{ textAlign: "center", padding: "48px 16px", color: "#94A3B8" }}>
-                    No postings match your search. Run a harvest from the Rule Engine to collect jobs.
-                  </td></tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-          <div style={{ display: "flex", justifyContent: "space-between", padding: "12px 16px", fontSize: 12, borderTop: "1px solid #EEF2F7", color: C.textSoft }}>
-            <span>Showing {filtered.length} of {jobs.length} loaded postings · {counts.qualified} qualified · {counts.flagged} flagged</span>
-            <span>{counts.email} email · {counts.whatsapp} WhatsApp · {counts.linkedin} LinkedIn</span>
-          </div>
+        <div style={{ display: "flex", justifyContent: "space-between", padding: "0 4px", fontSize: 12, color: C.textSoft }}>
+          <span>Showing {filteredRows.length} of {jobs.length} loaded postings · {counts.qualified} qualified · {counts.flagged} flagged</span>
+          <span>{counts.email} email · {counts.whatsapp} WhatsApp · {counts.linkedin} LinkedIn</span>
         </div>
       </div>
-
-      {emailModalJob && <EmailComposeModal job={emailModalJob} onClose={() => setEmailModalJob(null)} />}
-      {linkedinModalJob && <LinkedInMessageModal job={linkedinModalJob} onClose={() => setLinkedinModalJob(null)} />}
     </main>
   );
 }
@@ -1008,7 +981,7 @@ function RunHistoryPage({ runs, loading, error, onRefresh, onNavigate, onView })
           <Select label="Source" value={filters.source} onChange={(v) => setFilters((f) => ({ ...f, source: v }))}
             options={[{ value: "all", label: "All" }, { value: "linkedin", label: "LinkedIn" }, { value: "naukri", label: "Naukri" }, { value: "dice", label: "Dice" }]} />
           <Select label="Status" value={filters.status} onChange={(v) => setFilters((f) => ({ ...f, status: v }))}
-            options={[{ value: "all", label: "All" }, { value: "success", label: "Success" }, { value: "no_results", label: "No results" }, { value: "failed", label: "Failed" }, { value: "running", label: "Running" }]} />
+            options={[{ value: "all", label: "All" }, { value: "success", label: "Success" }, { value: "no_results", label: "No results" }, { value: "failed", label: "Failed" }, { value: "running", label: "Running" }, { value: "stopped", label: "Stopped" }]} />
           <div className="ha-filter-search">
             <Search size={16} />
             <input className="ha-input" value={query}
@@ -1047,7 +1020,10 @@ function RunHistoryPage({ runs, loading, error, onRefresh, onNavigate, onView })
                     <td className="ha-td"><StatusPill status={r.status} /></td>
                     <td className="ha-td" style={{ whiteSpace: "nowrap", color: C.textSoft }}>{fmtDate(r.startedAt)}</td>
                     <td className="ha-td" style={{ whiteSpace: "nowrap", color: C.textSoft }}>{fmtDate(r.completedAt)}</td>
-                    <td className="ha-td" style={{ fontWeight: 600 }}>{r.jobsFound}</td>
+                    <td className="ha-td" style={{ fontWeight: 600 }}>
+                      <AnimatedNumber value={r.jobsFound} />
+                      {r.status === "running" && <span style={{ color: C.accent, marginLeft: 4 }} title="climbing live">▲</span>}
+                    </td>
                     <td className="ha-td">
                       <div className="ha-breakdown">
                         <span><b>{r.directClients}</b> DC</span>
@@ -1155,12 +1131,16 @@ function SourceRunsPage({ harvestRunning, setHarvestRunning }) {
             Trigger a single-source harvest (POST /run-{tab}-agent) and browse its saved results.
           </p>
         </div>
-        <button className="ha-btn ha-btn-primary" onClick={handleRun} disabled={running || harvestRunning}
-          style={harvestRunning && !running ? { background: "#94A3B8", borderColor: "#94A3B8" } : undefined}
-          title={harvestRunning && !running ? "A harvest is already running — controls locked until it finishes" : undefined}>
-          {(running || harvestRunning) ? <Loader2 size={16} className="ha-spin" /> : <Play size={16} />}
-          {running ? "Running…" : harvestRunning ? "Running elsewhere…" : `Run ${current.label} Only`}
-        </button>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <StopHarvestButton harvestRunning={harvestRunning}
+            onStopped={() => setRunMessage("Stop requested — the run will halt shortly and save its jobs. The report email is deferred to the next successful run.")} />
+          <button className="ha-btn ha-btn-primary" onClick={handleRun} disabled={running || harvestRunning}
+            style={harvestRunning && !running ? { background: "#94A3B8", borderColor: "#94A3B8" } : undefined}
+            title={harvestRunning && !running ? "A harvest is already running — controls locked until it finishes" : undefined}>
+            {(running || harvestRunning) ? <Loader2 size={16} className="ha-spin" /> : <Play size={16} />}
+            {running ? "Running…" : harvestRunning ? "Running elsewhere…" : `Run ${current.label} Only`}
+          </button>
+        </div>
       </div>
       <div style={{ marginTop: 20, borderBottom: "1px solid " + C.border }} />
 
@@ -1512,6 +1492,16 @@ export default function HarvestAgent({ onLogout }) {
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
   }, [syncActiveRun]);
+
+  // While any run is in progress, re-fetch the run list every 6s so the Run
+  // History page reflects the running row's jobs_found (= live combined_count)
+  // climbing. Polling stops automatically once no run is "running".
+  const anyRunning = runs.some((r) => r.status === "running");
+  useEffect(() => {
+    if (!anyRunning) return;
+    const id = setInterval(() => { fetchRuns(); }, 6000);
+    return () => clearInterval(id);
+  }, [anyRunning, fetchRuns]);
 
   if (activePage === "rules") {
     return (

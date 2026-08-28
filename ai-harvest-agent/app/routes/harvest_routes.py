@@ -258,74 +258,90 @@ async def toggle_schedule(request: Request) -> Any:
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def _apply_schedule(scheduler, config: HarvestConfig) -> None:
-    """Wire up the APScheduler job for the automatic harvest run."""
-    from app.agents.orchestrator_agent import OrchestratorAgent  # avoid circular at import time
-    from app.config import get_settings
-    from app.services.email_service import EmailSender
-    from app.services.harvest_notification_service import send_harvest_report
+    """Wire up the APScheduler job for the automatic harvest run.
+
+    A scheduled tick now runs the SAME persisted pipeline as the manual
+    endpoint (POST /run-harvest-agent): it creates a harvest_run row + a
+    JobTracker entry, persists scraped jobs / LLM calls / run history via
+    _run_harvest_background_impl, enforces the global daily cap, and emails the
+    report. The only differences from a manual run are unattended semantics —
+    conflicts are skipped (not surfaced as 409s) and wait_for_login=False so an
+    expired LinkedIn session fails fast instead of hanging with no human present.
+    """
+    # Lazily imported: this module is pulled in by main.py's lifespan, and the
+    # run_harvest_agent route module builds a fuller import graph.
+    from uuid import uuid4
+    from app.routes.run_harvest_agent import _filters_snapshot, _run_harvest_background
+    from app.services.harvest_run_service import HarvestRunService, db_write
+    from app.services.job_tracker import JobTracker
 
     async def _auto_harvest() -> None:
         cfg     = _config_svc.load()
         run_id  = _make_run_id(cfg.filters.keyword, cfg.filters.location)
+        now_iso = datetime.now(timezone.utc).isoformat()
 
-        # Single-flight: an unattended scheduled tick must NOT collide with an
-        # in-progress manual run (same Chrome profile). Skip this tick if a run
-        # is already active rather than failing both. DB backstop first, then an
-        # atomic in-process claim — try_begin() has no await between check and
-        # set, so a tick firing at the same moment as a manual start can't slip
-        # past it; exactly one claims the slot, the other skips/409s.
+        enabled = [
+            src for src in ["naukri", "linkedin", "dice"]
+            if getattr(cfg.sources, src, False)
+        ]
+        if not enabled:
+            logger.warning("scheduled_harvest_skipped_no_sources", run_id=run_id)
+            return
+
+        # Global daily cap — same guard the manual endpoint enforces, but a
+        # scheduled tick over the limit simply skips (no HTTP caller to reject).
+        budget = await run_guard.daily_budget_conflict()
+        if budget is not None:
+            logger.warning(
+                "scheduled_harvest_skipped_daily_limit",
+                run_id = run_id,
+                used   = budget.get("used"),
+                limit  = budget.get("limit"),
+            )
+            return
+
+        # Single-flight (skip, don't 409): an unattended tick must NOT collide
+        # with an in-progress manual run (same Chrome profile). DB backstop
+        # first, then an atomic in-process claim — try_begin() has no await
+        # between check and set, so a tick firing at the same instant as a
+        # manual start can't slip past it; exactly one claims the slot.
         db = await run_guard.db_conflict()
         if db is not None:
             logger.warning("scheduled_harvest_skipped_run_in_progress", run_id=run_id, active=db)
             return
-        conflict = run_guard.try_begin(None, run_id, None)
+        job_id   = uuid4().hex
+        conflict = run_guard.try_begin(job_id, run_id, None)
         if conflict is not None:
             logger.warning("scheduled_harvest_skipped_run_in_progress", run_id=run_id, active=conflict)
             return
 
-        orch    = OrchestratorAgent(cfg)
+        # Slot claimed. Create the DB run row + JobTracker entry exactly as the
+        # manual endpoint does, then hand off to the shared persisted pipeline
+        # (which releases the single-flight guard in its finally). If setup
+        # fails before that hand-off, release the guard here so it doesn't stick.
         try:
-            # wait_for_login=False: this is an unattended scheduled run — no
-            # one is present to complete a LinkedIn login if the saved
-            # session has expired, so fail fast instead of hanging.
-            if needs_proactor():
-                result = await run_in_proactor(lambda: orch.run_all(wait_for_login=False))
-            else:
-                result = await orch.run_all(wait_for_login=False)
-        except Exception as exc:
-            logger.exception("scheduled_harvest_failed", run_id=run_id, error=str(exc))
-            # ── Alert configured recipients that the scheduled run failed ────────
-            enabled = [
-                src for src in ["naukri", "linkedin", "dice"]
-                if getattr(cfg.sources, src, False)
-            ]
-            await send_harvest_report(
-                EmailSender(get_settings()),
-                cfg.notifications,
-                run_id     = run_id,
-                status     = "failed",
-                total_jobs = 0,
-                sources    = enabled,
-                error      = str(exc),
-            )
-            return
-        finally:
+            JobTracker.create(job_id, run_id)
+            run_pk = await db_write(lambda db: HarvestRunService(db).create_run(
+                run_id           = run_id,
+                job_id           = job_id,
+                source           = None,
+                sources          = enabled,
+                filters_snapshot = _filters_snapshot(cfg),
+                started_at       = datetime.now(timezone.utc),
+            ))
+        except Exception:
             run_guard.end()
+            logger.exception("scheduled_harvest_setup_failed", run_id=run_id)
+            return
 
-        status_str = "success" if result.total_jobs else "no_results"
-        logger.info("scheduled_harvest_complete", run_id=run_id, total=result.total_jobs)
+        logger.info("scheduled_harvest_queued", job_id=job_id, run_id=run_id, sources=enabled)
 
-        # ── Email the report to configured recipients (best-effort) ──────────
-        # Attachments are generated in memory from the run's job records —
-        # no result JSON/Excel file is written to disk anymore.
-        await send_harvest_report(
-            EmailSender(get_settings()),
-            cfg.notifications,
-            run_id      = run_id,
-            status      = status_str,
-            total_jobs  = result.total_jobs,
-            sources     = result.sources_executed,
-            job_dicts   = [j.to_dict() for j in result.all_jobs],
+        # wait_for_login=False → unattended: fail fast if the saved LinkedIn
+        # session expired rather than hanging for a human that isn't there.
+        # _run_harvest_background persists results/history/status and emails the
+        # report (success or failure) just like the manual run.
+        await _run_harvest_background(
+            job_id, run_id, cfg, now_iso, enabled, run_pk, wait_for_login=False,
         )
 
     scheduler.schedule_harvest(

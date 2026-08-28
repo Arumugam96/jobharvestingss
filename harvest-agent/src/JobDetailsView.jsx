@@ -1,5 +1,7 @@
-import React from "react";
+import React, { useState } from "react";
 import DOMPurify from "dompurify";
+import EmailComposeModal from "./components/EmailComposeModal";
+import LinkedInMessageModal from "./components/LinkedInMessageModal";
 import {
   ArrowLeft,
   MapPin,
@@ -29,7 +31,22 @@ const LinkedInIcon = ({ size = 16 }) => (
   </svg>
 );
 
-function ContactAction({ glyph: Glyph, href, title, variant, newTab = true }) {
+function ContactAction({ glyph: Glyph, href, onClick, title, variant, newTab = true }) {
+  // A click handler (opens the LLM composer) takes precedence over a plain href
+  // (mailto / profile link fallback); with neither, the action is disabled.
+  if (onClick) {
+    return (
+      <button
+        type="button"
+        className={`ha-cbtn ha-cbtn-on-${variant}`}
+        style={{ padding: 0, boxSizing: "border-box", cursor: "pointer", font: "inherit" }}
+        title={title}
+        onClick={onClick}
+      >
+        <Glyph size={18} />
+      </button>
+    );
+  }
   if (href) {
     return (
       <a
@@ -50,6 +67,11 @@ function ContactAction({ glyph: Glyph, href, title, variant, newTab = true }) {
 }
 
 function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
+  // Same LLM outreach composers the jobs-table rows use. They need the DB-backed
+  // job.id (carried through by mapJobToDetail) plus job.email / job.company.
+  const [emailModalJob, setEmailModalJob] = useState(null);
+  const [linkedinModalJob, setLinkedinModalJob] = useState(null);
+
   const linkOrDash = (url, label) =>
     url ? (
       <a className="ha-link" href={url} target="_blank" rel="noreferrer">
@@ -134,13 +156,15 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
                 variant="mail"
                 title="Email"
                 newTab={false}
-                href={job.posterContact?.email ? `mailto:${job.posterContact.email}` : null}
+                onClick={job.id && job.email ? () => setEmailModalJob(job) : undefined}
+                href={!job.id && job.email ? `mailto:${job.email}` : null}
               />
               <ContactAction
                 glyph={LinkedInIcon}
                 variant="li"
                 title="LinkedIn"
-                href={job.posterLinkedIn || null}
+                onClick={job.id && job.linkedin ? () => setLinkedinModalJob(job) : undefined}
+                href={!job.id && job.linkedin ? job.linkedin : null}
               />
             </div>
           </div>
@@ -207,6 +231,9 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
           </aside>
         </div>
       </div>
+
+      {emailModalJob && <EmailComposeModal job={emailModalJob} onClose={() => setEmailModalJob(null)} />}
+      {linkedinModalJob && <LinkedInMessageModal job={linkedinModalJob} onClose={() => setLinkedinModalJob(null)} />}
     </div>
   );
 }

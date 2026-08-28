@@ -334,6 +334,7 @@ class OrchestratorAgent:
         self,
         wait_for_login: bool = False,
         on_status: Callable[[str], Awaitable[None]] | None = None,
+        on_persist: Callable[[list[UnifiedJob]], Awaitable[None]] | None = None,
     ) -> OrchestratorResult:
         """
         Execute all enabled sources in priority order, apply business filters,
@@ -348,6 +349,12 @@ class OrchestratorAgent:
         on_status       Optional async callback for human-readable progress
                         messages (e.g. "waiting for login…"), forwarded to
                         JobTracker by the caller.
+        on_persist      Optional async callback invoked with batches of
+                        UnifiedJob as they are scraped (per LinkedIn page /
+                        per source), so the caller can persist them to the DB
+                        incrementally — crash safety + live progress. These
+                        batches are RAW (pre-classification/pre-dedup); the
+                        caller reconciles with the final result.all_jobs at end.
         """
         config      = self._config
         started_at  = datetime.now(timezone.utc)
@@ -357,7 +364,7 @@ class OrchestratorAgent:
         # ── Step 1: collect raw jobs from all enabled sources ─────────────────
         try:
             raw_by_source, result.token_usage, result.llm_calls = await self._collect_all(
-                config, wait_for_login=wait_for_login, on_status=on_status
+                config, wait_for_login=wait_for_login, on_status=on_status, on_persist=on_persist
             )
         except LLMUnavailableError as exc:
             # The extraction LLM went down mid-scrape. Keep whatever was
@@ -607,6 +614,7 @@ class OrchestratorAgent:
         config: HarvestConfig,
         wait_for_login: bool = False,
         on_status: Callable[[str], Awaitable[None]] | None = None,
+        on_persist: Callable[[list[UnifiedJob]], Awaitable[None]] | None = None,
     ) -> tuple[dict[str, list[UnifiedJob]], dict, list[dict]]:
         """
         Run all enabled source agents IN PARALLEL using a single shared browser
@@ -659,6 +667,10 @@ class OrchestratorAgent:
                     unified = [_naukri_to_unified(j) for j in scraped]
                     logger.info("orchestrator_source_done", source="naukri", count=len(unified))
                     logger.info("batch_saved", source="Naukri", count=len(unified))
+                    # Incremental persist (crash safety): Naukri returns its whole
+                    # list at once, so persist it here as one batch.
+                    if on_persist and unified:
+                        await on_persist(unified)
                     return "Naukri", unified
                 except Exception as exc:
                     logger.exception(
@@ -673,8 +685,20 @@ class OrchestratorAgent:
                 try:
                     agent   = LinkedInAgent()
                     linkedin_agent_holder["agent"] = agent
+
+                    # Per-page incremental persist: the agent hands us each page's
+                    # freshly-scraped LinkedInScrapedJobs; convert to UnifiedJob
+                    # here (where _linkedin_to_unified lives) and forward to the
+                    # caller's persist callback. LinkedIn is the long pole, so
+                    # this is where mid-scrape crash protection + live progress
+                    # matter most. Best-effort in the callback itself.
+                    async def _linkedin_on_batch(scraped_batch: list[LinkedInScrapedJob]) -> None:
+                        if on_persist and scraped_batch:
+                            await on_persist([_linkedin_to_unified(j) for j in scraped_batch])
+
                     scraped: list[LinkedInScrapedJob] = await agent._run(
                         page, config.filters, wait_for_login=wait_for_login, on_status=on_status,
+                        on_batch=(_linkedin_on_batch if on_persist else None),
                     )
                     # ── Checkpoint 2: jobs received by orchestrator ────────────
                     logger.info("linkedin_jobs_received_by_orchestrator", count=len(scraped))
@@ -727,6 +751,10 @@ class OrchestratorAgent:
                     unified = [_dice_to_unified(j) for j in scraped]
                     logger.info("orchestrator_source_done", source="dice", count=len(unified))
                     logger.info("batch_saved", source="Dice", count=len(unified))
+                    # Incremental persist (crash safety): Dice returns its whole
+                    # list at once, so persist it here as one batch.
+                    if on_persist and unified:
+                        await on_persist(unified)
                     return "Dice", unified
                 except Exception as exc:
                     logger.exception(

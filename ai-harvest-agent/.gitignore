@@ -42,6 +42,7 @@ storage_state/
 # ── Generated Harvest Results (runtime output — never commit) ─────────────────
 data/results/
 data/debug/
+data/sessions/
 
 # ── Generated Root-Level Status & Result Files ────────────────────────────────
 harvest_result.json
@@ -98,3 +99,4 @@ architecture_diagram_files/
 output/
 exports/
 reports/
+scripts/
