@@ -184,7 +184,7 @@ export default function RuleEngineConfig({
   const [runState, setRunState] = useState("idle"); // idle | running | success | failed
   // DEV ONLY: flip to true to force the progress cards visible so you can style
   // them without an active run. Set back to false to restore normal behavior.
-  const PREVIEW_PROG = true;
+  const PREVIEW_PROG = false;
   const [runMessage, setRunMessage] = useState("");
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
