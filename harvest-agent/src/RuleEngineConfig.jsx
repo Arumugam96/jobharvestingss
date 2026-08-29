@@ -182,6 +182,9 @@ export default function RuleEngineConfig({
   const [harvestedLive, setHarvestedLive] = useState(0); // jobs saved so far, updated live during a run
   const [maxPerDay, setMaxPerDay] = useState(0);         // MAX_JOBS_PER_DAY from the backend (.env); 0 = unlimited
   const [runState, setRunState] = useState("idle"); // idle | running | success | failed
+  // DEV ONLY: flip to true to force the progress cards visible so you can style
+  // them without an active run. Set back to false to restore normal behavior.
+  const PREVIEW_PROG = true;
   const [runMessage, setRunMessage] = useState("");
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
@@ -545,7 +548,7 @@ export default function RuleEngineConfig({
           </div>
         </header>
 
-        {runState === "running" && (
+        {(runState === "running" || PREVIEW_PROG) && (
           <div className="rec-prog">
             {/* Max Jobs / Day — daily cap from the backend .env (MAX_JOBS_PER_DAY) */}
             <div className="rec-prog-card">
@@ -821,7 +824,7 @@ const styles = `
 
   /* Main */
   .rec-main { flex:1; min-width:0; display:flex; flex-direction:column; overflow:hidden; }
-  .rec-header { display:flex; justify-content:space-between; align-items:flex-start; gap:18px; padding:24px 28px 16px; background:#fff; border-bottom:1px solid var(--line); }
+  .rec-header { display:flex; justify-content:space-between; align-items:flex-start; gap:18px; padding:15px 20px 16px; background:#fff; border-bottom:1px solid var(--line); }
   .rec-header h1 { font-size:21px; font-weight:700; margin:0; letter-spacing:-0.3px; }
   .rec-meta { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-top:7px; font-size:12.5px; color:var(--muted); }
   .rec-dot { color:#CBD5E1; }
@@ -854,11 +857,13 @@ const styles = `
   /* ── Live harvest progress cards (Max / Saved / Remaining) ─────────────── */
   /* Compact + centered: capped width with auto side margins leaves breathing
      room at the left/right of the page. */
-  .rec-prog { max-width:640px; margin:18px auto 4px; padding:0 24px; display:grid; gap:14px; grid-template-columns:repeat(3,minmax(0,1fr)); }
-  @media (max-width:640px) { .rec-prog { grid-template-columns:1fr; max-width:320px; } }
+  /* Full-width white band flush with the header/tabs gutters (28px) so the
+     stats read as part of the page, not a boxed cluster on a grey strip. */
+  .rec-prog { margin:0; padding:18px 28px; background:#fff; display:grid; gap:16px; grid-template-columns:repeat(3,minmax(0,1fr)); }
+  @media (max-width:640px) { .rec-prog { grid-template-columns:1fr; } }
   .rec-prog-card {
     position:relative; overflow:hidden; text-align:center;
-    background:linear-gradient(160deg,#F6F3FF 0%,#fff 55%),#fff;
+    background:linear-gradient(180deg,#F6F3FF 42%,#fff 72%),#fff;
     border:1px solid #ECEAF6; border-radius:12px; padding:14px 12px 18px;
     box-shadow:0 1px 2px rgba(30,27,46,.05);
     transition:transform .22s cubic-bezier(.2,.7,.3,1), box-shadow .22s ease, border-color .22s ease;
