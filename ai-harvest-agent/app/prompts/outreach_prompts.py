@@ -5,14 +5,16 @@ Two audiences, each with a canonical reference message supplied by the business:
   * active client  — a company already on ss_active_clients.json
   * new client     — everyone else
 
-The reference messages serve double duty:
-  1. LLM context — the model rewrites the reference in the requested tone,
-     personalized to the job/company, and returns JSON {"subject","body"}.
-  2. Dynamic fallback — if LLM generation fails, the reference is rendered
-     directly with the company name interpolated (render_email_fallback).
+The reference messages are the dynamic fallback: if LLM generation fails, the
+reference is rendered directly with the company name interpolated
+(render_email_fallback). They are NOT fed to the LLM — the system prompt already
+dictates the email's structure, length, and capability selection, and the full
+reference (two long service lists) would fight those rules. The user prompt sends
+only a concise per-audience positioning note (_AUDIENCE) describing how the
+message should differ for an active client vs. a new prospect.
 
 Everything is plain text (the email is sent text-only with the corporate-
-overview pptx attached), so bodies contain no markdown/HTML.
+overview pptx attached in the form Google drive link), bodies contain no markdown/HTML.
 """
 from __future__ import annotations
 
@@ -68,8 +70,32 @@ Our key staffing services include:
 - Payroll Processing Services.
 
 We would appreciate the opportunity to connect and understand your vendor onboarding process. Please let us know a convenient time to discuss this further.
+"""
 
-Looking forward to your response."""
+# ── Per-audience positioning (LLM prompt) ─────────────────────────────────────
+# What the system prompt can't know per request: how to position Sightspectrum
+# for an existing client vs. a new prospect. The full reference messages above
+# are NOT sent to the LLM (they'd fight the system prompt's "pick 1-2
+# capabilities, ~70-100 words" rules); these one-liners carry only the
+# positioning difference, which is all the model needs on top of the catalog.
+_AUDIENCE = {
+    "active": (
+        "This recipient's company is an existing Sightspectrum client — "
+        "Sightspectrum is already an empaneled vendor partner with them and has "
+        "completed onboards recently. Acknowledge that partnership and invite them "
+        "to share their priority requirements."
+    ),
+    "new": (
+        "This recipient's company is a new prospect (not yet a client). Introduce "
+        "Sightspectrum as a potential staffing partner and express interest in "
+        "their vendor onboarding process for current and upcoming requirements."
+    ),
+    "unknown": (
+        "The recipient's company could not be identified — keep it generic. "
+        "Introduce Sightspectrum as a staffing partner and invite a conversation "
+        "about hiring needs."
+    ),
+}
 
 # For "unknown" companies (nothing to personalize) — use the new-client message
 # with a generic stand-in so no "{company}" leaks into the text.
@@ -81,15 +107,9 @@ _FALLBACK_SUBJECTS = {
     "unknown": "Sightspectrum — IT Staffing Partnership",
 }
 
-# ── Deterministic closing (reach-out CTA + sign-off) ─────────────────────────
-# The LLM writes only the pitch; we append these ourselves so the contact detail
-# is always correct and the signature is consistent. Rendered as a bold, clickable
-# mailto link in the outgoing HTML email (see email_service._outreach_body_to_html).
-
+# ── Deterministic closing (reach-out CTA + sign-off) ────────────────────────
 SIGN_OFF = "Best Regards,\nSightspectrum Team"
 REACHOUT_TEMPLATE = "Please feel free to reach me directly at {email}."
-# Appended only when a hosted deck URL is configured (OUTREACH_DECK_URL). Replaces
-# the old file attachment — rendered as a clickable link in the HTML email.
 DECK_LINK_TEMPLATE = "You can view our company overview here: {url}"
 
 _SIGNOFF_MARKERS = (
@@ -137,7 +157,7 @@ def _greeting_on_own_line(body: str) -> str:
         return body
     greeting = m.group(1).strip()
     rest = text[m.end():].lstrip()
-    return f"{greeting}\n\n{rest}" if rest else greeting
+    return f"{greeting}\n{rest}" if rest else greeting
 
 
 def _build_sign_off(sender_email: str) -> str:
@@ -167,7 +187,7 @@ def append_closing(pitch: str, sender_email: str, deck_url: str = "") -> str:
     if url:
         parts.append(DECK_LINK_TEMPLATE.format(url=url))
     parts.append(_build_sign_off(sender_email))
-    return "\n\n".join(p for p in parts if p).strip()
+    return "\n".join(p for p in parts if p).strip()
 
 
 EMAIL_SYSTEM_PROMPT = (
@@ -366,19 +386,14 @@ def _job_context(job: dict) -> str:
 # ── Email ────────────────────────────────────────────────────────────────────
 
 def build_email_prompt(client_type: str, tone: str, job: dict, sender_email: str = "") -> str:
-    """User prompt for email generation. `client_type` picks the reference,
-    `tone` picks the style, `job` supplies personalization context, and
-    `sender_email` lets the opening introduce the sender by name."""
-    company = (job.get("company") or "").strip() or _GENERIC_COMPANY
-    reference = (
-        ACTIVE_CLIENT_REFERENCE if client_type == "active" else NEW_CLIENT_REFERENCE
-    ).format(company=company)
+    """User prompt for email generation. It supplies only the per-request
+    variables — `client_type` picks the audience positioning, `tone` the style,
+    `job` the personalization context, and `sender_email` lets the opening
+    introduce the sender by name. The email's structure, length, capability
+    selection, greeting, sign-off, and output rules live in EMAIL_SYSTEM_PROMPT
+    and are deliberately not restated here."""
     tone_instr = TONE_INSTRUCTIONS.get(tone, TONE_INSTRUCTIONS["Formal"])
-    audience = {
-        "active": "This recipient's company is an existing Sightspectrum client.",
-        "new": "This recipient's company is a new prospect (not yet a client).",
-        "unknown": "The recipient's company could not be identified — keep it generic.",
-    }.get(client_type, "")
+    audience = _AUDIENCE.get(client_type, _AUDIENCE["new"])
     sender_name = sender_display_name(sender_email)
     sender_ctx = (
         f'Sender name: {sender_name} — open by introducing the sender in the '
@@ -388,23 +403,12 @@ def build_email_prompt(client_type: str, tone: str, job: dict, sender_email: str
         "Sightspectrum, with no personal name and no placeholder.\n\n"
     )
     return (
-        f"{audience}\n\n"
+        f"Audience — {audience}\n\n"
         f"Tone: {tone} — {tone_instr}\n\n"
         f"{sender_ctx}"
-        f"Reference message to adapt (keep its intent and offer):\n"
-        f"\"\"\"\n{reference}\n\"\"\"\n\n"
         f"Recipient / role context:\n{_job_context(job)}\n\n"
-        f"Write the outreach email BODY only — no sign-off and no reach-out/contact "
-        f"line (those are appended automatically). Structure it as a first-name "
-        f"greeting line followed by three short paragraphs: (1) a one-sentence "
-        f"intro where the sender introduces themselves by name and notes they came "
-        f"across the recipient's posting for the role; (2) two sentences that "
-        f"reference the role's focus and position Sightspectrum, naming ONLY the "
-        f"one or two capabilities that match this job and whether contract and/or "
-        f"permanent hiring is supported — not the full service list; (3) a brief, "
-        f"low-pressure line inviting a conversation about current or upcoming "
-        f"hiring needs. Keep it to ~70-100 words, warm and professional, and do "
-        f"not restate the full job description. "
+        f"Write the outreach email BODY only, following the structure and rules in "
+        f"the system instructions. "
         f'Return ONLY JSON: {{"subject": "...", "body": "..."}}'
     )
 
