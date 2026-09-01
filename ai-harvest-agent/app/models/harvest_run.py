@@ -126,11 +126,20 @@ class ScrapedJobORM(Base):
 
 class LlmCallType:
     """Purpose discriminator for LlmCallORM.call_type — lets one audit table
-    cover every LLM call across the app, tagged by what it was for. Harvest/
-    contact-extraction calls come from the scrape pipeline (run-scoped);
-    email/linkedin generation come from the outreach flow (run_id is NULL)."""
-    HARVEST = "harvest"
-    CONTACT_EXTRACTION = "contact_extraction"
+    cover every LLM call across the app, tagged by which workflow it belongs to
+    so rows are easy to classify:
+
+      job_harvest         — extracting scraped-job data (title/company/JD/etc.)
+      contact_harvest     — extracting recruiter email/phone contact details
+      email_generation    — composing an outreach email (outreach flow)
+      linkedin_generation — composing a LinkedIn message (outreach flow)
+
+    Harvest calls come from the scrape pipeline (run-scoped); the two generation
+    types come from the outreach flow (run_id is NULL). NOTE: rows written before
+    this rename retain the legacy value "harvest" (and any stray
+    "contact_extraction")."""
+    JOB_HARVEST = "job_harvest"
+    CONTACT_HARVEST = "contact_harvest"
     EMAIL_GENERATION = "email_generation"
     LINKEDIN_GENERATION = "linkedin_generation"
 
@@ -144,9 +153,9 @@ class LlmCallORM(Base):
     # generations (email/linkedin from the UI) have no harvest run, so they are
     # stored with run_id=NULL. FK constraint kept, only NOT NULL dropped.
     run_id: Mapped[str | None] = mapped_column(ForeignKey("harvest_runs.id"), nullable=True, index=True)
-    # What this LLM call was for — see LlmCallType. Defaults to "harvest" so
-    # legacy rows (and existing harvest inserts) read as harvest calls.
-    call_type: Mapped[str] = mapped_column(String(30), nullable=False, default=LlmCallType.HARVEST)
+    # What this LLM call was for — see LlmCallType. Defaults to "job_harvest";
+    # pre-rename rows retain the legacy "harvest" DB server-default value.
+    call_type: Mapped[str] = mapped_column(String(30), nullable=False, default=LlmCallType.JOB_HARVEST)
     # Denormalized correlation key, not a hard FK — the LLM fallback fires mid-scrape,
     # before ScrapedJobORM rows exist for the run's final deduped job list.
     job_url: Mapped[str | None] = mapped_column(Text, nullable=True)

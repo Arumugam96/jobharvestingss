@@ -208,10 +208,10 @@ class LLMService:
     """Anthropic Claude/openrouter/LocalLLM client with retry logic and tool-use support."""
 
     def __init__(self, settings: Settings) -> None:
-        self._client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
-        self._model = settings.anthropic_model
-        self._max_tokens = settings.anthropic_max_tokens
-        self._temperature = settings.anthropic_temperature
+        self.anthropic_client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+        self.anthropic_model = settings.anthropic_model
+        self.anthropic_max_tokens = settings.anthropic_max_tokens
+        self.anthropic_temperature = settings.anthropic_temperature
         self._extraction_llm_model = settings.extraction_llm_model
         self._local_llm_url = settings.local_llm_url
         self._local_llm_model = settings.local_llm_model
@@ -261,7 +261,6 @@ class LLMService:
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
-        # Don't burn retries on a provider that's down/misconfigured — fail fast.
         retry=retry_if_not_exception_type(LLMUnavailableError),
         reraise=True,
         after=_track_attempt,
@@ -276,15 +275,15 @@ class LLMService:
         """Call Claude and return the raw Message."""
         try:
             kwargs: dict[str, Any] = {
-                "model": model or self._model,
-                "max_tokens": self._max_tokens,
+                "model": model or self.anthropic_model,
+                "max_tokens": self.anthropic_max_tokens,
                 "messages": messages,
             }
             if system:
                 kwargs["system"] = system
             if tools:
                 kwargs["tools"] = tools
-            response = await self._client.messages.create(**kwargs)
+            response = await self.anthropic_client.messages.create(**kwargs)
             self._record_usage(
                 _PROVIDER_CLAUDE,
                 response.usage.input_tokens,
@@ -306,7 +305,7 @@ class LLMService:
         """Convenience wrapper returning plain text, routed through the centrally
         configured provider (EXTRACTION_LLM_MODEL) — see generate_text(). `model`
         overrides the Claude model id only (ignored for local/OpenRouter)."""
-        text, _in, _out, _provider, _model = await self.generate_text(
+        text, _in, _out, _provider, anthropic_model = await self.generate_text(
             prompt, system, json_mode=False, model=model,
         )
         return text
@@ -320,12 +319,7 @@ class LLMService:
         model: str | None = None,
     ) -> tuple[str, int, int, str, str]:
         """Free-text (or JSON) generation routed through the centrally configured
-        provider — the SAME selection extract_json() uses (EXTRACTION_LLM_MODEL,
-        with LOCAL_LLM_* / OPENROUTER_* as connection details). This is the single
-        entry point every non-extraction LLM call should go through so local-LLM /
-        OpenRouter / Claude is chosen once, from the env file.
-
-        Returns (text, input_tokens, output_tokens, provider, model). Set
+        provider — Returns (text, input_tokens, output_tokens, provider, model). Set
         json_mode=True to ask the provider for a JSON object (Ollama format=json /
         OpenRouter response_format); leave False for plain text. `model` overrides
         only the Claude model id (local/OpenRouter models come from config)."""
@@ -377,7 +371,7 @@ class LLMService:
         raw = (self._extraction_llm_model or "").strip()
         lowered = raw.lower()
         if not raw or lowered == _PROVIDER_CLAUDE:
-            return _PROVIDER_CLAUDE, self._model
+            return _PROVIDER_CLAUDE, self.anthropic_model
         if lowered == _PROVIDER_OLLAMA:
             return _PROVIDER_OLLAMA, self._local_llm_model
         if lowered == _PROVIDER_OPENROUTER:
@@ -385,9 +379,6 @@ class LLMService:
         return _PROVIDER_OLLAMA, raw
 
     def _local_llm_unavailable_msg(self, model: str, url: str, reason: str) -> str:
-        """Admin-facing message for a down/misconfigured local LLM. Names the
-        configured LOCAL_LLM_MODEL (self._local_llm_model) so ops know exactly
-        which server/model to check; falls back to the resolved model id."""
         name = self._local_llm_model or model
         return (
             f"SightSpectrum's Local LLM '{name}' at is unavailable ({reason}) — the server "
@@ -571,6 +562,7 @@ class LLMService:
         system: str = "",
         debug_dir: str | Path | None = None,
         job_url: str | None = None,
+        call_type: str = "job_harvest",
     ) -> dict[str, Any]:
         """
         Ask the configured extraction LLM (Claude or a local Ollama model,
@@ -580,6 +572,11 @@ class LLMService:
         job_url is an optional correlation key (e.g. the LinkedIn job this
         call is extracting for) recorded on the call-log entry — see
         get_call_log().
+
+        call_type tags which workflow this call belongs to for the llm_calls
+        audit table — one of LlmCallType's values (models.harvest_run). Defaults
+        to "job_harvest"; contact-extraction callers pass "contact_harvest".
+        Stamped onto the call-log entry so bulk_insert_llm_calls persists it.
         """
         provider, model = self._resolve_extraction_target()
         prompt = (
@@ -659,6 +656,7 @@ class LLMService:
                 "error_message": error_message,
                 "retry_count": max(0, _retry_attempts.get() - 1),
                 "job_url": job_url,
+                "call_type": call_type,
             })
             _retry_attempts.reset(retry_token)
 

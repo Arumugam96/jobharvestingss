@@ -31,6 +31,30 @@ const LinkedInIcon = ({ size = 16 }) => (
   </svg>
 );
 
+// Renders a contact value that may originate from two sources — the scraped job
+// and the enriched recruiter record. Both present (and distinct) → two labeled
+// lines (Job / Recruiter); single source → unlabeled; neither → em-dash.
+// `fallback` covers rows that carry only the merged value (JSON read path).
+function DualContactVal({ scraped, recruiter, fallback }) {
+  const s = (scraped || "").trim();
+  const r = (recruiter || "").trim();
+  const muted = <span className="ha-muted">—</span>;
+
+  if (!s && !r) {
+    const f = (fallback || "").trim();
+    return f ? <span>{f}</span> : muted;
+  }
+  if (s && r && s !== r) {
+    return (
+      <span style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+        <span><span className="ha-src-tag">Job</span> {s}</span>
+        <span><span className="ha-src-tag">Recruiter</span> {r}</span>
+      </span>
+    );
+  }
+  return <span>{s || r}</span>;
+}
+
 function ContactAction({ glyph: Glyph, href, onClick, title, variant, newTab = true }) {
   // A click handler (opens the LLM composer) takes precedence over a plain href
   // (mailto / profile link fallback); with neither, the action is disabled.
@@ -132,11 +156,23 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
             <div className="ha-poc-fields">
               <div className="ha-field">
                 <span className="ha-key">Email</span>
-                <span className="ha-val">{job.posterContact?.email || <span className="ha-muted">—</span>}</span>
+                <span className="ha-val">
+                  <DualContactVal
+                    scraped={job.posterContact?.emailScraped}
+                    recruiter={job.posterContact?.emailRecruiter}
+                    fallback={job.posterContact?.email}
+                  />
+                </span>
               </div>
               <div className="ha-field">
                 <span className="ha-key">Mobile</span>
-                <span className="ha-val">{job.posterContact?.mobile || <span className="ha-muted">—</span>}</span>
+                <span className="ha-val">
+                  <DualContactVal
+                    scraped={job.posterContact?.mobileScraped}
+                    recruiter={job.posterContact?.mobileRecruiter}
+                    fallback={job.posterContact?.mobile}
+                  />
+                </span>
               </div>
               <div className="ha-field">
                 <span className="ha-key">LinkedIn</span>
@@ -310,6 +346,8 @@ const styles = `
   .ha-key { font-size: 13px; color: #64748B; }
   .ha-val { font-size: 13.5px; color: #1E293B; word-break: break-word; }
   .ha-muted { color: #94A3B8; }
+  .ha-src-tag { font-size: 10px; font-weight: 600; color: #64748B;
+    text-transform: uppercase; letter-spacing: .03em; margin-right: 4px; }
 
   .ha-link { color: #2563EB; text-decoration: none; font-weight: 500;
     display: inline-flex; align-items: center; gap: 4px; }

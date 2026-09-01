@@ -92,11 +92,7 @@ class LLMUnavailableError(LLMError):
     """The extraction LLM provider itself is unreachable/down (connection
     refused, timeout, HTTP 5xx, missing credentials, provider-side error) —
     as opposed to plain LLMError, which signals a single call went wrong
-    (e.g. the model returned invalid JSON) and is safe to skip past.
-
-    This distinction is load-bearing: a bare LLMError still just skips the one
-    job, but an LLMUnavailableError aborts the entire harvest run (all sources)
-    because retrying every remaining job against a dead provider is pointless.
+    (e.g. the model returned invalid JSON) and is safe to stop the entire workflow.
     """
 
     def __init__(self, message: str) -> None:

@@ -31,6 +31,8 @@ from typing import Any
 
 import structlog
 
+from app.core.contact_normalize import normalize_email, normalize_phone
+from app.models.harvest_run import LlmCallType
 from app.models.prospect_models import (
     ProspectIntelligenceResult,
     ProspectRecord,
@@ -715,9 +717,14 @@ async def _llm_extract_contact_fields(
 
     schema_description = (
         '{"email": str or null (ONLY if an email address appears verbatim in '
-        'the text — never guess or construct one; null otherwise), '
+        'the text — never guess or construct one. Return it exactly as written '
+        "with no masking; if it is masked/partial (e.g. contains '*'), null), "
         '"phone": str or null (ONLY if a phone number appears verbatim in the '
-        'text — never guess or construct one; null otherwise)}'
+        'text — never guess or construct one. Return it in E.164 with the '
+        'country code (e.g. +6581234567) when the country code is present or '
+        "unambiguous; strip spaces, brackets, dashes and masking noise such as "
+        "'*' or '\\'. If it is masked, partial, or you are not confident it is "
+        'a complete real number, null)}'
     )
     try:
         extracted = await llm_service.extract_json(
@@ -730,19 +737,22 @@ async def _llm_extract_contact_fields(
                 "that appears inside reposts, the activity feed, comments, job "
                 "posts, or other people's content. Never fabricate, guess, or "
                 "construct an email or phone number that is not literally "
-                "present in the text. Return only the fields in the schema, no "
-                "commentary."
+                "present in the text. Return a phone in E.164 with its country "
+                "code when determinable, and drop any masking/formatting noise "
+                "(asterisks, backslashes, brackets); if a value is masked or "
+                "partial, return null for it. Return only the fields in the "
+                "schema, no commentary."
             ),
             job_url=source_url or None,
+            call_type=LlmCallType.CONTACT_HARVEST,
         )
     except Exception as exc:
         logger.debug("llm_contact_extract_failed", url=source_url, error=str(exc))
         return out
 
-    if extracted.get("email"):
-        out["email"] = str(extracted["email"]).strip()
-    if extracted.get("phone"):
-        out["phone"] = str(extracted["phone"]).strip()
+    # Deterministic second layer — reject masked/partial noise before returning.
+    out["email"] = normalize_email(extracted.get("email")) or ""
+    out["phone"] = normalize_phone(extracted.get("phone")) or ""
     return out
 
 

@@ -31,15 +31,20 @@ class Settings(BaseSettings):
     data_source: Literal["auto", "database", "json"] = "database"
 
     # Global daily harvest cap: max jobs that may be scraped across all runs in a
-    # UTC day. 0 = unlimited. Enforced at the run start-gate (MAX_JOBS_PER_DAY in
-    # .env) — a new run is rejected once today's harvested total reaches this.
+    # UTC day. 0 = unlimited. Enforced at the run start-gate
     max_jobs_per_day: int = 0
-
-    # How many scraped jobs to accumulate before persisting a batch to the DB and
-    # bumping the live "jobs saved" UI counter (HARVEST_PERSIST_BATCH_SIZE in
-    # .env). Smaller = smoother count-up + finer crash-granularity, but more DB
-    # round-trips (a recruiter upsert runs per job). Clamped to >= 1 at read time.
     harvest_persist_batch_size: int = 10
+
+    # ── Sales Navigator (standalone experimental script) ─────────────────────────
+    # Dynamic per-day budget for scripts/scrape_sales_navigator.py — kept here so
+    # it is tunable via .env without code changes (NOT derived from
+    # max_jobs_per_day). Both counts are UTC-day scoped.
+    #   sales_navigator_max_jobs_per_day  — this script's own harvest cap per day
+    #                                       (its "1/3" share). 0 = disabled/skip.
+    #   sales_navigator_daily_stop_ceiling— stop once today's total scraped jobs
+    #                                       reach this (the "2/3" line). 0 = no ceiling.
+    sales_navigator_max_jobs_per_day: int = 0
+    sales_navigator_daily_stop_ceiling: int = 0
 
     # ── Database ─────────────────────────────────────────────────────────────────
     database_url: str = "postgresql+asyncpg://harvest:harvest_password@localhost:5432/harvest_db"
@@ -73,21 +78,10 @@ class Settings(BaseSettings):
     gemini_max_output_tokens: int = 2048
     gemini_temperature: float = 0.0
 
-    # ── Apollo.io (contact enrichment fallback) ───────────────────────────────────
-    # Used only as a last-resort tier: when the LLM/regex LinkedIn extraction returns
-    # no email/phone, look the person up on Apollo by their LinkedIn URL. Credit-metered
-    # (Basic plan), so calls are cached on the recruiters table and gated. Leave
-    # apollo_api_key empty to disable the integration entirely (every call no-ops).
     apollo_api_key: str = ""
     apollo_base_url: str = "https://api.apollo.io/api/v1"
     apollo_timeout_s: float = 20.0
-    # Phone reveal is asynchronous on Apollo (delivered via a webhook), and costs
-    # ~8x an email reveal — off by default; only emails resolve synchronously.
     apollo_reveal_phone: bool = False
-    # Apollo REQUIRES a webhook_url whenever reveal_phone_number is set — without
-    # it the whole /people/match request 400s (taking the email down with it).
-    # Leave empty and phone reveal is silently downgraded to email-only so the
-    # email still resolves; set it to a receiver URL to actually get phones.
     apollo_webhook_url: str = ""
     # Per-profile cooldown: don't re-call Apollo for a recruiter enriched/attempted
     # within this many days (prevents re-spending on the same no-match profile).
@@ -142,12 +136,9 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 30
 
     # ── Persistent session (HttpOnly cookie, survives refresh/restart) ────────────
-    # After OTP verification we mint an opaque server-side session and set it as a
-    # secure HttpOnly cookie. The session slides: any authenticated request within
-    # the lifetime window pushes its expiry forward, so daily users rarely re-OTP.
     session_cookie_name: str = "ha_session"
-    session_lifetime_days: int = 30           # sliding window — each use extends expiry by this
-    session_renew_interval_minutes: int = 60  # throttle: only extend once per this interval
+    session_lifetime_days: int = 30           
+    session_renew_interval_minutes: int = 60  
     # Secure=True means the cookie is only sent over HTTPS (localhost is treated as
     # a secure context by modern browsers, so it still works in dev). Set
     # SESSION_COOKIE_SECURE=false only if you serve the app over plain HTTP on a
@@ -165,25 +156,10 @@ class Settings(BaseSettings):
     smtp_password: str = ""
     smtp_from_email: str = ""
     smtp_use_tls: bool = True
-    # Socket timeout (seconds) for the whole SMTP exchange, including the DATA
-    # write. 10s is fine for the tiny OTP email but too tight to upload the
-    # ~9 MB (base64) corporate-overview attachment on the outreach email — that
-    # write times out and the server drops the connection. 60s covers a multi-MB
-    # attachment on a modest uplink; raise SMTP_TIMEOUT_SECONDS if sends still time out.
     smtp_timeout_seconds: int = 60
-
-    # ── Outreach ─────────────────────────────────────────────────────────────────
-    # Public URL of the hosted corporate-overview deck. When set, outreach emails
-    # include a clickable link to it instead of attaching the (~7 MB) file — which
-    # keeps the SMTP send fast (a few KB, ~1s). Leave empty to include no deck link
-    # and attach nothing. The business uploads the deck somewhere public (Drive /
-    # SharePoint / etc.) and pastes the share URL here.
     outreach_deck_url: str = ""
 
     # ── CORS ─────────────────────────────────────────────────────────────────────
-    # Kept as a plain str (not list[str]) — pydantic-settings' env source treats
-    # list-typed fields as JSON and raises SettingsError on a comma-separated
-    # value like "http://a,http://b" before any field_validator ever runs.
     cors_origins: str = "http://localhost:3000,http://localhost:8080"
 
     

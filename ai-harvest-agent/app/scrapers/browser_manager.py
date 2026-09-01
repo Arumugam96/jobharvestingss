@@ -137,7 +137,7 @@ _LAUNCH_ARGS: list[str] = [
 
 _STEALTH_SCRIPTS: list[str] = [
     # Hide navigator.webdriver
-    "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});",
+    "Object.defineProperty(navigator,'webdriver',{ get:()=>undefined });",
 
     # Fake a populated plugins list
     """Object.defineProperty(navigator,'plugins',{

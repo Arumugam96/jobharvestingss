@@ -226,7 +226,7 @@ class HarvestRunService:
                 LlmCallORM(
                     id=str(uuid.uuid4()),
                     run_id=run_pk,
-                    call_type=c.get("call_type", LlmCallType.HARVEST),
+                    call_type=c.get("call_type", LlmCallType.JOB_HARVEST),
                     job_url=c.get("job_url"),
                     provider=c["provider"],
                     model=c["model"],
@@ -529,10 +529,19 @@ def scraped_job_view(job: ScrapedJobORM) -> dict[str, Any]:
     email_id/contact_number merge in the linked RecruiterORM's enriched
     contact info (official_email_id/contact_number) when the job row itself
     scraped none — one view feeds the UI, the report files, and the report
-    email, so they all show the merged contact identically."""
+    email, so they all show the merged contact identically.
+
+    email_scraped/email_recruiter (and the phone_* pair) additionally expose
+    the two sources UNMERGED so the UI can show both, labeled by origin, when
+    both are present. The merged email_id/contact_number above are kept as-is
+    for the report files/email that rely on a single value."""
     recruiter = job.recruiter
-    email = job.email_id or (recruiter.official_email_id if recruiter else "") or None
-    phone = job.contact_number or (recruiter.contact_number if recruiter else "") or None
+    email_scraped = job.email_id or None
+    email_recruiter = (recruiter.official_email_id if recruiter else "") or None
+    phone_scraped = job.contact_number or None
+    phone_recruiter = (recruiter.contact_number if recruiter else "") or None
+    email = email_scraped or email_recruiter
+    phone = phone_scraped or phone_recruiter
     return {
         "id":                     job.id,
         "job_title":              job.job_title,
@@ -562,6 +571,10 @@ def scraped_job_view(job: ScrapedJobORM) -> dict[str, Any]:
         "current_company":        job.current_company,
         "email_id":               email,
         "contact_number":         phone,
+        "email_scraped":          email_scraped,
+        "email_recruiter":        email_recruiter,
+        "phone_scraped":          phone_scraped,
+        "phone_recruiter":        phone_recruiter,
     }
 
 

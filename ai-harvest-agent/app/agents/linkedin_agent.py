@@ -39,6 +39,7 @@ from bs4 import BeautifulSoup
 from dateutil import parser as dateutil_parser
 from playwright.async_api import ElementHandle, Page
 
+from app.core.contact_normalize import normalize_email, normalize_phone
 from app.core.exceptions import LLMUnavailableError
 from app.core.text_formatting import (
     description_text_to_html,
@@ -47,6 +48,7 @@ from app.core.text_formatting import (
 )
 from app.core.linkedin_geo import resolve_geo
 from app.models.harvest_models import FiltersConfig
+from app.models.harvest_run import LlmCallType
 from app.scrapers.browser_manager import PersistentBrowserManager
 from app.services import run_guard
 
@@ -1546,10 +1548,16 @@ class LinkedInAgent:
 
         schema_description = (
             "{\"email\": str or null (ONLY if an email address is written "
-            "verbatim in the text — never guess or construct one; null "
-            "otherwise), \"phone\": str or null (ONLY if a phone number is "
-            "written verbatim in the text — never guess or construct one; "
-            "null otherwise)}"
+            "verbatim in the text — never guess or construct one. Return it "
+            "exactly as written, with no masking characters. If the address is "
+            "masked/partial (e.g. contains '*'), null), \"phone\": str or null "
+            "(ONLY if a phone number is written verbatim in the text — never "
+            "guess or construct one. Return it in E.164 format with the country "
+            "code (e.g. +6581234567) when the country code is present or "
+            "unambiguous from the text; strip spaces, brackets, dashes and any "
+            "masking noise such as '*' or '\\'. If the number is masked, "
+            "partial, or you are not confident it is a complete real number, "
+            "return null)}"
         )
         content = f"---LINKEDIN PROFILE PAGE---\n{text}\n\n---EXTRACT JSON---\n{schema_description}"
 
@@ -1561,14 +1569,18 @@ class LinkedInAgent:
                     "You are extracting only explicitly-stated contact details "
                     "from a LinkedIn profile page's text content. Never "
                     "fabricate, guess, or construct an email or phone number "
-                    "that is not literally present in the text. Return only "
-                    "the fields in the schema, no commentary."
+                    "that is not literally present in the text. Return a phone "
+                    "in E.164 with its country code when determinable, and drop "
+                    "any masking/formatting noise (asterisks, backslashes, "
+                    "brackets). If a value is masked or partial, return null for "
+                    "it. Return only the fields in the schema, no commentary."
                 ),
                 # debug_dir intentionally not passed — we no longer persist
                 # per-call LLM prompt/response JSON artifacts to data/debug/
                 # (extract_json's file dump is a no-op without it; the in-memory
                 # call log / get_call_log() still records every call).
                 job_url=profile_url,
+                call_type=LlmCallType.CONTACT_HARVEST,
             )
         except LLMUnavailableError:
             # LLM provider is down — abort the run (see _llm_fallback_extract).
@@ -1577,11 +1589,15 @@ class LinkedInAgent:
             logger.warning("recruiter_llm_fallback_failed", url=profile_url, error=str(exc))
             return {}
 
+        # Deterministic second layer — reject masked/partial noise the prompt
+        # may still let through (e.g. "+\\87*******") before it reaches the DB.
         result: dict = {}
-        if extracted.get("email"):
-            result["email"] = str(extracted["email"]).strip()
-        if extracted.get("phone"):
-            result["phone"] = str(extracted["phone"]).strip()
+        email = normalize_email(extracted.get("email"))
+        phone = normalize_phone(extracted.get("phone"))
+        if email:
+            result["email"] = email
+        if phone:
+            result["phone"] = phone
         return result
 
     # ── Search URL builder ─────────────────────────────────────────────────────
@@ -2324,9 +2340,15 @@ class LinkedInAgent:
             "\"recruiter_url\": str or null (pick the matching href from the "
             "candidate profile links below by matching the name, null if no match), "
             "\"recruiter_email\": str or null (ONLY if an email address is written "
-            "verbatim in the text — never guess or construct one; null otherwise), "
+            "verbatim in the text — never guess or construct one. Return it "
+            "exactly as written with no masking; if it is masked/partial (e.g. "
+            "contains '*'), null), "
             "\"recruiter_phone\": str or null (ONLY if a phone number is written "
-            "verbatim in the text — never guess or construct one; null otherwise)}"
+            "verbatim in the text — never guess or construct one. Return it in "
+            "E.164 with the country code (e.g. +6581234567) when the country "
+            "code is present or unambiguous; strip spaces, brackets, dashes and "
+            "masking noise such as '*' or '\\'. If it is masked, partial, or you "
+            "are not confident it is a complete real number, null)}"
         )
         # Labelled sections, short context first (card/links/date) and the
         # long detail-page text last — the LLM sees the most important
@@ -2416,10 +2438,14 @@ class LinkedInAgent:
             result["recruiter_company"] = str(extracted["recruiter_company"]).strip()
         if extracted.get("recruiter_url"):
             result["recruiter_url"] = str(extracted["recruiter_url"]).strip()
-        if extracted.get("recruiter_email"):
-            result["recruiter_email"] = str(extracted["recruiter_email"]).strip()
-        if extracted.get("recruiter_phone"):
-            result["recruiter_phone"] = str(extracted["recruiter_phone"]).strip()
+        # Deterministic cleaning — drop masked/partial contact noise the prompt
+        # may still let through before it is persisted.
+        recruiter_email = normalize_email(extracted.get("recruiter_email"))
+        recruiter_phone = normalize_phone(extracted.get("recruiter_phone"))
+        if recruiter_email:
+            result["recruiter_email"] = recruiter_email
+        if recruiter_phone:
+            result["recruiter_phone"] = recruiter_phone
 
         logger.info(
             "linkedin_llm_fallback_succeeded",

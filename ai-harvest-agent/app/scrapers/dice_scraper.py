@@ -260,7 +260,7 @@ async def _first_text(root: "Page | ElementHandle", selectors: list[str]) -> str
             if el:
                 text = await el.inner_text()
                 if text and text.strip():
-                    return text.strip()
+                    return text
         except Exception:
             continue
     return ""

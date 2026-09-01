@@ -194,6 +194,13 @@ function mapApiJob(j) {
     email: j.email_id || null,
     whatsapp: j.contact_number || null,
     mobile: j.contact_number || null,
+    // Source-split contact values so the UI can label Job: vs Recruiter: when
+    // both exist. email/mobile above stay the merged value used for search,
+    // sort, mailto:/tel: links and the contact-action icons.
+    emailScraped: j.email_scraped || null,
+    emailRecruiter: j.email_recruiter || null,
+    mobileScraped: j.phone_scraped || null,
+    mobileRecruiter: j.phone_recruiter || null,
     linkedin: j.linkedin_profile_url || null,
     source: j.source || "—",
     jobDescription: j.job_description || "",
@@ -237,7 +244,14 @@ function mapJobToDetail(j) {
     posterName: j.poc || "",
     posterLinkedIn: j.linkedin || "",
     posterTitle: j.posterTitle || "",
-    posterContact: { email: j.email || "", mobile: j.mobile || "" },
+    posterContact: {
+      email: j.email || "",
+      mobile: j.mobile || "",
+      emailScraped: j.emailScraped || "",
+      emailRecruiter: j.emailRecruiter || "",
+      mobileScraped: j.mobileScraped || "",
+      mobileRecruiter: j.mobileRecruiter || "",
+    },
     source: j.source,
     domain: j.domain || "",
     hiringEntity: j.hiringEntity || "",
@@ -419,6 +433,45 @@ function jobMatchesContact(j, contact) {
 }
 
 /**
+ * Renders a contact value that may come from two sources — the scraped job and
+ * the enriched recruiter record. When both exist (and differ) they are shown as
+ * two labeled lines (Job: / Recruiter:); a single source renders unlabeled, and
+ * nothing renders an em-dash. `link` is "mailto:" or "tel:"; `cls` the anchor
+ * class (ha-mail / ha-tel). Used by the jobs table and the job-details view.
+ */
+function DualContact({ scraped, recruiter, fallback, link, cls }) {
+  const s = (scraped || "").trim();
+  const r = (recruiter || "").trim();
+  const dash = <span style={{ color: "#94A3B8" }}>—</span>;
+  const anchor = (val) => <a className={cls} href={link + val}>{val}</a>;
+
+  // JSON read-path rows carry only the merged value (no split source fields) —
+  // fall back to it so they still render a single unlabeled contact.
+  if (!s && !r) {
+    const f = (fallback || "").trim();
+    return f ? anchor(f) : dash;
+  }
+
+  // Both present and distinct → label each by origin.
+  if (s && r && s !== r) {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+        <span style={{ display: "flex", gap: 5, alignItems: "baseline" }}>
+          <span style={{ fontSize: 10, fontWeight: 600, color: "#64748B", textTransform: "uppercase", letterSpacing: ".03em" }}>Job</span>
+          {anchor(s)}
+        </span>
+        <span style={{ display: "flex", gap: 5, alignItems: "baseline" }}>
+          <span style={{ fontSize: 10, fontWeight: 600, color: "#64748B", textTransform: "uppercase", letterSpacing: ".03em" }}>Recruiter</span>
+          {anchor(r)}
+        </span>
+      </div>
+    );
+  }
+  const single = s || r;
+  return single ? anchor(single) : dash;
+}
+
+/**
  * Shared jobs table used by both the Harvested Jobs page (JobsPage) and the
  * run-history per-run view (RunDetailView). Owns the Company/Contact/Job/POC/
  * search filter bar, sorting, the WhatsApp/Email/LinkedIn contact-action icons
@@ -544,14 +597,10 @@ function JobsTable({
                   </td>
                   <td className="ha-td" style={{ whiteSpace: "nowrap", color: C.textSoft }}>{j.postedDate || "—"}</td>
                   <td className="ha-td">
-                    {j.email
-                      ? <a className="ha-mail" href={"mailto:" + j.email}>{j.email}</a>
-                      : <span style={{ color: "#94A3B8" }}>—</span>}
+                    <DualContact scraped={j.emailScraped} recruiter={j.emailRecruiter} fallback={j.email} link="mailto:" cls="ha-mail" />
                   </td>
                   <td className="ha-td" style={{ whiteSpace: "nowrap" }}>
-                    {j.mobile
-                      ? <a className="ha-tel" href={"tel:" + j.mobile}>{j.mobile}</a>
-                      : <span style={{ color: "#94A3B8" }}>—</span>}
+                    <DualContact scraped={j.mobileScraped} recruiter={j.mobileRecruiter} fallback={j.mobile} link="tel:" cls="ha-tel" />
                   </td>
                   <td className="ha-td">
                     <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
