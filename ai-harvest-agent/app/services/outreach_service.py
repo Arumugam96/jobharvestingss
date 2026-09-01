@@ -103,7 +103,7 @@ class OutreachService:
         `deck_url`, when set, adds a clickable link to the hosted company-overview
         deck (in place of the old file attachment); when empty, no deck line."""
         company = (job.get("company") or "").strip()
-        prompt = outreach_prompts.build_email_prompt(client_type, tone, job)
+        prompt = outreach_prompts.build_email_prompt(client_type, tone, job, sender_email)
         if regenerate:
             prompt += "\n\nProduce a distinctly different variation from any previous version."
 

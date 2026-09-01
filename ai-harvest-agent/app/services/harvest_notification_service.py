@@ -24,8 +24,36 @@ logger = structlog.get_logger(__name__)
 _DEFAULT_SUBJECT = "Harvest Report — {run_id} ({status}, {total_jobs} jobs)"
 
 
+def _render_insights(insights: dict | None) -> str:
+    """A plain-text 'Harvest insights' block for a completed run — source split,
+    contactability, and contact provenance (local-LLM/scraped vs Apollo). Returns
+    "" when no insights were supplied so the email degrades to the basic summary."""
+    if not insights:
+        return ""
+    g = insights.get
+    return (
+        "Harvest insights\n"
+        "----------------\n"
+        f"Total jobs:                     {g('total', 0)}\n"
+        f"  - With LinkedIn:              {g('linkedin', 0)}\n"
+        f"  - Without LinkedIn:           {g('non_linkedin', 0)} "
+        f"(Naukri {g('naukri', 0)}, Dice {g('dice', 0)})\n\n"
+        "Contactable records\n"
+        f"  - With email:                 {g('with_email', 0)}\n"
+        f"  - With contact number:        {g('with_phone', 0)}\n\n"
+        "Contact provenance\n"
+        f"  - Extracted via local LLM:    {g('local_llm_contacts', 0)}\n"
+        f"  - Enriched via Apollo:        {g('apollo_enriched', 0)}\n\n"
+    )
+
+
 def _render_body(
-    run_id: str, status: str, total_jobs: int, sources: list[str], error: str = ""
+    run_id: str,
+    status: str,
+    total_jobs: int,
+    sources: list[str],
+    error: str = "",
+    insights: dict | None = None,
 ) -> str:
     if status == "failed":
         return (
@@ -44,6 +72,7 @@ def _render_body(
         f"Status:     {status}\n"
         f"Sources:    {', '.join(sources) or '-'}\n"
         f"Total jobs: {total_jobs}\n\n"
+        f"{_render_insights(insights)}"
         "The extracted jobs are attached to this email.\n\n"
         "Regards,\n"
         "Sightspectrum Harvest Agent"
@@ -59,6 +88,7 @@ async def send_harvest_report(
     total_jobs: int,
     sources: list[str],
     job_dicts: list[dict] | None = None,
+    insights: dict | None = None,
     error: str = "",
 ) -> None:
     """Email the harvest report (or a failure alert) to notifications.recipients,
@@ -123,7 +153,7 @@ async def send_harvest_report(
         subject = _DEFAULT_SUBJECT.format(run_id=run_id, status=status, total_jobs=total_jobs)
     log.debug("harvest_report_subject_built", subject=subject)
 
-    body = _render_body(run_id, status, total_jobs, sources, error)
+    body = _render_body(run_id, status, total_jobs, sources, error, insights)
 
     try:
         log.info("harvest_report_email_sending", recipients=recipients, attachments=len(attachments))

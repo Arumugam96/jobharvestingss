@@ -15,6 +15,7 @@ import mimetypes
 import re
 import smtplib
 from email.message import EmailMessage
+from email.utils import formataddr, parseaddr
 from pathlib import Path
 
 import structlog
@@ -24,6 +25,38 @@ from app.config import Settings
 logger = structlog.get_logger(__name__)
 
 OTP_EMAIL_SUBJECT = "Your Sightspectrum Login OTP"
+
+
+def _resolve_sender(settings: Settings) -> tuple[str, str]:
+    """Resolve the visible From header and the SMTP envelope sender for the
+    harvest report from ``SMTP_FROM_EMAIL`` / ``SMTP_USERNAME``.
+
+    Returns ``(from_header, envelope_addr)``.
+
+    * ``from_header``  — what the recipient sees. If ``SMTP_FROM_EMAIL`` is a real
+      address it's used as-is; if it's a bare display name (e.g.
+      ``"JOB HARVEST AGENT"``) it becomes the display name paired with the
+      authenticated mailbox — so the inbox shows that name instead of the Gmail
+      account owner (which is why the harvest mail used to read "Hariprasath").
+    * ``envelope_addr`` — the SMTP ``MAIL FROM``. Always a real address (never a
+      bare display name, which providers reject): the configured address when it
+      has one, else the authenticated mailbox.
+    """
+    username = (settings.smtp_username or "").strip()
+    configured = (settings.smtp_from_email or "").strip()
+
+    if "@" in configured:
+        name, addr = parseaddr(configured)
+        from_header = formataddr((name, addr)) if name else addr
+        return from_header, (addr or username)
+
+    if configured:
+        # Display-name-only SMTP_FROM_EMAIL — show it as the sender name and send
+        # from the authenticated mailbox.
+        from_header = formataddr((configured, username)) if username else configured
+        return from_header, username
+
+    return username, username
 
 # Matches an email address inside the plain-text outreach body so it can be
 # rendered as a bold, clickable mailto link in the HTML part (the reach-out line).
@@ -246,11 +279,12 @@ class EmailSender:
         (filename, bytes) blobs; the harvest report is generated from the DB
         in memory and attached as a blob.
 
-        `from_email`/`reply_to` set the visible From and add a Reply-To (the
-        recruiter-outreach flow passes the logged-in user's address so the email
-        comes from them). The SMTP envelope sender stays the authenticated mailbox
-        (settings.smtp_username) so providers don't reject a header From they
-        didn't authorize — see _send_with_attachments_sync.
+        Passing `from_email` marks this as an outreach send: the visible From
+        becomes the shared "harvest agent" identity ("SS <SMTP_FROM_EMAIL>", the
+        same sender the OTP email uses), and `from_email`/`reply_to` are set as
+        the Reply-To so recruiter replies reach the salesperson. Callers that omit
+        `from_email` (the harvest report) send under the configured sender
+        identity resolved by _resolve_sender.
 
         `as_html=True` adds an HTML alternative part rendered from `body`
         (outreach: bold, clickable mailto reach-out line). Plain callers (the
@@ -277,12 +311,21 @@ class EmailSender:
         as_html: bool,
         log,
     ) -> None:
-        # Visible From is the caller-supplied address (outreach: the logged-in
-        # user); fall back to the authenticated mailbox — NOT smtp_from_email,
-        # which may be a display-name string rather than an address.
+        # Sender identity:
+        #  * Outreach (caller passes `from_email`) sends under the shared
+        #    "harvest agent" identity exactly like the OTP email — From is
+        #    "SS <SMTP_FROM_EMAIL>" and the envelope is left for the provider to
+        #    derive. The sender's own address becomes the Reply-To below, so the
+        #    recruiter's reply still reaches the salesperson.
+        #  * Harvest report (no `from_email`) uses the configured sender identity
+        #    (see _resolve_sender — this is the fix for the old "Hariprasath").
+        if from_email:
+            from_header, envelope_from = f"SS {self._settings.smtp_from_email}", None
+        else:
+            from_header, envelope_from = _resolve_sender(self._settings)
         message = EmailMessage()
         message["Subject"] = subject
-        message["From"] = from_email or self._settings.smtp_from_email
+        message["From"] = from_header
         if reply_to or from_email:
             message["Reply-To"] = reply_to or from_email
         message["To"] = ", ".join(recipients)
@@ -315,9 +358,8 @@ class EmailSender:
                 content_type=f"{maintype}/{subtype}",
             )
 
-        # Envelope sender is the configured from-address even when the From
-        # header is a custom (logged-in-user) address.
-        envelope_from = self._settings.smtp_from_email or self._settings.smtp_username
+        # envelope_from is a real address for the harvest report, or None for
+        # outreach (provider derives it from the From, exactly like the OTP send).
         self._send_sync(message, log, envelope_from)
 
     def _send_sync(self, message: EmailMessage, log=None, from_addr: str | None = None) -> None:

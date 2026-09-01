@@ -59,7 +59,7 @@ from app.services.harvest_run_service import (
 )
 from app.services import run_guard
 from app.services.job_tracker import JobTracker
-from app.services.report_service import merged_job_dicts
+from app.services.report_service import compute_harvest_insights, merged_job_dicts
 from app.services.run_history_service import RunHistoryService
 
 logger = structlog.get_logger(__name__)
@@ -473,10 +473,15 @@ async def _run_harvest_background_impl(
     # recruiter-merged email/phone (scraped_job_view) is what recipients see;
     # falls back to the in-memory scraped list if the DB mirror failed.
     report_dicts: list[dict] = []
+    # ORM rows kept alongside the dicts purely to compute the email insights
+    # (source split + local-LLM/Apollo contact provenance) — provenance lives on
+    # the linked recruiter, which the dicts/UI view don't carry.
+    insight_rows: list = []
     if run_pk:
         run_rows = await db_read(lambda db: HarvestRunService(db).list_jobs_for_run(run_pk))
         if run_rows:
             report_dicts = merged_job_dicts(run_rows)
+            insight_rows = list(run_rows)
     if not report_dicts:
         report_dicts = [j.to_dict() for j in result.all_jobs]
 
@@ -494,11 +499,17 @@ async def _run_harvest_background_impl(
             pend_rows = await db_read(lambda db: HarvestRunService(db).list_jobs_for_run(pend.id))
             if pend_rows:
                 report_dicts = report_dicts + merged_job_dicts(pend_rows)
+                insight_rows = insight_rows + list(pend_rows)
                 merged_pending += len(pend_rows)
             await db_write(lambda db: HarvestRunService(db).clear_report_pending(pend.id))
         if merged_pending:
             total_for_email = len(report_dicts)
             log.info("deferred_reports_merged", runs=len(pending_runs), jobs=merged_pending)
+
+    # Report-email-only insights (never surfaced in the UI) built from the DB
+    # rows: with/without LinkedIn, records carrying email/phone, and how many
+    # contacts came from the local LLM/scrape vs paid Apollo enrichment.
+    insights = compute_harvest_insights(insight_rows) if insight_rows else None
 
     await send_harvest_report(
         EmailSender(get_settings()),
@@ -508,6 +519,7 @@ async def _run_harvest_background_impl(
         total_jobs  = total_for_email,
         sources     = result.sources_executed,
         job_dicts   = report_dicts,
+        insights    = insights,
     )
 
 

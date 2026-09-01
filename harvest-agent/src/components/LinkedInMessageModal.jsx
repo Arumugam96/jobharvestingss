@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { X, RefreshCw, Copy, Check, Sparkles, AlertCircle } from "lucide-react";
 import { generateLinkedinMessage, ApiError } from "../api";
+import OutreachBodyField from "./OutreachBodyField";
 
 /* LinkedIn outreach message generator. Opens from the LinkedIn icon on a
  * Harvested Jobs row (only when that row has a LinkedIn URL). Generates a single
@@ -89,8 +90,8 @@ export default function LinkedInMessageModal({ job = {}, onClose = () => {} }) {
             Message
             <span className="lmm-aitag"><Sparkles size={11} /> AI draft</span>
           </span>
-          <textarea className="lmm-textarea" value={message} onChange={(e) => setMessage(e.target.value)}
-            disabled={generating} placeholder={generating ? "Generating message…" : ""} />
+          <OutreachBodyField value={message} onChange={setMessage} disabled={generating}
+            placeholder={generating ? "Generating message…" : ""} textareaClassName="lmm-textarea" minHeight={190} />
           <div className="lmm-count">{message.length} characters</div>
 
           {fallbackUsed && !error && (

@@ -1,6 +1,7 @@
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { X, RefreshCw, Copy, Check, Send, Sparkles, Link, Loader2, AlertCircle } from "lucide-react";
 import { generateOutreachEmail, sendOutreachEmail, ApiError } from "../api";
+import OutreachBodyField from "./OutreachBodyField";
 
 /* Recruiter outreach email composer. Opens from the Email icon on a Harvested
  * Jobs row (only when that row has a recruiter email). Generates a tone- and
@@ -34,6 +35,7 @@ const styles = `
 .ecm-tone:hover:not(:disabled) { border-color: #CBD5E1; color: #1E293B; }
 .ecm-tone.is-active { background: #EFF6FF; border-color: #2563EB; color: #1E40AF; }
 .ecm-tone:disabled { opacity: .6; cursor: default; }
+.ecm-select { cursor: pointer; appearance: none; -webkit-appearance: none; background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%2364748B' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>"); background-repeat: no-repeat; background-position: right 10px center; padding-right: 34px; }
 .ecm-attach { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; color: #475569; background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 8px; padding: 8px 11px; }
 .ecm-note { display: flex; align-items: center; gap: 7px; font-size: 12.5px; border-radius: 8px; padding: 8px 11px; }
 .ecm-note-warn { background: #FFFBEB; border: 1px solid #FDE68A; color: #92400E; }
@@ -77,6 +79,32 @@ export default function EmailComposeModal({ job = {}, onClose = () => {} }) {
   const [sent, setSent] = useState(false);
   const [copied, setCopied] = useState(false);
   const metaLoaded = useRef(false);
+
+  // Candidate recipient addresses for this job, labeled by origin to match the
+  // table's Job/Recruiter split (emailScraped = the address on the job post,
+  // emailRecruiter = the recruiter's own). Deduped by address; when more than
+  // one exists the user gets quick-pick chips under the To field. Also reads the
+  // detail-view's nested posterContact shape, and the merged `email` fallback
+  // (JSON-read rows carry only that).
+  const toOptions = useMemo(() => {
+    const pc = job.posterContact || {};
+    const raw = [
+      { label: "Job", email: job.emailScraped || pc.emailScraped || "" },
+      { label: "Recruiter", email: job.emailRecruiter || pc.emailRecruiter || "" },
+    ];
+    const seen = new Set();
+    const opts = [];
+    for (const o of raw) {
+      const email = (o.email || "").trim();
+      if (!email || seen.has(email.toLowerCase())) continue;
+      seen.add(email.toLowerCase());
+      opts.push({ label: o.label, email });
+    }
+    if (opts.length === 0 && (job.email || "").trim()) {
+      opts.push({ label: "Contact", email: job.email.trim() });
+    }
+    return opts;
+  }, [job]);
 
   const generate = useCallback(async (nextTone, regenerate) => {
     setGenerating(true);
@@ -173,8 +201,23 @@ export default function EmailComposeModal({ job = {}, onClose = () => {} }) {
               <input className="ecm-input" value={fromEmail} onChange={(e) => setFromEmail(e.target.value)} placeholder="you@sightspectrum.com" />
             </div>
             <div className="ecm-field" style={{ flex: 1, minWidth: 220 }}>
-              <span className="ecm-label">To</span>
-              <input className="ecm-input" value={toEmail} onChange={(e) => setToEmail(e.target.value)} placeholder="recruiter@company.com" />
+              <span className="ecm-label">
+                To
+                {toOptions.length > 1 && <span style={{ color: "#94A3B8", fontWeight: 500, textTransform: "none", letterSpacing: 0 }}>· pick a recipient</span>}
+              </span>
+              {toOptions.length > 1 ? (
+                <select className="ecm-input ecm-select" value={toEmail} onChange={(e) => setToEmail(e.target.value)} aria-label="Recipient email">
+                  {/* Keep any seeded/edited address that isn't one of the labeled options selectable. */}
+                  {toEmail.trim() && !toOptions.some((o) => o.email.toLowerCase() === toEmail.trim().toLowerCase()) && (
+                    <option value={toEmail}>{toEmail}</option>
+                  )}
+                  {toOptions.map((o) => (
+                    <option key={o.email} value={o.email}>{o.label} — {o.email}</option>
+                  ))}
+                </select>
+              ) : (
+                <input className="ecm-input" value={toEmail} onChange={(e) => setToEmail(e.target.value)} placeholder="recruiter@company.com" />
+              )}
             </div>
           </div>
 
@@ -200,8 +243,8 @@ export default function EmailComposeModal({ job = {}, onClose = () => {} }) {
               Message
               <span className="ecm-aitag"><Sparkles size={11} /> AI draft</span>
             </span>
-            <textarea className="ecm-textarea" value={body} onChange={(e) => setBody(e.target.value)}
-              disabled={generating} placeholder={generating ? "Generating draft…" : ""} />
+            <OutreachBodyField value={body} onChange={setBody} disabled={generating}
+              placeholder={generating ? "Generating draft…" : ""} textareaClassName="ecm-textarea" />
           </div>
 
           {deckUrl && (

@@ -64,6 +64,64 @@ def build_excel_report_bytes(job_dicts: list[dict[str, Any]]) -> bytes:
     return ExcelExportService().build_bytes(job_dicts)
 
 
+def compute_harvest_insights(jobs: list[ScrapedJobORM]) -> dict[str, int]:
+    """Summary counts for the post-harvest report EMAIL (nothing in this is
+    surfaced in the UI) — computed straight off the run's ScrapedJobORM rows and
+    their eagerly-loaded RecruiterORM, so contact provenance is exact.
+
+    Splits the harvest along the axes the business tracks:
+      * source            — LinkedIn vs non-LinkedIn (Naukri + Dice)
+      * contactability     — how many records carry an email / phone (the job's
+        own scraped value, else the linked recruiter's enriched value — same
+        merge scraped_job_view uses for the attachments)
+      * contact provenance — free contacts (scraped on the page / extracted by
+        the local LLM) vs paid Apollo enrichments (recruiter.enrichment_source
+        == "apollo")"""
+    def _has(value: Any) -> bool:
+        return bool(value and str(value).strip())
+
+    total = len(jobs)
+    linkedin = naukri = dice = 0
+    with_email = with_phone = with_contact = 0
+    apollo_enriched = local_llm_contacts = 0
+
+    for j in jobs:
+        if j.source == "LinkedIn":
+            linkedin += 1
+        elif j.source == "Naukri":
+            naukri += 1
+        elif j.source == "Dice":
+            dice += 1
+
+        recruiter = j.recruiter
+        has_email = _has(j.email_id) or _has(getattr(recruiter, "official_email_id", ""))
+        has_phone = _has(j.contact_number) or _has(getattr(recruiter, "contact_number", ""))
+        if has_email:
+            with_email += 1
+        if has_phone:
+            with_phone += 1
+
+        if has_email or has_phone:
+            with_contact += 1
+            if getattr(recruiter, "enrichment_source", "") == "apollo":
+                apollo_enriched += 1
+            else:
+                local_llm_contacts += 1
+
+    return {
+        "total":               total,
+        "linkedin":            linkedin,
+        "non_linkedin":        naukri + dice,
+        "naukri":              naukri,
+        "dice":                dice,
+        "with_email":          with_email,
+        "with_phone":          with_phone,
+        "with_contact":        with_contact,
+        "local_llm_contacts":  local_llm_contacts,
+        "apollo_enriched":     apollo_enriched,
+    }
+
+
 def report_basename(run_id: str = "") -> str:
     """Consistent attachment/download filename stem for one report."""
     if run_id:

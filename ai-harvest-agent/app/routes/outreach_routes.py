@@ -169,9 +169,11 @@ async def send_email(
     email_sender: EmailSender = Depends(get_email_sender),
 ) -> dict:
     """Send a (possibly edited) outreach email with the corporate-overview pptx
-    attached, using the editable From (Reply-To set to it; envelope stays the
-    authenticated mailbox). Always returns 200 with a `status` so the failed row
-    is persisted (raising would roll back the session)."""
+    attached. The visible From is the shared "harvest agent" identity (same
+    sender as the OTP email); the composer's address (`from_email`) becomes the
+    Reply-To so the recruiter's reply reaches the salesperson. Always returns 200
+    with a `status` so the failed row is persisted (raising would roll back the
+    session)."""
     to_email = (body.to_email or "").strip()
     from_email = (body.from_email or "").strip()
     logger.info(f"the Email from {from_email} is sent to {to_email}")

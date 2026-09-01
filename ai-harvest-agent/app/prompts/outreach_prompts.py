@@ -87,10 +87,7 @@ _FALLBACK_SUBJECTS = {
 # mailto link in the outgoing HTML email (see email_service._outreach_body_to_html).
 
 SIGN_OFF = "Best Regards,\nSightspectrum Team"
-REACHOUT_TEMPLATE = (
-    "Please feel free to reach out to me directly at {email} for any requirements "
-    "or to take this forward."
-)
+REACHOUT_TEMPLATE = "Please feel free to reach me directly at {email}."
 # Appended only when a hosted deck URL is configured (OUTREACH_DECK_URL). Replaces
 # the old file attachment — rendered as a clickable link in the HTML email.
 DECK_LINK_TEMPLATE = "You can view our company overview here: {url}"
@@ -143,44 +140,73 @@ def _greeting_on_own_line(body: str) -> str:
     return f"{greeting}\n\n{rest}" if rest else greeting
 
 
+def _build_sign_off(sender_email: str) -> str:
+    """Sign-off personalized to the sender when their name can be recovered from
+    the email ("Best Regards,\\n<Name>\\nSightspectrum"), mirroring the opening
+    introduction; otherwise the neutral team sign-off."""
+    name = sender_display_name(sender_email)
+    if name:
+        return f"Best Regards,\n{name}\nSightspectrum"
+    return SIGN_OFF
+
+
 def append_closing(pitch: str, sender_email: str, deck_url: str = "") -> str:
-    """Append the deck link (when deck_url is set), the reach-out line (to
-    sender_email) and the Sightspectrum sign-off to an LLM- or template-generated
-    pitch. The email/URL are left as plain text here; they become a bold clickable
-    mailto link and a clickable deck link when the email is sent as HTML."""
+    """Append the reach-out line (to sender_email), then the deck link (when
+    deck_url is set), then the Sightspectrum sign-off to an LLM- or
+    template-generated pitch — the deck link sits just before the sign-off. The
+    sign-off is signed with the sender's name when it can be derived from
+    sender_email (see _build_sign_off). The email/URL are left as plain text
+    here; they become a bold clickable mailto link and a clickable deck link when
+    the email is sent as HTML."""
     body = _greeting_on_own_line(_strip_trailing_closing(pitch))
     email = (sender_email or "").strip()
     url = (deck_url or "").strip()
     parts = [body] if body else []
-    if url:
-        parts.append(DECK_LINK_TEMPLATE.format(url=url))
     if email:
         parts.append(REACHOUT_TEMPLATE.format(email=email))
-    parts.append(SIGN_OFF)
+    if url:
+        parts.append(DECK_LINK_TEMPLATE.format(url=url))
+    parts.append(_build_sign_off(sender_email))
     return "\n\n".join(p for p in parts if p).strip()
 
 
 EMAIL_SYSTEM_PROMPT = (
     "You are a business-development specialist at Sightspectrum, an IT staffing "
-    "firm. You write short B2B outreach emails to recruiters/talent-acquisition "
-    "contacts who have posted a job, offering Sightspectrum's staffing support. "
-    "Rules: keep it BRIEF — a greeting line plus at most 2 short sentences, "
-    "roughly 25-35 words of pitch total; get to the offer immediately, no "
-    "filler, no preamble, and do NOT restate or summarize the job description; "
-    "plain text only (no "
-    "markdown, no HTML); do not invent facts, statistics, names, phone numbers, "
-    "or email addresses; base the message on the provided reference text, "
-    "preserving its intent and offer; personalize naturally to the recipient's "
-    "company and the role they posted. Open with a greeting addressed to the "
-    "recipient by their first name when a recipient name is given (e.g. "
-    '"Dear Jane," for a formal tone or "Hi Jane," for a warmer one); when no '
-    'recipient name is given, use a neutral professional greeting such as '
-    '"Hello,". Put the greeting on its OWN line, then a blank line, then the '
-    'message body (e.g. "Hi Jane,\\n\\nSightspectrum …"). '
-    'NEVER output a bracketed placeholder such as "[Recipient Name]", '
-    '"[Name]", "[Company]", or "[Your Name]" — if a detail is unknown, omit it '
-    "or rephrase neutrally. Write ONLY the pitch: do NOT add a closing sign-off "
-    "(no 'Best Regards', no 'Sightspectrum Team')"
+    "firm. You write short, professional B2B outreach emails to recruiters / "
+    "talent-acquisition contacts who have posted a job, offering Sightspectrum's "
+    "staffing support. Write like a real person making a warm, understated, "
+    "consultative introduction — never a hyped sales blast. "
+    "Structure the body as a greeting line followed by three short paragraphs: "
+    "(1) a one-sentence introduction in which the SENDER introduces themselves by "
+    "name and notes they came across the recipient's posting for the role (e.g. "
+    "\"I'm Ravi from Sightspectrum, and I came across your posting for a Senior "
+    "Data Engineer role.\"); use the sender name given in the context, or if none "
+    "is given introduce simply as writing from Sightspectrum. "
+    "(2) two sentences that reference the role's focus and position Sightspectrum "
+    "as a staffing partner: name ONLY the one or two capabilities/skills that "
+    "directly match this role (e.g. Data Engineering and Cloud for a data role) "
+    "and mention that you can support contract and/or permanent hiring — do NOT "
+    "list every service Sightspectrum provides. "
+    "(3) a brief, low-pressure closing line inviting a conversation about the "
+    "recipient's current or upcoming hiring needs. "
+    "Keep the whole body to roughly 70-100 words; no filler, no hype, and do NOT "
+    "restate or summarize the full job description (you MAY reference the role's "
+    "focus or a key skill to show relevance). Plain text only (no markdown, no "
+    "HTML); do not invent facts, statistics, names, phone numbers, or email "
+    "addresses; base the message on the provided reference text, preserving its "
+    "intent and offer; personalize naturally to the recipient's company and the "
+    "role they posted. Address the recipient by their first name when a recipient "
+    'name is given (e.g. "Dear Jane," for a formal tone or "Hi Jane," for a '
+    'warmer one); when no recipient name is given, use a neutral professional '
+    'greeting such as "Hello,". Put the greeting on its OWN line, then a blank '
+    'line, then the three paragraphs (e.g. "Hi Jane,\\n\\nI\'m Ravi from '
+    'Sightspectrum, …"). '
+    'NEVER output a bracketed placeholder such as "[Recipient Name]", "[Name]", '
+    '"[Company]", or "[Your Name]" — if a detail is unknown, omit it or rephrase '
+    "neutrally. Write ONLY the greeting and the three body paragraphs: do NOT add "
+    "a closing sign-off (no 'Best regards', no sender name, no 'Sightspectrum "
+    "Team') and do NOT add a reach-out/contact line — the sign-off and contact "
+    "line are appended automatically. "
     'Return ONLY valid JSON of the form {"subject": "...", "body": "..."} with '
     "no commentary and no code fences."
 )
@@ -198,6 +224,35 @@ LINKEDIN_SYSTEM_PROMPT = (
     "unknown, omit it or rephrase neutrally. Return ONLY the message text — no "
     "subject line, no JSON, no code fences, no commentary."
 )
+
+
+# ── Sender identity ──────────────────────────────────────────────────────────
+
+# Role/shared-mailbox local parts that are not personal names — a first token
+# matching one of these yields no personal introduction (better a plain
+# "from Sightspectrum" than "This is Bd …").
+_NON_NAME_TOKENS = frozenset({
+    "bd", "hr", "info", "sales", "admin", "contact", "support", "team", "noreply",
+    "careers", "jobs", "recruiting", "recruitment", "talent", "hello", "office",
+    "mail", "email", "no", "reply", "help", "service", "services", "hi",
+})
+
+
+def sender_display_name(sender_email: str) -> str:
+    """Best-effort human first name for the sender, derived from their email
+    local part, so the email can open with a personal introduction ("This is
+    Ravi …"). "ravi.kumar@sightspectrum.com" → "Ravi"; drops a trailing company
+    token ("hari.sightspectrum@gmail.com" → "Hari"). Returns "" when nothing
+    name-like can be recovered (a role mailbox like "bd-team@…", or too short),
+    leaving the model to open without a personal name."""
+    local = (sender_email or "").split("@", 1)[0].strip()
+    if not local:
+        return ""
+    # Split on the usual separators; the first token is the given name.
+    first = re.split(r"[.\-_+]", local)[0].strip().lower()
+    if not first or not first.isalpha() or len(first) < 2 or first in _NON_NAME_TOKENS:
+        return ""
+    return first.capitalize()
 
 
 # ── Job-context block shared by both builders ────────────────────────────────
@@ -229,9 +284,10 @@ def _job_context(job: dict) -> str:
 
 # ── Email ────────────────────────────────────────────────────────────────────
 
-def build_email_prompt(client_type: str, tone: str, job: dict) -> str:
+def build_email_prompt(client_type: str, tone: str, job: dict, sender_email: str = "") -> str:
     """User prompt for email generation. `client_type` picks the reference,
-    `tone` picks the style, `job` supplies personalization context."""
+    `tone` picks the style, `job` supplies personalization context, and
+    `sender_email` lets the opening introduce the sender by name."""
     company = (job.get("company") or "").strip() or _GENERIC_COMPANY
     reference = (
         ACTIVE_CLIENT_REFERENCE if client_type == "active" else NEW_CLIENT_REFERENCE
@@ -242,16 +298,32 @@ def build_email_prompt(client_type: str, tone: str, job: dict) -> str:
         "new": "This recipient's company is a new prospect (not yet a client).",
         "unknown": "The recipient's company could not be identified — keep it generic.",
     }.get(client_type, "")
+    sender_name = sender_display_name(sender_email)
+    sender_ctx = (
+        f'Sender name: {sender_name} — open by introducing the sender in the '
+        f'first sentence (e.g. "This is {sender_name} from Sightspectrum …").\n\n'
+        if sender_name
+        else "Sender name: unknown — introduce simply as writing from "
+        "Sightspectrum, with no personal name and no placeholder.\n\n"
+    )
     return (
         f"{audience}\n\n"
         f"Tone: {tone} — {tone_instr}\n\n"
+        f"{sender_ctx}"
         f"Reference message to adapt (keep its intent and offer):\n"
         f"\"\"\"\n{reference}\n\"\"\"\n\n"
         f"Recipient / role context:\n{_job_context(job)}\n\n"
-        f"Write the outreach email BODY only — no sign-off and no contact details "
-        f"(these are appended automatically). Keep it brief: a greeting line plus "
-        f"at most 2 short sentences (~25-35 words); lead with the offer, no filler, "
-        f"and do not restate the job description. "
+        f"Write the outreach email BODY only — no sign-off and no reach-out/contact "
+        f"line (those are appended automatically). Structure it as a first-name "
+        f"greeting line followed by three short paragraphs: (1) a one-sentence "
+        f"intro where the sender introduces themselves by name and notes they came "
+        f"across the recipient's posting for the role; (2) two sentences that "
+        f"reference the role's focus and position Sightspectrum, naming ONLY the "
+        f"one or two capabilities that match this job and whether contract and/or "
+        f"permanent hiring is supported — not the full service list; (3) a brief, "
+        f"low-pressure line inviting a conversation about current or upcoming "
+        f"hiring needs. Keep it to ~70-100 words, warm and professional, and do "
+        f"not restate the full job description. "
         f'Return ONLY JSON: {{"subject": "...", "body": "..."}}'
     )
 
