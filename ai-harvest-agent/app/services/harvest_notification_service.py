@@ -13,6 +13,8 @@ and the subject line template — no code change needed to retarget or restyle.
 """
 from __future__ import annotations
 
+import html as html_lib
+
 import structlog
 
 from app.models.harvest_models import NotificationConfig
@@ -32,18 +34,16 @@ def _render_insights(insights: dict | None) -> str:
         return ""
     g = insights.get
     return (
-        "Harvest insights\n"
-        "----------------\n"
-        f"Total jobs:                     {g('total', 0)}\n"
-        f"  - With LinkedIn:              {g('linkedin', 0)}\n"
-        f"  - Without LinkedIn:           {g('non_linkedin', 0)} "
-        f"(Naukri {g('naukri', 0)}, Dice {g('dice', 0)})\n\n"
+        "Harvest insights\n\n"
+        "Sources\n"
+        f"- With LinkedIn: {g('linkedin', 0)}\n"
+        f"- Without LinkedIn: {g('non_linkedin', 0)} (Naukri {g('naukri', 0)}, Dice {g('dice', 0)})\n\n"
         "Contactable records\n"
-        f"  - With email:                 {g('with_email', 0)}\n"
-        f"  - With contact number:        {g('with_phone', 0)}\n\n"
+        f"- With email: {g('with_email', 0)}\n"
+        f"- With contact number: {g('with_phone', 0)}\n\n"
         "Contact provenance\n"
-        f"  - Extracted via local LLM:    {g('local_llm_contacts', 0)}\n"
-        f"  - Enriched via Apollo:        {g('apollo_enriched', 0)}\n\n"
+        f"- Extracted via local LLM: {g('local_llm_contacts', 0)}\n"
+        f"- Enriched via Apollo: {g('apollo_enriched', 0)}\n\n"
     )
 
 
@@ -76,6 +76,82 @@ def _render_body(
         "The extracted jobs are attached to this email.\n\n"
         "Regards,\n"
         "Sightspectrum Harvest Agent"
+    )
+
+
+def _esc(value: object) -> str:
+    return html_lib.escape(str(value if value is not None else ""))
+
+
+def _insights_html(insights: dict | None) -> str:
+    """The 'Harvest insights' block as a simple HTML table so the numbers line up
+    in a column (the point of using HTML over the ragged plain-text version).
+    Returns "" when no insights so the email degrades to just the summary."""
+    if not insights:
+        return ""
+    g = lambda k: insights.get(k, 0)  # noqa: E731
+
+    def section(title: str) -> str:
+        return f'<tr><td colspan="2" style="padding:14px 0 2px;font-weight:700;">{_esc(title)}</td></tr>'
+
+    def row(label: str, value: object) -> str:
+        return (
+            f'<tr><td style="padding:3px 0;color:#333;">{label}</td>'
+            f'<td style="padding:3px 0 3px 28px;text-align:right;white-space:nowrap;">{_esc(value)}</td></tr>'
+        )
+
+    rows = (
+        section("Sources")
+        + row("With LinkedIn", g("linkedin"))
+        + row(f'Without LinkedIn (Naukri {_esc(g("naukri"))}, Dice {_esc(g("dice"))})', g("non_linkedin"))
+        + section("Contactable records")
+        + row("With email", g("with_email"))
+        + row("With contact number", g("with_phone"))
+        + section("Contact provenance")
+        + row("Extracted via local LLM", g("local_llm_contacts"))
+        + row("Enriched via Apollo", g("apollo_enriched"))
+    )
+    return (
+        '<p style="margin:16px 0 2px;font-weight:700;">Harvest insights</p>'
+        '<table role="presentation" cellpadding="0" cellspacing="0" '
+        f'style="border-collapse:collapse;font-size:14px;">{rows}</table>'
+    )
+
+
+def _render_body_html(
+    run_id: str,
+    status: str,
+    total_jobs: int,
+    sources: list[str],
+    error: str = "",
+    insights: dict | None = None,
+) -> str:
+    """Simple HTML version of the report email — plain, readable text with the
+    insights in a small aligned table. `_render_body` is the plain-text fallback
+    for clients that don't render HTML."""
+    src = ", ".join(sources) or "-"
+    is_failed = status == "failed"
+
+    if is_failed:
+        intro = f"The harvest run <b>{_esc(run_id)}</b> failed before it could produce a report."
+        summary = (
+            f"Status: {_esc(status)}<br>Sources: {_esc(src)}<br>Error: {_esc(error or 'unknown')}"
+        )
+        middle = "<p style=\"margin:0;\">No report is attached — the run did not reach the export step.</p>"
+    else:
+        intro = f"The harvest run <b>{_esc(run_id)}</b> has completed."
+        summary = f"Status: {_esc(status)}<br>Sources: {_esc(src)}<br>Total jobs: {_esc(total_jobs)}"
+        middle = _insights_html(insights) + '<p style="margin:16px 0 0;">The extracted jobs are attached to this email.</p>'
+
+    return (
+        '<div style="font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,Arial,sans-serif;'
+        'font-size:14px;line-height:1.6;color:#222;max-width:600px;">'
+        '<p style="margin:0 0 14px;">Hello,</p>'
+        f'<p style="margin:0 0 14px;">{intro}</p>'
+        f'<p style="margin:0 0 14px;">{summary}</p>'
+        f"{middle}"
+        '<p style="margin:18px 0 0;color:#666;">Regards,<br>Sightspectrum Harvest Agent</p>'
+        "</div>"
     )
 
 
@@ -154,11 +230,12 @@ async def send_harvest_report(
     log.debug("harvest_report_subject_built", subject=subject)
 
     body = _render_body(run_id, status, total_jobs, sources, error, insights)
+    html_body = _render_body_html(run_id, status, total_jobs, sources, error, insights)
 
     try:
         log.info("harvest_report_email_sending", recipients=recipients, attachments=len(attachments))
         await email_sender.send_email_with_attachments(
-            recipients, subject, body, attachment_blobs=attachments,
+            recipients, subject, body, attachment_blobs=attachments, html_body=html_body,
         )
         log.info(
             "harvest_report_email_sent",

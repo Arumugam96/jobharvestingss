@@ -273,6 +273,7 @@ class EmailSender:
         from_email: str | None = None,
         reply_to: str | None = None,
         as_html: bool = False,
+        html_body: str | None = None,
     ) -> None:
         """Generic SMTP send with attachments — same transport/credentials as
         send_otp. Attachments come as file paths and/or as in-memory
@@ -286,16 +287,18 @@ class EmailSender:
         `from_email` (the harvest report) send under the configured sender
         identity resolved by _resolve_sender.
 
-        `as_html=True` adds an HTML alternative part rendered from `body`
-        (outreach: bold, clickable mailto reach-out line). Plain callers (the
-        harvest report) leave it False and send text-only, unchanged."""
+        HTML alternative part: pass `html_body` to supply a fully-formed HTML
+        body (the harvest report renders its own) — `body` stays as the plain-text
+        fallback. `as_html=True` instead derives the HTML from `body` (outreach:
+        bold, clickable mailto reach-out line). With neither, the email is sent
+        text-only."""
         paths = attachment_paths or []
         blobs = attachment_blobs or []
         log = logger.bind(recipients=recipients, subject=subject, attachments=len(paths) + len(blobs))
         log.debug("email_with_attachments_start")
         await asyncio.to_thread(
             self._send_with_attachments_sync,
-            recipients, subject, body, paths, blobs, from_email, reply_to, as_html, log,
+            recipients, subject, body, paths, blobs, from_email, reply_to, as_html, html_body, log,
         )
         log.info("email_with_attachments_sent")
 
@@ -309,6 +312,7 @@ class EmailSender:
         from_email: str | None,
         reply_to: str | None,
         as_html: bool,
+        html_body: str | None,
         log,
     ) -> None:
         # Sender identity:
@@ -330,10 +334,13 @@ class EmailSender:
             message["Reply-To"] = reply_to or from_email
         message["To"] = ", ".join(recipients)
         message.set_content(body)
-        if as_html:
-            # Add the HTML alternative before any attachments so the MIME tree is
-            # multipart/mixed[ multipart/alternative[text, html], attachments… ].
-            message.add_alternative(_outreach_body_to_html(body), subtype="html")
+        # HTML alternative (added before attachments so the MIME tree is
+        # multipart/mixed[ multipart/alternative[text, html], attachments… ]).
+        # A caller-supplied html_body (the harvest report) wins; otherwise
+        # as_html derives it from the plain-text body (outreach).
+        html_part = html_body if html_body else (_outreach_body_to_html(body) if as_html else None)
+        if html_part:
+            message.add_alternative(html_part, subtype="html")
 
         for raw_path in attachment_paths:
             path = Path(raw_path)
