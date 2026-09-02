@@ -83,37 +83,53 @@ def _linkify_bare(escaped: str) -> str:
     return escaped
 
 
+def _title_matcher(job_title: str) -> re.Pattern | None:
+    """Case-insensitive, whitespace-tolerant matcher for the job title, so the
+    posting link still attaches when the model reproduces the title with slightly
+    different capitalization or spacing than the stored value (e.g. "Business
+    Analyst" vs. "business  analyst"). Runs of whitespace in the title match any
+    whitespace; every other character is matched literally. Returns None when
+    there's no title to match."""
+    normalized = " ".join((job_title or "").split())
+    if not normalized:
+        return None
+    pattern = r"\s+".join(re.escape(tok) for tok in normalized.split(" "))
+    return re.compile(pattern, re.IGNORECASE)
+
+
 def _outreach_body_to_html(body: str, job_title: str = "", job_url: str = "") -> str:
     """Render the plain-text outreach body as HTML: preserve line breaks; turn any
     http(s) URL (the deck link) into a clickable link; turn any line containing an
     email address (the appended reach-out line) into a bold line whose address is a
     clickable mailto link — so the recipient can reply in one click; and, when
-    `job_title`/`job_url` are given, render the first verbatim occurrence of the job
-    title (the opening's role mention) as a bold, blue link to the posting that opens
-    in a new tab — the raw URL itself is never shown. All other text is HTML-escaped
-    verbatim."""
-    title = (job_title or "").strip()
+    `job_title`/`job_url` are given, render the first occurrence of the job title
+    (the opening's role mention; matched case- and whitespace-insensitively) as a
+    bold, blue link to the posting that opens in a new tab — the raw URL itself is
+    never shown. All other text is HTML-escaped verbatim."""
     url = (job_url or "").strip()
-    link_title = bool(title and url)
+    matcher = _title_matcher(job_title) if url else None
     title_linked = False
     out_lines: list[str] = []
     for line in (body or "").split("\n"):
         # Bold the whole line when it carries an email address (the reach-out line).
         bold = bool(_BODY_EMAIL_RE.search(line))
-        if link_title and not title_linked and title in line:
+        match = matcher.search(line) if (matcher and not title_linked) else None
+        if match:
             # Wrap only the first occurrence with a bold blue anchor that opens the
-            # posting in a new tab; the URL stays hidden (title text is the link).
-            i = line.index(title)
+            # posting in a new tab; the URL stays hidden. Link the text exactly as the
+            # model wrote it (match.group()), not the stored title, so casing/spacing
+            # in the visible email is preserved.
+            i, j = match.start(), match.end()
             anchor = (
                 f'<a href="{html_lib.escape(url)}" target="_blank" '
                 'rel="noopener noreferrer" '
                 'style="color:#5f7fd0;font-weight:700;">'
-                f"{html_lib.escape(title)}</a>"
+                f"{html_lib.escape(line[i:j])}</a>"
             )
             rendered = (
                 _linkify_bare(html_lib.escape(line[:i]))
                 + anchor
-                + _linkify_bare(html_lib.escape(line[i + len(title):]))
+                + _linkify_bare(html_lib.escape(line[j:]))
             )
             title_linked = True
         else:

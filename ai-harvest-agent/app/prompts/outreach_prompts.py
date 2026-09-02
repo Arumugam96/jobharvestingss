@@ -366,6 +366,7 @@ def sender_display_name(sender_email: str) -> str:
 
 def _job_context(job: dict) -> str:
     company = (job.get("company") or "").strip() or "the company"
+    title = (job.get("job_title") or "").strip()
     poster = (job.get("job_poster_name") or "").strip()
     jd = (job.get("job_description") or "").strip()
     if len(jd) > 1500:  # keep the prompt bounded; the opening is the useful part
@@ -373,6 +374,15 @@ def _job_context(job: dict) -> str:
     lines = [
         f"Company: {company}",
     ]
+    if title:
+        # The role mention in the opening must be this EXACT string — the sent email
+        # links the first verbatim occurrence of it to the posting URL (see
+        # email_service._outreach_body_to_html). Paraphrasing/shortening it here is
+        # why the job-title link sometimes goes missing, so pin it explicitly.
+        lines.append(
+            f"Job title (refer to the role using this EXACT text, verbatim — do not "
+            f"paraphrase, shorten, reorder, or change capitalization): {title}"
+        )
     if poster:
         first_name = poster.split()[0]
         lines.append(

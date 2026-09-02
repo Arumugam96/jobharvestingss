@@ -53,33 +53,49 @@ function renderLine(line, key) {
   return nodes;
 }
 
+// Case-insensitive, whitespace-tolerant matcher for the job title — mirrors the
+// backend's _title_matcher (email_service.py) so the preview links the title just
+// like the sent email, even when the model varies its capitalization or spacing.
+// Runs of whitespace in the title match any whitespace; every other char is literal.
+function titleMatcher(jobTitle) {
+  const normalized = String(jobTitle || "").trim().replace(/\s+/g, " ");
+  if (!normalized) return null;
+  const pattern = normalized
+    .split(" ")
+    .map((tok) => tok.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join("\\s+");
+  return new RegExp(pattern, "i");
+}
+
 /** Render outreach body text as an array of React nodes with blue deck/mailto
  * links. The reach-out line (any line containing an email) is bolded, matching
  * the <strong> the backend wraps that line in. Newlines are preserved literally
  * and shown via `white-space: pre-wrap` on the container.
  *
- * When `jobTitle`/`jobUrl` are given, the first verbatim occurrence of the job
- * title (the opening's role mention) is wrapped in a bold blue link to the posting
- * that opens in a new tab — the raw URL stays hidden — mirroring the backend's
- * _outreach_body_to_html so the preview matches the delivered email exactly. */
+ * When `jobTitle`/`jobUrl` are given, the first occurrence of the job title (the
+ * opening's role mention; matched case- and whitespace-insensitively) is wrapped in
+ * a bold blue link to the posting that opens in a new tab — the raw URL stays hidden
+ * — mirroring the backend's _outreach_body_to_html so the preview matches the
+ * delivered email exactly. */
 export function linkifyOutreachBody(text, jobTitle = "", jobUrl = "") {
-  const title = String(jobTitle || "").trim();
   const url = String(jobUrl || "").trim();
-  const linkTitle = !!(title && url);
+  const matcher = url ? titleMatcher(jobTitle) : null;
   let titleLinked = false;
   const lines = String(text || "").split("\n");
   const out = [];
   lines.forEach((line, idx) => {
     if (idx > 0) out.push("\n");
-    // Case-sensitive, first-occurrence match — same as the backend's `title in line`.
-    const at = linkTitle && !titleLinked ? line.indexOf(title) : -1;
+    // Case-/whitespace-insensitive, first-occurrence match — same as the backend.
+    const m = matcher && !titleLinked ? matcher.exec(line) : null;
     let lineNodes;
-    if (at !== -1) {
+    if (m) {
       titleLinked = true;
+      const at = m.index;
+      const matched = m[0]; // link the text as written, mirroring the backend
       lineNodes = [
         ...renderLine(line.slice(0, at), `${idx}a`),
-        <a key={`title-${idx}`} href={url} target="_blank" rel="noreferrer" style={JOB_TITLE_LINK_STYLE}>{title}</a>,
-        ...renderLine(line.slice(at + title.length), `${idx}b`),
+        <a key={`title-${idx}`} href={url} target="_blank" rel="noreferrer" style={JOB_TITLE_LINK_STYLE}>{matched}</a>,
+        ...renderLine(line.slice(at + matched.length), `${idx}b`),
       ];
     } else {
       lineNodes = renderLine(line, idx);
