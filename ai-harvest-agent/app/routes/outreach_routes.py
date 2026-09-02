@@ -119,6 +119,10 @@ async def generate_email(
         "tone": tone,
         "fallback_used": draft.fallback_used,
         "deck_url": deck_url,
+        # Sent to the composer so its Preview can render the job title as the same
+        # bold blue new-tab link the delivered email gets (see _outreach_body_to_html).
+        "job_title": view.get("job_title") or "",
+        "job_url": view.get("job_url") or "",
     }
 
 
@@ -186,12 +190,15 @@ async def send_email(
 
     # Recompute company / recruiter link / audience from the job when available.
     company, recruiter_id, client_type = "", None, body.client_type or "unknown"
+    job_title, job_url = "", ""
     if body.job_id:
         job = await HarvestRunService(db).get_scraped_job_by_id(body.job_id)
         if job is not None:
             company = job.company or ""
             recruiter_id = job.recruiter_id
             client_type = classify_client(company)
+            job_title = job.job_title or ""
+            job_url = job.job_url or ""
 
     # No file attachment: the corporate-overview deck is delivered as a link in the
     # body (OUTREACH_DECK_URL) rather than a ~7 MB attachment, keeping the send fast.
@@ -204,6 +211,8 @@ async def send_email(
             from_email=from_email or None,
             reply_to=from_email or None,
             as_html=True,
+            job_title=job_title,
+            job_url=job_url,
         )
     except Exception as exc:  # SMTP/config failure — record and report, don't 500
         send_status, error_message = "failed", str(exc)

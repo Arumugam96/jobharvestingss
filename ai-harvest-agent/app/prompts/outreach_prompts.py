@@ -110,6 +110,9 @@ _FALLBACK_SUBJECTS = {
 # ── Deterministic closing (reach-out CTA + sign-off) ────────────────────────
 SIGN_OFF = "Best Regards,\nSightspectrum Team"
 REACHOUT_TEMPLATE = "Please feel free to reach me directly at {email}."
+# Static contact line appended to every outreach email, right below the reach-out
+# line (business-supplied; same on the LLM and fallback paths).
+CONTACT_BLOCK = "Contact : Vishnu Hassan/96290 82587"
 DECK_LINK_TEMPLATE = "You can view our company overview here: {url}"
 
 _SIGNOFF_MARKERS = (
@@ -157,7 +160,7 @@ def _greeting_on_own_line(body: str) -> str:
         return body
     greeting = m.group(1).strip()
     rest = text[m.end():].lstrip()
-    return f"{greeting}\n{rest}" if rest else greeting
+    return f"{greeting}\n\n{rest}" if rest else greeting
 
 
 def _build_sign_off(sender_email: str) -> str:
@@ -166,7 +169,7 @@ def _build_sign_off(sender_email: str) -> str:
     introduction; otherwise the neutral team sign-off."""
     name = sender_display_name(sender_email)
     if name:
-        return f"Best Regards,\n{name}\nSightspectrum"
+        return f"\nBest Regards,\n{name}\nSightspectrum"
     return SIGN_OFF
 
 
@@ -184,6 +187,7 @@ def append_closing(pitch: str, sender_email: str, deck_url: str = "") -> str:
     parts = [body] if body else []
     if email:
         parts.append(REACHOUT_TEMPLATE.format(email=email))
+    parts.append(CONTACT_BLOCK)  # static contact line, directly under the reach-out line
     if url:
         parts.append(DECK_LINK_TEMPLATE.format(url=url))
     parts.append(_build_sign_off(sender_email))
@@ -227,10 +231,6 @@ EMAIL_SYSTEM_PROMPT = (
     "development, enterprise application integration, application modernization, "
     "application maintenance and support. "
 
-    "Cybersecurity & Data Security: "
-    "Cybersecurity, cloud security, data security, privacy and protection, "
-    "security engineering, security governance. "
-
     "Consulting & Professional Services: "
     "Technology consulting, IT consulting, digital transformation, technology "
     "strategy, product professional services, application consulting, "
@@ -260,21 +260,28 @@ EMAIL_SYSTEM_PROMPT = (
 
     "EMAIL STRUCTURE: "
     "Structure the body as a greeting line followed by exactly three short paragraphs: "
-    "(1) one sentence introducing the sender by name and noting that they came across "
-    "the recipient's posting for the role. Use the sender name given in the context; "
-    "if none is given, introduce simply as writing from Sightspectrum. "
-    "(2) two sentences that reference the role's focus and position Sightspectrum "
-    "as a relevant staffing partner. Mention ONLY the one or two capabilities selected "
-    "from the service catalog that directly match the role, and mention that Sightspectrum "
-    "can support contract and/or permanent hiring. Do NOT list every service Sightspectrum "
-    "provides. "
+    "(1) one sentence introducing the sender by name, noting that they came across "
+    "the recipient's posting on the source platform named in the context (e.g. "
+    "LinkedIn, Naukri, or Dice), and referring to the role by its EXACT job title "
+    "written verbatim as given in the context. Use the sender name given in the "
+    "context; if none is given, introduce simply as writing from Sightspectrum. If no "
+    "source is given, say you came across the posting without naming a platform. "
+    "(2) about two sentences in plain, human-friendly language matched to the requested "
+    "tone: first, a single line summarizing in simple terms what the role is about; "
+    "then roughly one and a half lines on what Sightspectrum can contribute for it. "
+    "Mention ONLY the one or two capabilities selected from the service catalog that "
+    "directly match the role, and mention that Sightspectrum can support contract "
+    "and/or permanent hiring. Keep it simple and conversational, not jargon-heavy. "
+    "Do NOT list every service Sightspectrum provides. "
     "(3) one brief, low-pressure closing sentence inviting a conversation about the "
     "recipient's current or upcoming hiring needs. "
 
     "PERSONALIZATION RULES: "
     "Personalize naturally to the recipient's company and the specific role they posted. "
     "Reference the role title and, where useful, one important skill, technology, or "
-    "responsibility from the job posting. Do not restate or summarize the job description. "
+    "responsibility from the job posting. Summarize the job description in a single "
+    "concise line only (as described in paragraph 2); do not quote it verbatim or "
+    "reproduce it at length. "
     "Do not invent company information, technologies, requirements, hiring volumes, "
     "client relationships, statistics, certifications, names, phone numbers, or email "
     "addresses. Base the message only on the provided reference text and the "
@@ -402,10 +409,19 @@ def build_email_prompt(client_type: str, tone: str, job: dict, sender_email: str
         else "Sender name: unknown — introduce simply as writing from "
         "Sightspectrum, with no personal name and no placeholder.\n\n"
     )
+    source = (job.get("source") or "").strip()
+    source_ctx = (
+        f"Job posting source: {source} — in the opening sentence, mention that you "
+        f"came across the posting on {source}.\n\n"
+        if source
+        else "Job posting source: unknown — say you came across the posting without "
+        "naming a platform.\n\n"
+    )
     return (
         f"Audience — {audience}\n\n"
         f"Tone: {tone} — {tone_instr}\n\n"
         f"{sender_ctx}"
+        f"{source_ctx}"
         f"Recipient / role context:\n{_job_context(job)}\n\n"
         f"Write the outreach email BODY only, following the structure and rules in "
         f"the system instructions. "

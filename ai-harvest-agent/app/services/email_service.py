@@ -66,27 +66,61 @@ _BODY_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
 _BODY_URL_RE = re.compile(r'https?://[^\s<>"]+')
 
 
-def _outreach_body_to_html(body: str) -> str:
-    """Render the plain-text outreach body as HTML: preserve line breaks, turn any
-    line containing an email address (the appended reach-out line) into a bold line
-    whose address is a clickable mailto link — so the recipient can reply to the
-    sender in one click — and turn any http(s) URL (the deck link) into a clickable
-    link. All other text is HTML-escaped verbatim."""
+def _linkify_bare(escaped: str) -> str:
+    """Turn bare http(s) URLs (deck link) and email addresses (reach-out line) in an
+    already-HTML-escaped text segment into clickable links. Applied only to text
+    OUTSIDE the job-title link, so an already-anchored URL is never wrapped twice."""
+    if _BODY_URL_RE.search(escaped):
+        escaped = _BODY_URL_RE.sub(
+            lambda m: f'<a href="{m.group(0)}" style="color:#5f7fd0;">{m.group(0)}</a>',
+            escaped,
+        )
+    if _BODY_EMAIL_RE.search(escaped):
+        escaped = _BODY_EMAIL_RE.sub(
+            lambda m: f'<a href="mailto:{m.group(0)}" style="color:#5f7fd0;">{m.group(0)}</a>',
+            escaped,
+        )
+    return escaped
+
+
+def _outreach_body_to_html(body: str, job_title: str = "", job_url: str = "") -> str:
+    """Render the plain-text outreach body as HTML: preserve line breaks; turn any
+    http(s) URL (the deck link) into a clickable link; turn any line containing an
+    email address (the appended reach-out line) into a bold line whose address is a
+    clickable mailto link — so the recipient can reply in one click; and, when
+    `job_title`/`job_url` are given, render the first verbatim occurrence of the job
+    title (the opening's role mention) as a bold, blue link to the posting that opens
+    in a new tab — the raw URL itself is never shown. All other text is HTML-escaped
+    verbatim."""
+    title = (job_title or "").strip()
+    url = (job_url or "").strip()
+    link_title = bool(title and url)
+    title_linked = False
     out_lines: list[str] = []
     for line in (body or "").split("\n"):
-        escaped = html_lib.escape(line)
-        if _BODY_URL_RE.search(line):
-            escaped = _BODY_URL_RE.sub(
-                lambda m: f'<a href="{m.group(0)}" style="color:#5f7fd0;">{m.group(0)}</a>',
-                escaped,
+        # Bold the whole line when it carries an email address (the reach-out line).
+        bold = bool(_BODY_EMAIL_RE.search(line))
+        if link_title and not title_linked and title in line:
+            # Wrap only the first occurrence with a bold blue anchor that opens the
+            # posting in a new tab; the URL stays hidden (title text is the link).
+            i = line.index(title)
+            anchor = (
+                f'<a href="{html_lib.escape(url)}" target="_blank" '
+                'rel="noopener noreferrer" '
+                'style="color:#5f7fd0;font-weight:700;">'
+                f"{html_lib.escape(title)}</a>"
             )
-        if _BODY_EMAIL_RE.search(line):
-            escaped = _BODY_EMAIL_RE.sub(
-                lambda m: f'<a href="mailto:{m.group(0)}" style="color:#5f7fd0;">{m.group(0)}</a>',
-                escaped,
+            rendered = (
+                _linkify_bare(html_lib.escape(line[:i]))
+                + anchor
+                + _linkify_bare(html_lib.escape(line[i + len(title):]))
             )
-            escaped = f"<strong>{escaped}</strong>"
-        out_lines.append(escaped)
+            title_linked = True
+        else:
+            rendered = _linkify_bare(html_lib.escape(line))
+        if bold:
+            rendered = f"<strong>{rendered}</strong>"
+        out_lines.append(rendered)
     inner = "<br>\n".join(out_lines)
     return (
         '<!DOCTYPE html><html><body style="margin:0;padding:0;">'
@@ -274,6 +308,8 @@ class EmailSender:
         reply_to: str | None = None,
         as_html: bool = False,
         html_body: str | None = None,
+        job_title: str = "",
+        job_url: str = "",
     ) -> None:
         """Generic SMTP send with attachments — same transport/credentials as
         send_otp. Attachments come as file paths and/or as in-memory
@@ -290,15 +326,17 @@ class EmailSender:
         HTML alternative part: pass `html_body` to supply a fully-formed HTML
         body (the harvest report renders its own) — `body` stays as the plain-text
         fallback. `as_html=True` instead derives the HTML from `body` (outreach:
-        bold, clickable mailto reach-out line). With neither, the email is sent
-        text-only."""
+        bold, clickable mailto reach-out line, and — when `job_title`/`job_url` are
+        given — a bold blue job-title link that opens the posting in a new tab).
+        With neither, the email is sent text-only."""
         paths = attachment_paths or []
         blobs = attachment_blobs or []
         log = logger.bind(recipients=recipients, subject=subject, attachments=len(paths) + len(blobs))
         log.debug("email_with_attachments_start")
         await asyncio.to_thread(
             self._send_with_attachments_sync,
-            recipients, subject, body, paths, blobs, from_email, reply_to, as_html, html_body, log,
+            recipients, subject, body, paths, blobs, from_email, reply_to, as_html, html_body,
+            job_title, job_url, log,
         )
         log.info("email_with_attachments_sent")
 
@@ -313,6 +351,8 @@ class EmailSender:
         reply_to: str | None,
         as_html: bool,
         html_body: str | None,
+        job_title: str,
+        job_url: str,
         log,
     ) -> None:
         # Sender identity:
@@ -334,13 +374,10 @@ class EmailSender:
             message["Reply-To"] = reply_to or from_email
         message["To"] = ", ".join(recipients)
         message.set_content(body)
-        # HTML alternative (added before attachments so the MIME tree is
-        # multipart/mixed[ multipart/alternative[text, html], attachments… ]).
-        # A caller-supplied html_body (the harvest report) wins; otherwise
-        # as_html derives it from the plain-text body (outreach).
-        html_part = html_body if html_body else (_outreach_body_to_html(body) if as_html else None)
-        if html_part:
-            message.add_alternative(html_part, subtype="html")
+        if as_html:
+            # Add the HTML alternative before any attachments so the MIME tree is
+            # multipart/mixed[ multipart/alternative[text, html], attachments… ].
+            message.add_alternative(_outreach_body_to_html(body, job_title, job_url), subtype="html")
 
         for raw_path in attachment_paths:
             path = Path(raw_path)

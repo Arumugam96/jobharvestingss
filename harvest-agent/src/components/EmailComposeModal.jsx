@@ -72,6 +72,10 @@ export default function EmailComposeModal({ job = {}, onClose = () => {} }) {
   const [clientType, setClientType] = useState("");
   const [fallbackUsed, setFallbackUsed] = useState(false);
   const [deckUrl, setDeckUrl] = useState("");
+  // The posting's title + URL, so the body Preview can render the same bold blue
+  // new-tab job-title link the delivered email gets.
+  const [jobTitle, setJobTitle] = useState("");
+  const [jobUrl, setJobUrl] = useState("");
 
   const [generating, setGenerating] = useState(false);
   const [sending, setSending] = useState(false);
@@ -116,6 +120,8 @@ export default function EmailComposeModal({ job = {}, onClose = () => {} }) {
       setClientType(res.client_type || "");
       setFallbackUsed(!!res.fallback_used);
       setDeckUrl(res.deck_url || "");
+      setJobTitle(res.job_title || "");
+      setJobUrl(res.job_url || "");
       // Seed the editable From/To only on the first successful draft, so a user's
       // manual edits to those fields survive a tone change / regenerate.
       if (!metaLoaded.current) {
@@ -244,7 +250,8 @@ export default function EmailComposeModal({ job = {}, onClose = () => {} }) {
               <span className="ecm-aitag"><Sparkles size={11} /> AI draft</span>
             </span>
             <OutreachBodyField value={body} onChange={setBody} disabled={generating}
-              placeholder={generating ? "Generating draft…" : ""} textareaClassName="ecm-textarea" />
+              placeholder={generating ? "Generating draft…" : ""} textareaClassName="ecm-textarea"
+              jobTitle={jobTitle} jobUrl={jobUrl} />
           </div>
 
           {deckUrl && (
