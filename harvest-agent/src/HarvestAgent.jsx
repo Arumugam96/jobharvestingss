@@ -12,11 +12,13 @@ import EmailComposeModal from "./components/EmailComposeModal";
 import LinkedInMessageModal from "./components/LinkedInMessageModal";
 import StopHarvestButton from "./components/StopHarvestModal";
 import useCountUp from "./useCountUp";
+import { makeStallWatch, STALL_WARN_MS, STALL_WARN_MSG } from "./stallWatch";
 import {
-  getJobs, getRunHistory, getRunHistoryEntry, getActiveRun, ApiError,
+  getJobs, getRunHistory, getRunHistoryEntry, getActiveRun, getHarvestStatus, ApiError,
   runLinkedinAgent, getLinkedinResults, getLinkedinResult,
   runNaukriAgent, getNaukriResults, getNaukriResult,
   runDiceAgent, getDiceResults, getDiceResult,
+  runLinkedinFeedAgent, getLinkedinFeedResults, getLinkedinFeedResult,
   runProspectIntelligence, getProspectResults, getProspectResult,
   runRecruiterDiscovery,
   downloadJsonUrl, downloadExcelUrl,
@@ -137,6 +139,9 @@ const SRC_TONES = {
   Naukri: { background: "#EFF6FF", color: "#1E40AF" },
   Dice: { background: "#FEF3C7", color: "#92400E" },
   LinkedIn: { background: "#E0E7FF", color: "#3730A3" },
+  // Home Feed leads — a distinct purple tone so they read differently from the
+  // LinkedIn Jobs source everywhere a SourceChip appears (Jobs table, Run History).
+  "LinkedIn Feed": { background: "#F5F3FF", color: "#6D28D9" },
 };
 const SourceChip = ({ source }) => (
   <span className="ha-pill" style={SRC_TONES[source] || { background: "#F1F5F9", color: "#475569" }}>{source}</span>
@@ -264,6 +269,9 @@ function mapRun(entry) {
   return {
     runId: entry.run_id,
     sources: entry.sources || [],
+    // run_type distinguishes a LinkedIn Home Feed lead run ("feed") from a
+    // job-harvest run ("harvest") so the Run History page renders them apart.
+    runType: entry.run_type || "harvest",
     status: entry.status || "no_results",
     startedAt: entry.started_at || "",
     completedAt: entry.completed_at || "",
@@ -1028,7 +1036,7 @@ function RunHistoryPage({ runs, loading, error, onRefresh, onNavigate, onView })
 
         <div className="ha-card ha-filterbar" style={{ padding: "16px 20px", gridTemplateColumns: "repeat(2, minmax(0, 1fr))" }}>
           <Select label="Source" value={filters.source} onChange={(v) => setFilters((f) => ({ ...f, source: v }))}
-            options={[{ value: "all", label: "All" }, { value: "linkedin", label: "LinkedIn" }, { value: "naukri", label: "Naukri" }, { value: "dice", label: "Dice" }]} />
+            options={[{ value: "all", label: "All" }, { value: "linkedin", label: "LinkedIn" }, { value: "linkedin feed", label: "LinkedIn Feed" }, { value: "naukri", label: "Naukri" }, { value: "dice", label: "Dice" }]} />
           <Select label="Status" value={filters.status} onChange={(v) => setFilters((f) => ({ ...f, status: v }))}
             options={[{ value: "all", label: "All" }, { value: "success", label: "Success" }, { value: "no_results", label: "No results" }, { value: "failed", label: "Failed" }, { value: "running", label: "Running" }, { value: "stopped", label: "Stopped" }]} />
           <div className="ha-filter-search">
@@ -1058,12 +1066,15 @@ function RunHistoryPage({ runs, loading, error, onRefresh, onNavigate, onView })
                     Loading run history…
                   </td></tr>
                 )}
-                {!loading && filtered.map((r) => (
+                {!loading && filtered.map((r) => {
+                  const isFeed = r.runType === "feed";
+                  return (
                   <tr key={r.runId} className="ha-row">
                     <td className="ha-td"><button className="ha-link" onClick={() => onView(r.runId)}>{r.runId}</button></td>
                     <td className="ha-td">
-                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                        {r.sources.map((s) => <SourceChip key={s} source={s} />)}
+                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+                        {(isFeed ? ["LinkedIn Feed"] : r.sources).map((s) => <SourceChip key={s} source={s} />)}
+                        {isFeed && <span style={{ fontSize: 11, fontWeight: 700, color: "#6D28D9" }}>· Home Feed leads</span>}
                       </div>
                     </td>
                     <td className="ha-td"><StatusPill status={r.status} /></td>
@@ -1071,18 +1082,24 @@ function RunHistoryPage({ runs, loading, error, onRefresh, onNavigate, onView })
                     <td className="ha-td" style={{ whiteSpace: "nowrap", color: C.textSoft }}>{fmtDate(r.completedAt)}</td>
                     <td className="ha-td" style={{ fontWeight: 600 }}>
                       <AnimatedNumber value={r.jobsFound} />
+                      <span style={{ fontSize: 11, fontWeight: 500, color: C.textSoft, marginLeft: 4 }}>{isFeed ? "leads" : "jobs"}</span>
                       {r.status === "running" && <span style={{ color: C.accent, marginLeft: 4 }} title="climbing live">▲</span>}
                     </td>
                     <td className="ha-td">
-                      <div className="ha-breakdown">
-                        <span><b>{r.directClients}</b> DC</span>
-                        <span><b>{r.gcc}</b> GCC</span>
-                        <span><b>{r.staffingFirms}</b> SF</span>
-                        <span><b>{r.ambiguous}</b> Amb</span>
-                      </div>
+                      {isFeed ? (
+                        <span style={{ fontSize: 12.5, color: C.textSoft }}>IT hiring leads (Home Feed)</span>
+                      ) : (
+                        <div className="ha-breakdown">
+                          <span><b>{r.directClients}</b> DC</span>
+                          <span><b>{r.gcc}</b> GCC</span>
+                          <span><b>{r.staffingFirms}</b> SF</span>
+                          <span><b>{r.ambiguous}</b> Amb</span>
+                        </div>
+                      )}
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
                 {!loading && !error && filtered.length === 0 && (
                   <tr><td className="ha-td" colSpan={7} style={{ textAlign: "center", padding: "48px 16px", color: "#94A3B8" }}>
                     No runs match your search. Trigger a harvest from the Rule Engine to see history here.
@@ -1105,6 +1122,9 @@ const SOURCE_TABS = [
   { key: "linkedin", label: "LinkedIn", run: runLinkedinAgent, list: getLinkedinResults, one: getLinkedinResult },
   { key: "naukri",   label: "Naukri",   run: runNaukriAgent,   list: getNaukriResults,   one: getNaukriResult },
   { key: "dice",     label: "Dice",     run: runDiceAgent,     list: getDiceResults,     one: getDiceResult },
+  // LinkedIn Home Feed leads — async run (202 + poll), unlike the synchronous
+  // job-board runs above; `async: true` switches SourceRunsPage to the poll flow.
+  { key: "feed",     label: "LinkedIn Feed", run: runLinkedinFeedAgent, list: getLinkedinFeedResults, one: getLinkedinFeedResult, async: true },
 ];
 
 function SourceRunsPage({ harvestRunning, setHarvestRunning }) {
@@ -1114,7 +1134,11 @@ function SourceRunsPage({ harvestRunning, setHarvestRunning }) {
   const [error, setError] = useState("");
   const [running, setRunning] = useState(false);
   const [runMessage, setRunMessage] = useState("");
+  const [stallWarn, setStallWarn] = useState(""); // amber "no progress" notice while a run is stalled
   const [viewing, setViewing] = useState(null); // { runId, jobs } | null
+  const pollTimer = useRef(null); // async feed run: recursive setTimeout handle
+  const stallWatch = useRef(makeStallWatch());
+  const syncStallTimer = useRef(null); // synchronous single-source run: one-shot stall notice
 
   const current = SOURCE_TABS.find((t) => t.key === tab);
 
@@ -1132,32 +1156,97 @@ function SourceRunsPage({ harvestRunning, setHarvestRunning }) {
     }
   }, []);
 
-  useEffect(() => { setViewing(null); fetchResults(current); }, [tab]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { clearTimeout(pollTimer.current); clearTimeout(syncStallTimer.current); setStallWarn(""); setViewing(null); fetchResults(current); }, [tab]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => () => { clearTimeout(pollTimer.current); clearTimeout(syncStallTimer.current); }, []); // clear timers on unmount
+
+  // Poll a background feed run to completion (reuses GET /harvest-status; the run
+  // carries a job_id). action_required = LinkedIn session not authenticated.
+  const pollFeed = (jobId, feedTab) => {
+    const tick = async () => {
+      try {
+        const st = await getHarvestStatus(jobId);
+        if (st.status === "running") {
+          setRunMessage(st.message || "Harvesting Home Feed — collecting & classifying posts…");
+          // Watchdog: warn (without failing) if message + count freeze for 2 min —
+          // e.g. the extraction LLM is down and each call is waiting out its timeout.
+          const { stalled } = stallWatch.current.note(`${st.message || ""}|${st.combined ?? 0}`);
+          setStallWarn(stalled ? STALL_WARN_MSG : "");
+          pollTimer.current = setTimeout(tick, 6000);
+          return;
+        }
+        setStallWarn("");
+        if (st.status === "action_required") {
+          setRunMessage(st.error || st.message || "LinkedIn session not authenticated — connect LinkedIn (Rule Engine) and retry.");
+        } else if (st.status === "failed") {
+          setRunMessage(`Failed: ${st.error || st.message}`);
+        } else {
+          setRunMessage(`${st.status === "success" ? "Success" : "No results"} — ${st.combined ?? 0} IT hiring leads extracted (run_id: ${st.run_id}).`);
+          fetchResults(feedTab);
+        }
+      } catch (err) {
+        setRunMessage(err instanceof ApiError ? `Failed: ${err.message}` : "Lost contact with the backend while polling.");
+      }
+      setStallWarn("");
+      setRunning(false);
+      setHarvestRunning(false);
+    };
+    tick();
+  };
 
   const handleRun = async () => {
     if (harvestRunning) {
       setRunMessage("Another harvest is already running (Rule Engine or another source tab) — wait for it to finish. Running two at once collides on the shared browser profile and both fail.");
       return;
     }
+    const isAsync = current.async;
+    const feedTab = current;
     setRunning(true);
     setHarvestRunning(true);
-    setRunMessage(`Running ${current.label} harvest — this calls a synchronous endpoint and can take several minutes. Don't close this tab.`);
-    let conflict = false;
+    setStallWarn("");
+    stallWatch.current.reset();
+    setRunMessage(isAsync
+      ? `Starting ${current.label} harvest…`
+      : `Running ${current.label} harvest — this calls a synchronous endpoint and can take several minutes. Don't close this tab.`);
+    // Synchronous single-source run: the UI awaits one long request, so there's
+    // no poll to hang a watchdog on. Arm a one-shot notice that fires if the
+    // request runs past the stall threshold, so a hung backend (e.g. LLM down,
+    // waiting out its timeout) doesn't just look like a frozen "don't close" line.
+    if (!isAsync) {
+      clearTimeout(syncStallTimer.current);
+      syncStallTimer.current = setTimeout(
+        () => setStallWarn("Still running — the LLM server may be slow or down; you can keep waiting or check the server."),
+        STALL_WARN_MS,
+      );
+    }
     try {
       const res = await current.run();
       if (res.status === "failed") {
         setRunMessage(`Failed: ${res.reason || res.message}`);
-      } else {
-        setRunMessage(`${res.status === "success" ? "Success" : "No results"} — ${res.total_found ?? 0} jobs found (run_id: ${res.run_id}).`);
-        fetchResults(current);
+        clearTimeout(syncStallTimer.current);
+        setStallWarn("");
+        setRunning(false);
+        setHarvestRunning(false);
+        return;
       }
+      if (isAsync) {
+        // 202 accepted — keep controls frozen and poll the background run to done.
+        setRunMessage(`Home-Feed harvest started (run_id: ${res.run_id}) — collecting & classifying posts…`);
+        pollFeed(res.job_id, feedTab);
+        return;
+      }
+      setRunMessage(`${res.status === "success" ? "Success" : "No results"} — ${res.total_found ?? 0} jobs found (run_id: ${res.run_id}).`);
+      fetchResults(current);
+      setRunning(false);
+      setHarvestRunning(false);
     } catch (err) {
       // 409 = a harvest is already running — keep controls frozen.
-      conflict = err instanceof ApiError && err.status === 409;
+      const conflict = err instanceof ApiError && err.status === 409;
       setRunMessage(err instanceof ApiError ? `Failed: ${err.message}` : "Could not reach the harvest backend.");
-    } finally {
       setRunning(false);
       setHarvestRunning(conflict);
+    } finally {
+      clearTimeout(syncStallTimer.current);
+      setStallWarn("");
     }
   };
 
@@ -1177,7 +1266,8 @@ function SourceRunsPage({ harvestRunning, setHarvestRunning }) {
         <div>
           <h1 style={{ margin: 0, fontSize: 24, fontWeight: 700, color: C.text }}>Source Runs</h1>
           <p style={{ margin: "4px 0 0", fontSize: 14, color: C.textSoft }}>
-            Trigger a single-source harvest (POST /run-{tab}-agent) and browse its saved results.
+            Trigger a single-source harvest and browse its saved results. "LinkedIn Feed" scrolls the
+            authenticated Home Feed and extracts genuine IT hiring leads.
           </p>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
@@ -1205,6 +1295,11 @@ function SourceRunsPage({ harvestRunning, setHarvestRunning }) {
         </div>
 
         {runMessage && <div className="ha-card" style={{ padding: "12px 16px", fontSize: 13.5, color: C.text }}>{runMessage}</div>}
+        {stallWarn && (
+          <div className="ha-card" style={{ padding: "12px 16px", fontSize: 13.5, color: "#B45309", display: "flex", alignItems: "center", gap: 8 }}>
+            <AlertTriangle size={16} /> {stallWarn}
+          </div>
+        )}
         {error && <div className="ha-errbanner">{error}</div>}
 
         {viewing ? (

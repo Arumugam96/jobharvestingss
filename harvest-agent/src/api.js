@@ -207,6 +207,24 @@ export function getDiceResult(runId) {
   return request(`/dice-results/${runId}`);
 }
 
+// ── LinkedIn Home Feed lead harvest (async — 202, then poll GET /harvest-status) ─
+
+/** POST /run-linkedin-feed-agent — start a background LinkedIn Home-Feed IT-hiring
+ * lead harvest; returns {job_id, run_id, status:"running"}. Poll getHarvestStatus. */
+export function runLinkedinFeedAgent() {
+  return request("/run-linkedin-feed-agent", { method: "POST" });
+}
+
+/** GET /linkedin-feed-results — list all saved Home-Feed lead runs. */
+export function getLinkedinFeedResults() {
+  return request("/linkedin-feed-results");
+}
+
+/** GET /linkedin-feed-results/{runId} — one feed run's extracted leads. */
+export function getLinkedinFeedResult(runId) {
+  return request(`/linkedin-feed-results/${runId}`);
+}
+
 // ── Prospect Intelligence (manual prospects.xlsx enrichment) ───────────────────
 
 /** POST /run-prospect-intelligence — enrich a prospects.xlsx file. Synchronous. */

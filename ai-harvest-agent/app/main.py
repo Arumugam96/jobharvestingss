@@ -32,6 +32,7 @@ from app.routes import harvest, agents, tasks, health, job_parser, linkedin_harv
 from app.routes.auth_routes import router as auth_router
 from app.routes.harvest_routes import router as harvest_agent_router
 from app.routes.linkedin_routes import router as linkedin_agent_router
+from app.routes.linkedin_feed_routes import router as linkedin_feed_router
 from app.routes.naukri_routes import router as naukri_agent_router
 from app.routes.dice_routes import router as dice_agent_router
 from app.routes.run_harvest_agent import router as run_harvest_agent_router
@@ -63,6 +64,13 @@ def _ensure_scraped_jobs_columns(sync_conn) -> None:
         ("passed_filter", "ALTER TABLE scraped_jobs ADD COLUMN passed_filter BOOLEAN NOT NULL DEFAULT TRUE"),
         ("filter_reason", "ALTER TABLE scraped_jobs ADD COLUMN filter_reason VARCHAR(255) NOT NULL DEFAULT ''"),
         ("job_description_html", "ALTER TABLE scraped_jobs ADD COLUMN job_description_html TEXT NOT NULL DEFAULT ''"),
+        # LinkedIn Home Feed lead-quality score (0.0–1.0), NULL for every other
+        # source. DOUBLE PRECISION has REAL affinity on SQLite, so it's portable.
+        ("lead_confidence", "ALTER TABLE scraped_jobs ADD COLUMN lead_confidence DOUBLE PRECISION"),
+        # Re-enrichment workflow state: "ok" | "pending" | "failed" (see
+        # ScrapedJobORM.extraction_status). Default 'ok' so existing rows are
+        # treated as already-extracted.
+        ("extraction_status", "ALTER TABLE scraped_jobs ADD COLUMN extraction_status VARCHAR(20) NOT NULL DEFAULT 'ok'"),
     ]
     for name, ddl in pending:
         if name not in existing_cols:
@@ -300,6 +308,7 @@ def create_app() -> FastAPI:
     app.include_router(frontend_router, dependencies=protected)               # GET /jobs, /lead-intelligence, /download/*, /health
     app.include_router(run_harvest_agent_router, dependencies=protected)      # POST /run-harvest-agent, GET /harvest-status/{id}, /run-history
     app.include_router(linkedin_agent_router, dependencies=protected)         # POST /run-linkedin-agent  +  results endpoints
+    app.include_router(linkedin_feed_router, dependencies=protected)          # POST /run-linkedin-feed-agent (Home Feed leads)
     app.include_router(harvest_agent_router, dependencies=protected)          # POST /run-harvest  +  management endpoints
     app.include_router(naukri_agent_router, dependencies=protected)           # POST /run-naukri-agent  +  results endpoints
     app.include_router(dice_agent_router, dependencies=protected)             # POST /run-dice-agent  +  dice results endpoints

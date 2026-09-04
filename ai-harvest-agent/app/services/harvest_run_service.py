@@ -19,8 +19,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import noload
 
 from app.config import get_settings
+from app.core.contact_normalize import normalize_email, normalize_phone
 from app.core.dependencies import get_session_factory
-from app.models.harvest_run import HarvestRunORM, LlmCallORM, LlmCallType, ScrapedJobORM
+from app.models.harvest_run import (
+    HarvestRunORM,
+    LlmCallORM,
+    LlmCallType,
+    ReenrichmentTaskORM,
+    ScrapedJobORM,
+)
 from app.services.recruiter_service import upsert_recruiter
 
 logger = structlog.get_logger(__name__)
@@ -197,6 +204,7 @@ class HarvestRunService:
                     email_id=j.get("email_id"),
                     contact_number=j.get("contact_number"),
                     recruiter_id=recruiter_id,
+                    lead_confidence=j.get("lead_confidence"),
                 )
             )
         self._db.add_all(rows)
@@ -265,6 +273,29 @@ class HarvestRunService:
         stmt = select(HarvestRunORM)
         stmt = stmt.where(HarvestRunORM.source.is_(None) if source is None else HarvestRunORM.source == source)
         stmt = stmt.order_by(HarvestRunORM.created_at.desc()).limit(limit)
+        result = await self._db.execute(stmt)
+        return list(result.scalars())
+
+    async def list_run_history(self, limit: int = 50) -> list[HarvestRunORM]:
+        """Run-history feed for GET /run-history: the multi-source orchestrator
+        runs (source IS NULL) PLUS the standalone LinkedIn Home Feed lead runs
+        (source == "LinkedIn Feed"), newest first. Feed runs are surfaced here so
+        an operator sees them alongside job-harvest runs; the caller tags each
+        entry by source so the UI can render the two run types distinctly. The
+        per-source LinkedIn/Naukri/Dice job runs stay excluded (they have their
+        own results endpoints), matching list_runs(source=None)'s historical
+        scope."""
+        stmt = (
+            select(HarvestRunORM)
+            .where(
+                or_(
+                    HarvestRunORM.source.is_(None),
+                    HarvestRunORM.source == "LinkedIn Feed",
+                )
+            )
+            .order_by(HarvestRunORM.created_at.desc())
+            .limit(limit)
+        )
         result = await self._db.execute(stmt)
         return list(result.scalars())
 
@@ -446,6 +477,144 @@ class HarvestRunService:
             .values(report_pending=False)
         )
 
+    # ── Re-enrichment queue (degrade-on-outage → retry on a later run) ───────────
+
+    async def enqueue_reenrichment(self, run_pk: str, items: list[dict[str, Any]]) -> int:
+        """Persist jobs that degraded to selector-only (every LLM provider down) as
+        pending reenrichment_tasks. items come from LinkedInAgent.get_reenrich_queue()
+        (job_url, source, content, schema_description, system). Dedups against tasks
+        already queued for this run. Returns the number inserted."""
+        if not items:
+            return 0
+        existing = await self._db.execute(
+            select(ReenrichmentTaskORM.job_url).where(ReenrichmentTaskORM.run_id == run_pk)
+        )
+        seen = {u for (u,) in existing.all()}
+        rows: list[ReenrichmentTaskORM] = []
+        for it in items:
+            url = it.get("job_url") or ""
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            rows.append(ReenrichmentTaskORM(
+                id=str(uuid.uuid4()),
+                run_id=run_pk,
+                job_url=url,
+                source=it.get("source", ""),
+                content=it.get("content", ""),
+                schema_description=it.get("schema_description", ""),
+                system=it.get("system", ""),
+            ))
+        if rows:
+            self._db.add_all(rows)
+            await self._db.flush()
+        return len(rows)
+
+    async def mark_extraction_pending(self, run_pk: str, job_urls: list[str]) -> None:
+        """Flag the scraped_jobs rows whose extraction was deferred to re-enrichment,
+        so reports/UI can show them as pending rather than complete."""
+        if not job_urls:
+            return
+        await self._db.execute(
+            update(ScrapedJobORM)
+            .where(ScrapedJobORM.run_id == run_pk, ScrapedJobORM.job_url.in_(job_urls))
+            .values(extraction_status="pending")
+        )
+
+    async def list_pending_reenrichment(self, limit: int) -> list[dict[str, Any]]:
+        """Pending re-enrichment tasks, oldest first, as plain dicts (so callers can
+        run slow LLM calls without holding a DB session on detached ORM rows)."""
+        stmt = (
+            select(ReenrichmentTaskORM)
+            .where(ReenrichmentTaskORM.status == "pending")
+            .order_by(ReenrichmentTaskORM.first_seen_at.asc())
+            .limit(limit)
+        )
+        result = await self._db.execute(stmt)
+        return [
+            {
+                "id": t.id,
+                "run_id": t.run_id,
+                "job_url": t.job_url,
+                "content": t.content,
+                "schema_description": t.schema_description,
+                "system": t.system,
+                "first_seen_at": t.first_seen_at,
+                "attempts": t.attempts,
+            }
+            for t in result.scalars()
+        ]
+
+    async def apply_reenrichment(self, task_id: str, run_pk: str, job_url: str, extracted: dict[str, Any]) -> None:
+        """A re-enrichment retry succeeded — backfill the scraped_jobs row from the
+        extracted dict (only overwriting fields the LLM actually returned) and mark
+        the task done + the row extraction_status='ok'."""
+        row = (await self._db.execute(
+            select(ScrapedJobORM).where(
+                ScrapedJobORM.run_id == run_pk, ScrapedJobORM.job_url == job_url
+            )
+        )).scalars().first()
+        if row is not None:
+            def _set(attr: str, val: Any) -> None:
+                if val not in (None, "", []):
+                    setattr(row, attr, val)
+            _set("job_description", extracted.get("description"))
+            _set("job_description_html", extracted.get("description_html"))
+            _set("skills", extracted.get("skills"))
+            _set("salary", extracted.get("salary"))
+            _set("employment_type", extracted.get("employment_type"))
+            _set("company_url", extracted.get("company_url"))
+            _set("job_poster_name", extracted.get("recruiter_name"))
+            _set("job_poster_designation", extracted.get("recruiter_title"))
+            _set("linkedin_profile_url", extracted.get("recruiter_url"))
+            _set("email_id", normalize_email(extracted.get("recruiter_email")))
+            _set("contact_number", normalize_phone(extracted.get("recruiter_phone")))
+            row.extraction_status = "ok"
+            # Best-effort recruiter identity now that a poster name may be available.
+            poster = (extracted.get("recruiter_name") or "").strip()
+            if poster:
+                recruiter = await upsert_recruiter(
+                    self._db,
+                    person_name=poster,
+                    company_name=extracted.get("recruiter_company") or extracted.get("company") or "",
+                    designation=extracted.get("recruiter_title") or "",
+                    linkedin_profile_url=extracted.get("recruiter_url"),
+                    harvest_source="LinkedIn",
+                )
+                if recruiter:
+                    row.recruiter_id = recruiter.id
+        await self._db.execute(
+            update(ReenrichmentTaskORM)
+            .where(ReenrichmentTaskORM.id == task_id)
+            .values(status="done", attempts=ReenrichmentTaskORM.attempts + 1,
+                    last_attempt_at=datetime.now(timezone.utc))
+        )
+
+    async def fail_reenrichment(self, task_id: str, run_pk: str, job_url: str, reason: str) -> None:
+        """Give up on a task (aged past the retention window) — mark it failed and
+        the scraped_jobs row extraction_status='failed'."""
+        await self._db.execute(
+            update(ReenrichmentTaskORM)
+            .where(ReenrichmentTaskORM.id == task_id)
+            .values(status="failed", last_attempt_at=datetime.now(timezone.utc))
+        )
+        await self._db.execute(
+            update(ScrapedJobORM)
+            .where(ScrapedJobORM.run_id == run_pk, ScrapedJobORM.job_url == job_url)
+            .values(extraction_status="failed")
+        )
+        logger.info("reenrichment_task_failed", task_id=task_id, reason=reason)
+
+    async def bump_reenrichment_attempt(self, task_id: str) -> None:
+        """Record a retry that didn't succeed (LLM still down / transient error),
+        leaving the task pending for the next run."""
+        await self._db.execute(
+            update(ReenrichmentTaskORM)
+            .where(ReenrichmentTaskORM.id == task_id)
+            .values(attempts=ReenrichmentTaskORM.attempts + 1,
+                    last_attempt_at=datetime.now(timezone.utc))
+        )
+
 
 # ── Ad-hoc LLM call audit (non-run-scoped) ──────────────────────────────────────
 
@@ -575,6 +744,9 @@ def scraped_job_view(job: ScrapedJobORM) -> dict[str, Any]:
         "email_recruiter":        email_recruiter,
         "phone_scraped":          phone_scraped,
         "phone_recruiter":        phone_recruiter,
+        # LinkedIn Home Feed leads carry an LLM lead-quality score; NULL for every
+        # other source, so the UI shows a confidence badge only on feed leads.
+        "lead_confidence":        job.lead_confidence,
     }
 
 

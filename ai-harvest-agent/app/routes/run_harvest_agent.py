@@ -59,6 +59,7 @@ from app.services.harvest_run_service import (
 )
 from app.services import run_guard
 from app.services.job_tracker import JobTracker
+from app.services.reenrichment_service import run_reenrichment_sweep
 from app.services.report_service import compute_harvest_insights, merged_job_dicts
 from app.services.run_history_service import RunHistoryService
 
@@ -115,6 +116,23 @@ def _filters_snapshot(cfg) -> dict:
     }
 
 
+async def _persist_reenrich_queue(run_pk: str, queue: list[dict], log) -> None:
+    """Store jobs that degraded to selector-only (all LLM providers down) as
+    pending reenrichment_tasks, and flag their scraped_jobs rows as pending, so a
+    later run's start-of-run sweep can re-extract them. No-op on a healthy run."""
+    if not queue:
+        return
+    try:
+        inserted = await db_write(
+            lambda db: HarvestRunService(db).enqueue_reenrichment(run_pk, queue)
+        )
+        urls = [it["job_url"] for it in queue if it.get("job_url")]
+        await db_write(lambda db: HarvestRunService(db).mark_extraction_pending(run_pk, urls))
+        log.info("harvest_reenrich_enqueued", queued=inserted, degraded=len(queue))
+    except Exception as exc:
+        log.warning("harvest_reenrich_enqueue_failed", error=str(exc))
+
+
 def _run_to_job_status_dict(run: HarvestRunORM) -> dict[str, Any]:
     """Maps a HarvestRunORM row onto the exact shape JobStatus.to_dict()
     already returns, so GET /harvest-status/{job_id} is unchanged for callers."""
@@ -140,9 +158,15 @@ def _run_to_job_status_dict(run: HarvestRunORM) -> dict[str, Any]:
 def _run_to_history_entry(run: HarvestRunORM) -> dict[str, Any]:
     """Maps a HarvestRunORM row onto the exact shape RunHistoryService.make_entry()
     already returns, so GET /run-history[/{run_id}] is unchanged for callers."""
+    # run_type lets the UI render a LinkedIn Home Feed lead run distinctly from a
+    # job-harvest run — they share the Run History page. source=None → job harvest
+    # (multi-source orchestrator); source="LinkedIn Feed" → feed lead run.
+    run_type = "feed" if run.source == "LinkedIn Feed" else "harvest"
     return {
         "run_id":         run.run_id,
         "sources":        run.sources or [],
+        "source":         run.source,
+        "run_type":       run_type,
         "started_at":     run.started_at.isoformat() if run.started_at else "",
         "completed_at":   run.completed_at.isoformat() if run.completed_at else "",
         "status":         run.status,
@@ -189,6 +213,18 @@ async def _run_harvest_background_impl(
     """Runs the full harvest in a background asyncio task, updating JobTracker."""
     log = logger.bind(job_id=job_id, run_id=run_id, sources=enabled)
     log.info("harvest_background_start")
+
+    # Re-enrichment sweep: retry jobs that degraded to selector-only on an earlier
+    # run because the LLM was down. Runs before scraping so a recovered LLM
+    # backfills the backlog; bounded by REENRICHMENT_SWEEP_LIMIT and self-limiting
+    # if the LLM is still down. Never raises — a sweep failure must not block the run.
+    try:
+        JobTracker.update(job_id, progress=5, message="Re-enriching earlier jobs…")
+        sweep = await run_reenrichment_sweep()
+        if sweep.get("done") or sweep.get("expired"):
+            log.info("harvest_reenrichment_sweep", **sweep)
+    except Exception as exc:
+        log.warning("harvest_reenrichment_sweep_failed", error=str(exc))
 
     JobTracker.update(job_id, progress=10, message="Starting orchestrator")
 
@@ -265,6 +301,7 @@ async def _run_harvest_background_impl(
                 await db_write(lambda db: HarvestRunService(db).replace_run_jobs(run_pk, scraped_dicts))
             if partial.llm_calls:
                 await db_write(lambda db: HarvestRunService(db).bulk_insert_llm_calls(run_pk, partial.llm_calls))
+            await _persist_reenrich_queue(run_pk, partial.reenrich_queue, log)
 
         partial_count = partial.total_jobs if partial is not None else 0
         _history_svc.append(
@@ -382,6 +419,7 @@ async def _run_harvest_background_impl(
         scraped_dicts = [j.to_dict() for j in result.all_jobs]
         await db_write(lambda db: HarvestRunService(db).replace_run_jobs(run_pk, scraped_dicts))
         await db_write(lambda db: HarvestRunService(db).bulk_insert_llm_calls(run_pk, result.llm_calls))
+        await _persist_reenrich_queue(run_pk, result.reenrich_queue, log)
 
     # A cooperative user-stop lets run_all() return normally with the jobs
     # gathered so far (the scrape loops break and return early — see
@@ -753,7 +791,9 @@ async def get_run_history() -> Any:
     mode = data_source_mode()
     runs, source = await resolve_read(
         mode,
-        lambda: db_read(lambda db: HarvestRunService(db).list_runs(source=None)),
+        # Includes multi-source job-harvest runs AND LinkedIn Home Feed lead runs,
+        # each tagged by run_type so the UI can render the two kinds distinctly.
+        lambda: db_read(lambda db: HarvestRunService(db).list_run_history()),
         lambda: _history_svc.list_all(),
     )
     if source == "database":

@@ -65,8 +65,20 @@ class Settings(BaseSettings):
 
     # ── HTML extraction LLM provider ──────────────────────────────────────────────
     extraction_llm_model: str = "claude"
+    # Single failover provider tried when the primary extraction provider is down
+    # (same value format as EXTRACTION_LLM_MODEL, e.g. "claude" | "openrouter").
+    # "" disables failover — the run degrades straight to re-enrichment instead.
+    extraction_fallback_model: str = ""
     local_llm_url:        str = "http://localhost:11434"
     local_llm_model:      str = "llama3.1:8b"
+
+    # ── Re-enrichment (degraded jobs when all LLM providers were down) ─────────────
+    # Jobs stored for re-enrichment are retried at the start of each harvest run
+    # for this many days; past that they're marked permanently failed.
+    reenrichment_max_age_days: int = 7
+    # Cap on how many pending jobs one start-of-run sweep re-extracts, so the
+    # sweep never delays a harvest's start by much.
+    reenrichment_sweep_limit: int = 50
 
     # ── OpenRouter (fallback LLM for HTML extraction) ──────────────────────────────
     openrouter_api_key: str = ""
@@ -105,6 +117,30 @@ class Settings(BaseSettings):
     # Leave blank to fall back to linkedin_email / linkedin_password.
     microsoft_email:    str = ""
     microsoft_password: str = ""
+
+    # ── LinkedIn Home Feed lead harvest ──────────────────────────────────────────
+    # Scrapes the authenticated recruiter's Home Feed (/feed/), NOT the Jobs board.
+    # All stop conditions are env-tunable so a run can be bounded without a redeploy.
+    linkedin_feed_max_posts:             int = 10      # max posts to inspect, then stop
+    linkedin_feed_max_scrolls:           int = 40      # max scroll actions, then stop
+    linkedin_feed_scroll_delay_ms:       int = 2500    # pause between scrolls (lazy-load)
+    # Always perform at least this many scrolls before honouring the "no new posts"
+    # early-stop below. IT hiring posts sit deep in the Home Feed and LinkedIn often
+    # serves a barren batch before loading more, so bailing after the first few quiet
+    # scrolls would miss them entirely.
+    linkedin_feed_min_scrolls:           int = 10
+    # Stop after this many consecutive scrolls that surface no NEW (non-duplicate)
+    # posts — the feed keeps rendering the same items (natural end of fresh content).
+    linkedin_feed_no_new_stop_rounds:    int = 3
+    # Stop after this many consecutive scrolls where the feed DOM yields ZERO post
+    # containers — a distinct signal from "no new posts": feed exhausted or a DOM
+    # change broke container matching. Ends the run instead of scrolling forever.
+    linkedin_feed_empty_dom_stop_rounds: int = 2
+    # Per-run cap on LLM calls (classify + extract combined) — bounds cost even if
+    # the candidate filter lets a lot of posts through.
+    linkedin_feed_llm_max_calls:         int = 300
+    # Minimum classifier confidence for a post to count as a genuine IT hiring lead.
+    linkedin_feed_min_confidence:        float = 0.6
 
     naukri_email:    str = ""
     naukri_password: str = ""

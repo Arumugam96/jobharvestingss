@@ -278,6 +278,10 @@ class OrchestratorResult:
     # LinkedInAgent.get_llm_call_log()) — [] if LinkedIn wasn't run or never
     # triggered the fallback. Naukri/Dice never call an LLM.
     llm_calls:        list[dict]                   = field(default_factory=list)
+    # Jobs that degraded to selector-only because every LLM provider was down
+    # (see LinkedInAgent.get_reenrich_queue()) — [] on a healthy run. The caller
+    # persists these to reenrichment_tasks for a later run to re-extract.
+    reenrich_queue:   list[dict]                   = field(default_factory=list)
 
     @property
     def total_jobs(self) -> int:
@@ -363,7 +367,7 @@ class OrchestratorAgent:
 
         # ── Step 1: collect raw jobs from all enabled sources ─────────────────
         try:
-            raw_by_source, result.token_usage, result.llm_calls = await self._collect_all(
+            raw_by_source, result.token_usage, result.llm_calls, result.reenrich_queue = await self._collect_all(
                 config, wait_for_login=wait_for_login, on_status=on_status, on_persist=on_persist
             )
         except LLMUnavailableError as exc:
@@ -373,9 +377,10 @@ class OrchestratorAgent:
             # harvest, then re-raise to mark the run failed.
             from app.services.llm_service import empty_usage_summary
 
-            result.token_usage = getattr(exc, "partial_token_usage", None) or empty_usage_summary()
-            result.llm_calls   = getattr(exc, "partial_llm_calls", None) or []
-            partial_raw        = getattr(exc, "partial_raw", None) or {}
+            result.token_usage    = getattr(exc, "partial_token_usage", None) or empty_usage_summary()
+            result.llm_calls      = getattr(exc, "partial_llm_calls", None) or []
+            result.reenrich_queue = getattr(exc, "partial_reenrich_queue", None) or []
+            partial_raw           = getattr(exc, "partial_raw", None) or {}
             partial_jobs: list[UnifiedJob] = []
             for source, jobs in partial_raw.items():
                 result.sources_executed.append(source)
@@ -615,18 +620,18 @@ class OrchestratorAgent:
         wait_for_login: bool = False,
         on_status: Callable[[str], Awaitable[None]] | None = None,
         on_persist: Callable[[list[UnifiedJob]], Awaitable[None]] | None = None,
-    ) -> tuple[dict[str, list[UnifiedJob]], dict, list[dict]]:
+    ) -> tuple[dict[str, list[UnifiedJob]], dict, list[dict], list[dict]]:
         """
         Run all enabled source agents IN PARALLEL using a single shared browser
         context (one page per source).  Using a single PersistentBrowserManager
         avoids Chrome profile-lock conflicts that arise when launching multiple
         browser instances against the same profile directory.
 
-        Returns ({source_name: [UnifiedJob, …]}, token_usage, llm_calls) —
-        token_usage/llm_calls are the LinkedIn LLM fallback's cumulative
-        Claude/Ollama usage and per-call audit log (Naukri and Dice never hit
-        the LLM), empty if LinkedIn wasn't enabled or never triggered the
-        fallback.
+        Returns ({source_name: [UnifiedJob, …]}, token_usage, llm_calls,
+        reenrich_queue) — all but the first are the LinkedIn LLM fallback's
+        cumulative Claude/Ollama usage, per-call audit log, and degraded-job
+        re-enrichment queue (Naukri and Dice never hit the LLM), empty if
+        LinkedIn wasn't enabled or never triggered the fallback.
         """
         from app.scrapers.browser_manager import PersistentBrowserManager
         from app.scrapers.dice_scraper import DiceScrapedJob, DiceScraper
@@ -830,6 +835,11 @@ class OrchestratorAgent:
             if "agent" in linkedin_agent_holder
             else []
         )
+        reenrich_queue = (
+            linkedin_agent_holder["agent"].get_reenrich_queue()
+            if "agent" in linkedin_agent_holder
+            else []
+        )
         logger.info("orchestrator_token_usage", **token_usage["total"])
 
         if fatal is not None:
@@ -840,6 +850,7 @@ class OrchestratorAgent:
             fatal.partial_raw = results
             fatal.partial_token_usage = token_usage
             fatal.partial_llm_calls = llm_calls
+            fatal.partial_reenrich_queue = reenrich_queue
             raise fatal
 
-        return results, token_usage, llm_calls
+        return results, token_usage, llm_calls, reenrich_queue

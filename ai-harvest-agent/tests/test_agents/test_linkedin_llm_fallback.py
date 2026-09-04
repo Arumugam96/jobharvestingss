@@ -214,6 +214,32 @@ async def test_llm_fallback_parses_description_html(httpx_mock) -> None:
 
 
 @pytest.mark.asyncio
+async def test_llm_fallback_degrades_and_enqueues_on_total_outage(httpx_mock) -> None:
+    """When every LLM provider is down, _llm_fallback_extract must NOT abort the
+    run — it returns selector-only ({}) and enqueues a replayable re-enrichment
+    payload (job_url + content + schema + system) for a later run."""
+    # ollama primary, no fallback configured → connection refused = total outage.
+    httpx_mock.add_exception(
+        __import__("httpx").ConnectError("refused"),
+        url="http://localhost:11434/api/generate", is_reusable=True,
+    )
+    agent = LinkedInAgent(llm_service=LLMService(_settings("ollama")))
+    result = await agent._llm_fallback_extract(
+        _fake_page(), idx=0, url="https://www.linkedin.com/jobs/view/999/",
+        card_text=SAMPLE_CARD_TEXT, card_links=SAMPLE_CARD_LINKS,
+    )
+
+    assert result == {}  # degraded to selector-only, no exception raised
+    queue = agent.get_reenrich_queue()
+    assert len(queue) == 1
+    task = queue[0]
+    assert task["job_url"] == "https://www.linkedin.com/jobs/view/999/"
+    assert task["source"] == "LinkedIn"
+    assert "Requirements: 5+ years" in task["content"]  # stripped detail text captured
+    assert task["schema_description"] and task["system"]  # replay payload complete
+
+
+@pytest.mark.asyncio
 async def test_llm_fallback_respects_per_run_call_cap(httpx_mock) -> None:
     # No mock registered — the cap must short-circuit before any HTTP call is made.
     agent = LinkedInAgent(llm_service=LLMService(_settings("claude")))

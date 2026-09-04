@@ -12,6 +12,7 @@ import Sidebar from "./components/Sidebar";
 import LiveBrowserView from "./components/LiveBrowserView";
 import StopHarvestButton from "./components/StopHarvestModal";
 import useCountUp from "./useCountUp";
+import { makeStallWatch, STALL_WARN_MSG } from "./stallWatch";
 
 const NaukriIcon = () => (
   <svg width="34" height="34" viewBox="0 0 34 34" aria-hidden="true">
@@ -192,6 +193,8 @@ export default function RuleEngineConfig({
   const [attempted, setAttempted] = useState(false);
 
   const pollTimer = useRef(null);
+  const stallWatch = useRef(makeStallWatch());
+  const [stallWarn, setStallWarn] = useState(""); // amber "no progress" notice while a run is stalled
   useEffect(() => () => clearTimeout(pollTimer.current), []);
 
   // Animated count-up for the live progress cards. `liveCount` is the real
@@ -320,18 +323,25 @@ export default function RuleEngineConfig({
         const status = await getHarvestStatus(jobId);
         if (status.status === "running") {
           setRunMessage(status.message || "Running…");
+          const live = status.jobs_saved_today ?? status.combined ?? 0;
           // `jobs_saved_today` is a live DB count of scraped_jobs rows persisted
           // today (across all runs), so it reflects real saved rows and climbs as
           // each batch inserts. Fall back to `combined` (this run's count) if the
           // backend didn't send it.
-          setHarvestedLive(status.jobs_saved_today ?? status.combined ?? 0);
+          setHarvestedLive(live);
           // Daily cap (MAX_JOBS_PER_DAY) drives the Max / Remaining cards.
           setMaxPerDay(status.max_jobs_per_day ?? 0);
+          // Watchdog: if message + saved-count haven't changed for 2 min the run
+          // is stalled (e.g. LLM down, waiting out its timeout) — warn without
+          // failing, since the backend stays the source of truth for terminal state.
+          const { stalled } = stallWatch.current.note(`${status.message || ""}|${live}`);
+          setStallWarn(stalled ? STALL_WARN_MSG : "");
           // Poll every 6s while running so the live count visibly ticks without
           // hammering the server.
           pollTimer.current = setTimeout(tick, 6000);
           return;
         }
+        setStallWarn("");
         if (status.status === "failed") {
           setRunState("failed");
           setRunMessage(status.error || status.message || `Harvest run ${runId} failed — check server logs.`);
@@ -350,6 +360,7 @@ export default function RuleEngineConfig({
           // to run-history, which is the durable record.
           try {
             const entry = await getRunHistoryEntry(runId);
+            setStallWarn("");
             if (entry.status === "failed") {
               setRunState("failed");
               setRunMessage(entry.error || `Harvest run ${runId} failed — check server logs.`);
@@ -367,6 +378,7 @@ export default function RuleEngineConfig({
           setHarvestRunning(false);
           return;
         }
+        setStallWarn("");
         setRunState("failed");
         setRunMessage(err instanceof ApiError ? err.message : "Lost connection while checking harvest status.");
         setHarvestRunning(false);
@@ -388,6 +400,8 @@ export default function RuleEngineConfig({
           setRunState("running");
           setRunMessage("Harvesting…");
           setHarvestedLive(0);
+          stallWatch.current.reset();
+          setStallWarn("");
           pollHarvestStatus(res.job_id, res.run_id);
         }
       } catch {
@@ -417,6 +431,8 @@ export default function RuleEngineConfig({
     setHarvestRunning(true);
     setRunMessage("Starting harvest…");
     setHarvestedLive(0);
+    stallWatch.current.reset();
+    setStallWarn("");
     try {
       const res = await runHarvestAgent();
       if (res.status === "failed") {
@@ -514,6 +530,14 @@ export default function RuleEngineConfig({
                 <span className="rec-status rec-status--err"><AlertTriangle size={14} /> {runMessage || "Harvest failed"}</span>
               ) : (
                 <span className="rec-status rec-status--ok"><Check size={14} /> {runState === "success" ? `Success (${harvested} harvested)` : "Ready"}</span>
+              )}
+              {runState === "running" && stallWarn && (
+                <>
+                  <span className="rec-dot">·</span>
+                  <span className="rec-status rec-status--warn" style={{ color: "#B45309" }}>
+                    <AlertTriangle size={14} /> {stallWarn}
+                  </span>
+                </>
               )}
             </div>
           </div>

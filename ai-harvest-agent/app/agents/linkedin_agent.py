@@ -67,11 +67,7 @@ _LOGIN_WAIT_POLL_S    = 2
 
 StatusCallback = Callable[[str], Awaitable[None]]
 
-# Canonical jobs deep-link. LinkedIn resolves the free-text `location=` param
-# into the correct geoId server-side on THIS path and applies it. The
-# `/jobs/search-results/` SPA route does NOT — given only location text (no
-# geoId) it silently falls back to the logged-in account's home location
-# (e.g. Chennai), ignoring location=india. Keep this as /jobs/search/.
+
 _LINKEDIN_SEARCH_URL = "https://www.linkedin.com/jobs/search/?"
 
 # Job-description container selectors, in priority order — reused from the
@@ -821,6 +817,12 @@ class LinkedInAgent:
     def __init__(self, llm_service: "LLMService | None" = None) -> None:
         self._llm_service        = llm_service
         self._llm_fallback_calls = 0
+        # Jobs whose LLM extraction hit a total provider outage (local + fallback
+        # both down). Instead of aborting the run we keep the selector-only data
+        # and stash the replayable extraction payload here; the route persists it
+        # to reenrichment_tasks so a later run can re-extract. Mirrors the
+        # get_llm_call_log() accumulation pattern.
+        self._reenrich_queue: list[dict] = []
         # Fixed at construction (one LinkedInAgent per harvest run, per this
         # class's docstring) rather than re-read per job, so every relative
         # date ("3 days ago") on a multi-hour run resolves against the same
@@ -853,6 +855,13 @@ class LinkedInAgent:
         if self._llm_service is None:
             return []
         return self._llm_service.get_call_log()
+
+    def get_reenrich_queue(self) -> list[dict]:
+        """Jobs that degraded to selector-only because every LLM provider was
+        down during this run, each with the payload needed to replay extraction
+        later (job_url, source, content, schema_description, system). The route
+        persists these to reenrichment_tasks. Empty on a healthy run."""
+        return list(self._reenrich_queue)
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -2363,34 +2372,47 @@ class LinkedInAgent:
             f"---EXTRACT JSON---\n{schema_description}"
         )
 
+        # Kept in a local (not inlined) so the exact system prompt can be stored
+        # alongside content for a verbatim re-enrichment replay if all providers
+        # are down.
+        system_prompt = (
+            "You are extracting structured job-posting data from the "
+            "text content of LinkedIn pages (a search-result card "
+            "and/or the job's detail page, with all HTML tags/classes "
+            "already stripped) — work from the text content only. "
+            "Prioritize returning the COMPLETE job description and any "
+            "recruiter contact details that are explicitly present. "
+            "For description_html, reproduce the same description as "
+            "clean HTML using ONLY <p>, <ul>, <li>, <strong>, <em>, "
+            "<h3>, <br> — never add attributes, classes, styles, or "
+            "scripts. Never fabricate an email, phone number, url, or "
+            "any other field that is not literally present in the text "
+            "or link list. Return only the fields in the schema, no "
+            "commentary."
+        )
         try:
             extracted = await self._get_llm_service().extract_json(
                 content=content,
                 schema_description=schema_description,
-                system=(
-                    "You are extracting structured job-posting data from the "
-                    "text content of LinkedIn pages (a search-result card "
-                    "and/or the job's detail page, with all HTML tags/classes "
-                    "already stripped) — work from the text content only. "
-                    "Prioritize returning the COMPLETE job description and any "
-                    "recruiter contact details that are explicitly present. "
-                    "For description_html, reproduce the same description as "
-                    "clean HTML using ONLY <p>, <ul>, <li>, <strong>, <em>, "
-                    "<h3>, <br> — never add attributes, classes, styles, or "
-                    "scripts. Never fabricate an email, phone number, url, or "
-                    "any other field that is not literally present in the text "
-                    "or link list. Return only the fields in the schema, no "
-                    "commentary."
-                ),
+                system=system_prompt,
                 # debug_dir intentionally not passed — no per-call LLM
                 # prompt/response JSON artifacts on disk (see note at the
                 # recruiter-contact extract_json call).
                 job_url=url,
             )
-        except LLMUnavailableError:
-            # The extraction LLM itself is down — abort the whole run rather
-            # than degrade every remaining job. Propagates up to run_all().
-            raise
+        except LLMUnavailableError as exc:
+            # Every LLM provider (local + configured fallback) is down. Don't
+            # abort the run — keep the selector-only data and enqueue a replayable
+            # extraction payload so a later run can re-enrich this job.
+            self._reenrich_queue.append({
+                "job_url": url,
+                "source": "LinkedIn",
+                "content": content,
+                "schema_description": schema_description,
+                "system": system_prompt,
+            })
+            logger.warning("linkedin_extract_degraded_enqueued", idx=idx, url=url, error=str(exc))
+            return {}
         except Exception as exc:
             logger.warning("linkedin_llm_fallback_failed", idx=idx, url=url, error=str(exc))
             return {}

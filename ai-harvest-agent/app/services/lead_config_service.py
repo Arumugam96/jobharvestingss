@@ -81,8 +81,7 @@ class LeadConfigService:
     def save(self, cfg: dict[str, Any]) -> None:
         _CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         _CONFIG_PATH.write_text(
-            json.dumps(cfg, indent=2, ensure_ascii=False),
-            encoding="utf-8",
+            json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8",
         )
         logger.info("lead_config_saved", path=str(_CONFIG_PATH))
 

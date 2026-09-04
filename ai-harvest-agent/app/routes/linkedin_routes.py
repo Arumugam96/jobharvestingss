@@ -190,23 +190,23 @@ async def run_linkedin_agent() -> Any:
     log = logger.bind(run_id=run_id, keyword=f.keyword, location=f.location)
     log.info("linkedin_search_started", max_jobs=f.max_jobs)
 
-    async def _do_harvest() -> tuple[list[LinkedInScrapedJob], dict, list[dict]]:
+    async def _do_harvest() -> tuple[list[LinkedInScrapedJob], dict, list[dict], list[dict]]:
         agent = LinkedInAgent()
         jobs = await agent.harvest(
             filters  = f,
             headless = config.browser.resolved_headless,
             slow_mo  = config.browser.slow_mo_ms,
         )
-        return jobs, agent.get_token_usage(), agent.get_llm_call_log()
+        return jobs, agent.get_token_usage(), agent.get_llm_call_log(), agent.get_reenrich_queue()
 
     # Single-flight: reject if a harvest is already running (raises 409).
     async with run_guard.single_flight(run_id, "LinkedIn"):
         try:
             if needs_proactor():
                 log.debug("using_proactor_thread")
-                scraped, token_usage, llm_calls = await run_in_proactor(_do_harvest)
+                scraped, token_usage, llm_calls, reenrich_queue = await run_in_proactor(_do_harvest)
             else:
-                scraped, token_usage, llm_calls = await _do_harvest()
+                scraped, token_usage, llm_calls, reenrich_queue = await _do_harvest()
 
         except LinkedInLoginError as exc:
             log.error("linkedin_login_failed", error=str(exc))
@@ -243,6 +243,13 @@ async def run_linkedin_agent() -> Any:
             run_pk, [_to_scraped_job_dict(j) for j in scraped],
         ))
         await db_write(lambda db: HarvestRunService(db).bulk_insert_llm_calls(run_pk, llm_calls))
+        # Store any jobs that degraded to selector-only (all LLM providers down)
+        # for re-enrichment on a later run, and flag their rows as pending.
+        if reenrich_queue:
+            await db_write(lambda db: HarvestRunService(db).enqueue_reenrichment(run_pk, reenrich_queue))
+            await db_write(lambda db: HarvestRunService(db).mark_extraction_pending(
+                run_pk, [it["job_url"] for it in reenrich_queue if it.get("job_url")],
+            ))
 
     # ── No results ────────────────────────────────────────────────────────────
     if not jobs:

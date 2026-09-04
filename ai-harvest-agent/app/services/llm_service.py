@@ -21,13 +21,17 @@ from tenacity import (
 
 from app.config import Settings
 from app.core.exceptions import LLMError, LLMUnavailableError
+from app.models.harvest_run import LlmCallType
 
 logger = structlog.get_logger(__name__)
 
 _PROVIDER_CLAUDE = "claude"
 _PROVIDER_OLLAMA = "ollama"
 _PROVIDER_OPENROUTER = "openrouter"
-_LOCAL_LLM_TIMEOUT_S = 500.0
+# Per-call ceiling before the local LLM is declared down. Hardcoded default (not
+# env-configurable by design) — a dead/slow Ollama surfaces after this instead of
+# stalling on the old 500s. The circuit breaker means only the first call pays it.
+_LOCAL_LLM_TIMEOUT_S = 300.0
 _OPENROUTER_TIMEOUT_S = 90.0
 _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
@@ -215,8 +219,18 @@ class LLMService:
         self._extraction_llm_model = settings.extraction_llm_model
         self._local_llm_url = settings.local_llm_url
         self._local_llm_model = settings.local_llm_model
+        # Circuit breaker: once the local LLM is confirmed down (connection
+        # refused / timeout / HTTP error) during this run, short-circuit every
+        # subsequent local call so we don't re-pay the full timeout per job.
+        # Run-scoped — a new run builds a fresh LLMService, so this never
+        # poisons a later healthy run.
+        self._local_llm_down = False
         self._openrouter_api_key = settings.openrouter_api_key
         self._openrouter_model = settings.openrouter_model
+        # Single failover provider tried when the primary extraction provider is
+        # down (EXTRACTION_FALLBACK_MODEL). "" = no failover. Resolved through the
+        # same mapping as the primary (_resolve_target_string).
+        self._extraction_fallback_model = settings.extraction_fallback_model
         self._debug_seq = 0
         self._usage: dict[str, _ProviderUsage] = {
             _PROVIDER_CLAUDE: _ProviderUsage(),
@@ -322,23 +336,15 @@ class LLMService:
         provider — Returns (text, input_tokens, output_tokens, provider, model). Set
         json_mode=True to ask the provider for a JSON object (Ollama format=json /
         OpenRouter response_format); leave False for plain text. `model` overrides
-        only the Claude model id (local/OpenRouter models come from config)."""
-        provider, resolved = self.resolve_target()
-        if provider == _PROVIDER_OLLAMA:
-            text, input_tokens, output_tokens = await self._complete_text_local(
-                prompt, system, resolved, json_mode=json_mode
-            )
-        elif provider == _PROVIDER_OPENROUTER:
-            text, input_tokens, output_tokens = await self._complete_text_openrouter(
-                prompt, system, resolved, json_mode=json_mode
-            )
-        else:
-            resolved = model or resolved
-            response = await self.complete(
-                messages=[LLMMessage.user(prompt)], system=system, model=resolved
-            )
-            text = self.get_text(response)
-            input_tokens, output_tokens = response.usage.input_tokens, response.usage.output_tokens
+        only the Claude model id (local/OpenRouter models come from config).
+
+        Routes through the same provider-failover core as extract_json (local →
+        single configured fallback), so outreach generation survives a local-LLM
+        outage too. log_calls=False keeps generation out of the per-instance call
+        log (the outreach flow writes its own audit row via the returned meta)."""
+        text, provider, resolved, input_tokens, output_tokens = await self._complete_text_with_failover(
+            prompt, system, json_mode=json_mode, claude_model=model, log_calls=False,
+        )
         return text, input_tokens, output_tokens, provider, resolved
 
     # ── Provider selection ────────────────────────────────────────────────────
@@ -351,11 +357,16 @@ class LLMService:
         return self._resolve_extraction_target()
 
     def _resolve_extraction_target(self) -> tuple[str, str]:
+        """The primary (provider, model) extract_json()/generate_text() call, driven
+        by EXTRACTION_LLM_MODEL. Delegates to _resolve_target_string so the primary
+        and the EXTRACTION_FALLBACK_MODEL fallback resolve through the same mapping."""
+        return self._resolve_target_string(self._extraction_llm_model)
+
+    def _resolve_target_string(self, raw: str) -> tuple[str, str]:
         """
-        Decide which provider/model extract_json() should call, driven entirely
-        by EXTRACTION_LLM_MODEL (with LOCAL_LLM_URL / LOCAL_LLM_MODEL as the
-        local-LLM connection details, and OPENROUTER_MODEL as the OpenRouter
-        default):
+        Map a provider-selection string to (provider, model), with LOCAL_LLM_URL /
+        LOCAL_LLM_MODEL as the local-LLM connection details and OPENROUTER_MODEL as
+        the OpenRouter default:
 
           ""                          -> Claude, using the default anthropic_model
           "claude"                    -> Claude, using the default anthropic_model
@@ -368,7 +379,7 @@ class LLMService:
           anything else               -> local LLM at local_llm_url, using that value
                                           as the model name
         """
-        raw = (self._extraction_llm_model or "").strip()
+        raw = (raw or "").strip()
         lowered = raw.lower()
         if not raw or lowered == _PROVIDER_CLAUDE:
             return _PROVIDER_CLAUDE, self.anthropic_model
@@ -378,10 +389,112 @@ class LLMService:
             return _PROVIDER_OPENROUTER, self._openrouter_model
         return _PROVIDER_OLLAMA, raw
 
+    def _provider_chain(self) -> list[tuple[str, str]]:
+        """Ordered (provider, model) pairs to try: the primary extraction target
+        first, then AT MOST ONE configured fallback (EXTRACTION_FALLBACK_MODEL).
+        The fallback is skipped when unset or when it resolves to the same provider
+        as the primary — so the worst case is one extra call, never a long chain."""
+        primary = self._resolve_extraction_target()
+        chain = [primary]
+        fb_raw = (self._extraction_fallback_model or "").strip()
+        if fb_raw:
+            fallback = self._resolve_target_string(fb_raw)
+            if fallback[0] != primary[0]:
+                chain.append(fallback)
+        return chain
+
+    async def _complete_text_with_failover(
+        self,
+        prompt: str,
+        system: str,
+        *,
+        json_mode: bool,
+        call_type: str = LlmCallType.JOB_HARVEST,
+        job_url: str | None = None,
+        claude_model: str | None = None,
+        log_calls: bool = True,
+    ) -> tuple[str, str, str, int | None, int | None]:
+        """Reusable provider-failover core shared by extract_json (extraction) and
+        generate_text (outreach email/LinkedIn generation).
+
+        Tries the two-provider chain (local first, then the single configured
+        fallback) until one returns text; only LLMUnavailableError (provider down)
+        triggers failover — any other error propagates immediately. Raises
+        LLMUnavailableError only when EVERY provider in the chain is unavailable.
+
+        When log_calls=True (extraction) a call-log entry is appended for EVERY
+        attempt, so the failed-local + successful-fallback pair are both visible in
+        the llm_calls audit. generate_text passes log_calls=False to preserve its
+        original behaviour (its outreach audit row is written separately by the
+        caller). Returns (text, provider, model, input_tokens, output_tokens)."""
+        chain = self._provider_chain()
+        last_exc: LLMUnavailableError | None = None
+        for provider, model in chain:
+            if provider == _PROVIDER_CLAUDE and claude_model:
+                model = claude_model
+            retry_token = _retry_attempts.set(0)
+            start = time.monotonic()
+            text: str | None = None
+            input_tokens: int | None = None
+            output_tokens: int | None = None
+            error_message: str | None = None
+            success = False
+            try:
+                if provider == _PROVIDER_OLLAMA:
+                    text, input_tokens, output_tokens = await self._complete_text_local(
+                        prompt, system, model, json_mode=json_mode
+                    )
+                elif provider == _PROVIDER_OPENROUTER:
+                    text, input_tokens, output_tokens = await self._complete_text_openrouter(
+                        prompt, system, model, json_mode=json_mode
+                    )
+                else:
+                    response = await self.complete(
+                        messages=[LLMMessage.user(prompt)], system=system, model=model
+                    )
+                    text = self.get_text(response)
+                    input_tokens, output_tokens = response.usage.input_tokens, response.usage.output_tokens
+                success = True
+                return text, provider, model, input_tokens, output_tokens
+            except LLMUnavailableError as exc:
+                # Provider is down — record it and fall through to the next in the chain.
+                last_exc = exc
+                error_message = str(exc)
+                logger.warning(
+                    "llm_provider_unavailable_failover", provider=provider, model=model, error=str(exc),
+                )
+            except Exception as exc:
+                # Not a provider outage (e.g. malformed response) — do NOT fail over.
+                error_message = str(exc)
+                raise
+            finally:
+                if log_calls:
+                    self._call_log.append({
+                        "provider": provider,
+                        "model": model,
+                        "prompt": prompt,
+                        "response": text,
+                        "prompt_chars": len(prompt),
+                        "response_chars": len(text) if text else 0,
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                        "latency_ms": int((time.monotonic() - start) * 1000),
+                        "success": success,
+                        "error_message": error_message,
+                        "retry_count": max(0, _retry_attempts.get() - 1),
+                        "job_url": job_url,
+                        "call_type": call_type,
+                    })
+                _retry_attempts.reset(retry_token)
+        # Every provider in the chain was unavailable.
+        raise last_exc if last_exc is not None else LLMUnavailableError(
+            "no extraction provider is configured"
+        )
+
     def _local_llm_unavailable_msg(self, model: str, url: str, reason: str) -> str:
         name = self._local_llm_model or model
         return (
-            f"SightSpectrum's Local LLM '{name}' at is unavailable ({reason}) — the server "
+            f"SightSpectrum's Local LLM '{name}' at {url} is unavailable ({reason}) — the server "
             f"may be shut down. Contact the admin team."
         )
 
@@ -389,7 +502,7 @@ class LLMService:
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
         # A down/misconfigured local server won't recover within the backoff —
-        # fail fast instead of retrying (esp. the 300s timeout, 3×).
+        # fail fast instead of retrying (the 300s timeout would otherwise be paid 3×).
         retry=retry_if_not_exception_type(LLMUnavailableError),
         reraise=True,
         after=_track_attempt,
@@ -404,6 +517,14 @@ class LLMService:
         (harvest strategy planning, LinkedIn messages) so the model isn't coerced
         into emitting JSON."""
         url = f"{self._local_llm_url.rstrip('/')}/api/generate"
+
+        # Circuit breaker: the server was already confirmed down earlier this run
+        # — fail immediately instead of paying the full timeout again.
+        if self._local_llm_down:
+            raise LLMUnavailableError(
+                self._local_llm_unavailable_msg(model, url, "already unavailable this run")
+            )
+
         payload: dict[str, Any] = {
             "model": model,
             "prompt": prompt,
@@ -420,14 +541,17 @@ class LLMService:
                 response = await client.post(url, json=payload)
             response.raise_for_status()
         except httpx.ConnectError as exc:
+            self._local_llm_down = True
             logger.error("local_llm_connection_failed", url=url, model=model, error=str(exc))
             raise LLMUnavailableError(self._local_llm_unavailable_msg(model, url, "connection refused")) from exc
         except httpx.TimeoutException as exc:
+            self._local_llm_down = True
             logger.error("local_llm_timeout", url=url, model=model, timeout_s=_LOCAL_LLM_TIMEOUT_S)
             raise LLMUnavailableError(
                 self._local_llm_unavailable_msg(model, url, f"timed out after {_LOCAL_LLM_TIMEOUT_S}s")
             ) from exc
         except httpx.HTTPStatusError as exc:
+            self._local_llm_down = True
             logger.error(
                 "local_llm_http_error", url=url, model=model,
                 status=exc.response.status_code, body=exc.response.text[:300],
@@ -578,7 +702,6 @@ class LLMService:
         to "job_harvest"; contact-extraction callers pass "contact_harvest".
         Stamped onto the call-log entry so bulk_insert_llm_calls persists it.
         """
-        provider, model = self._resolve_extraction_target()
         prompt = (
             f"Extract the following data from the content below.\n\n"
             f"Schema: {schema_description}\n\n"
@@ -586,79 +709,55 @@ class LLMService:
             f"Return only valid JSON, no explanation."
         )
         logger.info(
-            "llm_extraction_started", provider=provider, model=model,
+            "llm_extraction_started",
+            providers=[p for p, _ in self._provider_chain()],
             content_chars=len(content), prompt_chars=len(prompt),
         )
 
-        retry_token = _retry_attempts.set(0)
-        start = time.monotonic()
-        text: str | None = None
-        input_tokens: int | None = None
-        output_tokens: int | None = None
-        error_message: str | None = None
-        success = False
+        # Provider failover + per-attempt call-log recording live in the shared
+        # helper. Only LLMUnavailableError (every provider down) escapes as such;
+        # other provider errors are wrapped as LLMError below.
         try:
-            try:
-                if provider == _PROVIDER_OLLAMA:
-                    text, input_tokens, output_tokens = await self._complete_text_local(prompt, system, model)
-                elif provider == _PROVIDER_OPENROUTER:
-                    text, input_tokens, output_tokens = await self._complete_text_openrouter(prompt, system, model)
-                else:
-                    response = await self.complete(messages=[LLMMessage.user(prompt)], system=system, model=model)
-                    text = self.get_text(response)
-                    input_tokens, output_tokens = response.usage.input_tokens, response.usage.output_tokens
-            except LLMError:
-                raise
-            except Exception as exc:
-                logger.error("llm_extraction_request_failed", provider=provider, model=model, error=str(exc))
-                raise LLMError(f"{provider} extraction request failed: {exc}") from exc
-
-            logger.info(
-                "llm_extraction_response_received", provider=provider, model=model,
-                response_chars=len(text),
+            text, provider, model, _in, _out = await self._complete_text_with_failover(
+                prompt, system, json_mode=True, call_type=call_type, job_url=job_url,
             )
-            self._save_extraction_debug_artifact(debug_dir, provider, model, prompt, text)
-
-            # Strip markdown code fences if present
-            cleaned = text.strip()
-            if cleaned.startswith("```"):
-                cleaned = cleaned.split("\n", 1)[1].rsplit("```", 1)[0]
-            try:
-                parsed = json.loads(cleaned)
-            except json.JSONDecodeError as exc:
-                logger.warning(
-                    "llm_extraction_json_parse_failed", provider=provider, model=model,
-                    error=str(exc), raw_preview=cleaned[:300],
-                )
-                raise LLMError(f"LLM returned invalid JSON: {exc}") from exc
-
-            logger.info(
-                "llm_extraction_succeeded", provider=provider, model=model,
-                extracted_fields=list(parsed.keys()),
-            )
-            success = True
-            return parsed
-        except LLMError as exc:
-            error_message = str(exc)
+        except LLMError:
             raise
-        finally:
-            self._call_log.append({
-                "provider": provider,
-                "model": model,
-                "prompt": prompt,
-                "response": text,
-                "prompt_chars": len(prompt),
-                "response_chars": len(text) if text else 0,
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "latency_ms": int((time.monotonic() - start) * 1000),
-                "success": success,
-                "error_message": error_message,
-                "retry_count": max(0, _retry_attempts.get() - 1),
-                "job_url": job_url,
-                "call_type": call_type,
-            })
-            _retry_attempts.reset(retry_token)
+        except Exception as exc:
+            logger.error("llm_extraction_request_failed", error=str(exc))
+            raise LLMError(f"extraction request failed: {exc}") from exc
+
+        logger.info(
+            "llm_extraction_response_received", provider=provider, model=model,
+            response_chars=len(text),
+        )
+        self._save_extraction_debug_artifact(debug_dir, provider, model, prompt, text)
+
+        # Strip markdown code fences if present
+        cleaned = text.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.split("\n", 1)[1].rsplit("```", 1)[0]
+        try:
+            parsed = json.loads(cleaned)
+        except json.JSONDecodeError as exc:
+            # The provider responded but the payload wasn't valid JSON. The helper
+            # already logged this attempt as a success (text came back) — downgrade
+            # that entry to a failure so the llm_calls audit reflects the extraction
+            # outcome, not just the transport.
+            if self._call_log:
+                self._call_log[-1]["success"] = False
+                self._call_log[-1]["error_message"] = f"LLM returned invalid JSON: {exc}"
+            logger.warning(
+                "llm_extraction_json_parse_failed", provider=provider, model=model,
+                error=str(exc), raw_preview=cleaned[:300],
+            )
+            raise LLMError(f"LLM returned invalid JSON: {exc}") from exc
+
+        logger.info(
+            "llm_extraction_succeeded", provider=provider, model=model,
+            extracted_fields=list(parsed.keys()),
+        )
+        return parsed
 
     def get_tool_use(
         self, response: anthropic.types.Message

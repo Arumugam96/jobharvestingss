@@ -11,12 +11,6 @@ from __future__ import annotations
 
 import re
 
-# Placeholder strings some models emit instead of a real null.
-_NULL_TOKENS = {"", "null", "none", "n/a", "na", "not found", "not available", "-", "—"}
-
-# Characters that betray a masked / redacted value (asterisks) or extraction
-# noise (backslashes). Any of these ⇒ reject outright.
-_MASK_CHARS = ("*", "\\")
 
 # A phone in E.164 is at most 15 digits; anything below ~8 is a fragment.
 _PHONE_MIN_DIGITS = 8
@@ -26,9 +20,6 @@ _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 # Kept for stripping decorative separators from a phone before digit-counting.
 _PHONE_STRIP_RE = re.compile(r"[\s()\-. ]")
 
-
-def _is_null_token(value: str) -> bool:
-    return value.strip().lower() in _NULL_TOKENS
 
 
 def normalize_phone(raw: str | None) -> str | None:
@@ -41,11 +32,6 @@ def normalize_phone(raw: str | None) -> str | None:
     if raw is None:
         return None
     value = str(raw).strip()
-    if _is_null_token(value):
-        return None
-    if any(ch in value for ch in _MASK_CHARS):
-        return None
-
     has_plus = value.startswith("+")
     stripped = _PHONE_STRIP_RE.sub("", value)
     if has_plus:
@@ -68,10 +54,6 @@ def normalize_email(raw: str | None) -> str | None:
     if raw is None:
         return None
     value = str(raw).strip()
-    if _is_null_token(value):
-        return None
-    if any(ch in value for ch in _MASK_CHARS):
-        return None
     value = value.strip("<>").strip()
     if not _EMAIL_RE.match(value):
         return None
