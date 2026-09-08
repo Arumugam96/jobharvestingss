@@ -489,6 +489,38 @@ function DualContact({ scraped, recruiter, fallback, link, cls }) {
  * bucket in the run view). The filtered+sorted rows are reported back via
  * `onFilteredChange` so the parent can drive its own stats/export/footer.
  */
+// Options for the "Rows per page" selector on the Harvested Jobs and per-run
+// views — how many filtered rows JobsTable paints per client-side display page.
+// The whole dataset is always loaded (see fetchAllJobs), so this only affects
+// rendering, never which rows filters/search/export see.
+const PAGE_SIZE_OPTIONS = [
+  { value: "50", label: "50" },
+  { value: "100", label: "100" },
+  { value: "200", label: "200" },
+  { value: "500", label: "500" },
+];
+
+// Fallback display page size when no explicit "Rows per page" is provided.
+const DEFAULT_DISPLAY_PAGE_SIZE = 100;
+
+// Load the ENTIRE dataset in 100-row pages (the backend caps page_size at 100)
+// so all client-side filtering, search, and CSV export operate over the whole
+// DB rather than a partial slice. Page 1 is fetched first to learn total_pages,
+// then the remaining pages are fetched in parallel. Returns the mapped rows
+// plus the server's unfiltered total for the header count.
+async function fetchAllJobs(baseParams) {
+  const base = { ...baseParams, page_size: 100, sort_by: "posted_date", sort_order: "desc" };
+  const first = await getJobs({ ...base, page: 1 });
+  const totalPages = first.total_pages || 1;
+  let rows = first.jobs || [];
+  if (totalPages > 1) {
+    const rest = [];
+    for (let page = 2; page <= totalPages; page++) rest.push(getJobs({ ...base, page }));
+    for (const res of await Promise.all(rest)) rows = rows.concat(res.jobs || []);
+  }
+  return { rows: rows.map(mapApiJob), total: first.total || 0 };
+}
+
 function JobsTable({
   jobs,
   onView,
@@ -498,10 +530,12 @@ function JobsTable({
   emptyMessage = "No jobs match your filters.",
   minWidth = 1180,
   onFilteredChange = null,
+  pageSize = DEFAULT_DISPLAY_PAGE_SIZE,
 }) {
   const [filters, setFilters] = useState({ company: "all", contact: [], job: "all", poc: "all" });
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState({ col: "posted", dir: "desc" });
+  const [page, setPage] = useState(1);
 
   // Outreach modals + the per-row "no data on this channel" inline message.
   const [emailModalJob, setEmailModalJob] = useState(null);
@@ -547,6 +581,15 @@ function JobsTable({
 
   useEffect(() => { if (onFilteredChange) onFilteredChange(filtered); }, [filtered, onFilteredChange]);
 
+  // Reset to the first display page whenever the filtered result changes shape
+  // (new load, filter, search, sort, or a page-size change) so the user is
+  // never stranded on an out-of-range page.
+  useEffect(() => { setPage(1); }, [filters, query, sort, preFilter, jobs, pageSize]);
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+  const currentPage = Math.min(page, totalPages);
+  const pageRows = filtered.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+
   const colCount = showActionColumn ? 9 : 8;
 
   return (
@@ -588,7 +631,7 @@ function JobsTable({
                   Loading harvested jobs…
                 </td></tr>
               )}
-              {!loading && filtered.map((j) => (
+              {!loading && pageRows.map((j) => (
                 <tr key={j.id} className="ha-row">
                   <td className="ha-td">
                     <span className="ha-link" role="button" tabIndex={0} style={{ cursor: "pointer" }}
@@ -648,6 +691,19 @@ function JobsTable({
         </div>
       </div>
 
+      {!loading && filtered.length > pageSize && (
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12, marginTop: 12, padding: "0 4px", fontSize: 13, color: C.textSoft }}>
+          <span>
+            Showing {(currentPage - 1) * pageSize + 1}–{Math.min(currentPage * pageSize, filtered.length)} of {filtered.length}
+          </span>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <button className="ha-btn ha-btn-secondary" disabled={currentPage <= 1} onClick={() => setPage(Math.max(1, currentPage - 1))}>Prev</button>
+            <span>Page {currentPage} of {totalPages}</span>
+            <button className="ha-btn ha-btn-secondary" disabled={currentPage >= totalPages} onClick={() => setPage(Math.min(totalPages, currentPage + 1))}>Next</button>
+          </div>
+        </div>
+      )}
+
       {emailModalJob && <EmailComposeModal job={emailModalJob} onClose={() => setEmailModalJob(null)} />}
       {linkedinModalJob && <LinkedInMessageModal job={linkedinModalJob} onClose={() => setLinkedinModalJob(null)} />}
     </>
@@ -664,6 +720,7 @@ function RunDetailView({ runId, onBack, onView }) {
   const [jobs, setJobs] = useState([]);
   const [jobsLoading, setJobsLoading] = useState(true);
   const [jobsError, setJobsError] = useState("");
+  const [pageSizeSel, setPageSizeSel] = useState("100");
 
   useEffect(() => {
     let cancelled = false;
@@ -681,14 +738,8 @@ function RunDetailView({ runId, onBack, onView }) {
     setJobsError("");
     (async () => {
       try {
-        const PAGE_SIZE = 500;
-        const first = await getJobs({ run_id: runId, page: 1, page_size: PAGE_SIZE, sort_by: "posted_date", sort_order: "desc" });
-        let all = first.jobs || [];
-        for (let page = 2; page <= (first.total_pages || 1); page++) {
-          const next = await getJobs({ run_id: runId, page, page_size: PAGE_SIZE, sort_by: "posted_date", sort_order: "desc" });
-          all = all.concat(next.jobs || []);
-        }
-        if (!cancelled) setJobs(all.map(mapApiJob));
+        const { rows } = await fetchAllJobs({ run_id: runId });
+        if (!cancelled) setJobs(rows);
       } catch (err) {
         if (!cancelled) { setJobsError(err instanceof ApiError ? err.message : "Could not load this run's jobs."); setJobs([]); }
       } finally {
@@ -815,6 +866,7 @@ function RunDetailView({ runId, onBack, onView }) {
                     <span><b style={{ color: C.text }}>{jobStats.total}</b> jobs</span>
                     <span><b style={{ color: C.text }}>{jobStats.companies}</b> companies</span>
                     <span><b style={{ color: C.text }}>{jobStats.pocs}</b> POCs</span>
+                    <Select label="Rows per page" value={pageSizeSel} onChange={setPageSizeSel} options={PAGE_SIZE_OPTIONS} />
                     <button className="ha-btn ha-btn-primary" onClick={exportCsv} disabled={filteredRows.length === 0}>
                       <Download size={16} /> Export CSV
                     </button>
@@ -831,6 +883,7 @@ function RunDetailView({ runId, onBack, onView }) {
                     preFilter={bucketPredicate}
                     onFilteredChange={setFilteredRows}
                     minWidth={1180}
+                    pageSize={Number(pageSizeSel)}
                     emptyMessage={jobs.length === 0 ? "No jobs recorded for this run." : "No jobs match your filters."}
                   />
                 </div>
@@ -844,7 +897,7 @@ function RunDetailView({ runId, onBack, onView }) {
 }
 
 /* ── Harvested Jobs page ─────────────────────────────────────────────── */
-function JobsPage({ jobs, total, loading, error, onRefresh, onNavigate, onView }) {
+function JobsPage({ jobs, total, loading, error, onRefresh, onNavigate, onView, pageSizeSel, onPageSizeChange }) {
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
   const [filteredRows, setFilteredRows] = useState([]);
@@ -920,6 +973,9 @@ function JobsPage({ jobs, total, loading, error, onRefresh, onNavigate, onView }
           {(startDate || endDate) && (
             <button className="ha-btn ha-btn-secondary" style={{ height: 38, boxSizing: "border-box", padding: "0 14px" }} onClick={() => { setStartDate(""); setEndDate(""); }}>Clear dates</button>
           )}
+          <div style={{ marginLeft: "auto" }}>
+            <Select label="Rows per page" value={pageSizeSel} onChange={onPageSizeChange} options={PAGE_SIZE_OPTIONS} />
+          </div>
         </div>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 16 }}>
           <StatCard value={counts.all} label="Total harvested" color={C.accent} />
@@ -935,6 +991,7 @@ function JobsPage({ jobs, total, loading, error, onRefresh, onNavigate, onView }
           preFilter={dateFilter}
           onFilteredChange={setFilteredRows}
           minWidth={1340}
+          pageSize={Number(pageSizeSel)}
           emptyMessage="No postings match your search. Run a harvest from the Rule Engine to collect jobs."
         />
 
@@ -1565,6 +1622,7 @@ export default function HarvestAgent({ onLogout }) {
   const [jobsTotal, setJobsTotal] = useState(0);
   const [jobsLoading, setJobsLoading] = useState(true);
   const [jobsError, setJobsError] = useState("");
+  const [pageSizeSel, setPageSizeSel] = useState("100");
 
   const [runs, setRuns] = useState([]);
   const [runsLoading, setRunsLoading] = useState(true);
@@ -1574,15 +1632,9 @@ export default function HarvestAgent({ onLogout }) {
     setJobsLoading(true);
     setJobsError("");
     try {
-      const PAGE_SIZE = 500;
-      const first = await getJobs({ page: 1, page_size: PAGE_SIZE, sort_by: "posted_date", sort_order: "desc" });
-      let allJobs = first.jobs || [];
-      for (let page = 2; page <= (first.total_pages || 1); page++) {
-        const next = await getJobs({ page, page_size: PAGE_SIZE, sort_by: "posted_date", sort_order: "desc" });
-        allJobs = allJobs.concat(next.jobs || []);
-      }
-      setJobs(allJobs.map(mapApiJob));
-      setJobsTotal(first.total || 0);
+      const { rows, total } = await fetchAllJobs({});
+      setJobs(rows);
+      setJobsTotal(total);
     } catch (err) {
       setJobsError(
         err instanceof ApiError
@@ -1681,7 +1733,7 @@ export default function HarvestAgent({ onLogout }) {
       ) : activePage === "leads" ? (
         <LeadIntelligencePage />
       ) : (
-        <JobsPage jobs={jobs} total={jobsTotal} loading={jobsLoading} error={jobsError} onRefresh={fetchJobs} onNavigate={setActivePage} onView={setDetailView} />
+        <JobsPage jobs={jobs} total={jobsTotal} loading={jobsLoading} error={jobsError} onRefresh={fetchJobs} onNavigate={setActivePage} onView={setDetailView} pageSizeSel={pageSizeSel} onPageSizeChange={setPageSizeSel} />
       )}
     </div>
   );

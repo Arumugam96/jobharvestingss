@@ -36,13 +36,6 @@ class Settings(BaseSettings):
     harvest_persist_batch_size: int = 10
 
     # ── Sales Navigator (standalone experimental script) ─────────────────────────
-    # Dynamic per-day budget for scripts/scrape_sales_navigator.py — kept here so
-    # it is tunable via .env without code changes (NOT derived from
-    # max_jobs_per_day). Both counts are UTC-day scoped.
-    #   sales_navigator_max_jobs_per_day  — this script's own harvest cap per day
-    #                                       (its "1/3" share). 0 = disabled/skip.
-    #   sales_navigator_daily_stop_ceiling— stop once today's total scraped jobs
-    #                                       reach this (the "2/3" line). 0 = no ceiling.
     sales_navigator_max_jobs_per_day: int = 0
     sales_navigator_daily_stop_ceiling: int = 0
 
@@ -95,8 +88,6 @@ class Settings(BaseSettings):
     apollo_timeout_s: float = 20.0
     apollo_reveal_phone: bool = False
     apollo_webhook_url: str = ""
-    # Per-profile cooldown: don't re-call Apollo for a recruiter enriched/attempted
-    # within this many days (prevents re-spending on the same no-match profile).
     apollo_recheck_days: int = 30
 
     # ── Playwright ───────────────────────────────────────────────────────────────
@@ -156,11 +147,8 @@ class Settings(BaseSettings):
     s3_bucket: str = "harvest-results"
 
     # ── Auth / OTP ───────────────────────────────────────────────────────────────
-    # Master switch for login enforcement. Default True (login required). Set
-    # AUTH_ENABLED=false in dev to bypass the OTP gate — get_current_user then
-    # returns a synthetic dev user so protected routes accept tokenless calls.
     auth_enabled: bool = True
-    allowed_email_domain: str = "sightspectrum.com"
+    allowed_email_domain: str = "sightspectrum"
     otp_length: int = 6
     otp_expiry_seconds: int = 300
     otp_max_attempts: int = 5

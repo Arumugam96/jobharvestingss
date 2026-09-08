@@ -88,6 +88,10 @@ Auth is **verified, not automated** — the authoritative check is the **`li_at`
 
 ## 7. Diagram + End-to-End
 
+![LinkedIn Jobs harvesting workflow — end-to-end pipeline from trigger to Postgres](images/linkedin_workflow.png)
+
+*Figure 1 — LinkedIn Jobs harvesting workflow: two entry points → `LinkedInAgent` → Playwright scrape → LLM extract/enrich → normalize/dedup → `HarvestRunService` → Postgres. Colour-coded by stage type; the WIP Home-Feed lane rejoins at persistence. Text version below.*
+
 ```
 Frontend (React / nginx)
    POST /run-linkedin-agent (sync)  ┐

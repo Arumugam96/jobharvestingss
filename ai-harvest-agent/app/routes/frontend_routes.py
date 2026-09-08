@@ -226,7 +226,7 @@ def _paginate(items: list, page: int, page_size: int) -> tuple[list, int, int]:
 )
 async def list_jobs(
     page:          int = Query(1,    ge=1,               description="Page number (1-based)"),
-    page_size:     int = Query(50,   ge=1,  le=500,      description="Results per page (max 500)"),
+    page_size:     int = Query(100,  ge=1,  le=100,      description="Results per page (max 100)"),
     sort_by:       str = Query("posted_date",             description="Sort field: posted_date | company | job_title | source | hiring_entity | location"),
     sort_order:    str = Query("desc",                    description="Sort direction: asc | desc"),
     keyword:       str = Query("",                        description="Search in job_title, job_description, company"),

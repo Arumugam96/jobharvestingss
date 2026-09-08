@@ -1,13 +1,5 @@
 """LinkedIn geography → geoId resolution.
 
-LinkedIn scopes a job search by the numeric ``geoId`` parameter, NOT by the
-free-text ``location`` string. When a request carries no geoId, LinkedIn falls
-back to the logged-in account's home location (for the harvesting account that
-is India/Chennai) — so a blank *or* an unrecognized location silently narrows a
-"worldwide" search down to one place. Resolving names to a geoId here, and
-defaulting a blank location to Worldwide, makes the geographic scope explicit
-and predictable instead of dependent on whose account is scraping.
-
 Shared by both LinkedIn scrapers (``LinkedInAgent`` and ``LinkedInFormScraper``)
 so their two URL builders can't drift.
 

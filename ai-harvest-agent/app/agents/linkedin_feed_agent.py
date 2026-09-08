@@ -35,22 +35,16 @@ import structlog
 
 from app.config import Settings, get_settings
 from app.core.contact_normalize import normalize_email, normalize_phone
+from app.core.dependencies import get_llm_service
 from app.core.exceptions import LLMUnavailableError
 from app.models.harvest_run import LlmCallType
 from app.services import run_guard
-
-# Reuse the proven, robust helpers from the LinkedIn Jobs agent instead of
-# re-implementing them (BeautifulSoup text cleaning, SPA render-wait, and the
-# Python-side relative-date resolver so the LLM never does date arithmetic).
 from app.agents.linkedin_agent import (
     _clean,
     _infer_work_mode,
     _resolve_posted_date,
     _wait_for_page_text_stable,
 )
-
-# Reuse the existing keyword vocabularies so the candidate filter and the IT
-# sub-domain tag stay consistent with the rest of the app (no duplicate lists).
 from app.agents.linkedin_lead_agent import _HIRING_KEYWORDS
 from app.agents.prospect_intelligence_agent import _HIRING_DOMAIN_MAP, _classify_hiring_domain
 
@@ -318,7 +312,7 @@ class LinkedInFeedAgent:
         llm_service: "LLMService | None" = None,
     ) -> None:
         self._settings = settings or get_settings()
-        self._llm_service = llm_service
+        self._llm_service = llm_service or get_llm_service(self._settings)
         self._llm_calls_made = 0
         # Fixed once per run so every relative date ("2h ago") resolves against
         # the same reference point (see _resolve_posted_date).
@@ -333,14 +327,6 @@ class LinkedInFeedAgent:
         self._empty_dom_rounds  = int(s.linkedin_feed_empty_dom_stop_rounds)
         self._llm_max_calls    = int(s.linkedin_feed_llm_max_calls)
         self._min_confidence   = float(s.linkedin_feed_min_confidence)
-
-    # ── LLM plumbing (same lazy pattern as LinkedInAgent) ───────────────────────
-
-    def _get_llm_service(self) -> "LLMService":
-        if self._llm_service is None:
-            from app.services.llm_service import LLMService
-            self._llm_service = LLMService(self._settings)
-        return self._llm_service
 
     def get_token_usage(self) -> dict:
         if self._llm_service is None:
@@ -373,7 +359,7 @@ class LinkedInFeedAgent:
         storage_state_arg = sm.storage_state_arg()
 
         if storage_state_arg:
-            logger.info("linkedin_feed_using_session_file", session_file=storage_state_arg)
+            logger.debug("linkedin_feed_using_session_file", session_file=storage_state_arg)
             browser_ctx = BrowserManager(
                 headless=headless, slow_mo=slow_mo, storage_state=storage_state_arg,
             )

@@ -1,11 +1,4 @@
 """Defensive post-extraction cleaning for recruiter email / phone values.
-
-The LLM extraction prompts already ask for clean, verbatim contact details, but
-provider misses still slip through — e.g. a masked phone came back as
-``+\\87*******``. These helpers are a second, deterministic layer applied right
-after extraction (where values were previously only ``.strip()``-ed) so noise
-never reaches the DB. Both return ``None`` when the value is missing, masked,
-malformed, or too short to be a real contact.
 """
 from __future__ import annotations
 

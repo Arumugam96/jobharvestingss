@@ -36,15 +36,15 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         )
         noisy = _is_noisy(request.url.path)
         log_fn = log.debug if noisy else log.info
-        log_fn("request_started")
+        # log_fn("request_started")
         try:
             response = await call_next(request)
             elapsed_ms = round((time.perf_counter() - start) * 1000, 2)
-            log_fn(
-                "request_finished",
-                status_code=response.status_code,
-                elapsed_ms=elapsed_ms,
-            )
+            # log_fn(
+            #     "request_finished",
+            #     status_code=response.status_code,
+            #     elapsed_ms=elapsed_ms,
+            # )
             response.headers["X-Process-Time"] = f"{elapsed_ms}ms"
             return response
         except Exception as exc:

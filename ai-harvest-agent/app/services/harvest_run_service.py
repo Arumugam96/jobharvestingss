@@ -21,6 +21,7 @@ from sqlalchemy.orm import noload
 from app.config import get_settings
 from app.core.contact_normalize import normalize_email, normalize_phone
 from app.core.dependencies import get_session_factory
+from app.core.text_formatting import html_description_to_text
 from app.models.harvest_run import (
     HarvestRunORM,
     LlmCallORM,
@@ -377,7 +378,7 @@ class HarvestRunService:
         sort_by:       str = "posted_date",
         sort_order:    str = "desc",
         page:          int = 1,
-        page_size:     int = 50,
+        page_size:     int = 100,
     ) -> tuple[list[ScrapedJobORM], int]:
         """ScrapedJobORM rows across *every* run (unlike get_by_run_id/
         list_runs, not scoped to one HarvestRunORM) — the DB-backed
@@ -711,6 +712,12 @@ def scraped_job_view(job: ScrapedJobORM) -> dict[str, Any]:
     phone_recruiter = (recruiter.contact_number if recruiter else "") or None
     email = email_scraped or email_recruiter
     phone = phone_scraped or phone_recruiter
+    # Plain-text description: use the stored text, else derive it from the stored
+    # HTML at read time. LinkedIn jobs whose description was captured as HTML skip
+    # the LLM's verbatim plain-text copy, so job_description is empty for them —
+    # deriving here keeps the tag-free JSON/Excel downloads and the outreach
+    # prompt populated without a separate stored/LLM-generated text field.
+    job_description = job.job_description or html_description_to_text(job.job_description_html)
     return {
         "id":                     job.id,
         "job_title":              job.job_title,
@@ -720,7 +727,7 @@ def scraped_job_view(job: ScrapedJobORM) -> dict[str, Any]:
         "experience":             job.experience,
         "posted_date":            job.posted_date,
         "job_url":                job.job_url,
-        "job_description":        job.job_description,
+        "job_description":        job_description,
         "job_description_html":   job.job_description_html,
         "skills":                 job.skills,
         "work_mode":              job.work_mode,

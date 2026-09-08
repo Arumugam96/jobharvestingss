@@ -46,6 +46,8 @@ from app.core.text_formatting import (
     format_job_description,
     sanitize_description_html,
 )
+from app.core.dependencies import get_llm_service
+from app.config import get_settings
 from app.core.linkedin_geo import resolve_geo
 from app.models.harvest_models import FiltersConfig
 from app.models.harvest_run import LlmCallType
@@ -815,7 +817,7 @@ class LinkedInAgent:
     _RECRUITER_CONTACT_SCRAPE_CAP = 50
 
     def __init__(self, llm_service: "LLMService | None" = None) -> None:
-        self._llm_service        = llm_service
+        self._llm_service        = llm_service or get_llm_service(get_settings())
         self._llm_fallback_calls = 0
         # Jobs whose LLM extraction hit a total provider outage (local + fallback
         # both down). Instead of aborting the run we keep the selector-only data
@@ -938,13 +940,6 @@ class LinkedInAgent:
 
         logger.info("linkedin_jobs_received", count=len(jobs))
         logger.info(
-            "agent_completed",
-            source   = "linkedin",
-            total    = len(jobs),
-            keyword  = filters.keyword,
-            location = filters.location,
-        )
-        logger.info(
             "linkedin_harvest_completed",
             total    = len(jobs),
             keyword  = filters.keyword,
@@ -981,15 +976,10 @@ class LinkedInAgent:
         search_url = self._build_search_url(f, start=0)
         logger.info("search_started", source="linkedin", keyword=f.keyword, location=f.location)
         logger.info("search_url_generated", source="linkedin", url=search_url)
-        logger.info("linkedin_navigating_to_jobs", url=search_url)
+        logger.debug("linkedin_navigating_to_jobs", url=search_url)
 
         await _screenshot(page, "page_loaded")
 
-        # Retry the first navigation: right after the browser starts, the
-        # container's embedded DNS resolver can briefly fail (Chromium reports
-        # this as net::ERR_NAME_NOT_RESOLVED), which would otherwise abort the
-        # whole run with 0 jobs. A couple of retries with backoff rides out the
-        # transient blip.
         try:
             await _retry(
                 lambda: page.goto(search_url, wait_until="domcontentloaded", timeout=30_000),
@@ -1380,6 +1370,10 @@ class LinkedInAgent:
             "recruiter_enrichment_pass_started",
             unique_recruiters=len(groups), cap=self._RECRUITER_CONTACT_SCRAPE_CAP,
         )
+        logger.debug(
+            "recruiter_enrichment_pass_started",
+            unique_recruiters=len(groups), cap=self._RECRUITER_CONTACT_SCRAPE_CAP,
+        )
 
         for norm_url, group_jobs in groups.items():
             # Cooperative stop: skip the remaining (capped, best-effort) recruiter
@@ -1592,14 +1586,11 @@ class LinkedInAgent:
                 call_type=LlmCallType.CONTACT_HARVEST,
             )
         except LLMUnavailableError:
-            # LLM provider is down — abort the run (see _llm_fallback_extract).
             raise
         except Exception as exc:
             logger.warning("recruiter_llm_fallback_failed", url=profile_url, error=str(exc))
             return {}
 
-        # Deterministic second layer — reject masked/partial noise the prompt
-        # may still let through (e.g. "+\\87*******") before it reaches the DB.
         result: dict = {}
         email = normalize_email(extracted.get("email"))
         phone = normalize_phone(extracted.get("phone"))
@@ -2199,12 +2190,16 @@ class LinkedInAgent:
             # the page's full HTML with tags/classes stripped down to text.
             llm_detail = await self._llm_fallback_extract(
                 detail_page, idx, url, card_text=card_text, card_links=card_links,
+                have_desc_html=bool(desc_html),
             )
             detail.update(llm_detail)
             if desc_html:
                 detail["job_description_html"] = desc_html
 
-            if not detail.get("description"):
+            # A job with captured HTML but no plain-text description is expected
+            # now (we skip the LLM's verbatim text when DOM HTML exists), so only
+            # alert when we have neither form of the description.
+            if not detail.get("description") and not detail.get("job_description_html"):
                 logger.info("linkedin_description_still_empty", idx=idx, url=url)
                 await _screenshot(detail_page, f"desc_empty_{idx:03d}")
                 await _save_html(detail_page, f"desc_empty_{idx:03d}")
@@ -2227,6 +2222,7 @@ class LinkedInAgent:
         url:        str,
         card_text:  str        = "",
         card_links: list[dict] | None = None,
+        have_desc_html: bool    = False,
     ) -> dict:
         """
         Extracts every detail-page field via the LLM instead of matching
@@ -2316,6 +2312,29 @@ class LinkedInAgent:
             resolved_date=resolved_date,
         )
 
+        # The job description is captured and stored as HTML. When the DOM
+        # selector already produced job_description_html, that HTML wins at merge
+        # time and is all we keep — so the LLM is asked for NEITHER the plain-text
+        # description NOR description_html here (both would be generated only to be
+        # discarded, and the verbatim description is the single longest field /
+        # biggest output-token cost). Only when the DOM capture found no HTML does
+        # the LLM extract the description itself — as plain text plus clean HTML
+        # (the HTML is then the sole source and also feeds the outage
+        # re-enrichment replay).
+        description_fields = (
+            ""
+            if have_desc_html
+            else (
+                "\"description\": str (the COMPLETE job description / \"About the job\" "
+                "text — include every paragraph and bullet point verbatim, do not "
+                "summarize or shorten it; empty string if not present), "
+                "\"description_html\": str (the SAME complete description formatted as "
+                "clean, simple HTML using ONLY these tags: <p>, <ul>, <li>, <strong>, "
+                "<em>, <h3>, <br> — preserve headings, paragraphs and bullet lists; no "
+                "attributes, styles, classes, scripts, or any other tag; empty string "
+                "if not present), "
+            )
+        )
         schema_description = (
             "{\"title\": str (the job title; empty string if not present), "
             "\"company\": str (the hiring company's name; empty if not present), "
@@ -2326,15 +2345,8 @@ class LinkedInAgent:
             "\"posted\": str or null (copy the pre-calculated posting date given "
             "above verbatim — do not calculate or derive it yourself; null if it "
             "was marked unavailable), "
-            "\"description\": str (the COMPLETE job description / \"About the job\" "
-            "text — include every paragraph and bullet point verbatim, do not "
-            "summarize or shorten it; empty string if not present), "
-            "\"description_html\": str (the SAME complete description formatted as "
-            "clean, simple HTML using ONLY these tags: <p>, <ul>, <li>, <strong>, "
-            "<em>, <h3>, <br> — preserve headings, paragraphs and bullet lists; no "
-            "attributes, styles, classes, scripts, or any other tag; empty string "
-            "if not present), "
-            "\"employment_type\": str (e.g. Full-time, Contract; empty if not stated), "
+            + description_fields
+            + "\"employment_type\": str (e.g. Full-time, Contract; empty if not stated), "
             "\"salary\": str (empty if not disclosed), "
             "\"job_insights\": str (employment type/seniority/company size/industry "
             "bullets shown near the title, joined with \" | \"; empty if none), "
@@ -2375,6 +2387,16 @@ class LinkedInAgent:
         # Kept in a local (not inlined) so the exact system prompt can be stored
         # alongside content for a verbatim re-enrichment replay if all providers
         # are down.
+        description_html_instruction = (
+            ""
+            if have_desc_html
+            else (
+                "For description_html, reproduce the same description as "
+                "clean HTML using ONLY <p>, <ul>, <li>, <strong>, <em>, "
+                "<h3>, <br> — never add attributes, classes, styles, or "
+                "scripts. "
+            )
+        )
         system_prompt = (
             "You are extracting structured job-posting data from the "
             "text content of LinkedIn pages (a search-result card "
@@ -2382,10 +2404,8 @@ class LinkedInAgent:
             "already stripped) — work from the text content only. "
             "Prioritize returning the COMPLETE job description and any "
             "recruiter contact details that are explicitly present. "
-            "For description_html, reproduce the same description as "
-            "clean HTML using ONLY <p>, <ul>, <li>, <strong>, <em>, "
-            "<h3>, <br> — never add attributes, classes, styles, or "
-            "scripts. Never fabricate an email, phone number, url, or "
+            + description_html_instruction
+            + "Never fabricate an email, phone number, url, or "
             "any other field that is not literally present in the text "
             "or link list. Return only the fields in the schema, no "
             "commentary."

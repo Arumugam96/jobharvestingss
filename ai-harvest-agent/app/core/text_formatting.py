@@ -15,9 +15,7 @@ from html import escape as _escape
 
 from bs4 import BeautifulSoup
 
-_BULLET_PREFIX = re.compile(
-    r"^(?:[•‣▪●○◦*·]|-|\d{1,2}[.)]|\([a-zA-Z0-9]\))\s+"
-)
+_BULLET_PREFIX = re.compile(r"^(?:[•‣▪●○◦*·]|-|\d{1,2}[.)]|\([a-zA-Z0-9]\))\s+")
 # LinkedIn/board scrapes sometimes glue bullet items into one run of text
 # with no line breaks (e.g. "• Item one• Item two") — force each glyph onto
 # its own line before splitting into lines.
@@ -186,3 +184,39 @@ def description_text_to_html(text: str) -> str:
     _flush_bullets()
     _flush_para()
     return "".join(out)
+
+
+# ── Deterministic HTML → plain text (read-time report/outreach fallback) ───────
+
+def html_description_to_text(html: str) -> str:
+    """Convert stored job-description HTML back into clean formatted plain text.
+
+    The reverse of description_text_to_html: <li> items become "• " bullets,
+    <br> and block-level tags (p/div/list/heading) become line breaks, while
+    inline tags (strong/em/a/span) are unwrapped without breaking the sentence
+    they sit in. The result is run through format_job_description for consistent
+    bullet/paragraph normalization.
+
+    Used at READ time (reports, outreach) for LinkedIn jobs where only
+    job_description_html was stored and the plain-text job_description is empty —
+    so the tag-free JSON/Excel downloads and the outreach prompt still get the
+    description without asking the LLM for a separate verbatim copy. Returns ""
+    for empty/whitespace input or on any parse error.
+    """
+    if not html or not html.strip():
+        return ""
+    try:
+        soup = BeautifulSoup(html, "lxml")
+    except Exception:
+        return ""
+
+    for br in soup.find_all("br"):
+        br.replace_with("\n")
+    for li in soup.find_all("li"):
+        li.insert(0, "• ")
+    # Trailing newline after each block element so get_text() (which uses no
+    # separator, keeping inline runs intact) still breaks between blocks.
+    for block in soup.find_all(["p", "div", "ul", "ol", "li", "h1", "h2", "h3", "h4", "tr"]):
+        block.append("\n")
+
+    return format_job_description(soup.get_text())
