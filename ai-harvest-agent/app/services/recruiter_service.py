@@ -246,6 +246,43 @@ async def link_recruiter_jobs_by_url(db: AsyncSession, recruiter_id: str, linked
     return updated
 
 
+async def list_recruiters_missing_email(db: AsyncSession, *, limit: int) -> list[dict]:
+    """Recruiters that have a LinkedIn URL but no email yet — the candidate set for
+    the manual Apollo sweep (app/services/recruiter_apollo_sweep.py).
+
+    Returns plain dicts (not ORM rows) so the caller can run slow Apollo network
+    calls without holding a DB session on detached rows — same pattern as
+    HarvestRunService.list_pending_reenrichment. The Apollo recheck cooldown
+    (settings.apollo_recheck_days) is enforced downstream inside
+    apollo_contact_fallback via `apollo_enriched_at`, so it's returned here rather
+    than filtered on — a profile in cooldown is skipped, not silently dropped.
+    """
+    stmt = (
+        select(RecruiterORM)
+        .where(
+            RecruiterORM.linkedin_profile_url.isnot(None),
+            RecruiterORM.linkedin_profile_url != "",
+            RecruiterORM.official_email_id == "",
+        )
+        .order_by(RecruiterORM.last_seen_at.desc())
+        .limit(limit)
+    )
+    result = await db.execute(stmt)
+    return [
+        {
+            "id": r.id,
+            "linkedin_profile_url": r.linkedin_profile_url,
+            "person_name": r.person_name,
+            "company_name": r.company_name,
+            "company_domain": r.company_domain,
+            "official_email_id": r.official_email_id,
+            "contact_number": r.contact_number,
+            "apollo_enriched_at": r.apollo_enriched_at,
+        }
+        for r in result.scalars()
+    ]
+
+
 # ── Recruiter discovery run history (small — mirrors HarvestRunORM's shape,
 # not ScrapedJobORM's; see RecruiterDiscoveryRunORM's docstring) ────────────────
 

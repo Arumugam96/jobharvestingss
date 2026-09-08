@@ -25,15 +25,25 @@ from app.services.llm_service import LLMService
 logger = structlog.get_logger(__name__)
 
 
-async def run_reenrichment_sweep() -> dict[str, int]:
+async def run_reenrichment_sweep(
+    limit: int | None = None,
+    max_age_days: int | None = None,
+) -> dict[str, int]:
     """Retry pending re-enrichment tasks (oldest first, capped). Returns a summary
     dict {pending, done, expired, still_pending}. Never raises — a failure here
-    must not block the harvest that triggered it."""
+    must not block the harvest that triggered it.
+
+    `limit` and `max_age_days` default to settings.reenrichment_sweep_limit /
+    settings.reenrichment_max_age_days (the start-of-harvest behavior). A manual
+    caller (scripts/reenrich_and_apollo.py) passes large values to drain the whole
+    backlog and to retry aged tasks instead of expiring them."""
     settings = get_settings()
+    lim = limit if limit is not None else settings.reenrichment_sweep_limit
+    age_days = max_age_days if max_age_days is not None else settings.reenrichment_max_age_days
     summary = {"pending": 0, "done": 0, "expired": 0, "still_pending": 0}
     try:
         tasks = await db_read(
-            lambda db: HarvestRunService(db).list_pending_reenrichment(settings.reenrichment_sweep_limit)
+            lambda db: HarvestRunService(db).list_pending_reenrichment(lim)
         ) or []
     except Exception as exc:  # defensive — db_read already swallows, but never raise upward
         logger.warning("reenrichment_sweep_list_failed", error=str(exc))
@@ -44,11 +54,16 @@ async def run_reenrichment_sweep() -> dict[str, int]:
     summary["pending"] = len(tasks)
 
     llm = LLMService(settings)
-    max_age = timedelta(days=settings.reenrichment_max_age_days)
+    max_age = timedelta(days=age_days)
     now = datetime.now(timezone.utc)
-    logger.info("reenrichment_sweep_start", pending=len(tasks))
+    logger.debug("reenrichment_sweep_start", pending=len(tasks))
 
     for t in tasks:
+        logger.debug(
+            "reenrichment_task_started",
+            run_id=t["run_id"],
+            job_url=t["job_url"],
+        )
         first_seen = t.get("first_seen_at")
         if first_seen is not None:
             # server_default now() is tz-aware on Postgres but may be naive on SQLite.
