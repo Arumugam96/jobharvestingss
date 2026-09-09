@@ -39,6 +39,7 @@ from bs4 import BeautifulSoup
 from dateutil import parser as dateutil_parser
 from playwright.async_api import ElementHandle, Page
 
+from app.core.company_size import normalize_company_size, parse_company_size_band
 from app.core.contact_normalize import normalize_email, normalize_phone
 from app.core.exceptions import LLMUnavailableError
 from app.core.text_formatting import (
@@ -135,6 +136,7 @@ class LinkedInScrapedJob:
     company_url:     str       = ""
     employment_type: str       = ""
     industry_hint:   str       = ""   # raw "Industries" job-insight text, if scraped
+    company_size:    str       = ""   # LinkedIn employee-range band (e.g. "1,001-5,000 employees")
     source:          str       = "LinkedIn"
     # Lead intelligence
     job_poster_name:        str | None = None
@@ -296,6 +298,17 @@ def _clean(text: str) -> str:
     return re.sub(r"\n+", " ", text).strip()
 
 
+def _resolve_company_size(llm_value: str, job_insights: str) -> str:
+    """Resolve a per-job company-size band: trust the LLM-extracted value when it
+    normalises to a known band, else fall back to a regex over the raw job-insights
+    text. Returns a canonical band string (e.g. "1,001-5,000 employees") or ""
+    (Unknown). Never guesses — extraction only. See app/core/company_size.py."""
+    normalized = normalize_company_size(llm_value or "")
+    if normalized:
+        return f"{normalized} employees"
+    return parse_company_size_band(job_insights or "")
+
+
 # Known LinkedIn upsell/ad lines that show up in the *main content* area
 # (not nav/header/footer, which are stripped as whole tags below) — pure
 # noise for job-data extraction, and a big share of a captured page's text.
@@ -334,7 +347,19 @@ _NOISE_CUTOFF_MARKERS = [
 ]
 
 
-def _html_to_text(html: str) -> str:
+def _apply_noise_cutoff(text: str) -> str:
+    """Truncate at the first noise-section marker (see _NOISE_CUTOFF_MARKERS) —
+    LinkedIn always renders these after the real job content, so anything from
+    there on is safe to drop. Split out of _html_to_text so callers can also get
+    the FULL pre-cutoff text (the "About the company" card often sits after a
+    marker and would otherwise be lost — see _extract_about_company)."""
+    cutoff_positions = [pos for pos in (text.find(marker) for marker in _NOISE_CUTOFF_MARKERS) if pos != -1]
+    if cutoff_positions:
+        return text[: min(cutoff_positions)]
+    return text
+
+
+def _html_to_text(html: str, apply_cutoff: bool = True) -> str:
     """Strip tags/classes/scripts/styles from a full page's HTML, leaving
     plain text — used to feed the LLM extractor instead of matching
     LinkedIn's constantly-drifting CSS selectors. Unlike innerText, this also
@@ -344,21 +369,46 @@ def _html_to_text(html: str) -> str:
 
     Also strips whole-tag site chrome (nav/header/footer/aside — top nav,
     footer/legal/language links, and the related-jobs rail; never the job
-    posting itself), known upsell/ad lines that live in the main content
-    area, and truncates at the first noise-section marker (see
-    _NOISE_CUTOFF_MARKERS) — LinkedIn always renders these after the real
-    job content, so anything from there on is safe to drop."""
+    posting itself) and known upsell/ad lines that live in the main content
+    area. With apply_cutoff (the default) the text is additionally truncated
+    at the first noise-section marker; pass apply_cutoff=False to get the
+    full text and apply _apply_noise_cutoff separately (used by the detail
+    fallback so the "About the company" card can be recovered even when it
+    renders after a noise marker)."""
     soup = BeautifulSoup(html, "lxml")
     for tag in soup(["script", "style", "noscript", "svg", "nav", "header", "footer", "aside"]):
         tag.decompose()
     lines = soup.get_text(separator="\n").split("\n")
     lines = [ln for ln in lines if not _LINKEDIN_BOILERPLATE_LINE.search(ln)]
     text = _clean("\n".join(lines))
+    return _apply_noise_cutoff(text) if apply_cutoff else text
 
-    cutoff_positions = [pos for pos in (text.find(marker) for marker in _NOISE_CUTOFF_MARKERS) if pos != -1]
+
+_ABOUT_COMPANY_SNIPPET_MAX_CHARS = 1_200
+
+
+def _extract_about_company(full_text: str, max_chars: int = _ABOUT_COMPANY_SNIPPET_MAX_CHARS) -> str:
+    """Pull the "About the company" card's text out of the FULL (pre-cutoff)
+    page text. This card carries the company's employee-range band ("51-200
+    employees"), industry, and blurb, but renders after the description — often
+    after a _NOISE_CUTOFF_MARKERS marker ("Set alert for similar jobs"), so the
+    trimmed detail text frequently loses it. Extracted here as its own bounded
+    snippet and given to the LLM as a labelled prompt section instead.
+
+    Uses the LAST occurrence ("About the company" inside the description body
+    itself comes earlier; LinkedIn's card is the final one), capped at
+    max_chars and ended early at any noise marker inside the window."""
+    if not full_text:
+        return ""
+    idx = full_text.rfind("About the company")
+    if idx == -1:
+        return ""
+    snippet = full_text[idx: idx + max_chars]
+    # The related-jobs rail can start inside the window — cut it off.
+    cutoff_positions = [pos for pos in (snippet.find(m) for m in _NOISE_CUTOFF_MARKERS) if pos > 0]
     if cutoff_positions:
-        text = text[: min(cutoff_positions)]
-    return text
+        snippet = snippet[: min(cutoff_positions)]
+    return snippet.strip()
 
 
 def _trim_to_relevant(text: str, max_chars: int) -> str:
@@ -1562,7 +1612,9 @@ class LinkedInAgent:
             "partial, or you are not confident it is a complete real number, "
             "return null)}"
         )
-        content = f"---LINKEDIN PROFILE PAGE---\n{text}\n\n---EXTRACT JSON---\n{schema_description}"
+        # Schema NOT embedded in the content — extract_json() injects it once in
+        # its own prompt scaffold ("Schema: …"); embedding it here duplicated it.
+        content = f"---LINKEDIN PROFILE PAGE---\n{text}"
 
         try:
             extracted = await self._get_llm_service().extract_json(
@@ -1936,6 +1988,16 @@ class LinkedInAgent:
                     company_url             = detail_data.get("company_url", ""),
                     employment_type         = _clean(detail_data.get("emp_type", "")),
                     industry_hint           = _clean(detail_data.get("job_insights", "")),
+                    # LLM-extracted band first; fall back to a regex over the
+                    # job-insights text AND the raw About-the-company snippet
+                    # (where LinkedIn actually prints the band). Normalised to a
+                    # canonical band string or "" (Unknown). Display-only — never
+                    # used to drop the job.
+                    company_size            = _resolve_company_size(
+                        detail_data.get("company_size", ""),
+                        detail_data.get("job_insights", "")
+                        + "\n" + detail_data.get("about_company", ""),
+                    ),
                     source                  = "LinkedIn",
                     job_poster_name         = detail_data.get("recruiter_name") or None,
                     job_poster_designation  = detail_data.get("recruiter_title") or None,
@@ -2259,7 +2321,13 @@ class LinkedInAgent:
             logger.info("linkedin_llm_fallback_text_read_failed", idx=idx, error=str(exc))
             return {}
 
-        detail_text = _trim_to_relevant(_html_to_text(html), self._LLM_FALLBACK_TEXT_MAX_CHARS)
+        # Full pre-cutoff text once (single parse), then: the trimmed detail blob
+        # for the prompt body, and the "About the company" card recovered from
+        # the full text — it usually renders AFTER a noise marker, so the trimmed
+        # text alone frequently loses it (and with it the company-size band).
+        full_text = _html_to_text(html, apply_cutoff=False)
+        detail_text = _trim_to_relevant(_apply_noise_cutoff(full_text), self._LLM_FALLBACK_TEXT_MAX_CHARS)
+        about_company = _extract_about_company(full_text)
         if len(detail_text) < 100:
             logger.info("linkedin_llm_fallback_text_too_short", idx=idx, chars=len(detail_text))
             return {}
@@ -2318,20 +2386,24 @@ class LinkedInAgent:
         # description NOR description_html here (both would be generated only to be
         # discarded, and the verbatim description is the single longest field /
         # biggest output-token cost). Only when the DOM capture found no HTML does
-        # the LLM extract the description itself — as plain text plus clean HTML
-        # (the HTML is then the sole source and also feeds the outage
-        # re-enrichment replay).
+        # the LLM extract the description — as clean HTML ONLY (description_html;
+        # no plain-text twin, which would double the largest output for nothing:
+        # the plain text is derived from this HTML at read time by
+        # scraped_job_view → html_description_to_text). That HTML is then the sole
+        # source and also feeds the outage re-enrichment replay.
         description_fields = (
             ""
             if have_desc_html
             else (
-                "\"description\": str (the COMPLETE job description / \"About the job\" "
-                "text — include every paragraph and bullet point verbatim, do not "
-                "summarize or shorten it; empty string if not present), "
-                "\"description_html\": str (the SAME complete description formatted as "
-                "clean, simple HTML using ONLY these tags: <p>, <ul>, <li>, <strong>, "
-                "<em>, <h3>, <br> — preserve headings, paragraphs and bullet lists; no "
-                "attributes, styles, classes, scripts, or any other tag; empty string "
+                "\"description_html\": str (the COMPLETE job description, verbatim — "
+                "do not summarize or shorten it — as HTML that mirrors how LinkedIn "
+                "renders the description on the page as closely as possible: keep the "
+                "same headings, paragraph breaks, bullet/numbered lists, "
+                "bold/italic/underline emphasis, links, and spacing, using whichever "
+                "HTML tags best reproduce that structure (<p>, <br>, <ul>/<ol>/<li>, "
+                "<strong>/<em>/<u>, <h1>-<h6>, <div>, <span>, <table>, <blockquote>, "
+                "<hr>, <a>, etc.). Do NOT include <script>, <style>, <iframe>, <img>, "
+                "forms, event-handler attributes, or external resources; empty string "
                 "if not present), "
             )
         )
@@ -2350,6 +2422,11 @@ class LinkedInAgent:
             "\"salary\": str (empty if not disclosed), "
             "\"job_insights\": str (employment type/seniority/company size/industry "
             "bullets shown near the title, joined with \" | \"; empty if none), "
+            "\"company_size\": str (the company's employee-range band EXACTLY as "
+            "shown, e.g. \"51-200 employees\", \"1,001-5,000 employees\", "
+            "\"10,001+ employees\" — copy it verbatim if present in the "
+            "---ABOUT THE COMPANY--- section or in the insights near the job "
+            "title; empty string if not shown, never guess), "
             "\"skills\": list[str] (empty list if none listed), "
             "\"recruiter_name\": str or null (name of the recruiter / hiring "
             "manager / job poster — check both the search-card text and the "
@@ -2371,17 +2448,19 @@ class LinkedInAgent:
             "masking noise such as '*' or '\\'. If it is masked, partial, or you "
             "are not confident it is a complete real number, null)}"
         )
-        # Labelled sections, short context first (card/links/date) and the
-        # long detail-page text last — the LLM sees the most important
+        # Labelled sections, short context first (card/links/date/about-company)
+        # and the long detail-page text last — the LLM sees the most important
         # signals before wading into a much longer blob, instead of that
-        # blob burying them.
+        # blob burying them. The schema is NOT embedded here: extract_json()
+        # already injects it once in its own prompt scaffold ("Schema: …"), so
+        # repeating it in the content only duplicated ~2-3 KB of input.
         content = (
             f"---CARD TEXT---\n{card_text_clean or '(none)'}\n\n"
             f"---COMPANY LINKS---\n{json.dumps(company_links, ensure_ascii=False)}\n\n"
             f"---PROFILE LINKS---\n{json.dumps(profile_links, ensure_ascii=False)}\n\n"
             f"---POSTING DATE (pre-calculated)---\n{resolved_date or 'unavailable'}\n\n"
-            f"---JOB DETAIL PAGE---\n{detail_text}\n\n"
-            f"---EXTRACT JSON---\n{schema_description}"
+            f"---ABOUT THE COMPANY---\n{about_company or '(none)'}\n\n"
+            f"---JOB DETAIL PAGE---\n{detail_text}"
         )
 
         # Kept in a local (not inlined) so the exact system prompt can be stored
@@ -2391,10 +2470,11 @@ class LinkedInAgent:
             ""
             if have_desc_html
             else (
-                "For description_html, reproduce the same description as "
-                "clean HTML using ONLY <p>, <ul>, <li>, <strong>, <em>, "
-                "<h3>, <br> — never add attributes, classes, styles, or "
-                "scripts. "
+                "For description_html, return the COMPLETE job description as HTML "
+                "that mirrors LinkedIn's on-page rendering as closely as possible — "
+                "same headings, paragraphs, lists, emphasis, links, and spacing — "
+                "using any HTML tags that fit; never include scripts, styles, "
+                "iframes, images, forms, or event-handler attributes. "
             )
         )
         system_prompt = (
@@ -2470,6 +2550,13 @@ class LinkedInAgent:
             result["salary"] = str(extracted["salary"]).strip()
         if extracted.get("job_insights"):
             result["job_insights"] = str(extracted["job_insights"]).strip()
+        if extracted.get("company_size"):
+            result["company_size"] = str(extracted["company_size"]).strip()
+        # The raw About-the-company snippet rides along (not persisted) so the
+        # job-construction site can run the deterministic size-band regex over it
+        # when the LLM's own company_size comes back empty.
+        if about_company:
+            result["about_company"] = about_company
         if extracted.get("skills"):
             result["skills"] = [str(s).strip() for s in extracted["skills"] if str(s).strip()][:20]
         if extracted.get("recruiter_name"):
