@@ -88,6 +88,12 @@ class ScrapedJobORM(Base):
     # models) but not on UnifiedJob — kept here so /linkedin-results and
     # /dice-results don't lose data relative to the file-based responses.
     company_url: Mapped[str] = mapped_column(String(500), nullable=False, default="")
+    # LinkedIn employee-range band captured per job (e.g. "1,001-5,000 employees"),
+    # LLM-extracted with a regex fallback over the scraped job-insights text. Empty
+    # ("Unknown") for jobs where the band wasn't shown and for non-LinkedIn sources.
+    # Used only to power a display-time company-size filter in the UI — never to
+    # drop jobs at harvest time. See app/core/company_size.py.
+    company_size: Mapped[str] = mapped_column(String(100), nullable=False, default="")
     employment_type: Mapped[str] = mapped_column(String(100), nullable=False, default="")
     job_type: Mapped[str] = mapped_column(String(50), nullable=False, default="")
     domain: Mapped[str] = mapped_column(String(50), nullable=False, default="Any")
@@ -150,9 +156,10 @@ class LlmCallType:
       feed_extract        — extracting job + recruiter data from a feed post that
                             classified as a genuine IT hiring lead (stage 2)
       email_generation    — composing an outreach email (outreach flow)
+      email_followup      — composing a follow-up outreach email (outreach flow)
       linkedin_generation — composing a LinkedIn message (outreach flow)
 
-    Harvest calls come from the scrape pipeline (run-scoped); the two generation
+    Harvest calls come from the scrape pipeline (run-scoped); the generation
     types come from the outreach flow (run_id is NULL). NOTE: rows written before
     this rename retain the legacy value "harvest" (and any stray
     "contact_extraction")."""
@@ -161,6 +168,7 @@ class LlmCallType:
     FEED_CLASSIFY = "feed_classify"
     FEED_EXTRACT = "feed_extract"
     EMAIL_GENERATION = "email_generation"
+    EMAIL_FOLLOWUP = "email_followup"
     LINKEDIN_GENERATION = "linkedin_generation"
 
 

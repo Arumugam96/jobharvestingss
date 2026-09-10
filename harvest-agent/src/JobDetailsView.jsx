@@ -1,7 +1,8 @@
-import React, { useState } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import DOMPurify from "dompurify";
 import EmailComposeModal from "./components/EmailComposeModal";
 import LinkedInMessageModal from "./components/LinkedInMessageModal";
+import { getOutreachStatus } from "./api";
 import {
   ArrowLeft,
   MapPin,
@@ -55,14 +56,14 @@ function DualContactVal({ scraped, recruiter, fallback }) {
   return <span>{s || r}</span>;
 }
 
-function ContactAction({ glyph: Glyph, href, onClick, title, variant, newTab = true }) {
+function ContactAction({ glyph: Glyph, href, onClick, title, variant, newTab = true, sent = false }) {
   // A click handler (opens the LLM composer) takes precedence over a plain href
   // (mailto / profile link fallback); with neither, the action is disabled.
   if (onClick) {
     return (
       <button
         type="button"
-        className={`ha-cbtn ha-cbtn-on-${variant}`}
+        className={`ha-cbtn ${sent ? "ha-cbtn-sent" : `ha-cbtn-on-${variant}`}`}
         style={{ padding: 0, boxSizing: "border-box", cursor: "pointer", font: "inherit" }}
         title={title}
         onClick={onClick}
@@ -93,8 +94,26 @@ function ContactAction({ glyph: Glyph, href, onClick, title, variant, newTab = t
 function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
   // Same LLM outreach composers the jobs-table rows use. They need the DB-backed
   // job.id (carried through by mapJobToDetail) plus job.email / job.company.
-  const [emailModalJob, setEmailModalJob] = useState(null);
+  // emailModal carries follow-up context: { job, followup, parentOutreachId }.
+  const [emailModal, setEmailModal] = useState(null);
   const [linkedinModalJob, setLinkedinModalJob] = useState(null);
+  // DB-backed sent state for this job ({ email?, linkedin? }); drives the green
+  // "sent" icons and whether the Email icon opens an initial or a follow-up.
+  const [outreach, setOutreach] = useState({});
+
+  const refreshOutreach = useCallback(async () => {
+    if (!job.id) return;
+    try {
+      const map = await getOutreachStatus([job.id]);
+      setOutreach((map && map[job.id]) || {});
+    } catch {
+      // best-effort — icons fall back to the default (not-sent) state
+    }
+  }, [job.id]);
+  useEffect(() => { refreshOutreach(); }, [refreshOutreach]);
+
+  const emailSent = !!outreach.email;
+  const liSent = !!outreach.linkedin;
 
   const linkOrDash = (url, label) =>
     url ? (
@@ -190,15 +209,23 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
               <ContactAction
                 glyph={Mail}
                 variant="mail"
-                title="Email"
+                title={emailSent ? "Email sent — click to follow up" : "Email"}
+                sent={emailSent}
                 newTab={false}
-                onClick={job.id && job.email ? () => setEmailModalJob(job) : undefined}
+                onClick={
+                  job.id && emailSent
+                    ? () => setEmailModal({ job, followup: true, parentOutreachId: outreach.email.outreach_id })
+                    : job.id && job.email
+                      ? () => setEmailModal({ job, followup: false })
+                      : undefined
+                }
                 href={!job.id && job.email ? `mailto:${job.email}` : null}
               />
               <ContactAction
                 glyph={LinkedInIcon}
                 variant="li"
-                title="LinkedIn"
+                title={liSent ? "LinkedIn message sent" : "LinkedIn"}
+                sent={liSent}
                 onClick={job.id && job.linkedin ? () => setLinkedinModalJob(job) : undefined}
                 href={!job.id && job.linkedin ? job.linkedin : null}
               />
@@ -249,6 +276,19 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
                   <span className="ha-key">Domain</span>
                   <span className="ha-val">{job.domain || <span className="ha-muted">—</span>}</span>
                 </div>
+                <div className="ha-row">
+                  <span className="ha-key">Company size</span>
+                  <span className="ha-val">
+                    {job.companySize ? (
+                      <>
+                        {job.companySize}
+                        {job.companySizeTier && <span className="ha-src-tag" style={{ marginLeft: 6 }}>{job.companySizeTier}</span>}
+                      </>
+                    ) : (
+                      <span className="ha-muted">—</span>
+                    )}
+                  </span>
+                </div>
               </div>
             </section>
             <section className="ha-section">
@@ -268,8 +308,22 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
         </div>
       </div>
 
-      {emailModalJob && <EmailComposeModal job={emailModalJob} onClose={() => setEmailModalJob(null)} />}
-      {linkedinModalJob && <LinkedInMessageModal job={linkedinModalJob} onClose={() => setLinkedinModalJob(null)} />}
+      {emailModal && (
+        <EmailComposeModal
+          job={emailModal.job}
+          followup={emailModal.followup}
+          parentOutreachId={emailModal.parentOutreachId}
+          onClose={() => setEmailModal(null)}
+          onSent={refreshOutreach}
+        />
+      )}
+      {linkedinModalJob && (
+        <LinkedInMessageModal
+          job={linkedinModalJob}
+          onClose={() => setLinkedinModalJob(null)}
+          onLogged={refreshOutreach}
+        />
+      )}
     </div>
   );
 }
@@ -338,6 +392,17 @@ const styles = `
   .ha-jd-html strong, .ha-jd-html b { font-weight: 700; color: #1E293B; }
   .ha-jd-html a { color: #2563EB; text-decoration: none; }
   .ha-jd-html a:hover { text-decoration: underline; }
+  /* The LLM-produced description HTML may now mirror LinkedIn's own layout
+     (any structural tags survive the backend sanitizer) — keep the extras tidy. */
+  .ha-jd-html div, .ha-jd-html section, .ha-jd-html article { margin: 0 0 10px; }
+  .ha-jd-html table { border-collapse: collapse; margin: 0 0 10px; max-width: 100%; }
+  .ha-jd-html th, .ha-jd-html td { border: 1px solid #E2E8F0; padding: 6px 10px; font-size: 13.5px; text-align: left; }
+  .ha-jd-html th { background: #F8FAFC; font-weight: 600; }
+  .ha-jd-html hr { border: 0; border-top: 1px solid #E2E8F0; margin: 14px 0; }
+  .ha-jd-html blockquote { border-left: 3px solid #E2E8F0; margin: 0 0 10px; padding: 2px 0 2px 12px; color: #475569; }
+  .ha-jd-html pre, .ha-jd-html code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; background: #F1F5F9; border-radius: 6px; }
+  .ha-jd-html pre { padding: 10px 12px; overflow-x: auto; }
+  .ha-jd-html code { padding: 1px 5px; }
   .ha-jd-html > *:first-child { margin-top: 0; }
   .ha-jd-html > *:last-child { margin-bottom: 0; }
 
@@ -372,6 +437,9 @@ const styles = `
   .ha-cbtn-on-mail:hover { background: #EFF4FF; }
   .ha-cbtn-on-li { background: #0A66C2; border-color: #0A66C2; color: #fff; cursor: pointer; }
   .ha-cbtn-on-li:hover { background: #084d92; }
+  /* Outreach already sent — filled green so a contacted recruiter is obvious. */
+  .ha-cbtn-sent { background: #ECFDF5; border-color: #86EFAC; color: #047857; cursor: pointer; }
+  .ha-cbtn-sent:hover { background: #047857; color: #fff; }
 
   @media (max-width: 900px) {
     .ha-grid { grid-template-columns: 1fr; }

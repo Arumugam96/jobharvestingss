@@ -222,6 +222,7 @@ def _linkedin_to_unified(j: LinkedInScrapedJob) -> UnifiedJob:
         work_mode               = j.work_mode,
         source                  = "LinkedIn",
         company_url             = getattr(j, "company_url", ""),
+        company_size            = getattr(j, "company_size", ""),
         employment_type         = getattr(j, "employment_type", ""),
         job_type                = getattr(j, "employment_type", ""),
         domain_hint             = getattr(j, "industry_hint", ""),

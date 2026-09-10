@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
-import { X, RefreshCw, Copy, Check, Send, Sparkles, Link, Loader2, AlertCircle } from "lucide-react";
-import { generateOutreachEmail, sendOutreachEmail, ApiError } from "../api";
+import { X, RefreshCw, Copy, Check, Send, Sparkles, Link, Loader2, AlertCircle, CornerUpRight } from "lucide-react";
+import { generateOutreachEmail, generateFollowupEmail, sendOutreachEmail, getOutreachHistory, ApiError } from "../api";
 import OutreachBodyField from "./OutreachBodyField";
+import OutreachThread from "./OutreachThread";
 
 /* Recruiter outreach email composer. Opens from the Email icon on a Harvested
  * Jobs row (only when that row has a recruiter email). Generates a tone- and
@@ -63,7 +64,13 @@ const CLIENT_LABELS = {
   unknown: { label: "Unknown company", cls: "ecm-badge-unknown" },
 };
 
-export default function EmailComposeModal({ job = {}, onClose = () => {} }) {
+export default function EmailComposeModal({
+  job = {},
+  followup = false,
+  parentOutreachId = null,
+  onClose = () => {},
+  onSent = () => {},
+}) {
   const [tone, setTone] = useState("Formal");
   const [subject, setSubject] = useState("");
   const [body, setBody] = useState("");
@@ -72,6 +79,12 @@ export default function EmailComposeModal({ job = {}, onClose = () => {} }) {
   const [clientType, setClientType] = useState("");
   const [fallbackUsed, setFallbackUsed] = useState(false);
   const [deckUrl, setDeckUrl] = useState("");
+  // The prior outreach this follow-up threads onto (may be resolved server-side
+  // when the caller didn't pass an explicit parent).
+  const [resolvedParentId, setResolvedParentId] = useState(parentOutreachId);
+  // Set when an initial send is blocked as a duplicate — holds the existing send
+  // so the user can confirm a re-send.
+  const [duplicate, setDuplicate] = useState(null);
   // The posting's title + URL, so the body Preview can render the same bold blue
   // new-tab job-title link the delivered email gets.
   const [jobTitle, setJobTitle] = useState("");
@@ -83,6 +96,13 @@ export default function EmailComposeModal({ job = {}, onClose = () => {} }) {
   const [sent, setSent] = useState(false);
   const [copied, setCopied] = useState(false);
   const metaLoaded = useRef(false);
+
+  // Follow-up mode shows the previously sent email(s) first and only drafts a new
+  // follow-up once the user clicks "Generate follow-up" (draftStarted). Initial
+  // mode drafts immediately, so draftStarted starts true there.
+  const [history, setHistory] = useState([]);
+  const [historyLoading, setHistoryLoading] = useState(followup);
+  const [draftStarted, setDraftStarted] = useState(!followup);
 
   // Candidate recipient addresses for this job, labeled by origin to match the
   // table's Job/Recruiter split (emailScraped = the address on the job post,
@@ -114,7 +134,11 @@ export default function EmailComposeModal({ job = {}, onClose = () => {} }) {
     setGenerating(true);
     setError("");
     try {
-      const res = await generateOutreachEmail({ job_id: job.id, mode: nextTone, regenerate });
+      // Follow-up mode drafts from the prior outreach (server supplies the
+      // context) so it reads as a second-touch nudge, not a fresh introduction.
+      const res = followup
+        ? await generateFollowupEmail({ job_id: job.id, parent_outreach_id: parentOutreachId, mode: nextTone, regenerate })
+        : await generateOutreachEmail({ job_id: job.id, mode: nextTone, regenerate });
       setSubject(res.subject || "");
       setBody(res.body || "");
       setClientType(res.client_type || "");
@@ -122,6 +146,7 @@ export default function EmailComposeModal({ job = {}, onClose = () => {} }) {
       setDeckUrl(res.deck_url || "");
       setJobTitle(res.job_title || "");
       setJobUrl(res.job_url || "");
+      if (followup && res.parent_outreach_id) setResolvedParentId(res.parent_outreach_id);
       // Seed the editable From/To only on the first successful draft, so a user's
       // manual edits to those fields survive a tone change / regenerate.
       if (!metaLoaded.current) {
@@ -134,10 +159,36 @@ export default function EmailComposeModal({ job = {}, onClose = () => {} }) {
     } finally {
       setGenerating(false);
     }
-  }, [job.id]);
+  }, [job.id, followup, parentOutreachId]);
 
-  // Generate an initial draft when the modal opens.
-  useEffect(() => { generate("Formal", false); }, [generate]);
+  // On open: initial mode drafts immediately; follow-up mode instead loads the
+  // already-sent email thread and waits for the user to ask for a new draft.
+  useEffect(() => {
+    if (!followup) { generate("Formal", false); return undefined; }
+    let cancelled = false;
+    setHistoryLoading(true);
+    (async () => {
+      try {
+        const res = await getOutreachHistory({ job_id: job.id });
+        if (cancelled) return;
+        const emails = (res.items || [])
+          .filter((m) => m.channel === "email" && m.status === "sent")
+          .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+        setHistory(emails);
+      } catch {
+        // non-fatal — the user can still generate a follow-up
+      } finally {
+        if (!cancelled) setHistoryLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [followup, job.id, generate]);
+
+  // Kick off the follow-up draft on demand, then reveal the editable compose UI.
+  const startFollowup = () => {
+    setDraftStarted(true);
+    generate("Formal", false);
+  };
 
   // Escape closes the modal.
   useEffect(() => {
@@ -158,9 +209,10 @@ export default function EmailComposeModal({ job = {}, onClose = () => {} }) {
     setTimeout(() => setCopied(false), 1600);
   };
 
-  const handleSend = async () => {
+  const handleSend = async (force = false) => {
     setSending(true);
     setError("");
+    setDuplicate(null);
     try {
       const res = await sendOutreachEmail({
         job_id: job.id,
@@ -171,10 +223,16 @@ export default function EmailComposeModal({ job = {}, onClose = () => {} }) {
         tone,
         client_type: clientType,
         fallback_used: fallbackUsed,
+        parent_outreach_id: followup ? (resolvedParentId || parentOutreachId) : null,
+        force,
       });
       if (res.status === "sent") {
         setSent(true);
+        onSent();                 // let the caller refresh the DB-backed icon state
         setTimeout(onClose, 900);
+      } else if (res.status === "duplicate") {
+        // An initial email was already sent to this recruiter/job — ask to confirm.
+        setDuplicate(res.existing || {});
       } else {
         setError(res.error || "The email could not be sent.");
       }
@@ -194,13 +252,40 @@ export default function EmailComposeModal({ job = {}, onClose = () => {} }) {
       <div className="ecm-card" role="dialog" aria-modal="true" aria-label="Compose outreach email">
         <div className="ecm-head">
           <span className="ecm-title">
-            Compose email
+            {followup ? "Compose follow-up" : "Compose email"}
+            {followup && (
+              <span className="ecm-badge" style={{ background: "#FFF7EC", color: "#92580B", display: "inline-flex", alignItems: "center", gap: 4 }}>
+                <CornerUpRight size={11} /> Follow-up
+              </span>
+            )}
             {badge && <span className={`ecm-badge ${badge.cls}`}>{badge.label}</span>}
           </span>
           <button className="ecm-close" onClick={onClose} aria-label="Close"><X size={17} /></button>
         </div>
 
         <div className="ecm-body">
+          {followup && (
+            <div className="ecm-field">
+              <span className="ecm-label">Previously sent</span>
+              {/* Collapsible cards — click one to read it (opens from above); they
+                  all collapse once the user starts a draft (draftStarted). */}
+              <OutreachThread messages={history} loading={historyLoading}
+                emptyText="No previously sent email found for this job."
+                collapsible forceCollapsed={draftStarted} />
+            </div>
+          )}
+          {/* The compose editor. In initial mode it's shown immediately; in follow-up
+              mode it stays collapsed until "Generate follow-up" flips draftStarted,
+              then reveals from below. */}
+          <div
+            style={{
+              display: "flex", flexDirection: "column", gap: 14,
+              maxHeight: (!followup || draftStarted) ? 2000 : 0,
+              opacity: (!followup || draftStarted) ? 1 : 0,
+              overflow: "hidden",
+              transition: "max-height .4s ease, opacity .3s ease .05s",
+            }}
+          >
           <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
             <div className="ecm-field" style={{ flex: 1, minWidth: 220 }}>
               <span className="ecm-label">From</span>
@@ -261,25 +346,54 @@ export default function EmailComposeModal({ job = {}, onClose = () => {} }) {
           {fallbackUsed && !error && (
             <div className="ecm-note ecm-note-warn"><AlertCircle size={14} /> AI generation was unavailable — a standard template was used. Please review before sending.</div>
           )}
+          {duplicate && (
+            <div className="ecm-note ecm-note-warn" style={{ alignItems: "center" }}>
+              <AlertCircle size={14} />
+              <span>
+                An initial email was already sent to this recruiter
+                {duplicate.created_at ? ` on ${new Date(duplicate.created_at).toLocaleDateString()}` : ""}.
+                Send it again?
+              </span>
+              <button className="ecm-btn ecm-btn-ghost" style={{ marginLeft: "auto" }}
+                onClick={() => handleSend(true)} disabled={sending}>
+                Send anyway
+              </button>
+            </div>
+          )}
           {error && <div className="ecm-note ecm-note-err"><AlertCircle size={14} /> {error}</div>}
-          {sent && <div className="ecm-note" style={{ background: "#ECFDF5", border: "1px solid #A7F3D0", color: "#047857" }}><Check size={14} /> Email sent.</div>}
+          {sent && <div className="ecm-note" style={{ background: "#ECFDF5", border: "1px solid #A7F3D0", color: "#047857" }}><Check size={14} /> {followup ? "Follow-up sent." : "Email sent."}</div>}
+          </div>
         </div>
 
         <div className="ecm-foot">
-          <div className="ecm-foot-left">
-            <button className="ecm-btn ecm-btn-ghost" onClick={() => generate(tone, true)} disabled={generating || sending}>
-              <RefreshCw size={14} className={generating ? "ecm-spin" : undefined} /> Regenerate
-            </button>
-            <button className="ecm-btn ecm-btn-ghost" onClick={copyAll} disabled={generating || !body} title={copied ? "Copied" : "Copy"}>
-              {copied ? <Check size={14} /> : <Copy size={14} />} {copied ? "Copied" : "Copy"}
-            </button>
-          </div>
-          <div className="ecm-foot-right">
-            <button className="ecm-btn ecm-btn-plain" onClick={onClose}>Cancel</button>
-            <button className="ecm-btn ecm-btn-primary" onClick={handleSend} disabled={!canSend}>
-              {sending ? <Loader2 size={14} className="ecm-spin" /> : <Send size={14} />} {sending ? "Sending…" : "Send email"}
-            </button>
-          </div>
+          {followup && !draftStarted ? (
+            <>
+              <div className="ecm-foot-left" />
+              <div className="ecm-foot-right">
+                <button className="ecm-btn ecm-btn-plain" onClick={onClose}>Cancel</button>
+                <button className="ecm-btn ecm-btn-primary" onClick={startFollowup} disabled={generating || historyLoading}>
+                  {generating ? <Loader2 size={14} className="ecm-spin" /> : <Sparkles size={14} />} Generate follow-up
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="ecm-foot-left">
+                <button className="ecm-btn ecm-btn-ghost" onClick={() => generate(tone, true)} disabled={generating || sending}>
+                  <RefreshCw size={14} className={generating ? "ecm-spin" : undefined} /> Regenerate
+                </button>
+                <button className="ecm-btn ecm-btn-ghost" onClick={copyAll} disabled={generating || !body} title={copied ? "Copied" : "Copy"}>
+                  {copied ? <Check size={14} /> : <Copy size={14} />} {copied ? "Copied" : "Copy"}
+                </button>
+              </div>
+              <div className="ecm-foot-right">
+                <button className="ecm-btn ecm-btn-plain" onClick={onClose}>Cancel</button>
+                <button className="ecm-btn ecm-btn-primary" onClick={() => handleSend(false)} disabled={!canSend}>
+                  {sending ? <Loader2 size={14} className="ecm-spin" /> : <Send size={14} />} {sending ? "Sending…" : followup ? "Send follow-up" : "Send email"}
+                </button>
+              </div>
+            </>
+          )}
         </div>
       </div>
     </div>

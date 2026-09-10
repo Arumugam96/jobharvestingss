@@ -75,9 +75,19 @@ def format_job_description(text: str) -> str:
 
 # Structural/formatting tags kept for display. Everything else is unwrapped
 # (text preserved, tag dropped) or, for dangerous containers, decomposed.
+# Deliberately broad: the LLM fallback is prompted to reproduce LinkedIn's
+# on-page rendering of the description as faithfully as possible (any layout
+# tags), so generic containers, all heading levels, tables, quotes and
+# separators must survive sanitization. Safety comes from what is DROPPED
+# (scripts/styles/iframes/etc. below) and from stripping every attribute
+# except a[href] — not from a minimal tag set. DOMPurify re-sanitizes in the
+# frontend as defense-in-depth.
 _ALLOWED_HTML_TAGS = {
     "p", "br", "ul", "ol", "li", "strong", "b", "em", "i", "u",
-    "h1", "h2", "h3", "h4", "span", "a",
+    "h1", "h2", "h3", "h4", "h5", "h6", "span", "a",
+    "div", "section", "article", "table", "thead", "tbody", "tfoot", "tr",
+    "th", "td", "blockquote", "pre", "code", "hr", "sub", "sup", "small",
+    "dl", "dt", "dd",
 }
 _ALLOWED_HTML_ATTRS: dict[str, set[str]] = {"a": {"href", "target", "rel"}}
 _DROP_HTML_CONTAINERS = [

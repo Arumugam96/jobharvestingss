@@ -1,13 +1,15 @@
 import React, { useState, useEffect, useCallback } from "react";
-import { X, RefreshCw, Copy, Check, Sparkles, AlertCircle } from "lucide-react";
-import { generateLinkedinMessage, ApiError } from "../api";
+import { X, RefreshCw, Copy, Check, Sparkles, AlertCircle, Send } from "lucide-react";
+import { generateLinkedinMessage, logLinkedinSent, ApiError } from "../api";
 import OutreachBodyField from "./OutreachBodyField";
 
 /* LinkedIn outreach message generator. Opens from the LinkedIn icon on a
  * Harvested Jobs row (only when that row has a LinkedIn URL). Generates a single
  * generic message via the LLM (POST /outreach/generate-linkedin); the user can
- * edit, regenerate, and copy it. Copy-only — no send, no attachment. Styling
- * mirrors the self-contained-overlay pattern with an `lmm-` prefix. */
+ * edit, regenerate, and copy it. There is no programmatic LinkedIn send, so after
+ * pasting/sending the message in LinkedIn the user clicks "Mark as sent" to record
+ * a channel="linkedin" outreach row (POST /outreach/log-linkedin) — that's what
+ * turns the row's LinkedIn icon green. Styling uses the `lmm-` prefix. */
 
 const styles = `
 .lmm-overlay { position: fixed; inset: 0; background: rgba(15,23,42,.45); display: flex; align-items: center; justify-content: center; padding: 24px; z-index: 1000; }
@@ -38,12 +40,14 @@ const styles = `
 @media (max-width: 640px) { .lmm-overlay { padding: 0; align-items: flex-end; } .lmm-card { max-width: 100%; max-height: 100vh; height: 100%; border-radius: 0; } }
 `;
 
-export default function LinkedInMessageModal({ job = {}, onClose = () => {} }) {
+export default function LinkedInMessageModal({ job = {}, onClose = () => {}, onLogged = () => {} }) {
   const [message, setMessage] = useState("");
   const [fallbackUsed, setFallbackUsed] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
+  const [marking, setMarking] = useState(false);
+  const [marked, setMarked] = useState(false);
 
   const generate = useCallback(async (regenerate) => {
     setGenerating(true);
@@ -73,6 +77,27 @@ export default function LinkedInMessageModal({ job = {}, onClose = () => {} }) {
     setTimeout(() => setCopied(false), 1600);
   };
 
+  // No programmatic LinkedIn transport — this records that the user sent the
+  // message manually, so the row icon reflects a real, DB-backed sent state.
+  const markSent = async () => {
+    setMarking(true);
+    setError("");
+    try {
+      const res = await logLinkedinSent({ job_id: job.id, message });
+      if (res.status === "sent") {
+        setMarked(true);
+        onLogged();
+        setTimeout(onClose, 900);
+      } else {
+        setError("Could not record the LinkedIn message as sent.");
+      }
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not record the LinkedIn message as sent.");
+    } finally {
+      setMarking(false);
+    }
+  };
+
   return (
     <div className="lmm-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
       <style>{styles}</style>
@@ -98,15 +123,21 @@ export default function LinkedInMessageModal({ job = {}, onClose = () => {} }) {
             <div className="lmm-note lmm-note-warn"><AlertCircle size={14} /> AI generation was unavailable — a standard template was used.</div>
           )}
           {error && <div className="lmm-note lmm-note-err"><AlertCircle size={14} /> {error}</div>}
+          {marked && <div className="lmm-note" style={{ background: "#ECFDF5", border: "1px solid #A7F3D0", color: "#047857" }}><Check size={14} /> Marked as sent.</div>}
         </div>
 
         <div className="lmm-foot">
-          <button className="lmm-btn lmm-btn-ghost" onClick={() => generate(true)} disabled={generating}>
+          <button className="lmm-btn lmm-btn-ghost" onClick={() => generate(true)} disabled={generating || marking}>
             <RefreshCw size={14} className={generating ? "lmm-spin" : undefined} /> Regenerate
           </button>
-          <button className="lmm-btn lmm-btn-primary" onClick={copy} disabled={generating || !message}>
-            {copied ? <Check size={14} /> : <Copy size={14} />} {copied ? "Copied" : "Copy message"}
-          </button>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button className="lmm-btn lmm-btn-ghost" onClick={copy} disabled={generating || !message}>
+              {copied ? <Check size={14} /> : <Copy size={14} />} {copied ? "Copied" : "Copy"}
+            </button>
+            <button className="lmm-btn lmm-btn-primary" onClick={markSent} disabled={generating || marking || marked || !message}>
+              {marking ? <RefreshCw size={14} className="lmm-spin" /> : <Send size={14} />} {marking ? "Saving…" : "Mark as sent"}
+            </button>
+          </div>
         </div>
       </div>
     </div>

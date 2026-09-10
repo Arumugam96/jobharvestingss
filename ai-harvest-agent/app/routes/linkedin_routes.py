@@ -120,6 +120,7 @@ def _to_scraped_job_dict(j: LinkedInScrapedJob) -> dict[str, Any]:
         "skills":                 j.skills,
         "work_mode":              j.work_mode,
         "company_url":            j.company_url,
+        "company_size":           j.company_size,
         "employment_type":        j.employment_type,
         "job_poster_name":        j.job_poster_name,
         "job_poster_designation": j.job_poster_designation,

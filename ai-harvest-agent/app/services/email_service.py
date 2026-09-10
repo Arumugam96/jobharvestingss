@@ -1,23 +1,28 @@
-"""SMTP delivery for OTP and harvest-report emails.
+"""Mailjet delivery for OTP, outreach, and harvest-report emails.
 
-Uses the stdlib ``smtplib`` (run off the event loop via ``asyncio.to_thread``)
-rather than a third-party async SMTP client, since the project has no such
-dependency today and this keeps the login flow dependency-free. AuthService
-depends on ``send_otp``; the harvest report flow (see
-app/services/harvest_notification_service.py) depends on
-``send_email_with_attachments`` — both share the same SMTP transport/settings.
+Sends over the Mailjet Send API v3.1 (POST https://api.mailjet.com/v3.1/send) with
+HTTP Basic auth (public/private key), using the app-wide async ``httpx`` idiom (see
+apollo_client.py / llm_service.py) — no SMTP, no ``asyncio.to_thread``, no new
+dependency. AuthService depends on ``send_otp``; the outreach flow
+(app/routes/outreach_routes.py) and the harvest report flow
+(app/services/harvest_notification_service.py) depend on
+``send_email_with_attachments`` — both share the same Mailjet transport/settings.
+
+The public method signatures are unchanged from the previous SMTP implementation so
+every call site (and tests/conftest.py::MockEmailSender) keeps working; only the
+transport differs. ``send_email_with_attachments`` still returns a stable
+``Message-ID`` string persisted as EmailOutreachORM.provider_message_id.
 """
 from __future__ import annotations
 
-import asyncio
+import base64
 import html as html_lib
 import mimetypes
 import re
-import smtplib
-from email.message import EmailMessage
-from email.utils import formataddr, parseaddr
+from email.utils import formataddr, make_msgid, parseaddr
 from pathlib import Path
 
+import httpx
 import structlog
 
 from app.config import Settings
@@ -272,8 +277,69 @@ def _load_logo_bytes() -> bytes | None:
         return None
 
 
+def _shared_identity_from(settings: Settings) -> dict:
+    """The shared harvest-agent From used by OTP + outreach, as a Mailjet
+    ``{"Email","Name"}`` object. When SMTP_FROM_EMAIL is a real address it's used
+    as-is; when it's a bare display name (e.g. "JOB HARVEST AGENT") that name is
+    shown and the mail is sent from the authenticated mailbox (SMTP_USERNAME).
+    Mailjet's From.Email must be a real, account-validated address — never a bare
+    display name (that's what caused the "'JOB' is an invalid email address" 400)."""
+    configured = (settings.smtp_from_email or "").strip()
+    username = (settings.smtp_username or "").strip()
+    if "@" in configured:
+        name, addr = parseaddr(configured)
+        return {"Email": addr or username, "Name": name or "SS"}
+    # Bare display name (or empty) → send from the authenticated mailbox and show
+    # the display name as the sender name.
+    return {"Email": username or configured, "Name": configured or "SS"}
+
+
+def _parse_from(from_header: str, fallback_email: str) -> dict:
+    """Turn a resolved RFC From header ("Name <addr>" or "addr") into a Mailjet
+    ``{"Email","Name"}`` object (harvest report — configured sender identity).
+    Falls back to ``fallback_email`` unless a real ``@`` address was parsed, so a
+    bare display name never leaks into From.Email."""
+    name, addr = parseaddr(from_header or "")
+    email = addr if "@" in (addr or "") else fallback_email
+    out = {"Email": email}
+    if name:
+        out["Name"] = name
+    return out
+
+
+def _build_attachments(
+    attachment_paths: list[str],
+    attachment_blobs: list[tuple[str, bytes]],
+    log,
+) -> list[dict]:
+    """Base64-encode file-path and in-memory (filename, bytes) attachments into the
+    Mailjet v3.1 ``Attachments`` shape."""
+    out: list[dict] = []
+    for raw_path in attachment_paths:
+        path = Path(raw_path)
+        log.debug("email_attachment_reading", path=str(path))
+        data = path.read_bytes()
+        maintype, subtype = _guess_attachment_type(path)
+        out.append({
+            "ContentType": f"{maintype}/{subtype}",
+            "Filename": path.name,
+            "Base64Content": base64.b64encode(data).decode("ascii"),
+        })
+    for filename, data in attachment_blobs:
+        maintype, subtype = _guess_attachment_type(Path(filename))
+        out.append({
+            "ContentType": f"{maintype}/{subtype}",
+            "Filename": filename,
+            "Base64Content": base64.b64encode(data).decode("ascii"),
+        })
+    return out
+
+
 class EmailSender:
-    """SMTP abstraction. AuthService only ever calls ``send_otp``."""
+    """Mailjet transport. AuthService only ever calls ``send_otp``; the outreach and
+    harvest-report flows call ``send_email_with_attachments``."""
+
+    _MAILJET_URL = "https://api.mailjet.com/v3.1/send"
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
@@ -284,33 +350,29 @@ class EmailSender:
         log.debug("otp_email_build_start")
         logo_bytes = _load_logo_bytes()
 
-        message = EmailMessage()
-        message["Subject"] = OTP_EMAIL_SUBJECT
-        message["From"] = f"SS {settings.smtp_from_email}"
-        message["To"] = recipient
-
-        # multipart/alternative: plain-text fallback first, then the HTML body.
-        message.set_content(render_otp_email(otp, settings.otp_expiry_seconds))
-        message.add_alternative(
-            render_otp_email_html(
+        # multipart/alternative: TextPart is the plain-text fallback, HTMLPart the
+        # styled body. From is the shared "SS" identity (same as before).
+        message: dict = {
+            "From": _shared_identity_from(settings),
+            "To": [{"Email": recipient}],
+            "Subject": OTP_EMAIL_SUBJECT,
+            "TextPart": render_otp_email(otp, settings.otp_expiry_seconds),
+            "HTMLPart": render_otp_email_html(
                 otp, settings.otp_expiry_seconds, has_logo=logo_bytes is not None
             ),
-            subtype="html",
-        )
+        }
 
-        # Embed the logo as an inline (CID) image related to the HTML part, so
-        # it renders inline rather than being blocked as a remote image.
+        # Embed the logo as an inline (CID) image so it renders inline rather than
+        # being blocked as a remote image — the HTML references cid:ss-logo.
         if logo_bytes is not None:
-            html_part = message.get_payload()[-1]
-            html_part.add_related(
-                logo_bytes,
-                maintype="image",
-                subtype="jpeg",
-                cid=f"<{LOGO_CID}>",
-                filename="sight_spectrum_logo.jpg",
-            )
+            message["InlinedAttachments"] = [{
+                "ContentType": "image/jpeg",
+                "Filename": "sight_spectrum_logo.jpg",
+                "ContentID": LOGO_CID,
+                "Base64Content": base64.b64encode(logo_bytes).decode("ascii"),
+            }]
 
-        await asyncio.to_thread(self._send_sync, message, log)
+        await self._send_via_mailjet(message, log)
         log.info("otp_email_sent")
 
     async def send_email_with_attachments(
@@ -326,135 +388,126 @@ class EmailSender:
         html_body: str | None = None,
         job_title: str = "",
         job_url: str = "",
-    ) -> None:
-        """Generic SMTP send with attachments — same transport/credentials as
+        custom_id: str | None = None,
+    ) -> str | None:
+        """Generic Mailjet send with attachments — same transport/credentials as
         send_otp. Attachments come as file paths and/or as in-memory
         (filename, bytes) blobs; the harvest report is generated from the DB
         in memory and attached as a blob.
 
+        Returns a stable ``Message-ID`` string stamped on the message (so outreach
+        sends can persist a provider identifier for follow-up threading); callers
+        that don't need it can ignore the return. Raises on a Mailjet failure so the
+        caller can record status="failed".
+
         Passing `from_email` marks this as an outreach send: the visible From
-        becomes the shared "harvest agent" identity ("SS <SMTP_FROM_EMAIL>", the
-        same sender the OTP email uses), and `from_email`/`reply_to` are set as
-        the Reply-To so recruiter replies reach the salesperson. Callers that omit
-        `from_email` (the harvest report) send under the configured sender
-        identity resolved by _resolve_sender.
+        becomes the shared "harvest agent" identity (the same "SS" sender the OTP
+        email uses), and `from_email`/`reply_to` are set as the Reply-To so
+        recruiter replies reach the salesperson. Callers that omit `from_email`
+        (the harvest report) send under the configured sender identity resolved by
+        _resolve_sender.
 
         HTML alternative part: pass `html_body` to supply a fully-formed HTML
         body (the harvest report renders its own) — `body` stays as the plain-text
         fallback. `as_html=True` instead derives the HTML from `body` (outreach:
         bold, clickable mailto reach-out line, and — when `job_title`/`job_url` are
         given — a bold blue job-title link that opens the posting in a new tab).
-        With neither, the email is sent text-only."""
+        With neither, the email is sent text-only.
+
+        `custom_id` (outreach) is echoed by Mailjet in its delivery-event webhooks
+        so a send row can be matched back to its events; passing it also turns on
+        open + click tracking."""
+        settings = self._settings
         paths = attachment_paths or []
         blobs = attachment_blobs or []
         log = logger.bind(recipients=recipients, subject=subject, attachments=len(paths) + len(blobs))
         log.debug("email_with_attachments_start")
-        await asyncio.to_thread(
-            self._send_with_attachments_sync,
-            recipients, subject, body, paths, blobs, from_email, reply_to, as_html, html_body,
-            job_title, job_url, log,
-        )
-        log.info("email_with_attachments_sent")
 
-    def _send_with_attachments_sync(
-        self,
-        recipients: list[str],
-        subject: str,
-        body: str,
-        attachment_paths: list[str],
-        attachment_blobs: list[tuple[str, bytes]],
-        from_email: str | None,
-        reply_to: str | None,
-        as_html: bool,
-        html_body: str | None,
-        job_title: str,
-        job_url: str,
-        log,
-    ) -> None:
-        # Sender identity:
-        #  * Outreach (caller passes `from_email`) sends under the shared
-        #    "harvest agent" identity exactly like the OTP email — From is
-        #    "SS <SMTP_FROM_EMAIL>" and the envelope is left for the provider to
-        #    derive. The sender's own address becomes the Reply-To below, so the
-        #    recruiter's reply still reaches the salesperson.
-        #  * Harvest report (no `from_email`) uses the configured sender identity
-        #    (see _resolve_sender — this is the fix for the old "Hariprasath").
+        # Sender / Reply-To identity (mirrors the previous SMTP behavior):
+        #  * Outreach (caller passes `from_email`) → shared "SS" identity; the
+        #    sender's own address becomes the Reply-To so the recruiter's reply
+        #    still reaches the salesperson.
+        #  * Harvest report (no `from_email`) → configured sender identity
+        #    (see _resolve_sender).
         if from_email:
-            from_header, envelope_from = f"SS {self._settings.smtp_from_email}", None
+            sender = _shared_identity_from(settings)
         else:
-            from_header, envelope_from = _resolve_sender(self._settings)
-        message = EmailMessage()
-        message["Subject"] = subject
-        message["From"] = from_header
-        if reply_to or from_email:
-            message["Reply-To"] = reply_to or from_email
-        message["To"] = ", ".join(recipients)
-        message.set_content(body)
-        if as_html:
-            # Add the HTML alternative before any attachments so the MIME tree is
-            # multipart/mixed[ multipart/alternative[text, html], attachments… ].
-            message.add_alternative(_outreach_body_to_html(body, job_title, job_url), subtype="html")
+            from_header, envelope_from = _resolve_sender(settings)
+            sender = _parse_from(from_header, envelope_from)
 
-        for raw_path in attachment_paths:
-            path = Path(raw_path)
-            log.debug("email_attachment_reading", path=str(path))
-            data = path.read_bytes()
-            maintype, subtype = _guess_attachment_type(path)
-            message.add_attachment(data, maintype=maintype, subtype=subtype, filename=path.name)
-            log.debug(
-                "email_attachment_attached",
-                path=str(path),
-                bytes=len(data),
-                content_type=f"{maintype}/{subtype}",
-            )
+        # Stamp a Message-ID so outreach sends have a stable identifier to persist
+        # (used for follow-up threading). Derive the domain from the configured
+        # sender so it looks legitimate to receiving MTAs.
+        sender_addr = parseaddr(settings.smtp_from_email or "")[1]
+        msgid_domain = sender_addr.split("@")[-1] if "@" in sender_addr else None
+        message_id = make_msgid(domain=msgid_domain) if msgid_domain else make_msgid()
 
-        for filename, data in attachment_blobs:
-            maintype, subtype = _guess_attachment_type(Path(filename))
-            message.add_attachment(data, maintype=maintype, subtype=subtype, filename=filename)
-            log.debug(
-                "email_attachment_attached",
-                filename=filename,
-                bytes=len(data),
-                content_type=f"{maintype}/{subtype}",
-            )
+        message: dict = {
+            "From": sender,
+            "To": [{"Email": r} for r in recipients],
+            "Subject": subject,
+            "TextPart": body,
+            "Headers": {"Message-ID": message_id},
+        }
+        reply_addr = (reply_to or from_email or "").strip()
+        if reply_addr:
+            message["ReplyTo"] = {"Email": reply_addr}
 
-        # envelope_from is a real address for the harvest report, or None for
-        # outreach (provider derives it from the From, exactly like the OTP send).
-        self._send_sync(message, log, envelope_from)
+        # HTML alternative: a pre-rendered report body wins; otherwise derive the
+        # outreach HTML from `body`. With neither, the mail is text-only.
+        if html_body is not None:
+            message["HTMLPart"] = html_body
+        elif as_html:
+            message["HTMLPart"] = _outreach_body_to_html(body, job_title, job_url)
 
-    def _send_sync(self, message: EmailMessage, log=None, from_addr: str | None = None) -> None:
+        attachments = _build_attachments(paths, blobs, log)
+        if attachments:
+            message["Attachments"] = attachments
+
+        # Outreach only: correlate delivery events to the send row + track opens/clicks.
+        if custom_id:
+            message["CustomID"] = custom_id
+            message["TrackOpens"] = "enabled"
+            message["TrackClicks"] = "enabled"
+
+        await self._send_via_mailjet(message, log)
+        log.info("email_with_attachments_sent")
+        return message_id
+
+    async def _send_via_mailjet(self, message: dict, log=None) -> dict:
+        """POST a single v3.1 message to the Mailjet Send API. Raises on a transport
+        error or a non-success message status so callers can record the failure."""
         log = log or logger
         settings = self._settings
-        log.debug(
-            "smtp_connecting",
-            host=settings.smtp_host,
-            port=settings.smtp_port,
-            use_tls=settings.smtp_use_tls,
-        )
-        try:
-            with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=settings.smtp_timeout_seconds) as server:
-                log.debug("smtp_connected")
-                if settings.smtp_use_tls:
-                    server.starttls()
-                    log.debug("smtp_starttls_ok")
-                if settings.smtp_username:
-                    log.debug("smtp_login_attempt", username=settings.smtp_username)
-                    server.login(settings.smtp_username, settings.smtp_password)
-                    log.debug("smtp_login_ok")
-                log.debug("smtp_sending_message", to=message["To"])
-                if from_addr:
-                    server.send_message(message, from_addr=from_addr)
-                else:
-                    server.send_message(message)
-                log.debug("smtp_send_message_ok")
-        except Exception:
-            log.exception(
-                "smtp_send_failed",
-                host=settings.smtp_host,
-                port=settings.smtp_port,
-                username=settings.smtp_username,
+        if not settings.mailjet_api_key or not settings.mailjet_secret_key:
+            raise RuntimeError(
+                "Mailjet credentials are not configured "
+                "(set MJ_APIKEY_PUBLIC / MJ_APIKEY_PRIVATE)."
             )
+        payload = {"Messages": [message]}
+        log.debug("mailjet_sending", to=message.get("To"))
+        try:
+            async with httpx.AsyncClient(timeout=settings.mailjet_timeout_seconds) as client:
+                resp = await client.post(
+                    self._MAILJET_URL,
+                    json=payload,
+                    auth=(settings.mailjet_api_key, settings.mailjet_secret_key),
+                )
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            log.error("mailjet_http_error", status=exc.response.status_code, body=exc.response.text[:500])
             raise
+        except httpx.HTTPError as exc:
+            log.error("mailjet_transport_error", error=str(exc))
+            raise
+
+        data = resp.json()
+        result = (data.get("Messages") or [{}])[0]
+        if str(result.get("Status", "")).lower() != "success":
+            log.error("mailjet_message_rejected", result=result)
+            raise RuntimeError(f"Mailjet rejected the message: {result}")
+        log.debug("mailjet_send_ok")
+        return result
 
 
 def _guess_attachment_type(path: Path) -> tuple[str, str]:

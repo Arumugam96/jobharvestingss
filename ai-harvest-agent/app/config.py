@@ -5,6 +5,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -182,6 +183,17 @@ class Settings(BaseSettings):
     smtp_use_tls: bool = True
     smtp_timeout_seconds: int = 60
     outreach_deck_url: str = ""
+
+    # ── Mailjet (transactional email transport — replaces the SMTP send path) ─────
+    # All mail (OTP, outreach, harvest report) is delivered via the Mailjet Send API
+    # v3.1. Credentials accept the Mailjet-native env names used by check_mailjet.py
+    # (MJ_APIKEY_PUBLIC / MJ_APIKEY_PRIVATE) as well as MAILJET_* aliases.
+    mailjet_api_key: str = Field(default="", validation_alias=AliasChoices("MJ_APIKEY_PUBLIC", "MAILJET_API_KEY"))
+    mailjet_secret_key: str = Field(default="", validation_alias=AliasChoices("MJ_APIKEY_PRIVATE", "MAILJET_SECRET_KEY"))
+    mailjet_timeout_seconds: int = 30
+    # Shared secret embedded in the Mailjet event-webhook URL (?token=…) so only
+    # Mailjet's delivery-event callbacks are accepted. Empty disables the check.
+    mailjet_webhook_token: str = ""
 
     # ── CORS ─────────────────────────────────────────────────────────────────────
     cors_origins: str = "http://localhost:3000,http://localhost:8080"

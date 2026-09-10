@@ -123,6 +123,38 @@ class OutreachService:
         subject, body = outreach_prompts.render_email_fallback(client_type, job, sender_email, deck_url)
         return EmailDraft(subject=subject, body=body, fallback_used=True, meta=meta)
 
+    async def generate_followup_email(
+        self, job: dict, client_type: str, tone: str,
+        prior_subject: str = "", prior_body: str = "", prior_sent_at: str = "",
+        regenerate: bool = False, sender_email: str = "", deck_url: str = "",
+    ) -> EmailDraft:
+        """Draft a follow-up (second-touch) email that references the prior
+        outreach instead of re-introducing Sightspectrum. Reuses the same
+        deterministic closing (append_closing) and JSON-parsing path as
+        generate_email; the follow-up tone/structure live in the follow-up
+        system prompt. The subject is reply-prefixed from the prior subject so it
+        reads as the same thread. Falls back to render_followup_fallback on any
+        LLM failure so the send flow still works."""
+        prompt = outreach_prompts.build_followup_email_prompt(
+            client_type, tone, job, prior_subject, prior_body, prior_sent_at, sender_email,
+        )
+        if regenerate:
+            prompt += "\n\nProduce a distinctly different variation from any previous version."
+
+        text, meta = await self._complete(prompt, outreach_prompts.FOLLOWUP_SYSTEM_PROMPT, json_mode=True)
+        if meta.success and text:
+            parsed = self._parse_email_json(text)
+            if parsed:
+                _, pitch = parsed
+                subject = outreach_prompts.build_followup_subject(prior_subject, job)
+                body = outreach_prompts.append_closing(pitch, sender_email, deck_url)
+                return EmailDraft(subject=subject, body=body, fallback_used=False, meta=meta)
+            meta.success = False
+            meta.error_message = meta.error_message or "unparseable LLM JSON"
+
+        subject, body = outreach_prompts.render_followup_fallback(job, prior_subject, sender_email, deck_url)
+        return EmailDraft(subject=subject, body=body, fallback_used=True, meta=meta)
+
     @staticmethod
     def _parse_email_json(text: str) -> tuple[str, str] | None:
         try:

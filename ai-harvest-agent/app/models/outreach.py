@@ -28,6 +28,18 @@ class EmailOutreachORM(Base):
     # (mirrors LlmCallORM.job_url's rationale).
     job_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     recruiter_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    # Outreach channel: "email" | "linkedin". Email is sent over SMTP; LinkedIn is
+    # logged when the user manually marks a copied message as sent (no programmatic
+    # LinkedIn transport exists).
+    channel: Mapped[str] = mapped_column(String(20), nullable=False, default="email")
+    # "initial" (first contact) | "followup" (a nudge referencing an earlier send).
+    outreach_kind: Mapped[str] = mapped_column(String(20), nullable=False, default="initial")
+    # Self-referential soft link to the outreach this one follows up. A thread is a
+    # root row (parent NULL) plus its descendants — supports arbitrary follow-up
+    # depth without a hard-coded single follow-up column.
+    parent_outreach_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    # The email Message-ID header captured at send time (SMTP), when available.
+    provider_message_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     company: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     # Which audience template drove the copy: "active" | "new" | "unknown"
     # (see app/services/active_clients.py::classify_client).
@@ -44,9 +56,24 @@ class EmailOutreachORM(Base):
     # signal captured at generation time and echoed here for the send record.
     llm_generated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     fallback_used: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    # "sent" | "failed" — SMTP delivery outcome.
+    # "sent" | "failed" — the send-time transport outcome (accepted by Mailjet or
+    # not). Post-send delivery is tracked separately in delivery_status below.
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="sent")
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     # The logged-in user who triggered the send (AuthenticatedUser.email).
     sent_by: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    # ── Delivery engagement (updated by Mailjet event webhooks) ─────────────────
+    # Furthest-along delivery state seen from Mailjet's event callbacks:
+    #   "sent" (accepted) → "delivered" → "opened" → "clicked", or a terminal
+    #   "bounced" | "blocked" | "spam". NULL for LinkedIn rows and email rows with
+    #   no events yet — the UI then falls back to the send `status` (sent/failed).
+    # See app/routes/outreach_routes.py::mailjet_events. Correlated via CustomID
+    # (the row id) set on the Mailjet send.
+    delivery_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    opened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    bounced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Reserved for the later inbound-reply-tracking phase — no writer yet.
+    replied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

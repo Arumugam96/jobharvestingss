@@ -8,7 +8,6 @@ import {
   getHarvestConfig, saveHarvestConfig, runHarvestAgent, getHarvestStatus,
   getRunHistory, getRunHistoryEntry, getActiveRun, setupLinkedinSession, setupNaukriSession, ApiError,
 } from "./api";
-import Sidebar from "./components/Sidebar";
 import LiveBrowserView from "./components/LiveBrowserView";
 import StopHarvestButton from "./components/StopHarvestModal";
 import useCountUp from "./useCountUp";
@@ -493,7 +492,10 @@ export default function RuleEngineConfig({
   const needsLogin = runState === "running" && /log ?in/i.test(runMessage || "");
 
   return (
-    <div className="rec-root">
+    // Rendered inside the shared AppLayout (ha-root → Sidebar → Outlet), so this
+    // screen no longer draws its own root wrapper or Sidebar — just its main
+    // column (rec-main is flex:1, so it fills the space beside the shared nav).
+    <>
       <style>{styles}</style>
 
       {liveViewSource && (
@@ -506,10 +508,6 @@ export default function RuleEngineConfig({
           onClose={() => setLiveViewSource(null)}
         />
       )}
-
-      {/* Sidebar — shared component (Sidebar.jsx). This screen *is* the Rule
-          Engine, so "rules" is always the active page. */}
-      <Sidebar activePage="rules" onNavigate={onNavigate} jobsCount={jobsCount} runsCount={runsCount} />
 
       {/* Main */}
       <main className="rec-main">
@@ -827,27 +825,30 @@ export default function RuleEngineConfig({
           )}
         </div>
       </main>
-    </div>
+    </>
   );
 }
 
 const styles = `
-  .rec-root {
-    --primary:#2563EB; --secondary:#1E40AF; --accent:#F59E0B;
-    --bg:#F8FAFC; --text:#1E293B; --muted:#64748B; --line:#E2E8F0;
-    --green:#16A34A; --green-bg:#ECFDF5; --green-bd:#86EFAC;
-    --sidebar:#0F172A;
-    display:flex; min-height:100vh;
-    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
-    color:var(--text); background:var(--bg);
-    font-size:14px; line-height:1.45; -webkit-font-smoothing:antialiased;
-  }
-  .rec-root * { box-sizing:border-box; }
+  /* Design tokens live on .rec-main (the component's rendered root) rather than a
+     .rec-root wrapper — this screen renders inside the shared AppLayout and no
+     longer draws its own root element, so scoping the vars here keeps every
+     var(--…) resolving for the whole subtree (buttons/borders included). */
+  .rec-main * { box-sizing:border-box; }
 
   /* Sidebar styles now live in Sidebar.jsx (the shared component). */
 
   /* Main */
-  .rec-main { flex:1; min-width:0; display:flex; flex-direction:column; overflow:hidden; }
+  .rec-main {
+    --primary:#2563EB; --secondary:#1E40AF; --accent:#F59E0B;
+    --bg:#F8FAFC; --text:#1E293B; --muted:#64748B; --line:#E2E8F0;
+    --green:#16A34A; --green-bg:#ECFDF5; --green-bd:#86EFAC;
+    --sidebar:#0F172A;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    color:var(--text); background:var(--bg);
+    font-size:14px; line-height:1.45; -webkit-font-smoothing:antialiased;
+    flex:1; min-width:0; display:flex; flex-direction:column; overflow:hidden;
+  }
   .rec-header { display:flex; justify-content:space-between; align-items:flex-start; gap:18px; padding:15px 20px 16px; background:#fff; border-bottom:1px solid var(--line); }
   .rec-header h1 { font-size:21px; font-weight:700; margin:0; letter-spacing:-0.3px; }
   .rec-meta { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-top:7px; font-size:12.5px; color:var(--muted); }

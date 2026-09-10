@@ -15,9 +15,9 @@ import HealthBadge from "./HealthBadge";
  * RuleEngineConfig, which has its own separate `rec-` design system.
  *
  * Nav keys line up with HarvestAgent's `activePage` values
- * ("rules" | "jobs" | "history" | "sources" | "leads"); pass the current one as
- * `activePage` to highlight it. "Outreach" and "Analytics" have no target yet,
- * so they render as inert items (no onClick), matching the previous behaviour.
+ * ("rules" | "jobs" | "history" | "sources" | "leads" | "outreach"); pass the
+ * current one as `activePage` to highlight it. "Analytics" has no target yet, so
+ * it renders as an inert item (no onClick).
  */
 function NavItem({ glyph: Glyph, children, active, badge, onClick }) {
   return (
@@ -48,7 +48,7 @@ export default function Sidebar({ activePage, onNavigate = () => {}, jobsCount, 
           <NavItem glyph={History} active={activePage === "history"} badge={runsCount} onClick={() => onNavigate("history")}>Run History</NavItem>
           <NavItem glyph={Radar} active={activePage === "sources"} onClick={() => onNavigate("sources")}>Source Runs</NavItem>
           <NavItem glyph={UserSearch} active={activePage === "leads"} onClick={() => onNavigate("leads")}>Lead Intelligence</NavItem>
-          <NavItem glyph={Send}>Outreach</NavItem>
+          <NavItem glyph={Send} active={activePage === "outreach"} onClick={() => onNavigate("outreach")}>Mail logs</NavItem>
         </div>
         <div>
           <div className="ha-navhead">Reports</div>

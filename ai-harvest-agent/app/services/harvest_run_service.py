@@ -14,11 +14,18 @@ from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, TypeVar
 
 import structlog
-from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy import and_, case, delete, func, not_, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import noload
 
 from app.config import get_settings
+from app.core.company_size import (
+    BAND_TO_TIER,
+    TIER_TO_BANDS,
+    band_to_tier,
+    normalize_company_size,
+    parse_company_size_band,
+)
 from app.core.contact_normalize import normalize_email, normalize_phone
 from app.core.dependencies import get_session_factory
 from app.core.text_formatting import html_description_to_text
@@ -29,6 +36,7 @@ from app.models.harvest_run import (
     ReenrichmentTaskORM,
     ScrapedJobORM,
 )
+from app.models.recruiter import RecruiterORM
 from app.services.recruiter_service import upsert_recruiter
 
 logger = structlog.get_logger(__name__)
@@ -39,7 +47,33 @@ _T = TypeVar("_T")
 # the DB-side ORDER BY and the JSON-fallback path's in-memory sort never drift.
 JOB_SORT_FIELDS = {
     "posted_date", "company", "job_title", "source", "hiring_entity", "location",
+    "job_poster_name",
 }
+
+# Contact-availability tokens accepted by GET /jobs' `contact` filter — mirrors
+# the UI's jobMatchesContact() (harvest-agent/src/HarvestAgent.jsx). Positive
+# tokens match rows that HAVE the channel, no_* tokens rows missing it, "none"
+# rows with no contact at all. Selected tokens are OR-combined.
+CONTACT_FILTER_TOKENS = {
+    "email", "mobile", "linkedin", "no_email", "no_mobile", "no_linkedin", "none",
+}
+
+
+def _contact_presence_exprs():
+    """SQL presence tests for the three contact channels, matching what the UI
+    displays: email/phone are the merged scraped-or-recruiter values (so the
+    statement must outerjoin recruiters), LinkedIn is scraped-only — the same
+    merge scraped_job_view() applies per row."""
+    email = or_(
+        func.coalesce(ScrapedJobORM.email_id, "") != "",
+        func.coalesce(RecruiterORM.official_email_id, "") != "",
+    )
+    phone = or_(
+        func.coalesce(ScrapedJobORM.contact_number, "") != "",
+        func.coalesce(RecruiterORM.contact_number, "") != "",
+    )
+    linkedin = func.coalesce(ScrapedJobORM.linkedin_profile_url, "") != ""
+    return email, phone, linkedin
 
 
 def data_source_mode() -> str:
@@ -190,6 +224,7 @@ class HarvestRunService:
                     skills=j.get("skills") or [],
                     work_mode=j.get("work_mode", "not_specified"),
                     company_url=j.get("company_url", ""),
+                    company_size=j.get("company_size", ""),
                     employment_type=j.get("employment_type", ""),
                     job_type=j.get("job_type", ""),
                     domain=j.get("domain", "Any"),
@@ -369,6 +404,11 @@ class HarvestRunService:
         *,
         keyword:       str | None = None,
         company:       str | None = None,
+        company_exact: str | None = None,
+        job_title:     str | None = None,
+        poc:           str | None = None,
+        contact:       list[str] | None = None,
+        size_tier:     str | None = None,
         source:        str | None = None,
         hiring_entity: str | None = None,
         work_mode:     str | None = None,
@@ -394,16 +434,57 @@ class HarvestRunService:
         _format_posted(); not independently verified for Naukri/Dice)."""
         stmt = select(ScrapedJobORM)
         if keyword:
+            # Matches everything the UI's free-text search used to cover
+            # client-side (title/company/source/POC/email/phone), plus the
+            # description that this endpoint always searched.
             like = f"%{keyword}%"
             stmt = stmt.where(
                 or_(
                     ScrapedJobORM.job_title.ilike(like),
                     ScrapedJobORM.job_description.ilike(like),
                     ScrapedJobORM.company.ilike(like),
+                    ScrapedJobORM.job_poster_name.ilike(like),
+                    ScrapedJobORM.source.ilike(like),
+                    ScrapedJobORM.email_id.ilike(like),
+                    ScrapedJobORM.contact_number.ilike(like),
                 )
             )
         if company:
             stmt = stmt.where(ScrapedJobORM.company.ilike(f"%{company}%"))
+        if company_exact:
+            stmt = stmt.where(ScrapedJobORM.company == company_exact)
+        if job_title:
+            stmt = stmt.where(ScrapedJobORM.job_title == job_title)
+        if poc:
+            stmt = stmt.where(ScrapedJobORM.job_poster_name == poc)
+        if contact:
+            email_p, phone_p, linkedin_p = _contact_presence_exprs()
+            token_exprs = {
+                "email":       email_p,
+                "mobile":      phone_p,
+                "linkedin":    linkedin_p,
+                "no_email":    not_(email_p),
+                "no_mobile":   not_(phone_p),
+                "no_linkedin": not_(linkedin_p),
+                "none":        and_(not_(email_p), not_(phone_p), not_(linkedin_p)),
+            }
+            selected = [token_exprs[t] for t in contact if t in token_exprs]
+            if selected:
+                # 1:1 join on the recruiter PK — never duplicates job rows.
+                stmt = stmt.outerjoin(
+                    RecruiterORM, ScrapedJobORM.recruiter_id == RecruiterORM.id
+                ).where(or_(*selected))
+        if size_tier:
+            # company_size stores the canonical "<band> employees" string (or "");
+            # the replace() folds legacy en-dash rows onto BAND_TO_TIER's hyphen keys.
+            norm = func.replace(func.coalesce(ScrapedJobORM.company_size, ""), "–", "-")
+            known = [f"{band} employees" for band in BAND_TO_TIER]
+            if size_tier == "unknown":
+                stmt = stmt.where(norm.notin_(known))
+            elif size_tier in TIER_TO_BANDS:
+                stmt = stmt.where(
+                    norm.in_([f"{band} employees" for band in TIER_TO_BANDS[size_tier]])
+                )
         if source:
             stmt = stmt.where(func.lower(ScrapedJobORM.source) == source.lower())
         if hiring_entity:
@@ -436,6 +517,59 @@ class HarvestRunService:
 
         result = await self._db.execute(stmt)
         return list(result.scalars()), total
+
+    async def job_facets(self) -> dict[str, Any]:
+        """Distinct dropdown values + whole-dataset stats for the jobs page.
+
+        GET /jobs is paginated server-side, so the UI can no longer derive its
+        Company/Job/POC dropdown options or its header/footer stat counts from
+        the loaded rows — this returns them across the entire scraped_jobs
+        table in one call (GET /jobs/facets). Distincts are global, not scoped
+        to the active filters."""
+        async def _distinct(col) -> list[str]:
+            result = await self._db.execute(select(col).distinct())
+            return sorted(v for v in result.scalars() if v)
+
+        companies  = await _distinct(ScrapedJobORM.company)
+        job_titles = await _distinct(ScrapedJobORM.job_title)
+        poc_names  = await _distinct(ScrapedJobORM.job_poster_name)
+
+        email_p, phone_p, linkedin_p = _contact_presence_exprs()
+
+        def _count_if(expr):
+            return func.sum(case((expr, 1), else_=0))
+
+        row = (
+            await self._db.execute(
+                select(
+                    func.count().label("total"),
+                    # nullif drops empty-string companies — COUNT ignores NULLs.
+                    func.count(func.distinct(func.nullif(ScrapedJobORM.company, ""))).label("companies"),
+                    _count_if(func.coalesce(ScrapedJobORM.job_poster_name, "") != "").label("pocs"),
+                    # IS NOT FALSE mirrors the UI's `passed_filter !== false`.
+                    _count_if(ScrapedJobORM.passed_filter.isnot(False)).label("qualified"),
+                    _count_if(ScrapedJobORM.passed_filter.is_(False)).label("flagged"),
+                    _count_if(email_p).label("with_email"),
+                    _count_if(phone_p).label("with_phone"),
+                    _count_if(linkedin_p).label("with_linkedin"),
+                )
+                .select_from(ScrapedJobORM)
+                .outerjoin(RecruiterORM, ScrapedJobORM.recruiter_id == RecruiterORM.id)
+            )
+        ).one()
+        stats = {
+            key: int(getattr(row, key) or 0)
+            for key in (
+                "total", "companies", "pocs", "qualified", "flagged",
+                "with_email", "with_phone", "with_linkedin",
+            )
+        }
+        return {
+            "companies":  companies,
+            "job_titles": job_titles,
+            "poc_names":  poc_names,
+            "stats":      stats,
+        }
 
     async def get_scraped_job_by_id(self, job_id: str) -> ScrapedJobORM | None:
         result = await self._db.execute(select(ScrapedJobORM).where(ScrapedJobORM.id == job_id))
@@ -570,6 +704,17 @@ class HarvestRunService:
             _set("linkedin_profile_url", extracted.get("recruiter_url"))
             _set("email_id", normalize_email(extracted.get("recruiter_email")))
             _set("contact_number", normalize_phone(extracted.get("recruiter_phone")))
+            # Company-size band: the original harvest may have stored "" (LLM was
+            # down at scrape time). Backfill it from the re-extraction — the LLM's
+            # own value first, else a regex over the insights/about text — normalised
+            # to the canonical "<band> employees" so the size filter matches. _set
+            # skips empties, so a non-resolvable size never wipes an existing one.
+            size_band = normalize_company_size(extracted.get("company_size") or "")
+            if size_band:
+                _set("company_size", f"{size_band} employees")
+            else:
+                insights = f"{extracted.get('job_insights') or ''}\n{extracted.get('about_company') or ''}"
+                _set("company_size", parse_company_size_band(insights))
             row.extraction_status = "ok"
             # Best-effort recruiter identity now that a poster name may be available.
             poster = (extracted.get("recruiter_name") or "").strip()
@@ -732,6 +877,11 @@ def scraped_job_view(job: ScrapedJobORM) -> dict[str, Any]:
         "skills":                 job.skills,
         "work_mode":              job.work_mode,
         "company_url":            job.company_url,
+        # Company-size band captured per job + its friendly tier (Small/Medium/
+        # Large/Enterprise or "" ⇒ Unknown), so the UI can offer a display-only
+        # company-size filter. See app/core/company_size.py.
+        "company_size":           job.company_size,
+        "company_size_tier":      band_to_tier(job.company_size),
         "employment_type":        job.employment_type,
         "job_type":               job.job_type,
         "domain":                 job.domain,

@@ -33,7 +33,9 @@ from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.responses import Response
 from pydantic import BaseModel
 
+from app.core.company_size import band_to_tier
 from app.services.harvest_run_service import (
+    CONTACT_FILTER_TOKENS,
     JOB_SORT_FIELDS,
     HarvestRunService,
     data_source_mode,
@@ -133,9 +135,34 @@ def _load_lead_records() -> list[dict]:
     return []
 
 
+def _job_matches_contact(job: dict, tokens: list[str]) -> bool:
+    """Python mirror of the UI's jobMatchesContact() for the JSON read path.
+    Combined-JSON job dicts already carry the merged email_id/contact_number
+    (reports are built via scraped_job_view), so semantics match the DB path's
+    recruiter-merged presence tests. Tokens are OR-combined."""
+    has_email    = bool(job.get("email_id"))
+    has_mobile   = bool(job.get("contact_number"))
+    has_linkedin = bool(job.get("linkedin_profile_url"))
+    checks = {
+        "email":       has_email,
+        "mobile":      has_mobile,
+        "linkedin":    has_linkedin,
+        "no_email":    not has_email,
+        "no_mobile":   not has_mobile,
+        "no_linkedin": not has_linkedin,
+        "none":        not (has_email or has_mobile or has_linkedin),
+    }
+    return any(checks.get(t, False) for t in tokens)
+
+
 def _apply_job_filters(jobs: list[dict], **f: Any) -> list[dict]:
     keyword       = (f.get("keyword")       or "").lower()
     company       = (f.get("company")       or "").lower()
+    company_exact = f.get("company_exact")  or ""
+    job_title     = f.get("job_title")      or ""
+    poc           = f.get("poc")            or ""
+    contact       = f.get("contact")        or []
+    size_tier     = f.get("size_tier")      or ""
     source        = (f.get("source")        or "").lower()
     hiring_entity = (f.get("hiring_entity") or "").lower()
     work_mode     = (f.get("work_mode")     or "").lower()
@@ -158,9 +185,26 @@ def _apply_job_filters(jobs: list[dict], **f: Any) -> list[dict]:
             if keyword in (j.get("job_title")       or "").lower()
             or keyword in (j.get("job_description") or "").lower()
             or keyword in (j.get("company")         or "").lower()
+            or keyword in (j.get("job_poster_name") or "").lower()
+            or keyword in (j.get("source")          or "").lower()
+            or keyword in (j.get("email_id")        or "").lower()
+            or keyword in (j.get("contact_number")  or "").lower()
         ]
     if company:
         result = [j for j in result if company in (j.get("company") or "").lower()]
+    if company_exact:
+        result = [j for j in result if (j.get("company") or "") == company_exact]
+    if job_title:
+        result = [j for j in result if (j.get("job_title") or "") == job_title]
+    if poc:
+        result = [j for j in result if (j.get("job_poster_name") or "") == poc]
+    if contact:
+        result = [j for j in result if _job_matches_contact(j, contact)]
+    if size_tier:
+        if size_tier == "unknown":
+            result = [j for j in result if not band_to_tier(j.get("company_size") or "")]
+        else:
+            result = [j for j in result if band_to_tier(j.get("company_size") or "") == size_tier]
     if source:
         result = [j for j in result if (j.get("source") or "").lower() == source]
     if hiring_entity:
@@ -226,11 +270,16 @@ def _paginate(items: list, page: int, page_size: int) -> tuple[list, int, int]:
 )
 async def list_jobs(
     page:          int = Query(1,    ge=1,               description="Page number (1-based)"),
-    page_size:     int = Query(100,  ge=1,  le=100,      description="Results per page (max 100)"),
-    sort_by:       str = Query("posted_date",             description="Sort field: posted_date | company | job_title | source | hiring_entity | location"),
+    page_size:     int = Query(100,  ge=1,  le=500,      description="Results per page (max 500)"),
+    sort_by:       str = Query("posted_date",             description="Sort field: posted_date | company | job_title | source | hiring_entity | location | job_poster_name"),
     sort_order:    str = Query("desc",                    description="Sort direction: asc | desc"),
-    keyword:       str = Query("",                        description="Search in job_title, job_description, company"),
+    keyword:       str = Query("",                        description="Search in job_title, job_description, company, job_poster_name, source, email_id, contact_number"),
     company:       str = Query("",                        description="Filter by company name (partial match)"),
+    company_exact: str = Query("",                        description="Filter by exact company name (UI dropdown)"),
+    job_title:     str = Query("",                        description="Filter by exact job title (UI dropdown)"),
+    poc:           str = Query("",                        description="Filter by exact job poster (POC) name (UI dropdown)"),
+    contact:       str = Query("",                        description="Contact availability — comma-separated tokens, OR-combined: email | mobile | linkedin | no_email | no_mobile | no_linkedin | none"),
+    size_tier:     str = Query("",                        description="Company-size tier: Small | Medium | Large | Enterprise | unknown"),
     source:        str = Query("",                        description="Filter by source: LinkedIn | Naukri | Dice"),
     hiring_entity: str = Query("",                        description="Filter: Direct Client | GCC | Staffing Firm | Ambiguous"),
     work_mode:     str = Query("",                        description="Filter: Remote | Hybrid | Onsite"),
@@ -259,12 +308,24 @@ async def list_jobs(
         keyword=keyword, company=company, source=source,
     )
 
+    # Unknown contact tokens are dropped rather than 422ing — an empty result
+    # list after validation means "no contact filter".
+    contact_tokens = [
+        t for t in (tok.strip() for tok in contact.split(","))
+        if t in CONTACT_FILTER_TOKENS
+    ]
+
     def _json_fallback() -> tuple[list[dict], int, int]:
         all_jobs = _load_all_jobs()
         filtered = _apply_job_filters(
             all_jobs,
             keyword       = keyword,
             company       = company,
+            company_exact = company_exact,
+            job_title     = job_title,
+            poc           = poc,
+            contact       = contact_tokens,
+            size_tier     = size_tier,
             source        = source,
             hiring_entity = hiring_entity,
             work_mode     = work_mode,
@@ -281,6 +342,11 @@ async def list_jobs(
         lambda: db_read(lambda db: HarvestRunService(db).list_scraped_jobs(
             keyword       = keyword       or None,
             company       = company       or None,
+            company_exact = company_exact or None,
+            job_title     = job_title     or None,
+            poc           = poc           or None,
+            contact       = contact_tokens or None,
+            size_tier     = size_tier     or None,
             source        = source        or None,
             hiring_entity = hiring_entity or None,
             work_mode     = work_mode     or None,
@@ -314,6 +380,11 @@ async def list_jobs(
         "filters": {
             "keyword":       keyword       or None,
             "company":       company       or None,
+            "company_exact": company_exact or None,
+            "job_title":     job_title     or None,
+            "poc":           poc           or None,
+            "contact":       contact_tokens or None,
+            "size_tier":     size_tier     or None,
             "source":        source        or None,
             "hiring_entity": hiring_entity or None,
             "work_mode":     work_mode     or None,
@@ -324,6 +395,56 @@ async def list_jobs(
         "sort": {"by": sort_by, "order": sort_order},
         "jobs": page_items,
     }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# GET /jobs/facets — must be registered before /jobs/{job_id}, or FastAPI
+# would capture "facets" as a job id.
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.get(
+    "/jobs/facets",
+    status_code = status.HTTP_200_OK,
+    summary     = "Job filter facets",
+    description = (
+        "Distinct Company / Job-title / POC dropdown values plus whole-dataset "
+        "stat counts for the jobs page. GET /jobs is paginated server-side, so "
+        "the UI's filter options and header stats come from here rather than "
+        "from the loaded rows."
+    ),
+)
+async def job_facets() -> dict:
+    def _facets_from_json() -> dict:
+        jobs = _load_all_jobs()
+
+        def _distinct(key: str) -> list[str]:
+            return sorted({j.get(key) or "" for j in jobs} - {""})
+
+        return {
+            "companies":  _distinct("company"),
+            "job_titles": _distinct("job_title"),
+            "poc_names":  _distinct("job_poster_name"),
+            "stats": {
+                "total":         len(jobs),
+                "companies":     len({j.get("company") or "" for j in jobs} - {""}),
+                "pocs":          sum(1 for j in jobs if j.get("job_poster_name")),
+                # `is not False` mirrors the UI's `passed_filter !== false`.
+                "qualified":     sum(1 for j in jobs if j.get("passed_filter") is not False),
+                "flagged":       sum(1 for j in jobs if j.get("passed_filter") is False),
+                "with_email":    sum(1 for j in jobs if j.get("email_id")),
+                "with_phone":    sum(1 for j in jobs if j.get("contact_number")),
+                "with_linkedin": sum(1 for j in jobs if j.get("linkedin_profile_url")),
+            },
+        }
+
+    mode = data_source_mode()
+    result, _used = await resolve_read(
+        mode,
+        lambda: db_read(lambda db: HarvestRunService(db).job_facets()),
+        _facets_from_json,
+    )
+    # db_read returns None on a DB error in "database" mode — keep the shape.
+    return result or {"companies": [], "job_titles": [], "poc_names": [], "stats": {}}
 
 
 # ══════════════════════════════════════════════════════════════════════════════

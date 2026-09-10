@@ -1,4 +1,7 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { createContext, useContext, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Routes, Route, Navigate, Outlet, useNavigate, useLocation, useParams, useSearchParams,
+} from "react-router-dom";
 import {
   SlidersHorizontal, Download,
   Search, Mail, ArrowUpDown, ArrowUp, ArrowDown, Eye, Pencil, RefreshCw, ArrowLeft,
@@ -7,6 +10,7 @@ import {
 } from "lucide-react";
 import JobDetailsView from "./JobDetailsView";
 import RuleEngineConfig from "./RuleEngineConfig";
+import OutreachHistoryPage from "./OutreachHistoryPage";
 import Sidebar from "./components/Sidebar";
 import EmailComposeModal from "./components/EmailComposeModal";
 import LinkedInMessageModal from "./components/LinkedInMessageModal";
@@ -14,13 +18,14 @@ import StopHarvestButton from "./components/StopHarvestModal";
 import useCountUp from "./useCountUp";
 import { makeStallWatch, STALL_WARN_MS, STALL_WARN_MSG } from "./stallWatch";
 import {
-  getJobs, getRunHistory, getRunHistoryEntry, getActiveRun, getHarvestStatus, ApiError,
+  getJobs, getJob, getJobsFacets, getRunHistory, getRunHistoryEntry, getActiveRun, getHarvestStatus, ApiError,
   runLinkedinAgent, getLinkedinResults, getLinkedinResult,
   runNaukriAgent, getNaukriResults, getNaukriResult,
   runDiceAgent, getDiceResults, getDiceResult,
   runLinkedinFeedAgent, getLinkedinFeedResults, getLinkedinFeedResult,
   runProspectIntelligence, getProspectResults, getProspectResult,
   runRecruiterDiscovery,
+  getOutreachStatus,
   downloadJsonUrl, downloadExcelUrl,
 } from "./api";
 
@@ -106,6 +111,10 @@ const ThemeStyles = () => (
     .ha-cbtn-on{border-color:${C.primary};color:${C.primary};background:#fff;cursor:pointer;}
     .ha-cbtn-on:hover{background:${C.primary};color:#fff;}
     .ha-cbtn-off{border-color:${C.border};color:#CBD5E1;background:${C.bg};cursor:not-allowed;}
+    /* Outreach already sent — a filled green state so a contacted recruiter is
+       obvious at a glance (backed by the DB, so it survives a refresh). */
+    .ha-cbtn-sent{border-color:#86EFAC;color:#047857;background:#ECFDF5;cursor:pointer;}
+    .ha-cbtn-sent:hover{background:#047857;color:#fff;}
     .ha-spin{animation:ha-rot .9s linear infinite;}
     @keyframes ha-rot{to{transform:rotate(360deg);}}
     .ha-errbanner{background:#FEF2F2;border:1px solid #FCA5A5;color:#B91C1C;border-radius:10px;padding:10px 16px;font-size:13px;font-weight:500;}
@@ -216,6 +225,10 @@ function mapApiJob(j) {
     workMode: j.work_mode || "",
     applyLink: j.job_url || "",
     companyUrl: j.company_url || "",
+    // Company-size band + friendly tier (Small/Medium/Large/Enterprise or "" ⇒
+    // Unknown) captured at harvest — drives the display-only Company-size filter.
+    companySize: j.company_size || "",
+    companySizeTier: j.company_size_tier || "",
     posterTitle: j.job_poster_designation || "",
     domain: j.domain || "",
     hiringEntity: j.hiring_entity || "",
@@ -260,6 +273,10 @@ function mapJobToDetail(j) {
     source: j.source,
     domain: j.domain || "",
     hiringEntity: j.hiringEntity || "",
+    // Company-size band + friendly tier, so the detail view can show them. Accept
+    // either the mapped (companySize) or raw (company_size) shape defensively.
+    companySize: j.companySize || j.company_size || "",
+    companySizeTier: j.companySizeTier || j.company_size_tier || "",
     passedFilter: j.passedFilter,
     filterReason: j.filterReason || "",
   };
@@ -381,7 +398,7 @@ function MultiSelect({ label, options, selected, onChange }) {
 // that opens in a new tab. Otherwise it's a button: `available` rows call
 // `onClick` (open the Email/LinkedIn composer); unavailable rows also call
 // `onClick` (to surface the "no data" inline message) but render greyed out.
-function ContactActionBtn({ glyph: Glyph, title, available, href, onClick }) {
+function ContactActionBtn({ glyph: Glyph, title, available, href, onClick, sent = false, sentTitle }) {
   if (href) {
     return (
       <a className="ha-cbtn ha-cbtn-on" href={href} target="_blank" rel="noreferrer" title={title}>
@@ -389,12 +406,15 @@ function ContactActionBtn({ glyph: Glyph, title, available, href, onClick }) {
       </a>
     );
   }
+  // Sent state wins the styling (a filled green pill) even when the channel value
+  // is otherwise "unavailable", so a contacted recruiter always reads as sent.
+  const cls = sent ? "ha-cbtn-sent" : available ? "ha-cbtn-on" : "ha-cbtn-off";
   return (
     <button
       type="button"
-      className={"ha-cbtn " + (available ? "ha-cbtn-on" : "ha-cbtn-off")}
-      style={available ? undefined : { cursor: "pointer" }}
-      title={available ? title : title + " not available"}
+      className={"ha-cbtn " + cls}
+      style={available || sent ? undefined : { cursor: "pointer" }}
+      title={sent ? (sentTitle || title + " — sent") : available ? title : title + " not available"}
       onClick={onClick}
     >
       <Glyph size={16} />
@@ -410,6 +430,19 @@ function ContactActionBtn({ glyph: Glyph, title, available, href, onClick }) {
 // the presentation is grouped. `summaryLabel` keeps the collapsed chip
 // unambiguous ("Has email" vs "No email") while the open list stays short
 // under its group header.
+// Company-size filter options. Named tiers map to the LinkedIn employee bands
+// captured per job (backend app/core/company_size.py); "unknown" catches jobs
+// with no detected band (and non-LinkedIn sources). Display-only — filters which
+// harvested rows are shown, never drops data.
+const COMPANY_SIZE_FILTER_OPTIONS = [
+  { value: "all", label: "All sizes" },
+  { value: "Small", label: "Small · 2–200" },
+  { value: "Medium", label: "Medium · 201–1,000" },
+  { value: "Large", label: "Large · 1,001–10,000" },
+  { value: "Enterprise", label: "Enterprise · 10,001+" },
+  { value: "unknown", label: "Unknown" },
+];
+
 const CONTACT_FILTER_OPTIONS = [
   { group: "With contact" },
   { value: "email",    label: "Email",    summaryLabel: "Has email" },
@@ -490,9 +523,9 @@ function DualContact({ scraped, recruiter, fallback, link, cls }) {
  * `onFilteredChange` so the parent can drive its own stats/export/footer.
  */
 // Options for the "Rows per page" selector on the Harvested Jobs and per-run
-// views — how many filtered rows JobsTable paints per client-side display page.
-// The whole dataset is always loaded (see fetchAllJobs), so this only affects
-// rendering, never which rows filters/search/export see.
+// views. On the Harvested Jobs page this is the server page size (each page is
+// fetched on demand); on the per-run view it's the client-side display page
+// size over the run's fully-loaded rows.
 const PAGE_SIZE_OPTIONS = [
   { value: "50", label: "50" },
   { value: "100", label: "100" },
@@ -503,13 +536,14 @@ const PAGE_SIZE_OPTIONS = [
 // Fallback display page size when no explicit "Rows per page" is provided.
 const DEFAULT_DISPLAY_PAGE_SIZE = 100;
 
-// Load the ENTIRE dataset in 100-row pages (the backend caps page_size at 100)
-// so all client-side filtering, search, and CSV export operate over the whole
-// DB rather than a partial slice. Page 1 is fetched first to learn total_pages,
-// then the remaining pages are fetched in parallel. Returns the mapped rows
-// plus the server's unfiltered total for the header count.
+// Load EVERY row matching `baseParams` in 100-row pages — page 1 first to learn
+// total_pages, then the remaining pages in parallel. Used where the full result
+// set is genuinely needed: the run-detail view (one run's jobs) and the Jobs
+// page's CSV export (all rows matching the active filters). baseParams may
+// override the page_size/sort defaults. Returns the mapped rows plus the
+// server's total for that filter set.
 async function fetchAllJobs(baseParams) {
-  const base = { ...baseParams, page_size: 100, sort_by: "posted_date", sort_order: "desc" };
+  const base = { page_size: 100, sort_by: "posted_date", sort_order: "desc", ...baseParams };
   const first = await getJobs({ ...base, page: 1 });
   const totalPages = first.total_pages || 1;
   let rows = first.jobs || [];
@@ -531,16 +565,54 @@ function JobsTable({
   minWidth = 1180,
   onFilteredChange = null,
   pageSize = DEFAULT_DISPLAY_PAGE_SIZE,
+  urlState = false,
+  // Server mode (the Harvested Jobs page): `jobs` is just the current server
+  // page — filtering/sorting/pagination happen in the backend. The table emits
+  // its filter/sort/page state via onParamsChange (as GET /jobs query params)
+  // instead of filtering in-memory, dropdown options come from `facets`
+  // (GET /jobs/facets, whole-dataset distincts), and the footer counts against
+  // `serverTotal`. Client mode (RunDetailView) is unchanged.
+  serverMode = false,
+  facets = null,
+  serverTotal = 0,
+  onParamsChange = null,
+  serverExtraParams = null,
 }) {
-  const [filters, setFilters] = useState({ company: "all", contact: [], job: "all", poc: "all" });
-  const [query, setQuery] = useState("");
-  const [sort, setSort] = useState({ col: "posted", dir: "desc" });
-  const [page, setPage] = useState(1);
+  // When `urlState`, the filter/search/sort/page state is mirrored to the URL
+  // query string (so /jobs?company=…&page=2 is shareable and survives a refresh).
+  // Initialised from the URL on mount; written back on change. Non-urlState
+  // instances (e.g. the per-run table) keep purely-local state, unchanged.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [filters, setFilters] = useState(() =>
+    urlState
+      ? {
+          company: searchParams.get("company") || "all",
+          contact: (searchParams.get("contact") || "").split(",").filter(Boolean),
+          job: searchParams.get("job") || "all",
+          poc: searchParams.get("poc") || "all",
+          size: searchParams.get("size") || "all",
+        }
+      : { company: "all", contact: [], job: "all", poc: "all", size: "all" }
+  );
+  const [query, setQuery] = useState(() => (urlState ? searchParams.get("q") || "" : ""));
+  const [sort, setSort] = useState(() =>
+    urlState
+      ? { col: searchParams.get("sort") || "posted", dir: searchParams.get("dir") || "desc" }
+      : { col: "posted", dir: "desc" }
+  );
+  const [page, setPage] = useState(() =>
+    urlState ? Math.max(1, parseInt(searchParams.get("page") || "1", 10) || 1) : 1
+  );
 
   // Outreach modals + the per-row "no data on this channel" inline message.
-  const [emailModalJob, setEmailModalJob] = useState(null);
+  // emailModal carries follow-up context: { job, followup, parentOutreachId }.
+  const [emailModal, setEmailModal] = useState(null);
   const [linkedinModalJob, setLinkedinModalJob] = useState(null);
   const [noDataMsg, setNoDataMsg] = useState(null); // { jobId, channel }
+  // DB-backed "already contacted" state per job id: { [jobId]: { email?, linkedin? } }.
+  // Fetched for the visible page rows so a sent recruiter shows a green icon that
+  // survives refresh; clicking a sent email icon opens the follow-up composer.
+  const [outreachStatus, setOutreachStatus] = useState({});
   const noDataTimer = useRef(null);
   const showNoData = useCallback((jobId, channel) => {
     setNoDataMsg({ jobId, channel });
@@ -549,15 +621,35 @@ function JobsTable({
   }, []);
   useEffect(() => () => { if (noDataTimer.current) clearTimeout(noDataTimer.current); }, []);
 
-  const companies = useMemo(() => Array.from(new Set(jobs.map((j) => j.company))).sort(), [jobs]);
-  const jobTitles = useMemo(() => Array.from(new Set(jobs.map((j) => j.title))).sort(), [jobs]);
-  const pocNames = useMemo(() => Array.from(new Set(jobs.filter((j) => j.poc).map((j) => j.poc))).sort(), [jobs]);
+  // Server mode gets its dropdown options from GET /jobs/facets (they must span
+  // the whole dataset, not just the loaded page); client mode derives them from
+  // the fully-loaded rows as before.
+  const companies = useMemo(
+    () => (serverMode ? (facets?.companies || []) : Array.from(new Set(jobs.map((j) => j.company))).sort()),
+    [serverMode, facets, jobs]
+  );
+  const jobTitles = useMemo(
+    () => (serverMode ? (facets?.job_titles || []) : Array.from(new Set(jobs.map((j) => j.title))).sort()),
+    [serverMode, facets, jobs]
+  );
+  const pocNames = useMemo(
+    () => (serverMode ? (facets?.poc_names || []) : Array.from(new Set(jobs.filter((j) => j.poc).map((j) => j.poc))).sort()),
+    [serverMode, facets, jobs]
+  );
 
   const filtered = useMemo(() => {
+    // Server mode: rows arrive already filtered/sorted/paginated by the backend.
+    if (serverMode) return jobs;
     const rows = jobs.filter((j) => {
       if (filters.company !== "all" && j.company !== filters.company) return false;
       if (filters.job !== "all" && j.title !== filters.job) return false;
       if (filters.poc !== "all" && j.poc !== filters.poc) return false;
+      // Company-size is a display-only filter over the captured band's tier.
+      // "unknown" matches rows with no detected size; a named tier matches exactly.
+      if (filters.size && filters.size !== "all") {
+        const tier = j.companySizeTier || "";
+        if (filters.size === "unknown" ? tier !== "" : tier !== filters.size) return false;
+      }
       if (!jobMatchesContact(j, filters.contact)) return false;
       if (preFilter && !preFilter(j)) return false;
       if (query.trim()) {
@@ -577,26 +669,112 @@ function JobsTable({
         default: return 0;
       }
     });
-  }, [jobs, filters, query, sort, preFilter]);
+  }, [serverMode, jobs, filters, query, sort, preFilter]);
 
   useEffect(() => { if (onFilteredChange) onFilteredChange(filtered); }, [filtered, onFilteredChange]);
 
   // Reset to the first display page whenever the filtered result changes shape
   // (new load, filter, search, sort, or a page-size change) so the user is
-  // never stranded on an out-of-range page.
-  useEffect(() => { setPage(1); }, [filters, query, sort, preFilter, jobs, pageSize]);
+  // never stranded on an out-of-range page. Client mode only — in server mode
+  // `jobs` changes after every fetch, so this would bounce the page back to 1
+  // (and re-fetch) each time; the param-emission effect below owns the reset.
+  useEffect(() => {
+    if (!serverMode) setPage(1);
+  }, [serverMode, filters, query, sort, preFilter, jobs, pageSize]);
 
-  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+  // Debounced free-text search — the input stays immediate, but server fetches
+  // wait 350 ms after the last keystroke. Harmless (unused) in client mode.
+  const [debouncedQuery, setDebouncedQuery] = useState(query);
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedQuery(query), 350);
+    return () => clearTimeout(t);
+  }, [query]);
+
+  // Server mode: emit the current filter/sort/page state as GET /jobs params.
+  // On a filter/sort/size change while past page 1, reset to page 1 FIRST and
+  // let the effect re-run — so each state change produces exactly one fetch.
+  const serverParamsSig = JSON.stringify({
+    filters, q: debouncedQuery.trim(), sort, pageSize, extra: serverExtraParams || null,
+  });
+  const sigRef = useRef(serverParamsSig);
+  useEffect(() => {
+    if (!serverMode || !onParamsChange) return;
+    if (sigRef.current !== serverParamsSig) {
+      sigRef.current = serverParamsSig;
+      if (page !== 1) { setPage(1); return; }
+    }
+    const sortByMap = { title: "job_title", company: "company", poc: "job_poster_name", source: "source", posted: "posted_date" };
+    onParamsChange({
+      page,
+      page_size: pageSize,
+      sort_by: sortByMap[sort.col] || "posted_date",
+      sort_order: sort.dir === "asc" ? "asc" : "desc",
+      keyword: debouncedQuery.trim(),
+      company_exact: filters.company !== "all" ? filters.company : "",
+      job_title: filters.job !== "all" ? filters.job : "",
+      poc: filters.poc !== "all" ? filters.poc : "",
+      size_tier: filters.size && filters.size !== "all" ? filters.size : "",
+      contact: filters.contact.join(","),
+      ...(serverExtraParams || {}),
+    });
+    // The emitted params are fully captured by serverParamsSig + page; listing
+    // the individual pieces here would only duplicate the signature.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serverMode, onParamsChange, serverParamsSig, page]);
+
+  // Server mode: if a deep-linked page is out of range for the (possibly
+  // filtered) result set, the backend returns an empty page — snap back to 1.
+  useEffect(() => {
+    if (serverMode && !loading && jobs.length === 0 && serverTotal > 0 && page > 1) setPage(1);
+  }, [serverMode, loading, jobs, serverTotal, page]);
+
+  // Mirror the current filter/search/sort/page to the URL query string (only for
+  // the URL-synced instance). Uses replace so it doesn't spam the history stack.
+  useEffect(() => {
+    if (!urlState) return;
+    const sp = new URLSearchParams();
+    if (filters.company !== "all") sp.set("company", filters.company);
+    if (filters.contact.length) sp.set("contact", filters.contact.join(","));
+    if (filters.job !== "all") sp.set("job", filters.job);
+    if (filters.poc !== "all") sp.set("poc", filters.poc);
+    if (filters.size && filters.size !== "all") sp.set("size", filters.size);
+    if (query.trim()) sp.set("q", query.trim());
+    if (sort.col !== "posted" || sort.dir !== "desc") { sp.set("sort", sort.col); sp.set("dir", sort.dir); }
+    if (page > 1) sp.set("page", String(page));
+    setSearchParams(sp, { replace: true });
+  }, [urlState, filters, query, sort, page, setSearchParams]);
+
+  // Server mode paginates against the backend's filtered total — `jobs` already
+  // is the current page. Client mode slices the filtered in-memory rows.
+  const effectiveTotal = serverMode ? serverTotal : filtered.length;
+  const totalPages = Math.max(1, Math.ceil(effectiveTotal / pageSize));
   const currentPage = Math.min(page, totalPages);
-  const pageRows = filtered.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  const pageRows = serverMode ? filtered : filtered.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+
+  // Fetch outreach status for just the visible rows (keeps the query small vs.
+  // the whole dataset). Merged into prior results so paged-away rows stay marked.
+  const pageRowIdsKey = pageRows.map((j) => j.id).join(",");
+  const refreshOutreachStatus = useCallback(async () => {
+    const ids = pageRowIdsKey ? pageRowIdsKey.split(",") : [];
+    if (!ids.length) return;
+    try {
+      const map = await getOutreachStatus(ids);
+      setOutreachStatus((prev) => ({ ...prev, ...(map || {}) }));
+    } catch {
+      // best-effort — icons fall back to the default (not-sent) state
+    }
+  }, [pageRowIdsKey]);
+  useEffect(() => { refreshOutreachStatus(); }, [refreshOutreachStatus]);
 
   const colCount = showActionColumn ? 9 : 8;
 
   return (
     <>
-      <div className="ha-card ha-filterbar" style={{ padding: "16px 20px", gridTemplateColumns: "repeat(4, minmax(0, 1fr))" }}>
+      <div className="ha-card ha-filterbar" style={{ padding: "16px 20px", gridTemplateColumns: "repeat(5, minmax(0, 1fr))" }}>
         <Select label="Company" value={filters.company} onChange={(v) => setFilters((f) => ({ ...f, company: v }))}
           options={[{ value: "all", label: "All" }, ...companies.map((c) => ({ value: c, label: c }))]} />
+        <Select label="Company size" value={filters.size || "all"} onChange={(v) => setFilters((f) => ({ ...f, size: v }))}
+          options={COMPANY_SIZE_FILTER_OPTIONS} />
         <MultiSelect label="Contact" selected={filters.contact} onChange={(v) => setFilters((f) => ({ ...f, contact: v }))}
           options={CONTACT_FILTER_OPTIONS} />
         <Select label="Job" value={filters.job} onChange={(v) => setFilters((f) => ({ ...f, job: v }))}
@@ -659,10 +837,30 @@ function JobsTable({
                         <ContactActionBtn glyph={WhatsAppIcon} title="WhatsApp" available={!!j.whatsapp}
                           href={j.whatsapp ? "https://wa.me/" + j.whatsapp.replace(/[^0-9]/g, "") : null}
                           onClick={() => showNoData(j.id, "WhatsApp")} />
-                        <ContactActionBtn glyph={Mail} title="Email" available={!!j.email}
-                          onClick={() => (j.email ? setEmailModalJob(j) : showNoData(j.id, "email"))} />
-                        <ContactActionBtn glyph={LinkedInIcon} title="LinkedIn" available={!!j.linkedin}
-                          onClick={() => (j.linkedin ? setLinkedinModalJob(j) : showNoData(j.id, "LinkedIn"))} />
+                        {(() => {
+                          const st = outreachStatus[j.id] || {};
+                          const emailSent = !!st.email;
+                          const liSent = !!st.linkedin;
+                          const emailSentTitle = emailSent
+                            ? `Email sent${st.email.followup_count ? ` (+${st.email.followup_count} follow-up${st.email.followup_count > 1 ? "s" : ""})` : ""} — click to follow up`
+                            : undefined;
+                          return (
+                            <>
+                              <ContactActionBtn glyph={Mail} title="Email" available={!!j.email}
+                                sent={emailSent} sentTitle={emailSentTitle}
+                                onClick={() =>
+                                  emailSent
+                                    ? setEmailModal({ job: j, followup: true, parentOutreachId: st.email.outreach_id })
+                                    : j.email
+                                      ? setEmailModal({ job: j, followup: false })
+                                      : showNoData(j.id, "email")
+                                } />
+                              <ContactActionBtn glyph={LinkedInIcon} title="LinkedIn" available={!!j.linkedin}
+                                sent={liSent} sentTitle={liSent ? "LinkedIn message sent" : undefined}
+                                onClick={() => (j.linkedin ? setLinkedinModalJob(j) : showNoData(j.id, "LinkedIn"))} />
+                            </>
+                          );
+                        })()}
                       </div>
                       {noDataMsg && noDataMsg.jobId === j.id && (
                         <small style={{ color: "#B91C1C", fontSize: 11, whiteSpace: "nowrap" }}>
@@ -691,10 +889,10 @@ function JobsTable({
         </div>
       </div>
 
-      {!loading && filtered.length > pageSize && (
+      {!loading && effectiveTotal > pageSize && (
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12, marginTop: 12, padding: "0 4px", fontSize: 13, color: C.textSoft }}>
           <span>
-            Showing {(currentPage - 1) * pageSize + 1}–{Math.min(currentPage * pageSize, filtered.length)} of {filtered.length}
+            Showing {(currentPage - 1) * pageSize + 1}–{Math.min(currentPage * pageSize, effectiveTotal)} of {effectiveTotal}
           </span>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <button className="ha-btn ha-btn-secondary" disabled={currentPage <= 1} onClick={() => setPage(Math.max(1, currentPage - 1))}>Prev</button>
@@ -704,8 +902,22 @@ function JobsTable({
         </div>
       )}
 
-      {emailModalJob && <EmailComposeModal job={emailModalJob} onClose={() => setEmailModalJob(null)} />}
-      {linkedinModalJob && <LinkedInMessageModal job={linkedinModalJob} onClose={() => setLinkedinModalJob(null)} />}
+      {emailModal && (
+        <EmailComposeModal
+          job={emailModal.job}
+          followup={emailModal.followup}
+          parentOutreachId={emailModal.parentOutreachId}
+          onClose={() => setEmailModal(null)}
+          onSent={refreshOutreachStatus}
+        />
+      )}
+      {linkedinModalJob && (
+        <LinkedInMessageModal
+          job={linkedinModalJob}
+          onClose={() => setLinkedinModalJob(null)}
+          onLogged={refreshOutreachStatus}
+        />
+      )}
     </>
   );
 }
@@ -897,44 +1109,102 @@ function RunDetailView({ runId, onBack, onView }) {
 }
 
 /* ── Harvested Jobs page ─────────────────────────────────────────────── */
-function JobsPage({ jobs, total, loading, error, onRefresh, onNavigate, onView, pageSizeSel, onPageSizeChange }) {
+// Server-side pagination: only the current page of rows is ever loaded. The
+// JobsTable (in serverMode) emits its filter/sort/page state via
+// handleParamsChange, which fetches exactly that slice from GET /jobs; dropdown
+// options and the header/footer stat counts come from GET /jobs/facets so they
+// still span the whole dataset.
+function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeChange, urlState = false }) {
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
-  const [filteredRows, setFilteredRows] = useState([]);
+  const [pageJobs, setPageJobs] = useState([]);
+  const [pageTotal, setPageTotal] = useState(0);
+  const [pageLoading, setPageLoading] = useState(true);
+  const [pageError, setPageError] = useState("");
+  const [facets, setFacets] = useState(null);
+  const [exporting, setExporting] = useState(false);
+  // Monotonic request counter — a response only lands if no newer request has
+  // started since (fast typing / rapid filter clicks can overlap fetches).
+  const seqRef = useRef(0);
+  const lastParamsRef = useRef(null);
 
-  // Date-range predicate handed to the shared JobsTable. The rest of the filter
-  // bar (company/contact/job/POC/search/sort), the contact-action icons, and the
-  // Email/LinkedIn composer modals all live inside JobsTable, which reports its
-  // filtered rows back via onFilteredChange for the CSV export + footer below.
-  const dateFilter = useCallback((j) => {
-    if (startDate && j.postedDate.slice(0, 10) < startDate) return false;
-    if (endDate && j.postedDate.slice(0, 10) > endDate) return false;
-    return true;
-  }, [startDate, endDate]);
+  const handleParamsChange = useCallback(async (params) => {
+    lastParamsRef.current = params;
+    const seq = ++seqRef.current;
+    setPageLoading(true);
+    setPageError("");
+    try {
+      const res = await getJobs(params);
+      if (seq !== seqRef.current) return; // superseded by a newer request
+      setPageJobs((res.jobs || []).map(mapApiJob));
+      setPageTotal(res.total || 0);
+      setPageLoading(false);
+    } catch (err) {
+      if (seq !== seqRef.current) return;
+      setPageError(
+        err instanceof ApiError
+          ? `Could not load jobs: ${err.message}`
+          : "Could not reach the harvest backend. Is it running on the configured API URL?"
+      );
+      setPageJobs([]);
+      setPageTotal(0);
+      setPageLoading(false);
+    }
+  }, []);
 
-  const counts = useMemo(() => ({
-    all: jobs.length,
-    email: jobs.filter((j) => j.email).length,
-    whatsapp: jobs.filter((j) => j.whatsapp).length,
-    linkedin: jobs.filter((j) => j.linkedin).length,
-    companies: new Set(jobs.map((j) => j.company)).size,
-    pocs: jobs.filter((j) => j.poc).length,
-    qualified: jobs.filter((j) => j.passedFilter).length,
-    flagged: jobs.filter((j) => !j.passedFilter).length,
-  }), [jobs]);
+  const fetchFacets = useCallback(async () => {
+    try {
+      setFacets(await getJobsFacets());
+    } catch {
+      // Dropdowns fall back to "All"-only and stats render as 0; the jobs
+      // fetch's own error banner covers a backend outage.
+    }
+  }, []);
+  useEffect(() => { fetchFacets(); }, [fetchFacets]);
 
-  function exportCsv() {
-    const header = ["Job title", "Company", "Source", "Filter status", "Filter reason", "POC", "Posted date", "Email", "Mobile", "WhatsApp", "LinkedIn", "Job description"];
-    const lines = filteredRows.map((j) =>
-      [j.title, j.company, j.source, j.passedFilter ? "Qualified" : "Flagged", j.filterReason || "—", j.poc || "—", j.postedDate || "—", j.email || "—", j.mobile || "—", j.whatsapp || "—", j.linkedin || "—", j.jobDescription || "—"]
-        .map((c) => '"' + String(c).replace(/"/g, '""') + '"').join(","));
-    // Prepend a UTF-8 BOM so Excel detects the encoding — without it Excel reads
-    // the file as Windows-1252 and turns the "—" placeholder into "â€"".
-    const blob = new Blob([String.fromCharCode(0xFEFF) + [header.join(","), ...lines].join("\n")], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url; a.download = "harvested-jobs.csv"; a.click();
-    URL.revokeObjectURL(url);
+  const refresh = useCallback(() => {
+    fetchFacets();
+    if (lastParamsRef.current) handleParamsChange(lastParamsRef.current);
+  }, [fetchFacets, handleParamsChange]);
+
+  // Date range is a server-side filter now (date_from/date_to) — JobsTable
+  // folds these into every emitted params object.
+  const serverExtraParams = useMemo(
+    () => ({ date_from: startDate, date_to: endDate }),
+    [startDate, endDate]
+  );
+
+  const stats = facets?.stats || {};
+
+  // Export the FULL filtered dataset, not just the loaded page: re-run the
+  // current filter params without pagination through fetchAllJobs (which pulls
+  // every matching page) and build the CSV from all rows.
+  async function exportCsv() {
+    if (exporting) return;
+    setExporting(true);
+    try {
+      const { page, page_size, ...filterParams } = lastParamsRef.current || {};
+      const { rows } = await fetchAllJobs(filterParams);
+      const header = ["Job title", "Company", "Source", "Filter status", "Filter reason", "POC", "Posted date", "Email", "Mobile", "WhatsApp", "LinkedIn", "Job description"];
+      const lines = rows.map((j) =>
+        [j.title, j.company, j.source, j.passedFilter ? "Qualified" : "Flagged", j.filterReason || "—", j.poc || "—", j.postedDate || "—", j.email || "—", j.mobile || "—", j.whatsapp || "—", j.linkedin || "—", j.jobDescription || "—"]
+          .map((c) => '"' + String(c).replace(/"/g, '""') + '"').join(","));
+      // Prepend a UTF-8 BOM so Excel detects the encoding — without it Excel reads
+      // the file as Windows-1252 and turns the "—" placeholder into "â€"".
+      const blob = new Blob([String.fromCharCode(0xFEFF) + [header.join(","), ...lines].join("\n")], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = "harvested-jobs.csv"; a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setPageError(
+        err instanceof ApiError
+          ? `Could not export jobs: ${err.message}`
+          : "Could not reach the harvest backend to export. Is it running on the configured API URL?"
+      );
+    } finally {
+      setExporting(false);
+    }
   }
 
   return (
@@ -943,12 +1213,12 @@ function JobsPage({ jobs, total, loading, error, onRefresh, onNavigate, onView, 
         <div>
           <h1 style={{ margin: 0, fontSize: 24, fontWeight: 700, color: C.text }}>Harvested Jobs</h1>
           <p style={{ margin: "4px 0 0", fontSize: 14, color: C.textSoft }}>
-            {loading ? "Loading…" : `${total} harvested posting${total === 1 ? "" : "s"} · ${counts.qualified} qualified · ${counts.flagged} flagged`}
+            {pageLoading && !facets ? "Loading…" : `${stats.total || 0} harvested posting${(stats.total || 0) === 1 ? "" : "s"} · ${stats.qualified || 0} qualified · ${stats.flagged || 0} flagged`}
           </p>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <button className="ha-btn ha-btn-secondary" onClick={onRefresh} disabled={loading} title="Refresh">
-            <RefreshCw size={16} className={loading ? "ha-spin" : ""} /> Refresh
+          <button className="ha-btn ha-btn-secondary" onClick={refresh} disabled={pageLoading} title="Refresh">
+            <RefreshCw size={16} className={pageLoading ? "ha-spin" : ""} /> Refresh
           </button>
           <button className="ha-btn ha-btn-secondary" onClick={() => onNavigate("rules")}><SlidersHorizontal size={16} /> Rule Engine</button>
           <a className="ha-btn ha-btn-secondary" href={downloadJsonUrl()} title="GET /download/json — latest combined harvest JSON">
@@ -957,13 +1227,15 @@ function JobsPage({ jobs, total, loading, error, onRefresh, onNavigate, onView, 
           <a className="ha-btn ha-btn-secondary" href={downloadExcelUrl()} title="GET /download/excel — latest combined harvest Excel">
             <FileSpreadsheet size={16} /> Excel
           </a>
-          <button className="ha-btn ha-btn-primary" onClick={exportCsv}><Download size={16} /> Export CSV</button>
+          <button className="ha-btn ha-btn-primary" onClick={exportCsv} disabled={exporting}>
+            <Download size={16} /> {exporting ? "Exporting…" : "Export CSV"}
+          </button>
         </div>
       </div>
       <div style={{ marginTop: 20, borderBottom: "1px solid " + C.border }} />
 
       <div style={{ display: "flex", flexDirection: "column", gap: 16, padding: 24 }}>
-        {error && <div className="ha-errbanner">{error}</div>}
+        {pageError && <div className="ha-errbanner">{pageError}</div>}
 
         <div className="ha-daterow">
           <span style={{ fontSize: 14, fontWeight: 600, color: C.text }}>Posted between</span>
@@ -978,26 +1250,30 @@ function JobsPage({ jobs, total, loading, error, onRefresh, onNavigate, onView, 
           </div>
         </div>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 16 }}>
-          <StatCard value={counts.all} label="Total harvested" color={C.accent} />
-          <StatCard value={counts.companies} label="Companies sourced" color={C.primary} />
-          <StatCard value={counts.pocs} label="POCs identified" color={C.primary} />
+          <StatCard value={stats.total || 0} label="Total harvested" color={C.accent} />
+          <StatCard value={stats.companies || 0} label="Companies sourced" color={C.primary} />
+          <StatCard value={stats.pocs || 0} label="POCs identified" color={C.primary} />
         </div>
 
         <JobsTable
-          jobs={jobs}
+          jobs={pageJobs}
           onView={onView}
           showActionColumn
-          loading={loading}
-          preFilter={dateFilter}
-          onFilteredChange={setFilteredRows}
+          loading={pageLoading}
+          serverMode
+          serverTotal={pageTotal}
+          facets={facets}
+          onParamsChange={handleParamsChange}
+          serverExtraParams={serverExtraParams}
           minWidth={1340}
           pageSize={Number(pageSizeSel)}
+          urlState={urlState}
           emptyMessage="No postings match your search. Run a harvest from the Rule Engine to collect jobs."
         />
 
         <div style={{ display: "flex", justifyContent: "space-between", padding: "0 4px", fontSize: 12, color: C.textSoft }}>
-          <span>Showing {filteredRows.length} of {jobs.length} loaded postings · {counts.qualified} qualified · {counts.flagged} flagged</span>
-          <span>{counts.email} email · {counts.whatsapp} WhatsApp · {counts.linkedin} LinkedIn</span>
+          <span>Showing {pageJobs.length} of {pageTotal} matching posting{pageTotal === 1 ? "" : "s"} · {stats.qualified || 0} qualified · {stats.flagged || 0} flagged</span>
+          <span>{stats.with_email || 0} email · {stats.with_phone || 0} WhatsApp · {stats.with_linkedin || 0} LinkedIn</span>
         </div>
       </div>
     </main>
@@ -1608,43 +1884,201 @@ function LeadIntelligencePage() {
   );
 }
 
-/* Page */
+/* ── Shared app-data context ──────────────────────────────────────────────────
+ * Holds the genuinely app-level state that used to live in the root component:
+ * the harvested-jobs and run-history datasets (which also feed the Sidebar
+ * badges and the live-run poll) and the cross-page harvestRunning mutex. Pages
+ * read it via useHarvestData() instead of receiving it all as props. */
+const HarvestDataContext = createContext(null);
+
+export function useHarvestData() {
+  const ctx = useContext(HarvestDataContext);
+  if (!ctx) throw new Error("useHarvestData must be used within HarvestAgent");
+  return ctx;
+}
+
+// Map the current pathname to the Sidebar's active nav key.
+function activeKeyFromPath(pathname) {
+  if (pathname.startsWith("/rules")) return "rules";
+  if (pathname.startsWith("/history")) return "history";
+  if (pathname.startsWith("/sources")) return "sources";
+  if (pathname.startsWith("/leads")) return "leads";
+  if (pathname.startsWith("/outreach")) return "outreach";
+  return "jobs"; // "/", "/jobs", "/jobs/:id"
+}
+
+/* Shared layout for the sidebar-chrome pages (jobs/history/sources/leads/rules/
+ * outreach): renders the single Sidebar + the routed page via <Outlet/>. The
+ * full-page detail views (JobDetailsView, RunDetailView) render their own root
+ * and sit OUTSIDE this layout, exactly as before. */
+function AppLayout({ onLogout }) {
+  const { jobsTotal, runs } = useHarvestData();
+  const location = useLocation();
+  const navigate = useNavigate();
+  return (
+    <div className="ha-root">
+      <ThemeStyles />
+      <Sidebar
+        activePage={activeKeyFromPath(location.pathname)}
+        onNavigate={(key) => navigate(`/${key}`)}
+        jobsCount={jobsTotal}
+        runsCount={runs.length}
+        onLogout={onLogout}
+      />
+      <Outlet />
+    </div>
+  );
+}
+
+// ── Route wrappers: read shared context + wire router navigation into the
+// (otherwise unchanged) page components. onView/onNavigate become route pushes.
+function JobsRoute() {
+  const { pageSizeSel, setPageSizeSel } = useHarvestData();
+  const navigate = useNavigate();
+  return (
+    <JobsPage
+      onNavigate={(key) => navigate(`/${key}`)}
+      onView={(dv) => navigate(`/jobs/${encodeURIComponent(dv.job.id)}`, { state: { job: dv.job } })}
+      pageSizeSel={pageSizeSel} onPageSizeChange={setPageSizeSel}
+      urlState
+    />
+  );
+}
+
+function JobDetailRoute() {
+  const { jobId } = useParams();
+  const location = useLocation();
+  const navigate = useNavigate();
+  // Prefer the object passed via navigation state (instant); on a refresh/direct
+  // link there's no in-memory list anymore (the jobs page is server-paginated),
+  // so fetch the single record from GET /jobs/{id}.
+  const stateJob = location.state?.job;
+  const [fetchedJob, setFetchedJob] = useState(null);
+  const [loadState, setLoadState] = useState(stateJob ? "done" : "loading");
+
+  useEffect(() => {
+    if (stateJob) return undefined;
+    let cancelled = false;
+    setLoadState("loading");
+    setFetchedJob(null);
+    (async () => {
+      try {
+        const res = await getJob(jobId);
+        if (!cancelled) {
+          setFetchedJob(mapJobToDetail(mapApiJob(res)));
+          setLoadState("done");
+        }
+      } catch {
+        if (!cancelled) setLoadState("error"); // 404 or backend unreachable
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [jobId, stateJob]);
+
+  const job = stateJob || fetchedJob;
+
+  if (!job) {
+    // Rendered outside the shared layout (no ThemeStyles here), so keep it
+    // self-contained with inline styles.
+    return (
+      <div style={{ minHeight: "100vh", background: "#F8FAFC", padding: 40, color: "#64748B", fontFamily: 'ui-sans-serif,system-ui,"Segoe UI",Roboto,sans-serif' }}>
+        {loadState === "loading" ? "Loading job…" : (
+          <div>
+            <div style={{ marginBottom: 12 }}>This job isn’t in the current list.</div>
+            <button
+              onClick={() => navigate("/jobs")}
+              style={{ background: "#fff", border: "1px solid #CBD5E1", color: "#2563EB", borderRadius: 8, padding: "8px 16px", fontSize: 14, cursor: "pointer" }}
+            >
+              Back to Harvested Jobs
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  }
+  // Detail views are full-page (own root, no sidebar) — render outside the layout
+  // chrome by returning them directly from a route mounted above AppLayout.
+  return <JobDetailsView job={job} onBack={() => navigate("/jobs")} />;
+}
+
+function HistoryRoute() {
+  const { runs, runsLoading, runsError, fetchRuns } = useHarvestData();
+  const navigate = useNavigate();
+  return (
+    <RunHistoryPage
+      runs={runs} loading={runsLoading} error={runsError} onRefresh={fetchRuns}
+      onNavigate={(key) => navigate(`/${key}`)}
+      onView={(runId) => navigate(`/history/${encodeURIComponent(runId)}`)}
+    />
+  );
+}
+
+function RunDetailRoute() {
+  const { runId } = useParams();
+  const navigate = useNavigate();
+  return (
+    <RunDetailView
+      runId={runId}
+      onBack={() => navigate("/history")}
+      onView={(dv) => navigate(`/jobs/${encodeURIComponent(dv.job.id)}`, { state: { job: dv.job } })}
+    />
+  );
+}
+
+function SourcesRoute() {
+  const { harvestRunning, setHarvestRunning } = useHarvestData();
+  return <SourceRunsPage harvestRunning={harvestRunning} setHarvestRunning={setHarvestRunning} />;
+}
+
+function RulesRoute() {
+  const { jobsTotal, runs, refreshAll, harvestRunning, setHarvestRunning } = useHarvestData();
+  const navigate = useNavigate();
+  return (
+    <RuleEngineConfig
+      onNavigate={(key) => navigate(`/${key}`)} jobsCount={jobsTotal} runsCount={runs.length}
+      onRunComplete={refreshAll} harvestRunning={harvestRunning} setHarvestRunning={setHarvestRunning}
+    />
+  );
+}
+
+function NotFound() {
+  const navigate = useNavigate();
+  return (
+    <main className="ha-main">
+      <div style={{ padding: "64px 40px", textAlign: "center", color: "#64748B" }}>
+        <div style={{ fontSize: 40, fontWeight: 800, color: "#1E293B" }}>404</div>
+        <div style={{ marginTop: 8, marginBottom: 18 }}>That page doesn’t exist.</div>
+        <button className="ha-btn ha-btn-secondary" onClick={() => navigate("/jobs")}>Go to Harvested Jobs</button>
+      </div>
+    </main>
+  );
+}
+
+/* Page — owns the shared datasets/effects, provides them via context, and maps
+ * URLs to pages via React Router. Auth gating stays in App.js (this whole tree
+ * only mounts once authenticated), and the <BrowserRouter> lives there too. */
 export default function HarvestAgent({ onLogout }) {
-  const [activePage, setActivePage] = useState("jobs");
-  const [detailView, setDetailView] = useState(null); // null | { mode: "view"|"edit", job }
-  const [viewingRunId, setViewingRunId] = useState(null);
   // Shared across Rule Engine + Source Runs so two pages can't both launch a
   // harvest at once — Playwright can't open two browsers on the same
   // persistent Chrome profile, and doing so fails the whole run.
   const [harvestRunning, setHarvestRunning] = useState(false);
 
-  const [jobs, setJobs] = useState([]);
   const [jobsTotal, setJobsTotal] = useState(0);
-  const [jobsLoading, setJobsLoading] = useState(true);
-  const [jobsError, setJobsError] = useState("");
   const [pageSizeSel, setPageSizeSel] = useState("100");
 
   const [runs, setRuns] = useState([]);
   const [runsLoading, setRunsLoading] = useState(true);
   const [runsError, setRunsError] = useState("");
 
+  // The jobs dataset itself is no longer loaded here — the Jobs page fetches
+  // its own server-side pages (see JobsPage). This only reads the grand total
+  // for the Sidebar badge and the Rule Engine header count.
   const fetchJobs = useCallback(async () => {
-    setJobsLoading(true);
-    setJobsError("");
     try {
-      const { rows, total } = await fetchAllJobs({});
-      setJobs(rows);
-      setJobsTotal(total);
-    } catch (err) {
-      setJobsError(
-        err instanceof ApiError
-          ? `Could not load jobs: ${err.message}`
-          : "Could not reach the harvest backend. Is it running on the configured API URL?"
-      );
-      setJobs([]);
-      setJobsTotal(0);
-    } finally {
-      setJobsLoading(false);
+      const res = await getJobs({ page: 1, page_size: 1 });
+      setJobsTotal(res.total || 0);
+    } catch {
+      setJobsTotal(0); // badge only — the Jobs page surfaces backend errors
     }
   }, []);
 
@@ -1699,42 +2133,36 @@ export default function HarvestAgent({ onLogout }) {
     return () => clearInterval(id);
   }, [anyRunning, fetchRuns]);
 
-  if (activePage === "rules") {
-    return (
-      <RuleEngineConfig
-        onNavigate={setActivePage} jobsCount={jobsTotal} runsCount={runs.length} onRunComplete={refreshAll}
-        harvestRunning={harvestRunning} setHarvestRunning={setHarvestRunning}
-      />
-    );
-  }
-
-  if (detailView?.mode === "view") {
-    return (
-      <JobDetailsView
-        job={detailView.job}
-        onBack={() => setDetailView(null)}
-        onEdit={() => setDetailView({ mode: "edit", job: detailView.job })}
-      />
-    );
-  }
-
-  if (viewingRunId) {
-    return <RunDetailView runId={viewingRunId} onBack={() => setViewingRunId(null)} onView={setDetailView} />;
-  }
+  const ctx = useMemo(() => ({
+    jobsTotal, fetchJobs,
+    runs, runsLoading, runsError, fetchRuns,
+    refreshAll, harvestRunning, setHarvestRunning,
+    pageSizeSel, setPageSizeSel,
+  }), [
+    jobsTotal, fetchJobs,
+    runs, runsLoading, runsError, fetchRuns,
+    refreshAll, harvestRunning, pageSizeSel,
+  ]);
 
   return (
-    <div className="ha-root">
-      <ThemeStyles />
-      <Sidebar activePage={activePage} onNavigate={setActivePage} jobsCount={jobsTotal} runsCount={runs.length} onLogout={onLogout} />
-      {activePage === "history" ? (
-        <RunHistoryPage runs={runs} loading={runsLoading} error={runsError} onRefresh={fetchRuns} onNavigate={setActivePage} onView={setViewingRunId} />
-      ) : activePage === "sources" ? (
-        <SourceRunsPage harvestRunning={harvestRunning} setHarvestRunning={setHarvestRunning} />
-      ) : activePage === "leads" ? (
-        <LeadIntelligencePage />
-      ) : (
-        <JobsPage jobs={jobs} total={jobsTotal} loading={jobsLoading} error={jobsError} onRefresh={fetchJobs} onNavigate={setActivePage} onView={setDetailView} pageSizeSel={pageSizeSel} onPageSizeChange={setPageSizeSel} />
-      )}
-    </div>
+    <HarvestDataContext.Provider value={ctx}>
+      <Routes>
+        {/* Full-page detail views — own root/chrome, no shared sidebar (as before). */}
+        <Route path="/jobs/:jobId" element={<JobDetailRoute />} />
+        <Route path="/history/:runId" element={<RunDetailRoute />} />
+
+        {/* Sidebar-chrome pages share one layout via <Outlet/>. */}
+        <Route element={<AppLayout onLogout={onLogout} />}>
+          <Route index element={<Navigate to="/jobs" replace />} />
+          <Route path="/jobs" element={<JobsRoute />} />
+          <Route path="/history" element={<HistoryRoute />} />
+          <Route path="/sources" element={<SourcesRoute />} />
+          <Route path="/leads" element={<LeadIntelligencePage />} />
+          <Route path="/rules" element={<RulesRoute />} />
+          <Route path="/outreach" element={<OutreachHistoryPage />} />
+          <Route path="*" element={<NotFound />} />
+        </Route>
+      </Routes>
+    </HarvestDataContext.Provider>
   );
 }

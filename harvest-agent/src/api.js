@@ -89,6 +89,18 @@ export function getJobs(params = {}) {
   return request(`/jobs${qs(params)}`);
 }
 
+/** GET /jobs/facets — distinct Company/Job/POC dropdown values + whole-dataset
+ * stat counts. The jobs page is paginated server-side, so filter options and
+ * header stats come from here instead of the loaded rows. */
+export function getJobsFacets() {
+  return request("/jobs/facets");
+}
+
+/** GET /jobs/{id} — one job record by id (deep links / refresh on the detail page). */
+export function getJob(id) {
+  return request(`/jobs/${encodeURIComponent(id)}`);
+}
+
 /** GET /harvest-config — current Rule Engine configuration. */
 export function getHarvestConfig() {
   return request("/harvest-config");
@@ -275,12 +287,51 @@ export function generateLinkedinMessage({ job_id, regenerate } = {}) {
   });
 }
 
-/** POST /outreach/send-email — send the (possibly edited) email with the pptx attached; returns {status, error}. */
-export function sendOutreachEmail({ job_id, to_email, from_email, subject, body, tone, client_type, fallback_used } = {}) {
+/** POST /outreach/send-email — send the (possibly edited) email; returns {status, error, outreach_id}.
+ * status may be "sent" | "failed" | "duplicate" (an initial email already sent; retry with force:true). */
+export function sendOutreachEmail({ job_id, to_email, from_email, subject, body, tone, client_type, fallback_used, parent_outreach_id, force } = {}) {
   return request("/outreach/send-email", {
     method: "POST",
-    body: JSON.stringify({ job_id, to_email, from_email, subject, body, tone, client_type, fallback_used: !!fallback_used }),
+    body: JSON.stringify({
+      job_id, to_email, from_email, subject, body, tone, client_type,
+      fallback_used: !!fallback_used, parent_outreach_id: parent_outreach_id || null, force: !!force,
+    }),
   });
+}
+
+/** POST /outreach/generate-followup — draft a follow-up email from the prior outreach;
+ * returns the generate-email shape plus {parent_outreach_id}. */
+export function generateFollowupEmail({ job_id, parent_outreach_id, mode, regenerate } = {}) {
+  return request("/outreach/generate-followup", {
+    method: "POST",
+    body: JSON.stringify({ job_id, parent_outreach_id: parent_outreach_id || null, mode, regenerate: !!regenerate }),
+  });
+}
+
+/** POST /outreach/log-linkedin — record a manually-sent LinkedIn message; returns {status, outreach_id}. */
+export function logLinkedinSent({ job_id, message } = {}) {
+  return request("/outreach/log-linkedin", {
+    method: "POST",
+    body: JSON.stringify({ job_id, message: message || "" }),
+  });
+}
+
+/** GET /outreach/status?job_ids=… — latest sent state per job (row icons). Returns a
+ * map { job_id: { email?: {...}, linkedin?: {...} } }. */
+export function getOutreachStatus(jobIds = []) {
+  const ids = (jobIds || []).filter(Boolean).join(",");
+  return request(`/outreach/status?job_ids=${encodeURIComponent(ids)}`);
+}
+
+/** GET /outreach/history — outreach thread for a job/recruiter, or the recent list.
+ * Returns { items: [...] }. */
+export function getOutreachHistory({ job_id, recruiter_id, limit } = {}) {
+  const qs = new URLSearchParams();
+  if (job_id) qs.set("job_id", job_id);
+  if (recruiter_id) qs.set("recruiter_id", recruiter_id);
+  if (limit) qs.set("limit", String(limit));
+  const q = qs.toString();
+  return request(`/outreach/history${q ? `?${q}` : ""}`);
 }
 
 // ── Downloads ────────────────────────────────────────────────────────────────

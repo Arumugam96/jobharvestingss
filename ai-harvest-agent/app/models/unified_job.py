@@ -54,6 +54,10 @@ class UnifiedJob:
     # orchestrator flow silently dropped them before the DB insert.
     company_url:     str  = ""
     employment_type: str  = ""
+    # LinkedIn employee-range band (e.g. "1,001-5,000 employees"); persisted to
+    # ScrapedJobORM.company_size for the display-only company-size filter. Empty
+    # for sources/jobs where it wasn't captured.
+    company_size:    str  = ""
 
     # ── BusinessFilterService fills these ─────────────────────────────────────
     job_type:       str  = ""           # "contract" | "permanent" | … | "not_specified" (inferred)
@@ -99,6 +103,7 @@ class UnifiedJob:
             "work_mode":              self.work_mode,
             "source":                 self.source,
             "company_url":            self.company_url,
+            "company_size":           self.company_size,
             "employment_type":        self.employment_type,
             "job_type":               self.job_type,
             "domain":                 self.domain,

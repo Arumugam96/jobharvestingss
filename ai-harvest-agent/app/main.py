@@ -41,6 +41,7 @@ from app.routes.prospect_routes import router as prospect_intelligence_router
 from app.routes.recruiter_routes import router as recruiter_discovery_router
 from app.routes.lead_intelligence_routes import router as lead_intelligence_router
 from app.routes.outreach_routes import router as outreach_router
+from app.routes.outreach_routes import webhook_router as outreach_webhook_router
 from app.services.job_tracker import JobTracker
 from app.services.playwright_service import PlaywrightService
 from app.services.scheduler_service import SchedulerService
@@ -71,6 +72,8 @@ def _ensure_scraped_jobs_columns(sync_conn) -> None:
         # ScrapedJobORM.extraction_status). Default 'ok' so existing rows are
         # treated as already-extracted.
         ("extraction_status", "ALTER TABLE scraped_jobs ADD COLUMN extraction_status VARCHAR(20) NOT NULL DEFAULT 'ok'"),
+        # LinkedIn employee-range band captured per job (display-only size filter).
+        ("company_size", "ALTER TABLE scraped_jobs ADD COLUMN company_size VARCHAR(100) NOT NULL DEFAULT ''"),
     ]
     for name, ddl in pending:
         if name not in existing_cols:
@@ -148,6 +151,36 @@ def _ensure_harvest_runs_columns(sync_conn) -> None:
         logger.info("harvest_runs_column_added", column="report_pending")
 
 
+def _ensure_email_outreach_columns(sync_conn) -> None:
+    """One-time, idempotent ADD COLUMN backfill for columns added to the
+    pre-existing email_outreach table (channel / follow-up threading / provider
+    message id / Mailjet delivery engagement). Mirrors the other _ensure_* helpers
+    — create_all never alters an existing table."""
+    inspector = sa_inspect(sync_conn)
+    if "email_outreach" not in inspector.get_table_names():
+        return  # brand-new DB — create_all already made this table with the columns
+    existing_cols = {c["name"] for c in inspector.get_columns("email_outreach")}
+    # PostgreSQL uses TIMESTAMPTZ; SQLite ignores the type affinity so plain
+    # TIMESTAMP is fine there (mirrors _ensure_recruiter_columns).
+    ts_type = "TIMESTAMPTZ" if sync_conn.dialect.name == "postgresql" else "TIMESTAMP"
+    pending = [
+        ("channel",             "ALTER TABLE email_outreach ADD COLUMN channel VARCHAR(20) NOT NULL DEFAULT 'email'"),
+        ("outreach_kind",       "ALTER TABLE email_outreach ADD COLUMN outreach_kind VARCHAR(20) NOT NULL DEFAULT 'initial'"),
+        ("parent_outreach_id",  "ALTER TABLE email_outreach ADD COLUMN parent_outreach_id VARCHAR(36)"),
+        ("provider_message_id", "ALTER TABLE email_outreach ADD COLUMN provider_message_id VARCHAR(255)"),
+        # Mailjet delivery engagement — nullable, updated by the event webhook.
+        ("delivery_status",     "ALTER TABLE email_outreach ADD COLUMN delivery_status VARCHAR(20)"),
+        ("delivered_at",        f"ALTER TABLE email_outreach ADD COLUMN delivered_at {ts_type}"),
+        ("opened_at",           f"ALTER TABLE email_outreach ADD COLUMN opened_at {ts_type}"),
+        ("bounced_at",          f"ALTER TABLE email_outreach ADD COLUMN bounced_at {ts_type}"),
+        ("replied_at",          f"ALTER TABLE email_outreach ADD COLUMN replied_at {ts_type}"),
+    ]
+    for name, ddl in pending:
+        if name not in existing_cols:
+            sync_conn.execute(sa_text(ddl))
+            logger.info("email_outreach_column_added", column=name)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Startup: launch browser pool + scheduler. Shutdown: clean up both."""
@@ -176,6 +209,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # harvest_runs gained report_pending (deferred report for user-stopped
         # runs) — same idempotent ADD COLUMN treatment.
         await conn.run_sync(_ensure_harvest_runs_columns)
+        # email_outreach gained channel + follow-up threading (outreach_kind,
+        # parent_outreach_id) + provider_message_id — same idempotent treatment.
+        await conn.run_sync(_ensure_email_outreach_columns)
 
     # Reconcile stale 'running' runs left by a previous process (a harvest runs
     # in a detached task that doesn't survive a restart). Without this, the
@@ -316,6 +352,9 @@ def create_app() -> FastAPI:
     app.include_router(recruiter_discovery_router, dependencies=protected)    # POST /run-recruiter-discovery
     app.include_router(lead_intelligence_router, dependencies=protected)      # POST /run-lead-intelligence, GET /lead-intelligence, /download/lead-intelligence/*
     app.include_router(outreach_router, dependencies=protected)               # POST /outreach/generate-email, /generate-linkedin, /send-email
+    # Mailjet delivery-event webhook — unauthenticated (Mailjet has no login
+    # cookie); guarded by a shared token in the URL query instead.
+    app.include_router(outreach_webhook_router)                               # POST /outreach/mailjet-events
 
     return app
 

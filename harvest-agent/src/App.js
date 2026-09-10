@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { BrowserRouter } from "react-router-dom";
 import HarvestAgent from "./HarvestAgent";
 import LoginPage from "./LoginPage";
 import { AUTH_ENABLED } from "./auth";
@@ -45,17 +46,22 @@ function App() {
 
   if (status !== "authed") return <LoginPage onAuthenticated={() => setStatus("authed")} />;
 
+  // The router lives INSIDE the authed branch: LoginPage and the "checking"
+  // spinner stay non-routed short-circuits, so a deep link never renders the app
+  // shell before the session is confirmed. Cookie-based auth is unchanged.
   return (
-    <HarvestAgent
-      onLogout={async () => {
-        try {
-          await logout();
-        } catch {
-          /* revoke best-effort — clear the UI regardless */
-        }
-        setStatus("anon");
-      }}
-    />
+    <BrowserRouter>
+      <HarvestAgent
+        onLogout={async () => {
+          try {
+            await logout();
+          } catch {
+            /* revoke best-effort — clear the UI regardless */
+          }
+          setStatus("anon");
+        }}
+      />
+    </BrowserRouter>
   );
 }
 
