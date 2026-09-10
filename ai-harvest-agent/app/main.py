@@ -27,6 +27,7 @@ import app.models.auth  # noqa: F401 — registers users / otp_verifications on 
 import app.models.harvest_run  # noqa: F401 — registers harvest_runs / scraped_jobs / llm_calls on Base.metadata
 import app.models.recruiter  # noqa: F401 — registers recruiters on Base.metadata
 import app.models.outreach  # noqa: F401 — registers email_outreach on Base.metadata
+import app.models.suppression  # noqa: F401 — registers email_suppressions on Base.metadata
 from app.models.harvest import Base
 from app.routes import harvest, agents, tasks, health, job_parser, linkedin_harvest
 from app.routes.auth_routes import router as auth_router
@@ -102,6 +103,9 @@ def _ensure_recruiter_columns(sync_conn) -> None:
         ("state",                "ALTER TABLE recruiters ADD COLUMN state VARCHAR(120) NOT NULL DEFAULT ''"),
         ("country",              "ALTER TABLE recruiters ADD COLUMN country VARCHAR(120) NOT NULL DEFAULT ''"),
         ("company_linkedin_url", "ALTER TABLE recruiters ADD COLUMN company_linkedin_url TEXT NOT NULL DEFAULT ''"),
+        # Global outreach opt-out mirror (source of truth is email_suppressions).
+        ("unsubscribed",         "ALTER TABLE recruiters ADD COLUMN unsubscribed BOOLEAN NOT NULL DEFAULT FALSE"),
+        ("unsubscribed_at",      f"ALTER TABLE recruiters ADD COLUMN unsubscribed_at {ts_type}"),
     ]
     for name, ddl in pending:
         if name not in existing_cols:
@@ -174,6 +178,9 @@ def _ensure_email_outreach_columns(sync_conn) -> None:
         ("opened_at",           f"ALTER TABLE email_outreach ADD COLUMN opened_at {ts_type}"),
         ("bounced_at",          f"ALTER TABLE email_outreach ADD COLUMN bounced_at {ts_type}"),
         ("replied_at",          f"ALTER TABLE email_outreach ADD COLUMN replied_at {ts_type}"),
+        # Full ordered event trail (JSON list). Postgres accepts JSON; SQLite gives
+        # it TEXT affinity — both fine for a JSON-serialised list.
+        ("events",              "ALTER TABLE email_outreach ADD COLUMN events JSON"),
     ]
     for name, ddl in pending:
         if name not in existing_cols:

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { X, RefreshCw, Copy, Check, Send, Sparkles, Link, Loader2, AlertCircle, CornerUpRight } from "lucide-react";
-import { generateOutreachEmail, generateFollowupEmail, sendOutreachEmail, getOutreachHistory, ApiError } from "../api";
+import { generateOutreachEmail, generateFollowupEmail, sendOutreachEmail, getOutreachHistory, checkSuppressed, ApiError } from "../api";
 import OutreachBodyField from "./OutreachBodyField";
 import OutreachThread from "./OutreachThread";
 
@@ -95,6 +95,9 @@ export default function EmailComposeModal({
   const [error, setError] = useState("");
   const [sent, setSent] = useState(false);
   const [copied, setCopied] = useState(false);
+  // True when the current recipient has unsubscribed — blocks Generate/Send. The
+  // send route enforces it regardless; this is the up-front UX.
+  const [suppressed, setSuppressed] = useState(false);
   const metaLoaded = useRef(false);
 
   // Follow-up mode shows the previously sent email(s) first and only drafts a new
@@ -103,6 +106,20 @@ export default function EmailComposeModal({
   const [history, setHistory] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(followup);
   const [draftStarted, setDraftStarted] = useState(!followup);
+
+  // Check the recipient against the do-not-contact list (debounced on the To field).
+  useEffect(() => {
+    const email = (toEmail || "").trim();
+    if (!email) { setSuppressed(false); return undefined; }
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      try {
+        const res = await checkSuppressed(email);
+        if (!cancelled) setSuppressed(!!res.suppressed);
+      } catch { /* best-effort; the send route still enforces it */ }
+    }, 300);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [toEmail]);
 
   // Candidate recipient addresses for this job, labeled by origin to match the
   // table's Job/Recruiter split (emailScraped = the address on the job post,
@@ -233,6 +250,9 @@ export default function EmailComposeModal({
       } else if (res.status === "duplicate") {
         // An initial email was already sent to this recruiter/job — ask to confirm.
         setDuplicate(res.existing || {});
+      } else if (res.status === "suppressed") {
+        setSuppressed(true);
+        setError(res.error || "This recipient has unsubscribed and cannot be emailed.");
       } else {
         setError(res.error || "The email could not be sent.");
       }
@@ -244,7 +264,7 @@ export default function EmailComposeModal({
   };
 
   const badge = CLIENT_LABELS[clientType];
-  const canSend = !generating && !sending && !sent && toEmail.trim() && subject.trim() && body.trim();
+  const canSend = !generating && !sending && !sent && !suppressed && toEmail.trim() && subject.trim() && body.trim();
 
   return (
     <div className="ecm-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
@@ -272,6 +292,11 @@ export default function EmailComposeModal({
               <OutreachThread messages={history} loading={historyLoading}
                 emptyText="No previously sent email found for this job."
                 collapsible forceCollapsed={draftStarted} />
+            </div>
+          )}
+          {suppressed && (
+            <div className="ecm-note ecm-note-err">
+              <AlertCircle size={14} /> This contact has unsubscribed — sending is disabled.
             </div>
           )}
           {/* The compose editor. In initial mode it's shown immediately; in follow-up
@@ -371,7 +396,7 @@ export default function EmailComposeModal({
               <div className="ecm-foot-left" />
               <div className="ecm-foot-right">
                 <button className="ecm-btn ecm-btn-plain" onClick={onClose}>Cancel</button>
-                <button className="ecm-btn ecm-btn-primary" onClick={startFollowup} disabled={generating || historyLoading}>
+                <button className="ecm-btn ecm-btn-primary" onClick={startFollowup} disabled={generating || historyLoading || suppressed}>
                   {generating ? <Loader2 size={14} className="ecm-spin" /> : <Sparkles size={14} />} Generate follow-up
                 </button>
               </div>
@@ -379,7 +404,7 @@ export default function EmailComposeModal({
           ) : (
             <>
               <div className="ecm-foot-left">
-                <button className="ecm-btn ecm-btn-ghost" onClick={() => generate(tone, true)} disabled={generating || sending}>
+                <button className="ecm-btn ecm-btn-ghost" onClick={() => generate(tone, true)} disabled={generating || sending || suppressed}>
                   <RefreshCw size={14} className={generating ? "ecm-spin" : undefined} /> Regenerate
                 </button>
                 <button className="ecm-btn ecm-btn-ghost" onClick={copyAll} disabled={generating || !body} title={copied ? "Copied" : "Copy"}>

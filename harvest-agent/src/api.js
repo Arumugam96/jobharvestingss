@@ -323,15 +323,41 @@ export function getOutreachStatus(jobIds = []) {
   return request(`/outreach/status?job_ids=${encodeURIComponent(ids)}`);
 }
 
-/** GET /outreach/history — outreach thread for a job/recruiter, or the recent list.
- * Returns { items: [...] }. */
-export function getOutreachHistory({ job_id, recruiter_id, limit } = {}) {
+/** GET /outreach/history — the outreach thread for a job/recruiter (returns { items }),
+ * or the server-paginated + filtered recent list for the Mail logs page (returns
+ * { items, total, page, page_size, total_pages }). Pass job_id/recruiter_id for the
+ * thread; pass search/company/date_from/date_to/page/page_size for the list. */
+export function getOutreachHistory({ job_id, recruiter_id, limit, search, company, date_from, date_to, page, page_size } = {}) {
   const qs = new URLSearchParams();
   if (job_id) qs.set("job_id", job_id);
   if (recruiter_id) qs.set("recruiter_id", recruiter_id);
   if (limit) qs.set("limit", String(limit));
+  if (search) qs.set("search", search);
+  if (company) qs.set("company", company);
+  if (date_from) qs.set("date_from", date_from);
+  if (date_to) qs.set("date_to", date_to);
+  if (page) qs.set("page", String(page));
+  if (page_size) qs.set("page_size", String(page_size));
   const q = qs.toString();
   return request(`/outreach/history${q ? `?${q}` : ""}`);
+}
+
+/** GET /outreach/suppressed?email=… — whether a recipient has unsubscribed
+ * (do-not-contact). Returns { suppressed: bool }. */
+export function checkSuppressed(email) {
+  return request(`/outreach/suppressed?email=${encodeURIComponent(email || "")}`);
+}
+
+/** GET /outreach/stats — whole-dataset {sent, failed} over the filtered Mail-logs
+ * set, so the stat tiles stay accurate under pagination. */
+export function getOutreachStats({ search, company, date_from, date_to } = {}) {
+  const qs = new URLSearchParams();
+  if (search) qs.set("search", search);
+  if (company) qs.set("company", company);
+  if (date_from) qs.set("date_from", date_from);
+  if (date_to) qs.set("date_to", date_to);
+  const q = qs.toString();
+  return request(`/outreach/stats${q ? `?${q}` : ""}`);
 }
 
 // ── Downloads ────────────────────────────────────────────────────────────────

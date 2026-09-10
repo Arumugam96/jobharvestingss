@@ -10,7 +10,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, Float, Integer, String, Text, func
+from sqlalchemy import JSON, Boolean, DateTime, Float, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.harvest import Base  # shared metadata — one Base.metadata.create_all() for all tables
@@ -94,6 +94,11 @@ class RecruiterORM(Base):
     # whatever downstream CRM sync exists; this table doesn't manage its
     # lifecycle, just carries it alongside the recruiter's identity.
     crm_status: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # Global outreach opt-out — mirrored from the email_suppressions list (the
+    # email-keyed source of truth) when this recruiter's address is suppressed, so
+    # the CRM/UI can see it on the person. See app/services/suppression_service.py.
+    unsubscribed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    unsubscribed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(

@@ -1,8 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  RefreshCw, Send, Mail, X, Download, Search, Calendar, ChevronDown, Copy, Check, CornerUpRight,
+  RefreshCw, Send, Mail, X, Download, Search, Calendar, ChevronDown, Copy, Check, CornerUpRight, Building2,
 } from "lucide-react";
-import { getOutreachHistory, ApiError } from "./api";
+import { getOutreachHistory, getOutreachStats, ApiError } from "./api";
 import OutreachThread from "./components/OutreachThread";
 import EmailComposeModal from "./components/EmailComposeModal";
 
@@ -68,8 +68,9 @@ function avatarColor(seed) {
 function engagement(it) {
   if (it.status === "failed") return { label: "Failed", color: "#B91C1C", dot: "#B91C1C" };
   switch (it.delivery_status) {
-    case "opened":
     case "clicked":
+      return { label: "Clicked", color: "#0D9488", dot: "#0D9488" };
+    case "opened":
       return { label: "Opened", color: "#0E7C5A", dot: "#0E7C5A" };
     case "delivered":
       return { label: "Delivered", color: "#1E40AF", dot: "#2563EB" };
@@ -79,9 +80,31 @@ function engagement(it) {
       return { label: "Blocked", color: "#B91C1C", dot: "#B91C1C" };
     case "spam":
       return { label: "Spam", color: "#B91C1C", dot: "#B91C1C" };
+    case "unsubscribed":
+      return { label: "Unsubscribed", color: "#6D28D9", dot: "#6D28D9" };
     default:
       return { label: "Sent", color: "#64748B", dot: "#94A3B8" };
   }
+}
+
+// The distinct states a single mail passed through (from its Mailjet event trail),
+// de-duplicated in first-seen order, so the row/detail can show every status it hit
+// (e.g. Delivered → Opened → Clicked → Spam). Maps raw event names to short labels.
+const EVENT_LABEL = {
+  sent: "Delivered", open: "Opened", click: "Clicked",
+  bounce: "Bounced", blocked: "Blocked", spam: "Spam", unsub: "Unsubscribed",
+};
+const EVENT_COLOR = {
+  Delivered: "#1E40AF", Opened: "#0E7C5A", Clicked: "#0D9488",
+  Bounced: "#B91C1C", Blocked: "#B91C1C", Spam: "#B91C1C", Unsubscribed: "#6D28D9",
+};
+function eventTrail(it) {
+  const seen = [];
+  for (const e of it.events || []) {
+    const label = EVENT_LABEL[(e.event || "").toLowerCase()];
+    if (label && !seen.some((s) => s.label === label)) seen.push({ label, at: e.at });
+  }
+  return seen;
 }
 
 const TONE_STYLE = {
@@ -143,13 +166,29 @@ export default function OutreachHistoryPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
-  // Filters (all client-side over the loaded list).
-  const [search, setSearch] = useState("");
+  // Filters (applied server-side across the whole dataset).
+  const [search, setSearch] = useState("");        // point-of-contact name / email
+  const [companyQ, setCompanyQ] = useState("");     // company
   const [rangeKey, setRangeKey] = useState("all");
   const [customFrom, setCustomFrom] = useState("");
   const [customTo, setCustomTo] = useState("");
   const [dateOpen, setDateOpen] = useState(false);
   const dateRef = useRef(null);
+
+  // Debounced search values so typing doesn't fire a request per keystroke.
+  const [dq, setDq] = useState("");
+  const [dCompany, setDCompany] = useState("");
+  useEffect(() => { const t = setTimeout(() => setDq(search.trim()), 350); return () => clearTimeout(t); }, [search]);
+  useEffect(() => { const t = setTimeout(() => setDCompany(companyQ.trim()), 350); return () => clearTimeout(t); }, [companyQ]);
+
+  // Server pagination + whole-dataset stats.
+  const PAGE_SIZE = 100;
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [totalPages, setTotalPages] = useState(1);
+  const [stats, setStats] = useState({ sent: 0, failed: 0 });
+  const [exporting, setExporting] = useState(false);
+  const seqRef = useRef(0);
 
   // The row whose full thread is open in the detail modal + that thread's messages.
   const [detail, setDetail] = useState(null);
@@ -160,19 +199,43 @@ export default function OutreachHistoryPage() {
   // Follow-up composer context ({ job, parentOutreachId }) — opens EmailComposeModal.
   const [composeFor, setComposeFor] = useState(null);
 
+  const rangeLabel = RANGES.find((r) => r.key === rangeKey)?.label || "All time";
+  const hasDateFilter = rangeKey !== "all" || !!customFrom || !!customTo;
+
+  // Date filter → backend YYYY-MM-DD params (a custom range wins over the presets).
+  const dateParams = useMemo(() => {
+    if (customFrom || customTo) return { date_from: customFrom, date_to: customTo };
+    const range = RANGES.find((r) => r.key === rangeKey);
+    if (range && range.ms) return { date_from: new Date(Date.now() - range.ms).toISOString().slice(0, 10), date_to: "" };
+    return { date_from: "", date_to: "" };
+  }, [rangeKey, customFrom, customTo]);
+
+  // Any filter change resets to page 1.
+  useEffect(() => { setPage(1); }, [dq, dCompany, dateParams]);
+
   const load = useCallback(async () => {
+    const seq = ++seqRef.current;
     setLoading(true);
     setError("");
+    const filters = { search: dq, company: dCompany, ...dateParams };
     try {
-      const res = await getOutreachHistory({ limit: 200 });
+      const [res, st] = await Promise.all([
+        getOutreachHistory({ ...filters, page, page_size: PAGE_SIZE }),
+        getOutreachStats(filters),
+      ]);
+      if (seq !== seqRef.current) return; // a newer request superseded this one
       setItems(res.items || []);
+      setTotal(res.total || 0);
+      setTotalPages(res.total_pages || 1);
+      setStats(st || { sent: 0, failed: 0 });
     } catch (err) {
+      if (seq !== seqRef.current) return;
       setError(err instanceof ApiError ? `Could not load mail logs: ${err.message}` : "Could not reach the harvest backend.");
-      setItems([]);
+      setItems([]); setTotal(0); setTotalPages(1); setStats({ sent: 0, failed: 0 });
     } finally {
-      setLoading(false);
+      if (seq === seqRef.current) setLoading(false);
     }
-  }, []);
+  }, [page, dq, dCompany, dateParams]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -208,52 +271,42 @@ export default function OutreachHistoryPage() {
     return () => window.removeEventListener("keydown", onKey);
   }, [detail, composeFor]);
 
-  const rangeLabel = RANGES.find((r) => r.key === rangeKey)?.label || "All time";
-  const hasDateFilter = rangeKey !== "all" || !!customFrom || !!customTo;
+  const anyFilter = !!(dq || dCompany || hasDateFilter);
+  const resetFilters = () => { setSearch(""); setCompanyQ(""); setRangeKey("all"); setCustomFrom(""); setCustomTo(""); };
 
-  const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    const now = Date.now();
-    const range = RANGES.find((r) => r.key === rangeKey);
-    const fromMs = customFrom ? new Date(customFrom).getTime() : (range && range.ms ? now - range.ms : null);
-    const toMs = customTo ? new Date(customTo).getTime() + 24 * 3600e3 : null; // inclusive end-of-day
-    return items.filter((it) => {
-      if (q && !((it.contact_name || "").toLowerCase().includes(q) || (it.to_email || "").toLowerCase().includes(q))) return false;
-      const t = it.created_at ? new Date(it.created_at).getTime() : null;
-      if (fromMs != null && (t == null || t < fromMs)) return false;
-      if (toMs != null && (t == null || t > toMs)) return false;
-      return true;
-    });
-  }, [items, search, rangeKey, customFrom, customTo]);
-
-  const stats = useMemo(() => {
-    let sent = 0; let failed = 0;
-    for (const it of filtered) {
-      if (it.status === "failed" || it.delivery_status === "bounced" || it.delivery_status === "blocked") failed += 1;
-      else sent += 1;
+  // Export the WHOLE filtered set (every page), not just the loaded page.
+  const exportCsv = async () => {
+    setExporting(true);
+    try {
+      const filters = { search: dq, company: dCompany, ...dateParams };
+      const first = await getOutreachHistory({ ...filters, page: 1, page_size: PAGE_SIZE });
+      let all = first.items || [];
+      const pages = Math.min(first.total_pages || 1, 200); // safety cap (~20k rows)
+      for (let p = 2; p <= pages; p += 1) {
+        const res = await getOutreachHistory({ ...filters, page: p, page_size: PAGE_SIZE });
+        all = all.concat(res.items || []);
+      }
+      const head = ["Contact", "Email", "Company", "Client", "Subject", "Tone", "Type", "Status", "Engagement", "Sent"];
+      const esc = (v) => `"${String(v == null ? "" : v).replace(/"/g, '""')}"`;
+      const rows = all.map((it) => [
+        it.contact_name || "", it.to_email || "", it.company || "", it.client_type || "",
+        it.subject || "", it.tone || "", it.outreach_kind || "", it.status || "",
+        engagement(it).label, it.created_at || "",
+      ].map(esc).join(","));
+      const blob = new Blob([[head.map(esc).join(","), ...rows].join("\r\n")], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `mail-logs-${new Date().toISOString().slice(0, 10)}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch {
+      // best-effort — surface nothing rather than a partial file
+    } finally {
+      setExporting(false);
     }
-    return { sent, failed };
-  }, [filtered]);
-
-  const resetFilters = () => { setSearch(""); setRangeKey("all"); setCustomFrom(""); setCustomTo(""); };
-
-  const exportCsv = () => {
-    const head = ["Contact", "Email", "Company", "Client", "Subject", "Tone", "Type", "Status", "Engagement", "Sent"];
-    const esc = (v) => `"${String(v == null ? "" : v).replace(/"/g, '""')}"`;
-    const rows = filtered.map((it) => [
-      it.contact_name || "", it.to_email || "", it.company || "", it.client_type || "",
-      it.subject || "", it.tone || "", it.outreach_kind || "", it.status || "",
-      engagement(it).label, it.created_at || "",
-    ].map(esc).join(","));
-    const blob = new Blob([[head.map(esc).join(","), ...rows].join("\r\n")], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `mail-logs-${new Date().toISOString().slice(0, 10)}.csv`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
   };
 
   const copyMessage = () => {
@@ -283,8 +336,8 @@ export default function OutreachHistoryPage() {
           </div>
         </div>
         <div style={{ display: "flex", gap: 9 }}>
-          <button className="ha-btn ha-btn-secondary" onClick={exportCsv} disabled={!filtered.length}>
-            <Download size={15} /> Export CSV
+          <button className="ha-btn ha-btn-secondary" onClick={exportCsv} disabled={exporting || loading || !total}>
+            <Download size={15} className={exporting ? "ha-spin" : undefined} /> {exporting ? "Exporting…" : "Export CSV"}
           </button>
           <button className="ha-btn ha-btn-secondary" onClick={load} disabled={loading} title="Refresh" style={{ padding: "8px 10px" }}>
             <RefreshCw size={15} className={loading ? "ha-spin" : undefined} />
@@ -335,13 +388,19 @@ export default function OutreachHistoryPage() {
           )}
         </div>
 
-        <div style={{ display: "flex", alignItems: "center", gap: 8, border: "1px solid #CBD5E1", background: "#fff", borderRadius: 10, padding: "8px 12px", minWidth: 260, flex: "0 1 360px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, border: "1px solid #CBD5E1", background: "#fff", borderRadius: 10, padding: "8px 12px", minWidth: 230, flex: "0 1 300px" }}>
           <Search size={15} color="#94A3B8" />
           <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search by point of contact name…"
             style={{ border: 0, outline: "none", background: "transparent", fontSize: 13, width: "100%", fontFamily: "inherit", color: "#0F172A" }} />
         </div>
 
-        {(search || hasDateFilter) && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, border: "1px solid #CBD5E1", background: "#fff", borderRadius: 10, padding: "8px 12px", minWidth: 200, flex: "0 1 260px" }}>
+          <Building2 size={15} color="#94A3B8" />
+          <input value={companyQ} onChange={(e) => setCompanyQ(e.target.value)} placeholder="Search by company…"
+            style={{ border: 0, outline: "none", background: "transparent", fontSize: 13, width: "100%", fontFamily: "inherit", color: "#0F172A" }} />
+        </div>
+
+        {anyFilter && (
           <button onClick={resetFilters} style={{ border: 0, background: "transparent", color: "#64748B", fontSize: 13, fontWeight: 600, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 6, fontFamily: "inherit" }}>
             <X size={14} /> Reset filters
           </button>
@@ -364,12 +423,12 @@ export default function OutreachHistoryPage() {
               {loading && (
                 <tr><td colSpan={6} style={{ textAlign: "center", padding: "48px 16px", color: "#94A3B8" }}>Loading mail logs…</td></tr>
               )}
-              {!loading && filtered.length === 0 && !error && (
+              {!loading && items.length === 0 && !error && (
                 <tr><td colSpan={6} style={{ textAlign: "center", padding: "48px 16px", color: "#94A3B8" }}>
-                  {items.length ? "No mail matches your filters." : "No outreach sent yet."}
+                  {anyFilter ? "No mail matches your filters." : "No outreach sent yet."}
                 </td></tr>
               )}
-              {!loading && filtered.map((it) => {
+              {!loading && items.map((it) => {
                 const name = it.contact_name || (it.channel === "linkedin" ? "(LinkedIn)" : it.to_email || "—");
                 const client = CLIENT_LABEL[it.client_type] || "";
                 return (
@@ -398,7 +457,14 @@ export default function OutreachHistoryPage() {
                       </div>
                     </td>
                     <td style={{ padding: "13px 18px" }}><ToneChip it={it} /></td>
-                    <td style={{ padding: "13px 18px" }}><EngagementDot it={it} /></td>
+                    <td style={{ padding: "13px 18px" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                        <EngagementDot it={it} />
+                        {eventTrail(it).filter((e) => e.label !== engagement(it).label).map((e) => (
+                          <span key={e.label} style={{ fontSize: 10.5, fontWeight: 700, color: EVENT_COLOR[e.label] || "#64748B", background: "#F1F5F9", borderRadius: 999, padding: "1px 7px" }}>{e.label}</span>
+                        ))}
+                      </div>
+                    </td>
                     <td style={{ padding: "13px 18px", whiteSpace: "nowrap" }}>
                       <div style={{ fontWeight: 700, fontSize: 13, color: "#334155", fontVariantNumeric: "tabular-nums" }}>{fmtRel(it.created_at)}</div>
                       <div style={{ color: "#94A3B8", fontSize: 12, marginTop: 2, fontVariantNumeric: "tabular-nums" }}>{fmtAbs(it.created_at)}</div>
@@ -410,6 +476,19 @@ export default function OutreachHistoryPage() {
           </table>
         </div>
       </div>
+
+      {!loading && total > PAGE_SIZE && (
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 14, flexWrap: "wrap", gap: 10, fontSize: 13, color: "#64748B" }}>
+          <span style={{ fontVariantNumeric: "tabular-nums" }}>
+            Showing {(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, total)} of {total}
+          </span>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <button className="ha-btn ha-btn-secondary" disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>Prev</button>
+            <span style={{ fontWeight: 600, color: "#334155" }}>Page {page} of {totalPages}</span>
+            <button className="ha-btn ha-btn-secondary" disabled={page >= totalPages} onClick={() => setPage((p) => Math.min(totalPages, p + 1))}>Next</button>
+          </div>
+        </div>
+      )}
 
       {/* Detail modal */}
       {detail && !composeFor && (
@@ -436,13 +515,16 @@ export default function OutreachHistoryPage() {
             </div>
 
             <div style={{ padding: "16px 22px", overflowY: "auto" }}>
-              {/* Delivery timeline */}
+              {/* Delivery event trail — every status this mail passed through. */}
               <div style={{ fontSize: 11, letterSpacing: ".12em", textTransform: "uppercase", color: "#94A3B8", fontWeight: 700, marginBottom: 10 }}>Delivery</div>
               <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 16px", marginBottom: 18, fontSize: 12 }}>
                 <TimelineStep on label="Sent" time={fmtTime(detail.created_at)} />
-                <TimelineStep on={!!detail.delivered_at} label="Delivered" time={detail.delivered_at ? fmtTime(detail.delivered_at) : "—"} />
-                <TimelineStep on={!!detail.opened_at} label="Opened" time={detail.opened_at ? fmtTime(detail.opened_at) : "—"} />
-                <span style={{ color: "#CBD5E1" }}>Replied · <i>tracking added later</i></span>
+                {eventTrail(detail).map((e) => (
+                  <TimelineStep key={e.label} on label={e.label} time={fmtTime(e.at)} color={EVENT_COLOR[e.label]} />
+                ))}
+                {eventTrail(detail).length === 0 && (
+                  <span style={{ color: "#CBD5E1" }}>Awaiting delivery events…</span>
+                )}
               </div>
 
               <div style={{ fontSize: 11, letterSpacing: ".12em", textTransform: "uppercase", color: "#94A3B8", fontWeight: 700, marginBottom: 12 }}>Message</div>
@@ -489,10 +571,10 @@ export default function OutreachHistoryPage() {
   );
 }
 
-function TimelineStep({ on, label, time }) {
+function TimelineStep({ on, label, time, color = "#0E7C5A" }) {
   return (
     <span style={{ display: "inline-flex", alignItems: "center", gap: 6, color: on ? "#334155" : "#94A3B8" }}>
-      <span style={{ width: 7, height: 7, borderRadius: "50%", background: on ? "#0E7C5A" : "#CBD5E1" }} />
+      <span style={{ width: 7, height: 7, borderRadius: "50%", background: on ? color : "#CBD5E1" }} />
       {label} {on && <b style={{ color: "#0F172A", fontWeight: 700 }}>{time}</b>}
     </span>
   );

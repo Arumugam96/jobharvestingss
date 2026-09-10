@@ -16,11 +16,13 @@ in `email_outreach`, which is the source of truth for the "already contacted" st
 """
 from __future__ import annotations
 
+import math
 import re
 from uuid import uuid4
 
 import structlog
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -39,11 +41,17 @@ from app.services.outreach_log_service import (
     get_by_id,
     initial_email_sent,
     latest_sent_email,
+    outreach_list_stats,
     outreach_to_dict,
     recent_outreach,
     record_delivery_events,
     sent_status_for_jobs,
     thread_messages,
+)
+from app.services.suppression_service import (
+    add_suppression,
+    is_suppressed,
+    verify_unsubscribe_token,
 )
 from app.prompts.outreach_prompts import TONES
 
@@ -224,6 +232,13 @@ async def send_email(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid sender email")
     if not (body.subject or "").strip() or not (body.body or "").strip():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Subject and body are required")
+
+    # Do-not-contact guard: never send to an address that has unsubscribed. Return a
+    # 200 with an explicit status (like the duplicate guard) so the UI can surface it
+    # without treating it as a hard error.
+    if await is_suppressed(db, to_email):
+        logger.info("outreach_send_suppressed", to=to_email)
+        return {"status": "suppressed", "error": "This recipient has unsubscribed and cannot be emailed."}
 
     # Recompute company / recruiter link / audience from the job when available.
     company, recruiter_id, client_type = "", None, body.client_type or "unknown"
@@ -441,20 +456,73 @@ async def outreach_status(
 async def outreach_history(
     job_id: str | None = Query(default=None, description="Filter to one job's outreach thread."),
     recruiter_id: str | None = Query(default=None, description="Filter to one recruiter's outreach thread."),
-    limit: int = Query(default=100, ge=1, le=500),
+    limit: int = Query(default=200, ge=1, le=500, description="Thread branch (job_id/recruiter_id) row cap."),
+    search: str = Query(default="", description="List branch: point-of-contact name / recipient email."),
+    company: str = Query(default="", description="List branch: company name (partial)."),
+    date_from: str = Query(default="", description="List branch: sent on/after (YYYY-MM-DD)."),
+    date_to: str = Query(default="", description="List branch: sent on/before (YYYY-MM-DD)."),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=100, ge=1, le=500),
     current_user: AuthenticatedUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
 ) -> dict:
     """With a job_id/recruiter_id: the ordered outreach thread (initial + follow-ups
-    + linkedin) for that contact. With neither: the recent-outreach list for the
-    Mail logs page. Each item carries the resolved contact_name (Contact column)
-    plus the Mailjet delivery-engagement fields."""
+    + linkedin) for that contact. With neither: the server-paginated + filtered
+    recent-outreach list for the Mail logs page. Each item carries the resolved
+    contact_name (Contact column) plus the Mailjet delivery-engagement fields."""
     if job_id or recruiter_id:
         rows = await thread_messages(db, job_id=job_id, recruiter_id=recruiter_id, limit=limit)
-    else:
-        rows = await recent_outreach(db, limit=limit)
+        names = await contact_names_for_rows(db, rows)
+        return {"items": [outreach_to_dict(r, contact_name=names.get(r.job_id)) for r in rows]}
+
+    rows, total = await recent_outreach(
+        db, search=search or None, company=company or None,
+        date_from=date_from or None, date_to=date_to or None, page=page, page_size=page_size,
+    )
     names = await contact_names_for_rows(db, rows)
-    return {"items": [outreach_to_dict(r, contact_name=names.get(r.job_id)) for r in rows]}
+    return {
+        "items": [outreach_to_dict(r, contact_name=names.get(r.job_id)) for r in rows],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": max(1, math.ceil(total / page_size)) if page_size else 1,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# GET /outreach/stats  — whole-dataset sent/failed counts over the filtered set
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/stats", status_code=status.HTTP_200_OK)
+async def outreach_stats(
+    search: str = Query(default=""),
+    company: str = Query(default=""),
+    date_from: str = Query(default=""),
+    date_to: str = Query(default=""),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """{sent, failed} over the whole filtered Mail-logs set, so the stat tiles stay
+    accurate under pagination (the loaded page is only 100 rows)."""
+    return await outreach_list_stats(
+        db, search=search or None, company=company or None,
+        date_from=date_from or None, date_to=date_to or None,
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# GET /outreach/suppressed  — is this recipient on the do-not-contact list?
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/suppressed", status_code=status.HTTP_200_OK)
+async def outreach_suppressed(
+    email: str = Query(..., description="Recipient email to check against the unsubscribe list."),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """Lets the composer disable sending + show a banner up front when the recipient
+    has unsubscribed (the send route enforces it regardless)."""
+    return {"suppressed": await is_suppressed(db, email)}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -485,3 +553,56 @@ async def mailjet_events(
     updated = await record_delivery_events(db, events)
     logger.info("mailjet_events_received", count=len(events), updated=updated)
     return {"received": len(events), "updated": updated}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# GET/POST /outreach/unsubscribe — recipient-facing opt-out (unauthenticated)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _unsub_page(message: str, ok: bool = True) -> str:
+    """Minimal self-contained confirmation page for the unsubscribe link."""
+    accent = "#047857" if ok else "#B91C1C"
+    return (
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+        "<title>Unsubscribe</title></head>"
+        "<body style=\"margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;"
+        "background:#f1f5f9;color:#0f172a;\">"
+        "<div style='max-width:520px;margin:12vh auto;background:#fff;border:1px solid #e2e8f0;"
+        "border-radius:14px;padding:32px 34px;box-shadow:0 12px 30px rgba(15,23,42,.08);'>"
+        f"<div style='width:44px;height:44px;border-radius:50%;background:{accent}1a;color:{accent};"
+        "display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:700;'>"
+        f"{'✓' if ok else '!'}</div>"
+        f"<h1 style='font-size:19px;margin:16px 0 8px;'>{'Unsubscribed' if ok else 'Link problem'}</h1>"
+        f"<p style='font-size:14px;line-height:1.6;color:#475569;margin:0;'>{message}</p>"
+        "</div></body></html>"
+    )
+
+
+@webhook_router.get("/unsubscribe", response_class=HTMLResponse)
+async def unsubscribe_page(
+    u: str | None = Query(default=None, description="Signed unsubscribe token."),
+    db: AsyncSession = Depends(get_db_session),
+) -> HTMLResponse:
+    """Recipient clicks the unsubscribe link in an outreach email → suppress the
+    address and show a confirmation page."""
+    email = verify_unsubscribe_token(u)
+    if not email:
+        return HTMLResponse(_unsub_page("This unsubscribe link is invalid or malformed.", ok=False), status_code=400)
+    await add_suppression(db, email=email, source="self_link")
+    logger.info("outreach_unsubscribed", source="self_link")
+    return HTMLResponse(_unsub_page(f"<strong>{email}</strong> has been removed from our outreach list. You won't receive further emails from us."))
+
+
+@webhook_router.post("/unsubscribe", status_code=status.HTTP_200_OK)
+async def unsubscribe_oneclick(
+    u: str | None = Query(default=None, description="Signed unsubscribe token."),
+    db: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """RFC 8058 one-click unsubscribe (the target of the List-Unsubscribe-Post
+    header) — Gmail/Outlook POST here directly; suppress and return 200."""
+    email = verify_unsubscribe_token(u)
+    if email:
+        await add_suppression(db, email=email, source="list_unsubscribe")
+        logger.info("outreach_unsubscribed", source="list_unsubscribe")
+    return {"status": "ok"}

@@ -194,6 +194,10 @@ class Settings(BaseSettings):
     # Shared secret embedded in the Mailjet event-webhook URL (?token=…) so only
     # Mailjet's delivery-event callbacks are accepted. Empty disables the check.
     mailjet_webhook_token: str = ""
+    # Public base URL of the app (scheme + host, no trailing slash), e.g.
+    # "https://app.example.com" — used to build absolute links in outreach emails
+    # (the unsubscribe link + List-Unsubscribe header). Falls back to localhost.
+    public_base_url: str = ""
 
     # ── CORS ─────────────────────────────────────────────────────────────────────
     cors_origins: str = "http://localhost:3000,http://localhost:8080"

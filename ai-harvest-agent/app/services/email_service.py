@@ -26,6 +26,7 @@ import httpx
 import structlog
 
 from app.config import Settings
+from app.services.suppression_service import make_unsubscribe_token
 
 logger = structlog.get_logger(__name__)
 
@@ -335,6 +336,16 @@ def _build_attachments(
     return out
 
 
+def _unsubscribe_url(settings: Settings, email: str) -> str:
+    """Absolute, signed self-hosted unsubscribe URL for an outreach recipient, or ""
+    when the public base URL isn't configured (we never embed a broken localhost
+    link in a sent email — the footer/header are simply omitted then)."""
+    base = (settings.public_base_url or "").strip().rstrip("/")
+    if not base or not email:
+        return ""
+    return f"{base}/outreach/unsubscribe?u={make_unsubscribe_token(email)}"
+
+
 class EmailSender:
     """Mailjet transport. AuthService only ever calls ``send_otp``; the outreach and
     harvest-report flows call ``send_email_with_attachments``."""
@@ -442,6 +453,15 @@ class EmailSender:
         msgid_domain = sender_addr.split("@")[-1] if "@" in sender_addr else None
         message_id = make_msgid(domain=msgid_domain) if msgid_domain else make_msgid()
 
+        # Outreach only (custom_id set): append a working unsubscribe footer to the
+        # body — a signed self-hosted link. Built here because the recipient (and thus
+        # the per-address token) is only known at send time. Replaces the old,
+        # non-functional "Reply STOP" line; the same URL is advertised via the
+        # List-Unsubscribe header below for Gmail/Outlook one-click.
+        unsub_url = _unsubscribe_url(settings, recipients[0]) if (custom_id and recipients) else ""
+        if unsub_url:
+            body = f"{body.rstrip()}\n\n—\nNot interested? Unsubscribe: {unsub_url}"
+
         message: dict = {
             "From": sender,
             "To": [{"Email": r} for r in recipients],
@@ -464,11 +484,15 @@ class EmailSender:
         if attachments:
             message["Attachments"] = attachments
 
-        # Outreach only: correlate delivery events to the send row + track opens/clicks.
+        # Outreach only: correlate delivery events to the send row + track opens/clicks,
+        # and advertise the unsubscribe endpoint for one-click opt-out.
         if custom_id:
             message["CustomID"] = custom_id
             message["TrackOpens"] = "enabled"
             message["TrackClicks"] = "enabled"
+            if unsub_url:
+                message["Headers"]["List-Unsubscribe"] = f"<{unsub_url}>"
+                message["Headers"]["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
 
         await self._send_via_mailjet(message, log)
         log.info("email_with_attachments_sent")

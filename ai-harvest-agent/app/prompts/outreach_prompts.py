@@ -96,8 +96,10 @@ OFFER_LINE = (
 CTA_LINE = "Should I send the profiles, or would a 10-minute call be easier?"
 # Hardcoded sender title in the sign-off (spelling per business template).
 SENDER_TITLE = "HR Recruiter, SightSpectrum"
-# One-line opt-out footer, always the last line of the email.
-STOP_LINE = "Not hiring right now? Reply STOP and we won't email again."
+# NOTE: the opt-out footer is no longer part of the generated copy. A real,
+# per-recipient unsubscribe LINK (+ List-Unsubscribe header) is appended at send
+# time in app/services/email_service.py — the old reply-based "Reply STOP" line was
+# non-functional (nothing read replies) so it was removed.
 DECK_LINK_TEMPLATE = "Visit our WebSite : {url}"
 
 _SIGNOFF_MARKERS = (
@@ -173,17 +175,16 @@ def _build_sign_off(sender_email: str) -> str:
 def append_closing(pitch: str, sender_email: str, deck_url: str = "") -> str:
     """Append the deterministic closing to an LLM- or template-generated pitch:
     a blank line, the sign-off block (name + HR Recruiter title + sender email),
-    the website/deck link when `deck_url` is set, and finally the one-line STOP
-    opt-out. Blocks are separated by blank lines. The sender email and website URL
-    are left as plain text here; email_service turns them into a bold clickable
-    mailto link and a clickable link when the email is sent as HTML."""
+    and the website/deck link when `deck_url` is set. Blocks are separated by blank
+    lines. The sender email and website URL are left as plain text here; email_service
+    turns them into a bold clickable mailto link and a clickable link when the email
+    is sent as HTML, and appends the per-recipient unsubscribe footer at send time."""
     body = _greeting_on_own_line(_strip_trailing_closing(pitch))
     url = (deck_url or "").strip()
     blocks = [body] if body else []
     blocks.append(_build_sign_off(sender_email))
     if url:
         blocks.append(DECK_LINK_TEMPLATE.format(url=url))
-    blocks.append(STOP_LINE)
     return "\n\n".join(b for b in blocks if b).strip()
 
 

@@ -13,7 +13,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, String, Text, func
+from sqlalchemy import JSON, Boolean, DateTime, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.harvest import Base  # shared metadata — one Base.metadata.create_all() for all tables
@@ -77,3 +77,8 @@ class EmailOutreachORM(Base):
     bounced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Reserved for the later inbound-reply-tracking phase — no writer yet.
     replied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Full ordered trail of Mailjet events this send passed through — every event
+    # (sent/open/click/spam/unsub/…) appended as {"event", "at"}, even ones that
+    # don't advance the headline `delivery_status`. NULL/[] until the first event.
+    # Lets the Mail logs UI show every status a mail hit, not just the latest.
+    events: Mapped[list | None] = mapped_column(JSON, nullable=True)
