@@ -1115,30 +1115,56 @@ function RunDetailView({ runId, onBack, onView }) {
 // options and the header/footer stat counts come from GET /jobs/facets so they
 // still span the whole dataset.
 function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeChange, urlState = false }) {
-  const [startDate, setStartDate] = useState("");
-  const [endDate, setEndDate] = useState("");
-  const [pageJobs, setPageJobs] = useState([]);
-  const [pageTotal, setPageTotal] = useState(0);
-  const [pageLoading, setPageLoading] = useState(true);
+  const { jobsViewRef } = useHarvestData();
+  const location = useLocation();
+  // Seed from the persistent cache when we're returning to the SAME view (its URL
+  // search matches what the cached rows were fetched for) — so the list renders
+  // instantly and revalidates quietly, instead of blanking to a spinner. Dates
+  // live in JobsPage state (not the URL), so they ride along in the cache too.
+  const cache = jobsViewRef.current;
+  const rowsSeed = cache && cache.search === location.search ? cache : null;
+
+  const [startDate, setStartDate] = useState(rowsSeed?.dateFrom || "");
+  const [endDate, setEndDate] = useState(rowsSeed?.dateTo || "");
+  const [pageJobs, setPageJobs] = useState(rowsSeed?.jobs || []);
+  const [pageTotal, setPageTotal] = useState(rowsSeed?.total || 0);
+  const [pageLoading, setPageLoading] = useState(!rowsSeed);
   const [pageError, setPageError] = useState("");
-  const [facets, setFacets] = useState(null);
+  const [facets, setFacets] = useState(cache?.facets || null);
   const [exporting, setExporting] = useState(false);
   // Monotonic request counter — a response only lands if no newer request has
   // started since (fast typing / rapid filter clicks can overlap fetches).
   const seqRef = useRef(0);
   const lastParamsRef = useRef(null);
+  // On a cache-seeded remount, keep the cached rows visible during the first
+  // (revalidating) fetch instead of flashing the loading state.
+  const seededRef = useRef(!!rowsSeed);
+  const firstFetchRef = useRef(false);
 
   const handleParamsChange = useCallback(async (params) => {
     lastParamsRef.current = params;
     const seq = ++seqRef.current;
-    setPageLoading(true);
+    const quiet = !firstFetchRef.current && seededRef.current;
+    firstFetchRef.current = true;
+    setPageLoading(!quiet);
     setPageError("");
     try {
       const res = await getJobs(params);
       if (seq !== seqRef.current) return; // superseded by a newer request
-      setPageJobs((res.jobs || []).map(mapApiJob));
+      const mapped = (res.jobs || []).map(mapApiJob);
+      setPageJobs(mapped);
       setPageTotal(res.total || 0);
       setPageLoading(false);
+      // Cache this exact view so returning to it is instant. Keyed by the URL
+      // search (filters/page/sort) + the date range that produced these rows.
+      jobsViewRef.current = {
+        ...(jobsViewRef.current || {}),
+        search: window.location.search,
+        jobs: mapped,
+        total: res.total || 0,
+        dateFrom: params.date_from || "",
+        dateTo: params.date_to || "",
+      };
     } catch (err) {
       if (seq !== seqRef.current) return;
       setPageError(
@@ -1150,16 +1176,19 @@ function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeChange, urlState 
       setPageTotal(0);
       setPageLoading(false);
     }
-  }, []);
+  }, [jobsViewRef]);
 
   const fetchFacets = useCallback(async () => {
     try {
-      setFacets(await getJobsFacets());
+      const f = await getJobsFacets();
+      setFacets(f);
+      // Facets are whole-dataset (filter-independent), so cache them globally.
+      jobsViewRef.current = { ...(jobsViewRef.current || {}), facets: f };
     } catch {
       // Dropdowns fall back to "All"-only and stats render as 0; the jobs
       // fetch's own error banner covers a backend outage.
     }
-  }, []);
+  }, [jobsViewRef]);
   useEffect(() => { fetchFacets(); }, [fetchFacets]);
 
   const refresh = useCallback(() => {
@@ -1282,11 +1311,18 @@ function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeChange, urlState 
 
 /* ── Run History page ────────────────────────────────────────────────── */
 function RunHistoryPage({ runs, loading, error, onRefresh, onNavigate, onView }) {
-  const [filters, setFilters] = useState({ source: "all", status: "all" });
-  const [startDate, setStartDate] = useState("");
-  const [endDate, setEndDate] = useState("");
-  const [query, setQuery] = useState("");
-  const [sort, setSort] = useState({ col: "started", dir: "desc" });
+  // Seed the filter/sort UI from the persistent cache so returning from a run's
+  // detail view keeps the view (the run data itself already lives in context).
+  const { runHistoryViewRef } = useHarvestData();
+  const saved = runHistoryViewRef.current;
+  const [filters, setFilters] = useState(saved?.filters || { source: "all", status: "all" });
+  const [startDate, setStartDate] = useState(saved?.startDate || "");
+  const [endDate, setEndDate] = useState(saved?.endDate || "");
+  const [query, setQuery] = useState(saved?.query || "");
+  const [sort, setSort] = useState(saved?.sort || { col: "started", dir: "desc" });
+  useEffect(() => {
+    runHistoryViewRef.current = { filters, startDate, endDate, query, sort };
+  }, [runHistoryViewRef, filters, startDate, endDate, query, sort]);
 
   const counts = useMemo(() => ({
     totalRuns: runs.length,
@@ -1935,10 +1971,14 @@ function AppLayout({ onLogout }) {
 function JobsRoute() {
   const { pageSizeSel, setPageSizeSel } = useHarvestData();
   const navigate = useNavigate();
+  const location = useLocation();
   return (
     <JobsPage
       onNavigate={(key) => navigate(`/${key}`)}
-      onView={(dv) => navigate(`/jobs/${encodeURIComponent(dv.job.id)}`, { state: { job: dv.job } })}
+      // Carry the current jobs URL (with its ?company=…&page=… query) as `from`, so
+      // the detail view's Back returns to the exact filtered/paged list instead of
+      // a bare /jobs that resets everything.
+      onView={(dv) => navigate(`/jobs/${encodeURIComponent(dv.job.id)}`, { state: { job: dv.job, from: location.pathname + location.search } })}
       pageSizeSel={pageSizeSel} onPageSizeChange={setPageSizeSel}
       urlState
     />
@@ -1998,7 +2038,7 @@ function JobDetailRoute() {
   }
   // Detail views are full-page (own root, no sidebar) — render outside the layout
   // chrome by returning them directly from a route mounted above AppLayout.
-  return <JobDetailsView job={job} onBack={() => navigate("/jobs")} />;
+  return <JobDetailsView job={job} onBack={() => navigate(location.state?.from || "/jobs")} />;
 }
 
 function HistoryRoute() {
@@ -2065,6 +2105,15 @@ export default function HarvestAgent({ onLogout }) {
 
   const [jobsTotal, setJobsTotal] = useState(0);
   const [pageSizeSel, setPageSizeSel] = useState("100");
+
+  // Persisted across navigation (this provider never unmounts, unlike the pages
+  // under it) so returning from a full-page detail view restores the list
+  // instantly instead of refetching + resetting filters. jobsViewRef caches the
+  // last Harvested-Jobs page — the mapped rows/total + facets and the URL search
+  // they were fetched for; runHistoryViewRef keeps the Run History filter/sort UI
+  // state (its data already persists in `runs` above).
+  const jobsViewRef = useRef(null);
+  const runHistoryViewRef = useRef(null);
 
   const [runs, setRuns] = useState([]);
   const [runsLoading, setRunsLoading] = useState(true);
@@ -2138,6 +2187,7 @@ export default function HarvestAgent({ onLogout }) {
     runs, runsLoading, runsError, fetchRuns,
     refreshAll, harvestRunning, setHarvestRunning,
     pageSizeSel, setPageSizeSel,
+    jobsViewRef, runHistoryViewRef,   // stable refs — a persistent view cache
   }), [
     jobsTotal, fetchJobs,
     runs, runsLoading, runsError, fetchRuns,

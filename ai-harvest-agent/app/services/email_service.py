@@ -336,6 +336,18 @@ def _build_attachments(
     return out
 
 
+def _mailjet_message_ref(result: dict | None) -> str | None:
+    """The identifier Mailjet assigned to a sent message, pulled from a v3.1 send
+    result. Prefers the per-recipient ``MessageUUID`` (a stable string), falling
+    back to the numeric ``MessageID``. Returns None when neither is present."""
+    if not isinstance(result, dict):
+        return None
+    to = result.get("To") or []
+    first = to[0] if to and isinstance(to[0], dict) else {}
+    ref = first.get("MessageUUID") or first.get("MessageID")
+    return str(ref) if ref else None
+
+
 def _unsubscribe_url(settings: Settings, email: str) -> str:
     """Absolute, signed self-hosted unsubscribe URL for an outreach recipient, or ""
     when the public base URL isn't configured (we never embed a broken localhost
@@ -446,9 +458,12 @@ class EmailSender:
             from_header, envelope_from = _resolve_sender(settings)
             sender = _parse_from(from_header, envelope_from)
 
-        # Stamp a Message-ID so outreach sends have a stable identifier to persist
-        # (used for follow-up threading). Derive the domain from the configured
-        # sender so it looks legitimate to receiving MTAs.
+        # A stable identifier to persist for follow-up threading. Mailjet assigns
+        # the real Message-ID and returns it in the send response (captured below);
+        # this locally-generated value is only a fallback if that's ever absent.
+        # Derive the domain from the configured sender so the fallback looks
+        # legitimate. NOTE: Mailjet rejects a custom Message-ID in the "Headers"
+        # collection (send-0011), so it is never stamped on the outgoing message.
         sender_addr = parseaddr(settings.smtp_from_email or "")[1]
         msgid_domain = sender_addr.split("@")[-1] if "@" in sender_addr else None
         message_id = make_msgid(domain=msgid_domain) if msgid_domain else make_msgid()
@@ -467,7 +482,6 @@ class EmailSender:
             "To": [{"Email": r} for r in recipients],
             "Subject": subject,
             "TextPart": body,
-            "Headers": {"Message-ID": message_id},
         }
         reply_addr = (reply_to or from_email or "").strip()
         if reply_addr:
@@ -491,12 +505,15 @@ class EmailSender:
             message["TrackOpens"] = "enabled"
             message["TrackClicks"] = "enabled"
             if unsub_url:
-                message["Headers"]["List-Unsubscribe"] = f"<{unsub_url}>"
-                message["Headers"]["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
+                headers = message.setdefault("Headers", {})
+                headers["List-Unsubscribe"] = f"<{unsub_url}>"
+                headers["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
 
-        await self._send_via_mailjet(message, log)
+        result = await self._send_via_mailjet(message, log)
         log.info("email_with_attachments_sent")
-        return message_id
+        # Prefer the identifier Mailjet assigned (the real message reference); fall
+        # back to the locally-generated id only if the response lacks one.
+        return _mailjet_message_ref(result) or message_id
 
     async def _send_via_mailjet(self, message: dict, log=None) -> dict:
         """POST a single v3.1 message to the Mailjet Send API. Raises on a transport

@@ -23,7 +23,7 @@ const styles = `
 .ecm-badge-unknown { background: #F1F5F9; color: #475569; }
 .ecm-close { width: 30px; height: 30px; border: none; background: transparent; border-radius: 6px; color: #64748B; display: flex; align-items: center; justify-content: center; cursor: pointer; }
 .ecm-close:hover { background: #F1F5F9; color: #1E293B; }
-.ecm-body { padding: 18px 22px; overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 14px; }
+.ecm-body { padding: 18px 22px; overflow-y: auto; flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 14px; }
 .ecm-field { display: flex; flex-direction: column; gap: 6px; }
 .ecm-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: #94A3B8; display: flex; align-items: center; gap: 8px; }
 .ecm-input { width: 100%; border: 1px solid #E2E8F0; border-radius: 8px; padding: 9px 11px; font-size: 14px; color: #1E293B; font-family: inherit; background: #FFFFFF; box-sizing: border-box; }
