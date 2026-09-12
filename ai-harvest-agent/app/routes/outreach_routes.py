@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import math
 import re
+from datetime import datetime, timezone
 from uuid import uuid4
 
 import structlog
@@ -270,6 +271,7 @@ async def send_email(
     # Pre-generate the row id so it can ride along as the Mailjet CustomID: delivery
     # event webhooks echo it back, letting us map events to this exact send.
     outreach_id = str(uuid4())
+    sent_at = datetime.now(timezone.utc)
     send_status, error_message, message_id = "sent", None, None
     try:
         message_id = await email_sender.send_email_with_attachments(
@@ -307,10 +309,13 @@ async def send_email(
         fallback_used=body.fallback_used,
         status=send_status,
         error_message=error_message,
-        # Seed the delivery lifecycle: a clean hand-off to Mailjet starts at "sent";
-        # the event webhook advances it to delivered/opened/bounced. A failed send
-        # (never reached Mailjet) leaves it NULL.
-        delivery_status="sent" if send_status == "sent" else None,
+        # Seed the delivery lifecycle: a successful hand-off to Mailjet (HTTP 200 +
+        # per-message success — send_email_with_attachments raises otherwise) counts as
+        # delivered, so the row shows "Delivered" immediately without waiting on a
+        # webhook. The event webhook only advances it further (opened/clicked) or to a
+        # terminal negative (bounced/blocked/spam). A failed send leaves it NULL.
+        delivery_status="delivered" if send_status == "sent" else None,
+        delivered_at=sent_at if send_status == "sent" else None,
         sent_by=current_user.email,
     )
     db.add(row)

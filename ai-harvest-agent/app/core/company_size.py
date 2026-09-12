@@ -129,3 +129,24 @@ def band_to_tier(value: str) -> str:
     """Map a band string (any accepted format) to Small/Medium/Large/Enterprise,
     or "" when it can't be recognised (⇒ the UI shows "Unknown")."""
     return BAND_TO_TIER.get(normalize_company_size(value), "")
+
+
+def band_from_employee_count(count: object) -> str:
+    """Map a raw headcount (Apollo's ``estimated_num_employees`` integer) to the
+    canonical ``"<band> employees"`` string used on scraped_jobs.company_size /
+    RecruiterORM.company_size, so an Apollo-sourced size reads identically to a
+    LinkedIn-scraped band. Returns "" for a missing / non-positive count."""
+    try:
+        n = int(count)  # tolerates int, "1234", 1234.0
+    except (TypeError, ValueError):
+        return ""
+    if n <= 0:
+        return ""
+    for blo, bhi, tok in _TIER_BANDS:
+        if bhi is None:
+            if n >= blo:
+                return f"{tok} employees"
+        elif blo <= n <= bhi:
+            return f"{tok} employees"
+    # n == 1 falls below the smallest band (2-10) — snap it up to that band.
+    return f"{_TIER_BANDS[0][2]} employees"

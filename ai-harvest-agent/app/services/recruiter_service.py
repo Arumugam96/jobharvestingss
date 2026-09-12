@@ -149,6 +149,8 @@ async def save_enrichment(
     hiring_domain: str = "NOT_FOUND",
     company_industry: str = "NOT_FOUND",
     company_size: str = "NOT_FOUND",
+    company_state: str = "",
+    company_country: str = "",
     department: str = "",
     confidence_score: str = "Low",
     verified: bool = False,
@@ -198,6 +200,8 @@ async def save_enrichment(
     _apply("hiring_domain", hiring_domain, "NOT_FOUND")
     _apply("company_industry", company_industry, "NOT_FOUND")
     _apply("company_size", company_size, "NOT_FOUND")
+    _apply("company_state", company_state)
+    _apply("company_country", company_country)
     _apply("department", department)
     if confidence_score and confidence_score != "Low":
         recruiter.confidence_score = confidence_score

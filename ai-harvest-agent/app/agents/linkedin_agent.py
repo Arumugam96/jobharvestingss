@@ -1062,6 +1062,15 @@ class LinkedInAgent:
         except Exception as exc:
             logger.warning("recruiter_enrichment_pass_failed", error=str(exc))
 
+        # Company-level enrichment pass — fills company size / HQ location for
+        # EVERY company in the run (Apollo organizations/enrich, cached), so jobs
+        # with no recruiter still get company data. Gated by apollo_enrich_company;
+        # best-effort, never affects the collected job list.
+        try:
+            await self._enrich_companies(jobs)
+        except Exception as exc:
+            logger.warning("company_enrichment_pass_failed", error=str(exc))
+
         return jobs
 
     async def _ensure_authenticated(
@@ -1407,8 +1416,11 @@ class LinkedInAgent:
             return
 
         from app.config import get_settings
+        from app.core.company_domain import infer_company_domain
+        from app.core.company_size import band_from_employee_count
         from app.core.dependencies import get_session_factory
         from app.agents.prospect_intelligence_agent import _extract_linkedin_contact_info, _infer_department
+        from app.services.apollo_client import ApolloClient
         from app.services.apollo_enrichment import apollo_contact_fallback
         from app.services.recruiter_service import link_recruiter_jobs_by_url, save_enrichment, upsert_recruiter
 
@@ -1513,6 +1525,30 @@ class LinkedInAgent:
                         contact_info["email"] = apollo_result.email
                     if apollo_result.phone:
                         contact_info["phone"] = apollo_result.phone
+
+                    # Opt-in path (b): the people-match returned no company size —
+                    # spend an extra credit on organizations/enrich (keyed on a
+                    # derived domain) to fill company size / HQ location. Gated by
+                    # settings.apollo_enrich_company so default runs never do this.
+                    if (
+                        settings.apollo_enrich_company
+                        and apollo_result.matched
+                        and not apollo_result.company_size_band
+                    ):
+                        domain = apollo_result.company_domain or infer_company_domain(company_name)[0]
+                        if domain:
+                            try:
+                                org = await ApolloClient(settings).enrich_organization(domain)
+                            except Exception as exc:
+                                org = None
+                                logger.debug("apollo_org_enrich_failed", domain=domain, error=str(exc))
+                            if org:
+                                if org.size:
+                                    apollo_result.company_size_band = band_from_employee_count(org.size)
+                                if org.country and not apollo_result.company_country:
+                                    apollo_result.company_country = org.country
+                                if org.state and not apollo_result.company_state:
+                                    apollo_result.company_state = org.state
             except Exception as exc:
                 logger.warning("recruiter_contact_visit_failed", url=norm_url, error=str(exc))
             finally:
@@ -1545,6 +1581,14 @@ class LinkedInAgent:
                         city                 = apollo_result.city if apollo_result else "",
                         state                = apollo_result.state if apollo_result else "",
                         country              = apollo_result.country if apollo_result else "",
+                        # Company/org details from the same Apollo match (no extra
+                        # credit) — merged onto the job's company_size/country at
+                        # insert time so the UI can show/filter by them.
+                        company_size         = apollo_result.company_size_band if apollo_result else "",
+                        company_industry     = apollo_result.company_industry if apollo_result else "",
+                        company_domain       = apollo_result.company_domain if apollo_result else "",
+                        company_state        = apollo_result.company_state if apollo_result else "",
+                        company_country      = apollo_result.company_country if apollo_result else "",
                         enrichment_source = "apollo" if (apollo_result and apollo_result.source) else "",
                         apollo_attempted  = bool(apollo_result and apollo_result.attempted),
                     )
@@ -1563,6 +1607,46 @@ class LinkedInAgent:
             "recruiter_enrichment_pass_complete",
             unique_recruiters=len(groups), profiles_visited=visited,
         )
+
+    async def _enrich_companies(self, jobs: list[LinkedInScrapedJob]) -> None:
+        """Company-level enrichment: fetch size / HQ location for every company
+        that has NO size on any of its jobs (i.e. LinkedIn didn't show a band and
+        no recruiter Apollo-match filled it), via Apollo's organizations/enrich,
+        cached on CompanyORM. bulk_insert_scraped_jobs then applies the cache to
+        all of the company's jobs — including those without a recruiter.
+
+        Gated by settings.apollo_enrich_company (default off, spends credits).
+        Deduped per company; a recheck cooldown avoids re-billing across runs.
+        """
+        from app.config import get_settings
+        from app.core.dependencies import get_session_factory
+        from app.services.company_service import enrich_companies, normalize_company_key
+
+        settings = get_settings()
+        if not settings.apollo_enrich_company or not settings.apollo_api_key:
+            return
+
+        # Companies with at least one sized job don't need an Apollo size lookup —
+        # within-run propagation (in bulk_insert) will share that size to their
+        # other jobs for free. Target only companies with no size anywhere.
+        names: dict[str, str] = {}
+        have_size: set[str] = set()
+        for j in jobs:
+            name = (getattr(j, "company", "") or "").strip()
+            if not name:
+                continue
+            key = normalize_company_key(name)
+            names.setdefault(key, name)
+            if (getattr(j, "company_size", "") or "").strip():
+                have_size.add(key)
+
+        todo = [{"company_name": names[k], "domain": ""} for k in names if k not in have_size]
+        if not todo:
+            return
+
+        session_factory = get_session_factory(settings)
+        async with session_factory() as db:
+            await enrich_companies(db, settings, todo)
 
     async def _llm_fallback_extract_contact(self, page: Page, profile_url: str) -> dict:
         """

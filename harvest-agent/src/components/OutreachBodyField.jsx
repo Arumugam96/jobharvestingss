@@ -116,6 +116,10 @@ export default function OutreachBodyField({
   placeholder = "",
   textareaClassName = "",
   minHeight = 240,
+  // Cap the field height so a long draft scrolls inside its own box instead of
+  // pushing the modal past the viewport — keeps the surrounding fields and the
+  // Send button visible without scrolling the whole modal.
+  maxHeight = 320,
   jobTitle = "",
   jobUrl = "",
 }) {
@@ -143,7 +147,7 @@ export default function OutreachBodyField({
       {mode === "preview" ? (
         <div
           className={textareaClassName}
-          style={{ minHeight, whiteSpace: "pre-wrap", overflowWrap: "anywhere", overflowY: "auto", cursor: "text" }}
+          style={{ minHeight, maxHeight, whiteSpace: "pre-wrap", overflowWrap: "anywhere", overflowY: "auto", cursor: "text" }}
         >
           {value
             ? linkifyOutreachBody(value, jobTitle, jobUrl)
@@ -152,7 +156,7 @@ export default function OutreachBodyField({
       ) : (
         <textarea
           className={textareaClassName}
-          style={{ minHeight }}
+          style={{ minHeight, maxHeight, overflowY: "auto" }}
           value={value}
           onChange={(e) => onChange(e.target.value)}
           disabled={disabled}

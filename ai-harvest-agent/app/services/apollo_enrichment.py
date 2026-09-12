@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 import structlog
 
 from app.config import Settings
+from app.core.company_size import band_from_employee_count
 from app.services.apollo_client import ApolloAPIError, ApolloClient
 
 logger = structlog.get_logger(__name__)
@@ -40,6 +41,16 @@ class ApolloFallbackResult:
     city: str = ""
     state: str = ""
     country: str = ""
+    # ── Company/organization details from the same match (no extra credit) ──
+    # `state`/`country` above are the PERSON's location; these company_* fields
+    # are the ORGANIZATION's. company_size_band is Apollo's estimated_num_employees
+    # mapped to the canonical "<band> employees" string (app/core/company_size.py),
+    # so it reads identically to a LinkedIn-scraped size band.
+    company_size_band: str = ""
+    company_industry: str = ""
+    company_domain: str = ""
+    company_state: str = ""
+    company_country: str = ""
     matched: bool = False
     attempted: bool = False          # True once an Apollo call was actually issued
     source: str = ""                 # "apollo" when Apollo supplied the email
@@ -138,6 +149,13 @@ async def apollo_contact_fallback(
         city=person.city or "",
         state=person.state or "",
         country=person.country or "",
+        # Organization details already present on the match — previously dropped.
+        # estimated_num_employees → canonical band so it reads like a scraped size.
+        company_size_band=band_from_employee_count(org.size) if org else "",
+        company_industry=(org.industry if org else "") or "",
+        company_domain=(org.domain if org else "") or "",
+        company_state=(org.state if org else "") or "",
+        company_country=(org.country if org else "") or "",
         matched=person.matched,
         attempted=True,
         source="apollo" if email else "",

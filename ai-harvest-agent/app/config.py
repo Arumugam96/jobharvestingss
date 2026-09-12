@@ -90,6 +90,11 @@ class Settings(BaseSettings):
     apollo_reveal_phone: bool = False
     apollo_webhook_url: str = ""
     apollo_recheck_days: int = 30
+    # Opt-in: when a recruiter's Apollo people-match returns no company size,
+    # spend an extra credit on POST /organizations/enrich (keyed on a derived
+    # domain) to fill company size / HQ location. Off by default — the free
+    # people-match org data already covers the common case.
+    apollo_enrich_company: bool = False
 
     # ── Playwright ───────────────────────────────────────────────────────────────
     playwright_browser: Literal["chromium", "firefox", "webkit"] = "chromium"

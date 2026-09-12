@@ -67,6 +67,12 @@ class ScrapedJobORM(Base):
     job_title: Mapped[str] = mapped_column(String(500), nullable=False)
     company: Mapped[str] = mapped_column(String(500), nullable=False)
     location: Mapped[str] = mapped_column(String(500), nullable=False)
+    # Job-location country/state parsed from the free-text `location` at insert
+    # time (app/core/location.py::parse_location) — powers a display-time Country
+    # filter/facet in the UI while `location` is still shown verbatim. Never used
+    # to drop jobs. "" when the location carries no recognised country token.
+    country: Mapped[str] = mapped_column(String(100), nullable=False, default="")
+    state: Mapped[str] = mapped_column(String(100), nullable=False, default="")
     # Scraped free text with no reliable length ceiling — Text, not String(255).
     # Job boards occasionally emit long descriptive salary/experience strings
     # that overflow 255 in larger datasets (they were short in the small local
@@ -94,6 +100,12 @@ class ScrapedJobORM(Base):
     # Used only to power a display-time company-size filter in the UI — never to
     # drop jobs at harvest time. See app/core/company_size.py.
     company_size: Mapped[str] = mapped_column(String(100), nullable=False, default="")
+    # Company HQ location (country/state) from Apollo organization enrichment —
+    # NOT derived from the job's own `location`. Powers a separate "Company
+    # country" display-time filter/facet. "" until a run enriches the company via
+    # Apollo (unlike `country`/`state`, this can't be backfilled deterministically).
+    company_country: Mapped[str] = mapped_column(String(100), nullable=False, default="")
+    company_state: Mapped[str] = mapped_column(String(100), nullable=False, default="")
     employment_type: Mapped[str] = mapped_column(String(100), nullable=False, default="")
     job_type: Mapped[str] = mapped_column(String(50), nullable=False, default="")
     domain: Mapped[str] = mapped_column(String(50), nullable=False, default="Any")
@@ -236,3 +248,39 @@ class ReenrichmentTaskORM(Base):
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class CompanyORM(Base):
+    """Company-level enrichment cache — one row per unique company (keyed by a
+    normalized company name). Populated by the company-enrichment pass
+    (app/services/company_service.py, driven from the LinkedIn agent) via Apollo's
+    organizations/enrich, so a company's size / HQ location is fetched ONCE and
+    reused across every job of that company — including jobs with no recruiter to
+    piggyback the Apollo people-match on. HarvestRunService.bulk_insert_scraped_jobs
+    reads this cache to fill each job's company_size/company_country/company_state.
+
+    apollo_enriched_at drives a recheck cooldown (settings.apollo_recheck_days) so
+    a company isn't re-billed to Apollo every run.
+    """
+    __tablename__ = "companies"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    # Normalized company name (app/services/company_service.py::normalize_company_key).
+    company_key: Mapped[str] = mapped_column(String(600), nullable=False, unique=True, index=True)
+    company_name: Mapped[str] = mapped_column(String(500), nullable=False, default="")
+    domain: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    # Canonical "<band> employees" band (app/core/company_size.py), matching
+    # ScrapedJobORM.company_size's format so tier filtering is identical.
+    company_size: Mapped[str] = mapped_column(String(100), nullable=False, default="")
+    company_country: Mapped[str] = mapped_column(String(120), nullable=False, default="")
+    company_state: Mapped[str] = mapped_column(String(120), nullable=False, default="")
+    company_industry: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    # True once Apollo was actually queried for this company (hit or miss) — with
+    # apollo_enriched_at, powers the recheck cooldown so misses aren't retried
+    # every run either.
+    apollo_attempted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    apollo_enriched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )

@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   RefreshCw, Send, Mail, X, Download, Search, Calendar, ChevronDown, Copy, Check, CornerUpRight, Building2,
+  CheckCircle2, MailOpen, MousePointerClick, Ban, CornerUpLeft, ShieldAlert, BellOff,
 } from "lucide-react";
 import { getOutreachHistory, getOutreachStats, ApiError } from "./api";
 import OutreachThread from "./components/OutreachThread";
@@ -87,24 +88,32 @@ function engagement(it) {
   }
 }
 
-// The distinct states a single mail passed through (from its Mailjet event trail),
-// de-duplicated in first-seen order, so the row/detail can show every status it hit
-// (e.g. Delivered → Opened → Clicked → Spam). Maps raw event names to short labels.
-const EVENT_LABEL = {
-  sent: "Delivered", open: "Opened", click: "Clicked",
-  bounce: "Bounced", blocked: "Blocked", spam: "Spam", unsub: "Unsubscribed",
-};
+// Delivery-state label → dot/text color, shared by the detail timeline steps.
 const EVENT_COLOR = {
   Delivered: "#1E40AF", Opened: "#0E7C5A", Clicked: "#0D9488",
   Bounced: "#B91C1C", Blocked: "#B91C1C", Spam: "#B91C1C", Unsubscribed: "#6D28D9",
 };
-function eventTrail(it) {
-  const seen = [];
-  for (const e of it.events || []) {
-    const label = EVENT_LABEL[(e.event || "").toLowerCase()];
-    if (label && !seen.some((s) => s.label === label)) seen.push({ label, at: e.at });
+
+// The ordered delivery lifecycle for the detail timeline, built from the row's scalar
+// timestamps + event trail (not just events[]). This surfaces states the raw trail
+// misses: "Delivered" is seeded from the send's 200 response (delivered_at, no webhook),
+// and a click implies an open (opened_at), so both show even when Mailjet only fired a
+// click. De-duped by label in Sent → Delivered → Opened → Clicked order, with any
+// terminal negative (Bounced/Blocked/Spam) or Unsubscribed appended.
+function deliveryTimeline(it) {
+  const steps = [];
+  const add = (label, at) => { if (at && !steps.some((s) => s.label === label)) steps.push({ label, at }); };
+  add("Sent", it.created_at);            // always present
+  add("Delivered", it.delivered_at);     // from the 200 (or a 'sent' webhook)
+  add("Opened", it.opened_at);           // open, or click implies open
+  const click = (it.events || []).find((e) => (e.event || "").toLowerCase() === "click");
+  if (click) add("Clicked", click.at);
+  if (["bounced", "blocked", "spam"].includes(it.delivery_status)) add(engagement(it).label, it.bounced_at);
+  if (it.delivery_status === "unsubscribed") {
+    const un = (it.events || []).find((e) => (e.event || "").toLowerCase() === "unsub");
+    add("Unsubscribed", (un && un.at) || it.created_at);
   }
-  return seen;
+  return steps;
 }
 
 const TONE_STYLE = {
@@ -144,11 +153,53 @@ function StatCard({ icon, label, value, tone }) {
   );
 }
 
-function EngagementDot({ it }) {
-  const e = engagement(it);
+// The positive delivery lifecycle, in order — the set of stages a mail progresses through.
+const ENGAGEMENT_STAGES = ["Delivered", "Opened", "Clicked"];
+
+// Per-status icon + soft-pill palette for the engagement badges.
+const STATUS_META = {
+  Delivered:    { Icon: CheckCircle2,      color: "#1E7F4F", bg: "#E7F7EE" },
+  Opened:       { Icon: MailOpen,          color: "#0E7C5A", bg: "#E7F7F0" },
+  Clicked:      { Icon: MousePointerClick, color: "#0D7D74", bg: "#E4F5F3" },
+  Sent:         { Icon: Send,              color: "#64748B", bg: "#F1F5F9" },
+  Failed:       { Icon: Ban,               color: "#DC2626", bg: "#FDECEC" },
+  Bounced:      { Icon: CornerUpLeft,      color: "#DC2626", bg: "#FDECEC" },
+  Blocked:      { Icon: Ban,               color: "#DC2626", bg: "#FDECEC" },
+  Spam:         { Icon: ShieldAlert,       color: "#DC2626", bg: "#FDECEC" },
+  Unsubscribed: { Icon: BellOff,           color: "#6D28D9", bg: "#F1EBFD" },
+};
+
+// The delivery states a mail has reached, as labels — one icon badge is rendered per
+// entry. A failed send or terminal negative (bounced/blocked/spam/unsubscribed) is a
+// single badge; a positive send shows the cumulative lifecycle up to the furthest stage
+// (e.g. Delivered → Opened → Clicked).
+function engagementLabels(it) {
+  if (it.status === "failed") return ["Failed"];
+  const ds = it.delivery_status;
+  if (ds === "bounced") return ["Bounced"];
+  if (ds === "blocked") return ["Blocked"];
+  if (ds === "spam") return ["Spam"];
+  if (ds === "unsubscribed") return ["Unsubscribed"];
+  const furthest = ds === "clicked" ? "Clicked" : ds === "opened" ? "Opened" : ds === "delivered" ? "Delivered" : null;
+  const idx = ENGAGEMENT_STAGES.indexOf(furthest);
+  return idx === -1 ? ["Sent"] : ENGAGEMENT_STAGES.slice(0, idx + 1);
+}
+
+function StatusBadge({ label }) {
+  const meta = STATUS_META[label] || STATUS_META.Sent;
+  const Icon = meta.Icon;
   return (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 700, color: e.color }}>
-      <span style={{ width: 7, height: 7, borderRadius: "50%", background: e.dot }} /> {e.label}
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 5, background: meta.bg, color: meta.color, borderRadius: 999, padding: "3px 10px 3px 8px", fontSize: 11.5, fontWeight: 700, whiteSpace: "nowrap" }}>
+      <Icon size={13} strokeWidth={2.5} /> {label}
+    </span>
+  );
+}
+
+// Engagement cell: the reached delivery states as horizontal icon badges.
+function EngagementCell({ it }) {
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+      {engagementLabels(it).map((label) => <StatusBadge key={label} label={label} />)}
     </span>
   );
 }
@@ -414,17 +465,17 @@ export default function OutreachHistoryPage() {
           <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 860 }}>
             <thead>
               <tr>
-                {["Contact", "Company", "Subject", "Tone", "Engagement", "Sent"].map((h) => (
+                {["Contact", "Company", "Subject", "Engagement", "Sent"].map((h) => (
                   <th key={h} style={{ textAlign: "left", fontSize: 11.5, letterSpacing: ".04em", textTransform: "uppercase", color: "#94A3B8", fontWeight: 700, padding: "13px 18px", borderBottom: "1px solid #E2E8F0", whiteSpace: "nowrap" }}>{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {loading && (
-                <tr><td colSpan={6} style={{ textAlign: "center", padding: "48px 16px", color: "#94A3B8" }}>Loading mail logs…</td></tr>
+                <tr><td colSpan={5} style={{ textAlign: "center", padding: "48px 16px", color: "#94A3B8" }}>Loading mail logs…</td></tr>
               )}
               {!loading && items.length === 0 && !error && (
-                <tr><td colSpan={6} style={{ textAlign: "center", padding: "48px 16px", color: "#94A3B8" }}>
+                <tr><td colSpan={5} style={{ textAlign: "center", padding: "48px 16px", color: "#94A3B8" }}>
                   {anyFilter ? "No mail matches your filters." : "No outreach sent yet."}
                 </td></tr>
               )}
@@ -456,14 +507,8 @@ export default function OutreachHistoryPage() {
                         {it.subject || (it.channel === "linkedin" ? "(LinkedIn message)" : "—")}
                       </div>
                     </td>
-                    <td style={{ padding: "13px 18px" }}><ToneChip it={it} /></td>
                     <td style={{ padding: "13px 18px" }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                        <EngagementDot it={it} />
-                        {eventTrail(it).filter((e) => e.label !== engagement(it).label).map((e) => (
-                          <span key={e.label} style={{ fontSize: 10.5, fontWeight: 700, color: EVENT_COLOR[e.label] || "#64748B", background: "#F1F5F9", borderRadius: 999, padding: "1px 7px" }}>{e.label}</span>
-                        ))}
-                      </div>
+                      <EngagementCell it={it} />
                     </td>
                     <td style={{ padding: "13px 18px", whiteSpace: "nowrap" }}>
                       <div style={{ fontWeight: 700, fontSize: 13, color: "#334155", fontVariantNumeric: "tabular-nums" }}>{fmtRel(it.created_at)}</div>
@@ -504,7 +549,7 @@ export default function OutreachHistoryPage() {
                   {detail.subject || (detail.channel === "linkedin" ? "LinkedIn message" : "Outreach")}
                 </div>
                 <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10, flexWrap: "wrap" }}>
-                  <EngagementDot it={detail} />
+                  <StatusBadge label={engagement(detail).label} />
                   <ToneChip it={detail} />
                   <span style={{ color: "#94A3B8", fontSize: 12 }}>{fmtAbs(detail.created_at)}</span>
                 </div>
@@ -518,11 +563,10 @@ export default function OutreachHistoryPage() {
               {/* Delivery event trail — every status this mail passed through. */}
               <div style={{ fontSize: 11, letterSpacing: ".12em", textTransform: "uppercase", color: "#94A3B8", fontWeight: 700, marginBottom: 10 }}>Delivery</div>
               <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 16px", marginBottom: 18, fontSize: 12 }}>
-                <TimelineStep on label="Sent" time={fmtTime(detail.created_at)} />
-                {eventTrail(detail).map((e) => (
-                  <TimelineStep key={e.label} on label={e.label} time={fmtTime(e.at)} color={EVENT_COLOR[e.label]} />
+                {deliveryTimeline(detail).map((e) => (
+                  <TimelineStep key={e.label} on label={e.label} time={fmtTime(e.at)} color={EVENT_COLOR[e.label] || "#94A3B8"} />
                 ))}
-                {eventTrail(detail).length === 0 && (
+                {deliveryTimeline(detail).length <= 1 && (
                   <span style={{ color: "#CBD5E1" }}>Awaiting delivery events…</span>
                 )}
               </div>
@@ -539,7 +583,7 @@ export default function OutreachHistoryPage() {
 
               <div style={{ marginTop: 16 }}>
                 <div style={{ fontSize: 11, letterSpacing: ".12em", textTransform: "uppercase", color: "#94A3B8", fontWeight: 700, marginBottom: 10 }}>Thread</div>
-                <OutreachThread messages={thread} loading={threadLoading} emptyText="No sent messages found for this contact." />
+                <OutreachThread messages={thread} loading={threadLoading} emptyText="No sent messages found for this contact." collapsible />
               </div>
             </div>
 

@@ -4,7 +4,7 @@ import {
 } from "react-router-dom";
 import {
   SlidersHorizontal, Download,
-  Search, Mail, ArrowUpDown, ArrowUp, ArrowDown, Eye, Pencil, RefreshCw, ArrowLeft,
+  Search, Mail, ArrowUpDown, ArrowUp, ArrowDown, Eye, RefreshCw, ArrowLeft,
   CheckCircle2, XCircle, Loader2, HelpCircle, Play, FileJson, FileSpreadsheet,
   AlertTriangle, ChevronDown, Square,
 } from "lucide-react";
@@ -229,6 +229,10 @@ function mapApiJob(j) {
     // Unknown) captured at harvest — drives the display-only Company-size filter.
     companySize: j.company_size || "",
     companySizeTier: j.company_size_tier || "",
+    // Job-location country (parsed from the free-text `location`) and the
+    // company's HQ country (Apollo-enriched) — power the two Country filters.
+    country: j.country || "",
+    companyCountry: j.company_country || "",
     posterTitle: j.job_poster_designation || "",
     domain: j.domain || "",
     hiringEntity: j.hiring_entity || "",
@@ -512,13 +516,40 @@ function DualContact({ scraped, recruiter, fallback, link, cls }) {
   return single ? anchor(single) : dash;
 }
 
+// Company-size tier → badge colours (bg tint + text). The tier is the headline
+// value; the raw employee band renders small underneath. Unknown → neutral.
+const SIZE_TIER_STYLE = {
+  Small:      { bg: "#ECFDF5", fg: "#047857" }, // emerald
+  Medium:     { bg: "#EFF6FF", fg: "#1D4ED8" }, // blue
+  Large:      { bg: "#FFFBEB", fg: "#B45309" }, // amber
+  Enterprise: { bg: "#F5F3FF", fg: "#6D28D9" }, // violet
+};
+
+// Company-size table cell: a coloured tier badge (Small/Medium/Large/Enterprise)
+// with the employee-count band in a small font beneath it. "—" when unknown.
+function CompanySizeCell({ band, tier }) {
+  const count = (band || "").replace(/\s*employees?\s*$/i, "").trim();
+  if (!tier && !count) return <span style={{ color: "#94A3B8" }}>—</span>;
+  const s = SIZE_TIER_STYLE[tier] || { bg: "#F1F5F9", fg: "#475569" };
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 3, alignItems: "flex-start" }}>
+      <span style={{
+        background: s.bg, color: s.fg, fontSize: 11, fontWeight: 700,
+        padding: "2px 9px", borderRadius: 999, letterSpacing: ".02em", whiteSpace: "nowrap",
+      }}>
+        {tier || "Unknown"}
+      </span>
+      {count && <span style={{ fontSize: 11, color: "#94A3B8", whiteSpace: "nowrap" }}>{count}</span>}
+    </div>
+  );
+}
+
 /**
  * Shared jobs table used by both the Harvested Jobs page (JobsPage) and the
  * run-history per-run view (RunDetailView). Owns the Company/Contact/Job/POC/
- * search filter bar, sorting, the WhatsApp/Email/LinkedIn contact-action icons
- * (with the LLM Email + LinkedIn composer modals), and — only when
- * `showActionColumn` — the View/Edit Action column. `preFilter` lets the parent
- * add its own predicate (date range on the Harvested Jobs page; classification
+ * search filter bar, sorting, and the WhatsApp/Email/LinkedIn contact-action
+ * icons (with the LLM Email + LinkedIn composer modals). `preFilter` lets the
+ * parent add its own predicate (date range on the Harvested Jobs page; classification
  * bucket in the run view). The filtered+sorted rows are reported back via
  * `onFilteredChange` so the parent can drive its own stats/export/footer.
  */
@@ -558,7 +589,6 @@ async function fetchAllJobs(baseParams) {
 function JobsTable({
   jobs,
   onView,
-  showActionColumn = false,
   preFilter = null,
   loading = false,
   emptyMessage = "No jobs match your filters.",
@@ -591,8 +621,10 @@ function JobsTable({
           job: searchParams.get("job") || "all",
           poc: searchParams.get("poc") || "all",
           size: searchParams.get("size") || "all",
+          country: searchParams.get("country") || "all",
+          companyCountry: searchParams.get("companyCountry") || "all",
         }
-      : { company: "all", contact: [], job: "all", poc: "all", size: "all" }
+      : { company: "all", contact: [], job: "all", poc: "all", size: "all", country: "all", companyCountry: "all" }
   );
   const [query, setQuery] = useState(() => (urlState ? searchParams.get("q") || "" : ""));
   const [sort, setSort] = useState(() =>
@@ -636,6 +668,16 @@ function JobsTable({
     () => (serverMode ? (facets?.poc_names || []) : Array.from(new Set(jobs.filter((j) => j.poc).map((j) => j.poc))).sort()),
     [serverMode, facets, jobs]
   );
+  // Job-location country and company-HQ country dropdown options — whole-dataset
+  // facets in server mode, distinct-from-loaded-rows in client mode (Run Detail).
+  const countries = useMemo(
+    () => (serverMode ? (facets?.countries || []) : Array.from(new Set(jobs.map((j) => j.country).filter(Boolean))).sort()),
+    [serverMode, facets, jobs]
+  );
+  const companyCountries = useMemo(
+    () => (serverMode ? (facets?.company_countries || []) : Array.from(new Set(jobs.map((j) => j.companyCountry).filter(Boolean))).sort()),
+    [serverMode, facets, jobs]
+  );
 
   const filtered = useMemo(() => {
     // Server mode: rows arrive already filtered/sorted/paginated by the backend.
@@ -644,6 +686,8 @@ function JobsTable({
       if (filters.company !== "all" && j.company !== filters.company) return false;
       if (filters.job !== "all" && j.title !== filters.job) return false;
       if (filters.poc !== "all" && j.poc !== filters.poc) return false;
+      if (filters.country !== "all" && j.country !== filters.country) return false;
+      if (filters.companyCountry !== "all" && j.companyCountry !== filters.companyCountry) return false;
       // Company-size is a display-only filter over the captured band's tier.
       // "unknown" matches rows with no detected size; a named tier matches exactly.
       if (filters.size && filters.size !== "all") {
@@ -714,6 +758,8 @@ function JobsTable({
       job_title: filters.job !== "all" ? filters.job : "",
       poc: filters.poc !== "all" ? filters.poc : "",
       size_tier: filters.size && filters.size !== "all" ? filters.size : "",
+      country: filters.country !== "all" ? filters.country : "",
+      company_country: filters.companyCountry !== "all" ? filters.companyCountry : "",
       contact: filters.contact.join(","),
       ...(serverExtraParams || {}),
     });
@@ -738,6 +784,8 @@ function JobsTable({
     if (filters.job !== "all") sp.set("job", filters.job);
     if (filters.poc !== "all") sp.set("poc", filters.poc);
     if (filters.size && filters.size !== "all") sp.set("size", filters.size);
+    if (filters.country !== "all") sp.set("country", filters.country);
+    if (filters.companyCountry !== "all") sp.set("companyCountry", filters.companyCountry);
     if (query.trim()) sp.set("q", query.trim());
     if (sort.col !== "posted" || sort.dir !== "desc") { sp.set("sort", sort.col); sp.set("dir", sort.dir); }
     if (page > 1) sp.set("page", String(page));
@@ -766,19 +814,25 @@ function JobsTable({
   }, [pageRowIdsKey]);
   useEffect(() => { refreshOutreachStatus(); }, [refreshOutreachStatus]);
 
-  const colCount = showActionColumn ? 9 : 8;
+  // Columns: Job title, Company, Company size, POC, Email,
+  // Mobile, Contact,Source, Posted date
+  const colCount = 9;
 
   return (
     <>
-      <div className="ha-card ha-filterbar" style={{ padding: "16px 20px", gridTemplateColumns: "repeat(5, minmax(0, 1fr))" }}>
+      <div className="ha-card ha-filterbar" style={{ padding: "16px 20px", gridTemplateColumns: "repeat(4, minmax(0, 1fr))" }}>
         <Select label="Company" value={filters.company} onChange={(v) => setFilters((f) => ({ ...f, company: v }))}
           options={[{ value: "all", label: "All" }, ...companies.map((c) => ({ value: c, label: c }))]} />
         <Select label="Company size" value={filters.size || "all"} onChange={(v) => setFilters((f) => ({ ...f, size: v }))}
           options={COMPANY_SIZE_FILTER_OPTIONS} />
+        <Select label="Company country" value={filters.companyCountry} onChange={(v) => setFilters((f) => ({ ...f, companyCountry: v }))}
+          options={[{ value: "all", label: "All" }, ...companyCountries.map((c) => ({ value: c, label: c }))]} />
         <MultiSelect label="Contact" selected={filters.contact} onChange={(v) => setFilters((f) => ({ ...f, contact: v }))}
           options={CONTACT_FILTER_OPTIONS} />
         <Select label="Job" value={filters.job} onChange={(v) => setFilters((f) => ({ ...f, job: v }))}
           options={[{ value: "all", label: "All" }, ...jobTitles.map((t) => ({ value: t, label: t }))]} />
+        <Select label="Job country" value={filters.country} onChange={(v) => setFilters((f) => ({ ...f, country: v }))}
+          options={[{ value: "all", label: "All" }, ...countries.map((c) => ({ value: c, label: c }))]} />
         <Select label="POC" value={filters.poc} onChange={(v) => setFilters((f) => ({ ...f, poc: v }))}
           options={[{ value: "all", label: "All" }, ...pocNames.map((p) => ({ value: p, label: p }))]} />
         <div className="ha-filter-search">
@@ -794,13 +848,13 @@ function JobsTable({
               <tr>
                 <SortHeader label="Job title" col="title" sort={sort} setSort={setSort} width={230} />
                 <SortHeader label="Company" col="company" sort={sort} setSort={setSort} width={170} />
-                <SortHeader label="Source" col="source" sort={sort} setSort={setSort} width={100} />
+                <PlainHeader label="Company size" width={160} />
                 <SortHeader label="POC" col="poc" sort={sort} setSort={setSort} width={150} />
-                <SortHeader label="Posted date" col="posted" sort={sort} setSort={setSort} width={130} />
                 <PlainHeader label="Email" width={200} />
                 <PlainHeader label="Mobile" width={140} />
                 <PlainHeader label="Contact" align="center" width={130} />
-                {showActionColumn && <PlainHeader label="Action" align="center" width={90} />}
+                <SortHeader label="Source" col="source" sort={sort} setSort={setSort} width={100} />
+                <SortHeader label="Posted date" col="posted" sort={sort} setSort={setSort} width={130} />
               </tr>
             </thead>
             <tbody>
@@ -820,11 +874,12 @@ function JobsTable({
                     </span>
                   </td>
                   <td className="ha-td" style={{ color: C.text }}>{j.company}</td>
-                  <td className="ha-td"><SourceChip source={j.source} /></td>
+                  <td className="ha-td">
+                    <CompanySizeCell band={j.companySize} tier={j.companySizeTier} />
+                  </td>
                   <td className="ha-td" style={{ color: C.text }}>
                     {j.poc || <span style={{ color: "#94A3B8" }}>—</span>}
                   </td>
-                  <td className="ha-td" style={{ whiteSpace: "nowrap", color: C.textSoft }}>{j.postedDate || "—"}</td>
                   <td className="ha-td">
                     <DualContact scraped={j.emailScraped} recruiter={j.emailRecruiter} fallback={j.email} link="mailto:" cls="ha-mail" />
                   </td>
@@ -869,14 +924,8 @@ function JobsTable({
                       )}
                     </div>
                   </td>
-                  {showActionColumn && (
-                    <td className="ha-td">
-                      <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
-                        <button className="ha-act" title="View" onClick={() => onView({ mode: "view", job: mapJobToDetail(j) })}><Eye size={16} /></button>
-                        <button className="ha-act" title="Edit" onClick={() => onView({ mode: "edit", job: mapJobToDetail(j) })}><Pencil size={16} /></button>
-                      </div>
-                    </td>
-                  )}
+                  <td className="ha-td"><SourceChip source={j.source} /></td>
+                  <td className="ha-td" style={{ whiteSpace: "nowrap", color: C.textSoft }}>{j.postedDate || "—"}</td>
                 </tr>
               ))}
               {!loading && filtered.length === 0 && (
@@ -1094,7 +1143,7 @@ function RunDetailView({ runId, onBack, onView }) {
                     loading={jobsLoading}
                     preFilter={bucketPredicate}
                     onFilteredChange={setFilteredRows}
-                    minWidth={1180}
+                    minWidth={1410}
                     pageSize={Number(pageSizeSel)}
                     emptyMessage={jobs.length === 0 ? "No jobs recorded for this run." : "No jobs match your filters."}
                   />
@@ -1287,14 +1336,13 @@ function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeChange, urlState 
         <JobsTable
           jobs={pageJobs}
           onView={onView}
-          showActionColumn
           loading={pageLoading}
           serverMode
           serverTotal={pageTotal}
           facets={facets}
           onParamsChange={handleParamsChange}
           serverExtraParams={serverExtraParams}
-          minWidth={1340}
+          minWidth={1410}
           pageSize={Number(pageSizeSel)}
           urlState={urlState}
           emptyMessage="No postings match your search. Run a harvest from the Rule Engine to collect jobs."

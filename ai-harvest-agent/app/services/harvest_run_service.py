@@ -28,6 +28,7 @@ from app.core.company_size import (
 )
 from app.core.contact_normalize import normalize_email, normalize_phone
 from app.core.dependencies import get_session_factory
+from app.core.location import parse_location
 from app.core.text_formatting import html_description_to_text
 from app.models.harvest_run import (
     HarvestRunORM,
@@ -37,6 +38,7 @@ from app.models.harvest_run import (
     ScrapedJobORM,
 )
 from app.models.recruiter import RecruiterORM
+from app.services.company_service import get_companies_by_keys, normalize_company_key
 from app.services.recruiter_service import upsert_recruiter
 
 logger = structlog.get_logger(__name__)
@@ -193,9 +195,16 @@ class HarvestRunService:
         share field names for recruiter/poster info)."""
         if not jobs:
             return
+        # Company-level enrichment cache (app/services/company_service.py) — a
+        # company's Apollo size/HQ-location, shared across ALL its jobs (recruiter
+        # or not). Fetched once for the batch's companies.
+        company_cache = await get_companies_by_keys(
+            self._db, {normalize_company_key(j.get("company", "")) for j in jobs}
+        )
         rows: list[ScrapedJobORM] = []
         for j in jobs:
             recruiter_id = None
+            recruiter = None
             poster_name = (j.get("job_poster_name") or "").strip()
             if poster_name:
                 recruiter = await upsert_recruiter(
@@ -207,6 +216,29 @@ class HarvestRunService:
                     harvest_source=j.get("source", ""),
                 )
                 recruiter_id = recruiter.id if recruiter else None
+            # Company size/HQ location backfill from the recruiter's Apollo org
+            # match (populated earlier this run by _enrich_recruiters). Used only
+            # when the scraped job dict carries no value of its own — LinkedIn's
+            # own scraped company_size still wins. company_size default on the
+            # recruiter is "NOT_FOUND", treated as empty here.
+            rec_company_size = rec_company_country = rec_company_state = ""
+            if recruiter is not None:
+                _rcs = (recruiter.company_size or "").strip()
+                if _rcs and _rcs != "NOT_FOUND":
+                    rec_company_size = _rcs
+                rec_company_country = (recruiter.company_country or "").strip()
+                rec_company_state = (recruiter.company_state or "").strip()
+            # Company enrichment cache — covers jobs with no recruiter to borrow
+            # Apollo org data from. Lowest precedence (job dict > recruiter > cache).
+            _comp = company_cache.get(normalize_company_key(j.get("company", "")))
+            cache_company_size = (_comp.company_size if _comp else "") or ""
+            cache_company_country = (_comp.company_country if _comp else "") or ""
+            cache_company_state = (_comp.company_state if _comp else "") or ""
+            # Derive the job-location country/state deterministically from the
+            # free-text location (app/core/location.py) so the UI's Country
+            # filter/facet works without an LLM/Apollo call. Prefer any value the
+            # caller already provided (e.g. a future source that supplies it).
+            loc_city, loc_state, loc_country = parse_location(j.get("location", ""))
             rows.append(
                 ScrapedJobORM(
                     id=str(uuid.uuid4()),
@@ -215,6 +247,8 @@ class HarvestRunService:
                     job_title=j.get("job_title", ""),
                     company=j.get("company", ""),
                     location=j.get("location", ""),
+                    country=j.get("country") or loc_country,
+                    state=j.get("state") or loc_state,
                     salary=j.get("salary", ""),
                     experience=j.get("experience", ""),
                     posted_date=j.get("posted_date", ""),
@@ -224,7 +258,9 @@ class HarvestRunService:
                     skills=j.get("skills") or [],
                     work_mode=j.get("work_mode", "not_specified"),
                     company_url=j.get("company_url", ""),
-                    company_size=j.get("company_size", ""),
+                    company_size=j.get("company_size") or rec_company_size or cache_company_size,
+                    company_country=j.get("company_country") or rec_company_country or cache_company_country,
+                    company_state=j.get("company_state") or rec_company_state or cache_company_state,
                     employment_type=j.get("employment_type", ""),
                     job_type=j.get("job_type", ""),
                     domain=j.get("domain", "Any"),
@@ -243,6 +279,27 @@ class HarvestRunService:
                     lead_confidence=j.get("lead_confidence"),
                 )
             )
+        # Within-run company propagation (zero-cost): a company's size / HQ
+        # location often lands on just one of its jobs (the one LinkedIn showed a
+        # size band for, or the one whose recruiter Apollo matched). Share the
+        # first non-empty value across every job of the same company so jobs
+        # WITHOUT a recruiter still show it. Keyed by normalized company name.
+        best: dict[str, dict[str, str]] = {}
+        for r in rows:
+            key = normalize_company_key(r.company or "")
+            if not key:
+                continue
+            slot = best.setdefault(key, {"company_size": "", "company_country": "", "company_state": ""})
+            for f in slot:
+                if not slot[f] and getattr(r, f):
+                    slot[f] = getattr(r, f)
+        for r in rows:
+            slot = best.get(normalize_company_key(r.company or ""))
+            if not slot:
+                continue
+            for f in ("company_size", "company_country", "company_state"):
+                if not getattr(r, f) and slot[f]:
+                    setattr(r, f, slot[f])
         self._db.add_all(rows)
         await self._db.flush()
 
@@ -409,6 +466,8 @@ class HarvestRunService:
         poc:           str | None = None,
         contact:       list[str] | None = None,
         size_tier:     str | None = None,
+        country:       str | None = None,
+        company_country: str | None = None,
         source:        str | None = None,
         hiring_entity: str | None = None,
         work_mode:     str | None = None,
@@ -485,6 +544,10 @@ class HarvestRunService:
                 stmt = stmt.where(
                     norm.in_([f"{band} employees" for band in TIER_TO_BANDS[size_tier]])
                 )
+        if country:
+            stmt = stmt.where(func.lower(ScrapedJobORM.country) == country.lower())
+        if company_country:
+            stmt = stmt.where(func.lower(ScrapedJobORM.company_country) == company_country.lower())
         if source:
             stmt = stmt.where(func.lower(ScrapedJobORM.source) == source.lower())
         if hiring_entity:
@@ -533,6 +596,8 @@ class HarvestRunService:
         companies  = await _distinct(ScrapedJobORM.company)
         job_titles = await _distinct(ScrapedJobORM.job_title)
         poc_names  = await _distinct(ScrapedJobORM.job_poster_name)
+        countries         = await _distinct(ScrapedJobORM.country)
+        company_countries = await _distinct(ScrapedJobORM.company_country)
 
         email_p, phone_p, linkedin_p = _contact_presence_exprs()
 
@@ -565,10 +630,12 @@ class HarvestRunService:
             )
         }
         return {
-            "companies":  companies,
-            "job_titles": job_titles,
-            "poc_names":  poc_names,
-            "stats":      stats,
+            "companies":         companies,
+            "job_titles":        job_titles,
+            "poc_names":         poc_names,
+            "countries":         countries,
+            "company_countries": company_countries,
+            "stats":             stats,
         }
 
     async def get_scraped_job_by_id(self, job_id: str) -> ScrapedJobORM | None:
@@ -868,6 +935,10 @@ def scraped_job_view(job: ScrapedJobORM) -> dict[str, Any]:
         "job_title":              job.job_title,
         "company":                job.company,
         "location":               job.location,
+        # Job-location country/state parsed from `location` (display-time Country
+        # filter/facet); `location` above is still the verbatim string the UI shows.
+        "country":                job.country,
+        "state":                  job.state,
         "salary":                 job.salary,
         "experience":             job.experience,
         "posted_date":            job.posted_date,
@@ -882,6 +953,10 @@ def scraped_job_view(job: ScrapedJobORM) -> dict[str, Any]:
         # company-size filter. See app/core/company_size.py.
         "company_size":           job.company_size,
         "company_size_tier":      band_to_tier(job.company_size),
+        # Company HQ location from Apollo org enrichment — a separate "Company
+        # country" filter/facet, distinct from the job-location country above.
+        "company_country":        job.company_country,
+        "company_state":          job.company_state,
         "employment_type":        job.employment_type,
         "job_type":               job.job_type,
         "domain":                 job.domain,

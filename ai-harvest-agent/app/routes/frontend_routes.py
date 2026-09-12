@@ -163,6 +163,8 @@ def _apply_job_filters(jobs: list[dict], **f: Any) -> list[dict]:
     poc           = f.get("poc")            or ""
     contact       = f.get("contact")        or []
     size_tier     = f.get("size_tier")      or ""
+    country       = (f.get("country")       or "").lower()
+    company_country = (f.get("company_country") or "").lower()
     source        = (f.get("source")        or "").lower()
     hiring_entity = (f.get("hiring_entity") or "").lower()
     work_mode     = (f.get("work_mode")     or "").lower()
@@ -205,6 +207,10 @@ def _apply_job_filters(jobs: list[dict], **f: Any) -> list[dict]:
             result = [j for j in result if not band_to_tier(j.get("company_size") or "")]
         else:
             result = [j for j in result if band_to_tier(j.get("company_size") or "") == size_tier]
+    if country:
+        result = [j for j in result if (j.get("country") or "").lower() == country]
+    if company_country:
+        result = [j for j in result if (j.get("company_country") or "").lower() == company_country]
     if source:
         result = [j for j in result if (j.get("source") or "").lower() == source]
     if hiring_entity:
@@ -280,6 +286,8 @@ async def list_jobs(
     poc:           str = Query("",                        description="Filter by exact job poster (POC) name (UI dropdown)"),
     contact:       str = Query("",                        description="Contact availability — comma-separated tokens, OR-combined: email | mobile | linkedin | no_email | no_mobile | no_linkedin | none"),
     size_tier:     str = Query("",                        description="Company-size tier: Small | Medium | Large | Enterprise | unknown"),
+    country:       str = Query("",                        description="Filter by job-location country (UI dropdown), e.g. India"),
+    company_country: str = Query("",                      description="Filter by company HQ country (UI dropdown), e.g. United States"),
     source:        str = Query("",                        description="Filter by source: LinkedIn | Naukri | Dice"),
     hiring_entity: str = Query("",                        description="Filter: Direct Client | GCC | Staffing Firm | Ambiguous"),
     work_mode:     str = Query("",                        description="Filter: Remote | Hybrid | Onsite"),
@@ -326,6 +334,8 @@ async def list_jobs(
             poc           = poc,
             contact       = contact_tokens,
             size_tier     = size_tier,
+            country       = country,
+            company_country = company_country,
             source        = source,
             hiring_entity = hiring_entity,
             work_mode     = work_mode,
@@ -347,6 +357,8 @@ async def list_jobs(
             poc           = poc           or None,
             contact       = contact_tokens or None,
             size_tier     = size_tier     or None,
+            country       = country       or None,
+            company_country = company_country or None,
             source        = source        or None,
             hiring_entity = hiring_entity or None,
             work_mode     = work_mode     or None,
@@ -385,6 +397,8 @@ async def list_jobs(
             "poc":           poc           or None,
             "contact":       contact_tokens or None,
             "size_tier":     size_tier     or None,
+            "country":       country       or None,
+            "company_country": company_country or None,
             "source":        source        or None,
             "hiring_entity": hiring_entity or None,
             "work_mode":     work_mode     or None,

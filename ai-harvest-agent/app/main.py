@@ -75,6 +75,14 @@ def _ensure_scraped_jobs_columns(sync_conn) -> None:
         ("extraction_status", "ALTER TABLE scraped_jobs ADD COLUMN extraction_status VARCHAR(20) NOT NULL DEFAULT 'ok'"),
         # LinkedIn employee-range band captured per job (display-only size filter).
         ("company_size", "ALTER TABLE scraped_jobs ADD COLUMN company_size VARCHAR(100) NOT NULL DEFAULT ''"),
+        # Job-location country/state parsed from the free-text `location` at
+        # insert time (app/core/location.py) — display-only Country filter/facet.
+        ("country", "ALTER TABLE scraped_jobs ADD COLUMN country VARCHAR(100) NOT NULL DEFAULT ''"),
+        ("state",   "ALTER TABLE scraped_jobs ADD COLUMN state VARCHAR(100) NOT NULL DEFAULT ''"),
+        # Company HQ location from Apollo org enrichment — separate "Company
+        # country" filter/facet (distinct from the job-location country above).
+        ("company_country", "ALTER TABLE scraped_jobs ADD COLUMN company_country VARCHAR(100) NOT NULL DEFAULT ''"),
+        ("company_state",   "ALTER TABLE scraped_jobs ADD COLUMN company_state VARCHAR(100) NOT NULL DEFAULT ''"),
     ]
     for name, ddl in pending:
         if name not in existing_cols:
@@ -103,6 +111,10 @@ def _ensure_recruiter_columns(sync_conn) -> None:
         ("state",                "ALTER TABLE recruiters ADD COLUMN state VARCHAR(120) NOT NULL DEFAULT ''"),
         ("country",              "ALTER TABLE recruiters ADD COLUMN country VARCHAR(120) NOT NULL DEFAULT ''"),
         ("company_linkedin_url", "ALTER TABLE recruiters ADD COLUMN company_linkedin_url TEXT NOT NULL DEFAULT ''"),
+        # Company HQ location from the Apollo organization match — merged onto the
+        # job's company_country/company_state at insert time (display-time filter).
+        ("company_state",        "ALTER TABLE recruiters ADD COLUMN company_state VARCHAR(120) NOT NULL DEFAULT ''"),
+        ("company_country",      "ALTER TABLE recruiters ADD COLUMN company_country VARCHAR(120) NOT NULL DEFAULT ''"),
         # Global outreach opt-out mirror (source of truth is email_suppressions).
         ("unsubscribed",         "ALTER TABLE recruiters ADD COLUMN unsubscribed BOOLEAN NOT NULL DEFAULT FALSE"),
         ("unsubscribed_at",      f"ALTER TABLE recruiters ADD COLUMN unsubscribed_at {ts_type}"),

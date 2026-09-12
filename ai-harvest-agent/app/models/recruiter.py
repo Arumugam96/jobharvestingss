@@ -76,6 +76,12 @@ class RecruiterORM(Base):
     hiring_domain: Mapped[str] = mapped_column(String(100), nullable=False, default="NOT_FOUND")
     company_industry: Mapped[str] = mapped_column(String(255), nullable=False, default="NOT_FOUND")
     company_size: Mapped[str] = mapped_column(String(100), nullable=False, default="NOT_FOUND")
+    # Company HQ location from the Apollo organization match (apollo_enrichment.py)
+    # — distinct from the person's city/state/country above. "" until Apollo runs.
+    # Merged onto the job's company_country/company_state at insert time so the UI
+    # can filter jobs by company location. See HarvestRunService.bulk_insert_scraped_jobs.
+    company_state: Mapped[str] = mapped_column(String(120), nullable=False, default="")
+    company_country: Mapped[str] = mapped_column(String(120), nullable=False, default="")
     department: Mapped[str] = mapped_column(String(100), nullable=False, default="")
     confidence_score: Mapped[str] = mapped_column(String(10), nullable=False, default="Low")
     last_enriched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

@@ -75,6 +75,12 @@ class ApolloOrgResult(BaseModel):
     linkedin_url: str | None = None
     industry: str | None = None
     size: int | None = None
+    # Company HQ location — present on both the nested people-match organization
+    # and the standalone organizations/enrich response. Apollo-only, so callers
+    # merge it onto the recruiter/job when available.
+    city: str | None = None
+    state: str | None = None
+    country: str | None = None
 
     @classmethod
     def from_dict(cls, org: dict[str, Any] | None) -> "ApolloOrgResult | None":
@@ -87,6 +93,9 @@ class ApolloOrgResult(BaseModel):
             linkedin_url=_clean_str(org.get("linkedin_url")),
             industry=org.get("industry"),
             size=org.get("estimated_num_employees"),
+            city=_clean_str(org.get("city") or org.get("organization_city")),
+            state=_clean_str(org.get("state") or org.get("organization_state")),
+            country=_clean_str(org.get("country") or org.get("organization_country")),
         )
 
 
@@ -248,6 +257,30 @@ class ApolloClient:
         data = await self._request("/people/match", params=params)
         result = ApolloPersonResult.from_person(data.get("person"))
         self._log_result("people/match", linkedin_url, result)
+        return result
+
+    async def enrich_organization(self, domain: str) -> ApolloOrgResult | None:
+        """GET-style POST /organizations/enrich — company-level enrichment keyed
+        on a **domain** (Apollo has no LinkedIn-company-URL lookup). Returns an
+        ApolloOrgResult with size/industry/location, or None when Apollo finds no
+        organization for the domain. Does NOT reveal any person contact, so it
+        never spends an email/phone reveal credit (it is still an API call, so
+        callers should gate it — see apollo_enrichment / settings.apollo_enrich_company).
+        """
+        if not self.enabled:
+            raise ApolloAPIError("Apollo is not configured (APOLLO_API_KEY is empty)")
+        domain = (domain or "").strip()
+        if not domain:
+            return None
+        data = await self._request("/organizations/enrich", params={"domain": domain})
+        org = data.get("organization") or data.get("org")
+        result = ApolloOrgResult.from_dict(org)
+        logger.info(
+            "apollo_org_enriched",
+            domain=domain,
+            matched=bool(result),
+            size=result.size if result else None,
+        )
         return result
 
     async def bulk_enrich_people(

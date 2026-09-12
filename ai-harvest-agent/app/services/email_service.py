@@ -103,7 +103,7 @@ def _title_matcher(job_title: str) -> re.Pattern | None:
     return re.compile(pattern, re.IGNORECASE)
 
 
-def _outreach_body_to_html(body: str, job_title: str = "", job_url: str = "") -> str:
+def _outreach_body_to_html(body: str, job_title: str = "", job_url: str = "", unsub_url: str = "") -> str:
     """Render the plain-text outreach body as HTML: preserve line breaks; turn any
     http(s) URL (the deck link) into a clickable link; turn any line containing an
     email address (the appended reach-out line) into a bold line whose address is a
@@ -111,7 +111,12 @@ def _outreach_body_to_html(body: str, job_title: str = "", job_url: str = "") ->
     `job_title`/`job_url` are given, render the first occurrence of the job title
     (the opening's role mention; matched case- and whitespace-insensitively) as a
     bold, blue link to the posting that opens in a new tab — the raw URL itself is
-    never shown. All other text is HTML-escaped verbatim."""
+    never shown. All other text is HTML-escaped verbatim.
+
+    When `unsub_url` is given, a subtle footer is appended whose visible text is just
+    the word "unsubscribe" (the host URL stays in the href, never shown as text) — so
+    the body must be passed WITHOUT the raw-URL unsubscribe line the plain-text part
+    carries, otherwise _linkify_bare would expose that host here."""
     url = (job_url or "").strip()
     matcher = _title_matcher(job_title) if url else None
     title_linked = False
@@ -144,6 +149,16 @@ def _outreach_body_to_html(body: str, job_title: str = "", job_url: str = "") ->
             rendered = f"<strong>{rendered}</strong>"
         out_lines.append(rendered)
     inner = "<br>\n".join(out_lines)
+    if unsub_url:
+        # Visible text is only "unsubscribe"; the signed host URL lives in the href so
+        # it's never exposed as plain text in the rendered email.
+        inner += (
+            '<br>\n<div style="margin-top:18px;font-size:12px;color:#94A3B8;">'
+            'Not interested? '
+            f'<a href="{html_lib.escape(unsub_url)}" '
+            'style="color:#94A3B8;text-decoration:underline;">unsubscribe</a>.'
+            "</div>"
+        )
     return (
         '<!DOCTYPE html><html><body style="margin:0;padding:0;">'
         "<div style=\"font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',"
@@ -468,20 +483,21 @@ class EmailSender:
         msgid_domain = sender_addr.split("@")[-1] if "@" in sender_addr else None
         message_id = make_msgid(domain=msgid_domain) if msgid_domain else make_msgid()
 
-        # Outreach only (custom_id set): append a working unsubscribe footer to the
-        # body — a signed self-hosted link. Built here because the recipient (and thus
-        # the per-address token) is only known at send time. Replaces the old,
-        # non-functional "Reply STOP" line; the same URL is advertised via the
+        # Outreach only (custom_id set): a working unsubscribe footer — a signed
+        # self-hosted link. Built here because the recipient (and thus the per-address
+        # token) is only known at send time. The plain-text part must carry the raw URL
+        # (a text/plain part can't hide a link), but the HTML part renders it as an
+        # "unsubscribe" anchor with the host hidden — so `body` stays un-mutated and the
+        # raw-URL footer goes only into `text_body`. The same URL is advertised via the
         # List-Unsubscribe header below for Gmail/Outlook one-click.
         unsub_url = _unsubscribe_url(settings, recipients[0]) if (custom_id and recipients) else ""
-        if unsub_url:
-            body = f"{body.rstrip()}\n\n—\nNot interested? Unsubscribe: {unsub_url}"
+        text_body = f"{body.rstrip()}\n\n—\nNot interested? Unsubscribe: {unsub_url}" if unsub_url else body
 
         message: dict = {
             "From": sender,
             "To": [{"Email": r} for r in recipients],
             "Subject": subject,
-            "TextPart": body,
+            "TextPart": text_body,
         }
         reply_addr = (reply_to or from_email or "").strip()
         if reply_addr:
@@ -492,7 +508,7 @@ class EmailSender:
         if html_body is not None:
             message["HTMLPart"] = html_body
         elif as_html:
-            message["HTMLPart"] = _outreach_body_to_html(body, job_title, job_url)
+            message["HTMLPart"] = _outreach_body_to_html(body, job_title, job_url, unsub_url=unsub_url)
 
         attachments = _build_attachments(paths, blobs, log)
         if attachments:

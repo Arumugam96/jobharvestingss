@@ -305,6 +305,11 @@ export default function EmailComposeModal({
           <div
             style={{
               display: "flex", flexDirection: "column", gap: 14,
+              // flexShrink:0 keeps the wrapper at its full content height so the
+              // scrollable .ecm-body overflows (and shows its scrollbar) instead
+              // of this overflow:hidden wrapper silently clipping the bottom of
+              // the form on short viewports.
+              flexShrink: 0,
               maxHeight: (!followup || draftStarted) ? 2000 : 0,
               opacity: (!followup || draftStarted) ? 1 : 0,
               overflow: "hidden",
