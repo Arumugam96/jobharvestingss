@@ -163,6 +163,8 @@ class LlmCallType:
 
       job_harvest         — extracting scraped-job data (title/company/JD/etc.)
       contact_harvest     — extracting recruiter email/phone contact details
+      company_enrich      — extracting company size / HQ location from a scraped
+                            company page (LLM fallback of the enrichment waterfall)
       feed_classify       — classifying a LinkedIn Home Feed post as an IT hiring
                             lead (stage 1 of the feed workflow — cheap, per candidate)
       feed_extract        — extracting job + recruiter data from a feed post that
@@ -177,6 +179,7 @@ class LlmCallType:
     "contact_extraction")."""
     JOB_HARVEST = "job_harvest"
     CONTACT_HARVEST = "contact_harvest"
+    COMPANY_ENRICH = "company_enrich"
     FEED_CLASSIFY = "feed_classify"
     FEED_EXTRACT = "feed_extract"
     EMAIL_GENERATION = "email_generation"

@@ -7,7 +7,7 @@ import time
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import anthropic
 import httpx
@@ -24,6 +24,13 @@ from app.core.exceptions import LLMError, LLMUnavailableError
 from app.models.harvest_run import LlmCallType
 
 logger = structlog.get_logger(__name__)
+
+
+class _ResponseValidationError(Exception):
+    """Raised inside the failover loop when a reachable provider returns an
+    unusable payload (e.g. invalid JSON in json_mode). Treated like a provider
+    outage so the chain fails over to the next provider (e.g. local → Claude),
+    instead of the malformed response killing the whole extraction."""
 
 _PROVIDER_CLAUDE = "claude"
 _PROVIDER_OLLAMA = "ollama"
@@ -413,6 +420,7 @@ class LLMService:
         job_url: str | None = None,
         claude_model: str | None = None,
         log_calls: bool = True,
+        validate: "Callable[[str], None] | None" = None,
     ) -> tuple[str, str, str, int | None, int | None]:
         """Reusable provider-failover core shared by extract_json (extraction) and
         generate_text (outreach email/LinkedIn generation).
@@ -454,6 +462,15 @@ class LLMService:
                     )
                     text = self.get_text(response)
                     input_tokens, output_tokens = response.usage.input_tokens, response.usage.output_tokens
+                # A reachable provider can still return an unusable payload (e.g.
+                # invalid/truncated JSON from a flaky local model). Validate before
+                # accepting so we fail over to the next provider instead of letting
+                # the bad response kill the extraction.
+                if validate is not None:
+                    try:
+                        validate(text or "")
+                    except Exception as vexc:
+                        raise _ResponseValidationError(str(vexc)) from vexc
                 success = True
                 return text, provider, model, input_tokens, output_tokens
             except LLMUnavailableError as exc:
@@ -462,6 +479,13 @@ class LLMService:
                 error_message = str(exc)
                 logger.warning(
                     "llm_provider_unavailable_failover", provider=provider, model=model, error=str(exc),
+                )
+            except _ResponseValidationError as exc:
+                # Reachable but returned an unusable payload — fail over like an outage.
+                last_exc = LLMUnavailableError(f"{provider} returned an unusable response: {exc}")
+                error_message = str(exc)
+                logger.warning(
+                    "llm_response_invalid_failover", provider=provider, model=model, error=str(exc),
                 )
             except Exception as exc:
                 # Not a provider outage (e.g. malformed response) — do NOT fail over.
@@ -714,15 +738,29 @@ class LLMService:
             content_chars=len(content), prompt_chars=len(prompt),
         )
 
+        # Clean markdown fences and parse. Passed to the failover helper as a
+        # validator so a provider returning invalid JSON (e.g. a flaky local model)
+        # triggers failover to the next provider (e.g. Claude) instead of killing
+        # the extraction — a reachable-but-garbage response is no longer terminal.
+        def _clean_and_parse(raw: str) -> dict[str, Any]:
+            cleaned = (raw or "").strip()
+            if cleaned.startswith("```"):
+                cleaned = cleaned.split("\n", 1)[1].rsplit("```", 1)[0]
+            return json.loads(cleaned)
+
         # Provider failover + per-attempt call-log recording live in the shared
-        # helper. Only LLMUnavailableError (every provider down) escapes as such;
-        # other provider errors are wrapped as LLMError below.
+        # helper. Only LLMUnavailableError (every provider down OR every provider
+        # returned invalid JSON) escapes as such; other errors wrap as LLMError.
         try:
             text, provider, model, _in, _out = await self._complete_text_with_failover(
                 prompt, system, json_mode=True, call_type=call_type, job_url=job_url,
+                validate=_clean_and_parse,
             )
         except LLMError:
             raise
+        except LLMUnavailableError as exc:
+            logger.warning("llm_extraction_all_providers_failed", error=str(exc))
+            raise LLMError(f"extraction failed on every provider: {exc}") from exc
         except Exception as exc:
             logger.error("llm_extraction_request_failed", error=str(exc))
             raise LLMError(f"extraction request failed: {exc}") from exc
@@ -733,26 +771,8 @@ class LLMService:
         )
         self._save_extraction_debug_artifact(debug_dir, provider, model, prompt, text)
 
-        # Strip markdown code fences if present
-        cleaned = text.strip()
-        if cleaned.startswith("```"):
-            cleaned = cleaned.split("\n", 1)[1].rsplit("```", 1)[0]
-        try:
-            parsed = json.loads(cleaned)
-        except json.JSONDecodeError as exc:
-            # The provider responded but the payload wasn't valid JSON. The helper
-            # already logged this attempt as a success (text came back) — downgrade
-            # that entry to a failure so the llm_calls audit reflects the extraction
-            # outcome, not just the transport.
-            if self._call_log:
-                self._call_log[-1]["success"] = False
-                self._call_log[-1]["error_message"] = f"LLM returned invalid JSON: {exc}"
-            logger.warning(
-                "llm_extraction_json_parse_failed", provider=provider, model=model,
-                error=str(exc), raw_preview=cleaned[:300],
-            )
-            raise LLMError(f"LLM returned invalid JSON: {exc}") from exc
-
+        # Validated already inside the failover loop, so this parse succeeds.
+        parsed = _clean_and_parse(text)
         logger.info(
             "llm_extraction_succeeded", provider=provider, model=model,
             extracted_fields=list(parsed.keys()),

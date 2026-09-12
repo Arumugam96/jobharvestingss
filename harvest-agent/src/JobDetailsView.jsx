@@ -12,6 +12,7 @@ import {
   ExternalLink,
   Building2,
   User,
+  Users,
   Eye,
   FileText,
   Link2,
@@ -54,6 +55,27 @@ function DualContactVal({ scraped, recruiter, fallback }) {
     );
   }
   return <span>{s || r}</span>;
+}
+
+// Company-size tier → badge colours (bg tint + text), matching the jobs table.
+const SIZE_TIER_STYLE = {
+  Small:      { bg: "#ECFDF5", fg: "#047857" }, // emerald
+  Medium:     { bg: "#EFF6FF", fg: "#1D4ED8" }, // blue
+  Large:      { bg: "#FFFBEB", fg: "#B45309" }, // amber
+  Enterprise: { bg: "#F5F3FF", fg: "#6D28D9" }, // violet
+};
+
+// Company size as a coloured tier badge with the employee count beneath it.
+function CompanySizeBadge({ band, tier }) {
+  const count = (band || "").replace(/\s*employees?\s*$/i, "").trim();
+  if (!tier && !count) return <span className="ha-muted">—</span>;
+  const s = SIZE_TIER_STYLE[tier] || { bg: "#F1F5F9", fg: "#475569" };
+  return (
+    <span className="ha-sizewrap">
+      <span className="ha-sizebadge" style={{ background: s.bg, color: s.fg }}>{tier || "Unknown"}</span>
+      {count && <span className="ha-sizecount">{count} employees</span>}
+    </span>
+  );
 }
 
 function ContactAction({ glyph: Glyph, href, onClick, title, variant, newTab = true, sent = false }) {
@@ -251,6 +273,22 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
           </main>
 
           <aside className="ha-rail">
+            <section className="ha-section ha-company">
+              <div className="ha-label"><Building2 size={14} /> Company</div>
+              <div className="ha-company-grid">
+                <div className="ha-company-item">
+                  <span className="ha-company-key"><Users size={13} /> Size</span>
+                  <CompanySizeBadge band={job.companySize} tier={job.companySizeTier} />
+                </div>
+                <div className="ha-company-item">
+                  <span className="ha-company-key"><MapPin size={13} /> Headquarters</span>
+                  <span className="ha-company-val">
+                    {[job.companyState, job.companyCountry].filter(Boolean).join(", ") ||
+                      <span className="ha-muted">—</span>}
+                  </span>
+                </div>
+              </div>
+            </section>
             <section className="ha-section">
               <div className="ha-label"><Filter size={14} /> Classification</div>
               <div className="ha-rows">
@@ -275,19 +313,6 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
                 <div className="ha-row">
                   <span className="ha-key">Domain</span>
                   <span className="ha-val">{job.domain || <span className="ha-muted">—</span>}</span>
-                </div>
-                <div className="ha-row">
-                  <span className="ha-key">Company size</span>
-                  <span className="ha-val">
-                    {job.companySize ? (
-                      <>
-                        {job.companySize}
-                        {job.companySizeTier && <span className="ha-src-tag" style={{ marginLeft: 6 }}>{job.companySizeTier}</span>}
-                      </>
-                    ) : (
-                      <span className="ha-muted">—</span>
-                    )}
-                  </span>
                 </div>
               </div>
             </section>
@@ -413,6 +438,19 @@ const styles = `
   .ha-muted { color: #94A3B8; }
   .ha-src-tag { font-size: 10px; font-weight: 600; color: #64748B;
     text-transform: uppercase; letter-spacing: .03em; margin-right: 4px; }
+
+  /* Company card — size badge + HQ location, laid out as two tidy cells. */
+  .ha-company-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  .ha-company-item { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+  .ha-company-key { display: inline-flex; align-items: center; gap: 5px;
+    font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: #64748B; }
+  .ha-company-key svg { color: #94A3B8; }
+  .ha-company-val { font-size: 14px; font-weight: 500; color: #1E293B; word-break: break-word; }
+  .ha-sizewrap { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
+  .ha-sizebadge { font-size: 11px; font-weight: 700; letter-spacing: .02em;
+    padding: 3px 11px; border-radius: 999px; white-space: nowrap; }
+  .ha-sizecount { font-size: 12px; color: #94A3B8; }
+  @media (max-width: 520px) { .ha-company-grid { grid-template-columns: 1fr; } }
 
   .ha-link { color: #2563EB; text-decoration: none; font-weight: 500;
     display: inline-flex; align-items: center; gap: 4px; }

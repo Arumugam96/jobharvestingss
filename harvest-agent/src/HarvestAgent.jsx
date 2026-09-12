@@ -230,9 +230,11 @@ function mapApiJob(j) {
     companySize: j.company_size || "",
     companySizeTier: j.company_size_tier || "",
     // Job-location country (parsed from the free-text `location`) and the
-    // company's HQ country (Apollo-enriched) — power the two Country filters.
+    // company's HQ country/state (enrichment waterfall) — power the two Country
+    // filters and the job-detail Company card.
     country: j.country || "",
     companyCountry: j.company_country || "",
+    companyState: j.company_state || "",
     posterTitle: j.job_poster_designation || "",
     domain: j.domain || "",
     hiringEntity: j.hiring_entity || "",
@@ -281,6 +283,9 @@ function mapJobToDetail(j) {
     // either the mapped (companySize) or raw (company_size) shape defensively.
     companySize: j.companySize || j.company_size || "",
     companySizeTier: j.companySizeTier || j.company_size_tier || "",
+    // Company HQ location (enrichment waterfall) for the detail Company card.
+    companyCountry: j.companyCountry || j.company_country || "",
+    companyState: j.companyState || j.company_state || "",
     passedFilter: j.passedFilter,
     filterReason: j.filterReason || "",
   };

@@ -90,11 +90,13 @@ class Settings(BaseSettings):
     apollo_reveal_phone: bool = False
     apollo_webhook_url: str = ""
     apollo_recheck_days: int = 30
-    # Opt-in: when a recruiter's Apollo people-match returns no company size,
-    # spend an extra credit on POST /organizations/enrich (keyed on a derived
-    # domain) to fill company size / HQ location. Off by default — the free
-    # people-match org data already covers the common case.
-    apollo_enrich_company: bool = False
+    # Company-enrichment Apollo stage: the LinkedIn company-enrichment waterfall
+    # (LinkedIn company page → Apollo → company website → LLM) spends a credit on
+    # POST /organizations/enrich (keyed on a domain resolved from the company page)
+    # to fill company size / HQ location for EVERY company — including those with no
+    # recruiter to piggyback a people-match on. On by default; the per-company
+    # 30-day recheck cooldown (apollo_recheck_days) prevents re-billing.
+    apollo_enrich_company: bool = True
 
     # ── Playwright ───────────────────────────────────────────────────────────────
     playwright_browser: Literal["chromium", "firefox", "webkit"] = "chromium"

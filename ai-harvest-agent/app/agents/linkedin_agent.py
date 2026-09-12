@@ -31,7 +31,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from urllib.parse import quote_plus
 
 import structlog
@@ -836,6 +836,135 @@ def _group_recruiters_for_enrichment(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Company-enrichment waterfall helpers
+# ══════════════════════════════════════════════════════════════════════════════
+# Per unique company: LinkedIn company page → Apollo → company website → LLM.
+# Fills company size + HQ location, cached on CompanyORM and applied to every job
+# of the company (incl. those with no recruiter). See LinkedInAgent._enrich_companies.
+
+_COMPANY_ENRICH_CAP = 40           # max unique companies to enrich per run (bounds scraping time)
+_COMPANY_LLM_TEXT_MAX = 6_000      # chars of company-card text handed to the LLM
+_LI_COMPANY_SLUG_RE = re.compile(r'/company/([^/?#]+)', re.I)
+# Labels present in a LinkedIn company "Overview" card — used to locate the card in HTML.
+_COMPANY_CARD_LABELS = ("company size", "headquarters", "industry", "founded", "specialties")
+
+
+def _canonicalize_company_url(url: str) -> str:
+    """Reduce a LinkedIn company URL to .../company/<slug>/about/ — the About tab
+    shows the Overview card (size / headquarters / industry). Non-/company/ URLs
+    are returned unchanged."""
+    m = _LI_COMPANY_SLUG_RE.search(url or "")
+    if not m:
+        return url
+    return f"https://www.linkedin.com/company/{m.group(1).strip()}/about/"
+
+
+def _extract_company_card_text(html: str) -> str:
+    """Pull ONLY the company Overview/"face card" text out of a LinkedIn company
+    About page's HTML with BeautifulSoup — the block that lists Company size,
+    Headquarters, Industry, etc. Falls back progressively so a DOM change can't
+    silently return nothing:
+      1. the <dl> definition list whose text contains the card labels,
+      2. the smallest element whose text contains "company size" AND "headquarters",
+      3. any <section>/<div> mentioning several card labels,
+      4. "" if nothing matches (caller then has no text to give the LLM).
+    Returns compact text (labels + values), never the whole noisy page body."""
+    if not html:
+        return ""
+    soup = BeautifulSoup(html, "html.parser")
+
+    def _has_labels(text: str, need: int) -> bool:
+        low = (text or "").lower()
+        return sum(1 for lbl in _COMPANY_CARD_LABELS if lbl in low) >= need
+
+    # 1) Overview definition list (dt/dd) — the canonical structure.
+    for dl in soup.find_all("dl"):
+        if _has_labels(dl.get_text(" ", strip=True), 2):
+            return dl.get_text("\n", strip=True)[:_COMPANY_LLM_TEXT_MAX]
+
+    # 2) Smallest element carrying both the size and HQ labels.
+    best = None
+    for el in soup.find_all(["section", "div"]):
+        txt = el.get_text(" ", strip=True)
+        low = txt.lower()
+        if "company size" in low and "headquarters" in low:
+            if best is None or len(txt) < len(best):
+                best = txt
+    if best:
+        return best[:_COMPANY_LLM_TEXT_MAX]
+
+    # 3) Any section/div mentioning several card labels.
+    for el in soup.find_all(["section", "div"]):
+        txt = el.get_text(" ", strip=True)
+        if _has_labels(txt, 3):
+            return txt[:_COMPANY_LLM_TEXT_MAX]
+
+    return ""
+
+
+async def _scrape_linkedin_company_card_text(tab: Page, company_url: str) -> str:
+    """Navigate to a company's LinkedIn About page and return the Overview card text
+    (via BeautifulSoup over the page HTML). "" when the page can't be opened or the
+    card isn't found. The caller feeds this to the LLM to extract size + location."""
+    resp = await tab.goto(_canonicalize_company_url(company_url),
+                          wait_until="domcontentloaded", timeout=20000)
+    if not resp or resp.status >= 400:
+        return ""
+    await tab.wait_for_timeout(1500)
+    html = await tab.content()
+    return _extract_company_card_text(html)
+
+
+async def _llm_extract_company_fields(llm: Any, text: str, source_url: str = "") -> dict:
+    """LLM-extract company size / HQ location / industry from the LinkedIn company
+    Overview-card text. Extraction-only (never guesses). Returns normalized
+    {company_size, company_country, company_state, company_industry}."""
+    from app.core.location import parse_location
+
+    out = {"company_size": "", "company_country": "", "company_state": "", "company_industry": ""}
+    text = (text or "").strip()
+    if not llm or len(text) < 20:
+        return out
+    if len(text) > _COMPANY_LLM_TEXT_MAX:
+        text = text[:_COMPANY_LLM_TEXT_MAX]
+
+    schema = (
+        '{"employee_count": str or null (the company employee-count range EXACTLY as '
+        'written if present, e.g. "1,001-5,000 employees"; else null), '
+        '"headquarters": str or null (company headquarters as "city, state, country" '
+        'if stated; else null), '
+        '"industry": str or null (company industry if stated; else null)}'
+    )
+    try:
+        extracted = await llm.extract_json(
+            content=text,
+            schema_description=schema,
+            system=(
+                "You extract only explicitly-stated company facts from scraped "
+                "company-page text (a LinkedIn company page or the company website). "
+                "Never guess or fabricate. Return null for anything not literally "
+                "present. Return only the schema fields, no commentary."
+            ),
+            job_url=source_url or None,
+            call_type=LlmCallType.COMPANY_ENRICH,
+        )
+    except Exception:
+        return out
+
+    raw_size = str(extracted.get("employee_count") or "")
+    size = parse_company_size_band(raw_size)
+    if not size:
+        norm = normalize_company_size(raw_size)
+        size = f"{norm} employees" if norm else ""
+    out["company_size"] = size
+    hq = str(extracted.get("headquarters") or "")
+    if hq:
+        _, out["company_state"], out["company_country"] = parse_location(hq)
+    out["company_industry"] = str(extracted.get("industry") or "").strip()
+    return out
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # LinkedIn Agent
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1062,12 +1191,12 @@ class LinkedInAgent:
         except Exception as exc:
             logger.warning("recruiter_enrichment_pass_failed", error=str(exc))
 
-        # Company-level enrichment pass — fills company size / HQ location for
-        # EVERY company in the run (Apollo organizations/enrich, cached), so jobs
-        # with no recruiter still get company data. Gated by apollo_enrich_company;
-        # best-effort, never affects the collected job list.
+        # Company-level enrichment waterfall — fills company size / HQ location for
+        # EVERY company in the run (LinkedIn company page → Apollo → website → LLM,
+        # cached), so jobs with no recruiter still get company data. Best-effort,
+        # never affects the collected job list.
         try:
-            await self._enrich_companies(jobs)
+            await self._enrich_companies(page, jobs)
         except Exception as exc:
             logger.warning("company_enrichment_pass_failed", error=str(exc))
 
@@ -1597,6 +1726,33 @@ class LinkedInAgent:
             except Exception as exc:
                 logger.warning("recruiter_enrichment_save_failed", url=norm_url, error=str(exc))
 
+            # Mirror this recruiter's Apollo company data into the CompanyORM cache
+            # so the later company-enrichment pass skips this company (no redundant
+            # Apollo call / LinkedIn visit) and non-recruiter jobs of the same
+            # company inherit it. Best-effort.
+            if apollo_result and company_name and (
+                apollo_result.company_size_band or apollo_result.company_country
+            ):
+                try:
+                    from app.services.company_service import (
+                        normalize_company_key, upsert_company_enrichment,
+                    )
+                    async with session_factory() as db:
+                        await upsert_company_enrichment(
+                            db,
+                            company_key=normalize_company_key(company_name),
+                            company_name=company_name,
+                            domain=apollo_result.company_domain or "",
+                            company_size=apollo_result.company_size_band or "",
+                            company_country=apollo_result.company_country or "",
+                            company_state=apollo_result.company_state or "",
+                            company_industry=apollo_result.company_industry or "",
+                            apollo_attempted=True,
+                        )
+                        await db.commit()
+                except Exception as exc:
+                    logger.debug("recruiter_company_cache_write_failed", company=company_name, error=str(exc))
+
             logger.info(
                 "recruiter_enriched",
                 url=norm_url, person=person_name,
@@ -1608,45 +1764,173 @@ class LinkedInAgent:
             unique_recruiters=len(groups), profiles_visited=visited,
         )
 
-    async def _enrich_companies(self, jobs: list[LinkedInScrapedJob]) -> None:
-        """Company-level enrichment: fetch size / HQ location for every company
-        that has NO size on any of its jobs (i.e. LinkedIn didn't show a band and
-        no recruiter Apollo-match filled it), via Apollo's organizations/enrich,
-        cached on CompanyORM. bulk_insert_scraped_jobs then applies the cache to
-        all of the company's jobs — including those without a recruiter.
+    async def _enrich_companies(self, page: Page, jobs: list[LinkedInScrapedJob]) -> None:
+        """Company-enrichment waterfall — fill company size + HQ location for every
+        company (recruiter or not), run once per unique company and cached on
+        CompanyORM so bulk_insert_scraped_jobs applies it to all of that company's
+        jobs.
 
-        Gated by settings.apollo_enrich_company (default off, spends credits).
-        Deduped per company; a recheck cooldown avoids re-billing across runs.
-        """
+        Per company, in order (each stage only runs while data is still missing):
+          1. LinkedIn company page (company_url) → size band, HQ location, website
+             (→domain), industry — the primary use of the scraped company_url.
+          2. Apollo organizations/enrich(domain) — authoritative; gated by
+             settings.apollo_enrich_company. Preferred for size/country/state/industry.
+          3. Company website (/, /about, /about-us) → size band + collected text.
+          4. LLM extraction over the collected page text (COMPANY_ENRICH).
+
+        Best-effort throughout; deduped per company; a recheck cooldown
+        (settings.apollo_recheck_days) skips companies enriched recently. Companies
+        that already have a size on some job are skipped (within-run propagation
+        covers their other jobs for free)."""
         from app.config import get_settings
         from app.core.dependencies import get_session_factory
-        from app.services.company_service import enrich_companies, normalize_company_key
+        from app.services.company_service import (
+            company_needs_enrichment,
+            get_companies_by_keys,
+            normalize_company_key,
+            upsert_company_enrichment,
+        )
 
         settings = get_settings()
-        if not settings.apollo_enrich_company or not settings.apollo_api_key:
-            return
 
-        # Companies with at least one sized job don't need an Apollo size lookup —
-        # within-run propagation (in bulk_insert) will share that size to their
-        # other jobs for free. Target only companies with no size anywhere.
-        names: dict[str, str] = {}
-        have_size: set[str] = set()
+        # One entry per unique company: display name + a company_url to scrape +
+        # any size already scraped from a job (seeded so the cache keeps it and the
+        # waterfall then only needs to find the HQ location).
+        entries: dict[str, dict] = {}
         for j in jobs:
             name = (getattr(j, "company", "") or "").strip()
             if not name:
                 continue
             key = normalize_company_key(name)
-            names.setdefault(key, name)
-            if (getattr(j, "company_size", "") or "").strip():
-                have_size.add(key)
+            slot = entries.setdefault(key, {"company_name": name, "company_url": "", "company_size": ""})
+            if not slot["company_url"] and (getattr(j, "company_url", "") or "").strip():
+                slot["company_url"] = j.company_url.strip()
+            if not slot["company_size"] and (getattr(j, "company_size", "") or "").strip():
+                slot["company_size"] = j.company_size.strip()
 
-        todo = [{"company_name": names[k], "domain": ""} for k in names if k not in have_size]
-        if not todo:
+        # Every unique company runs — a company with a scraped size still needs its
+        # HQ location. The cache cooldown (company_needs_enrichment) skips companies
+        # already holding BOTH size and country, so this doesn't redo settled ones.
+        keys = list(entries)
+        if not keys:
             return
 
         session_factory = get_session_factory(settings)
         async with session_factory() as db:
-            await enrich_companies(db, settings, todo)
+            cached = await get_companies_by_keys(db, set(keys))
+        keys = [k for k in keys
+                if company_needs_enrichment(cached.get(k), settings.apollo_recheck_days)]
+        if not keys:
+            return
+
+        llm = self._get_llm_service()
+        enriched = 0
+        for key in keys:
+            if enriched >= _COMPANY_ENRICH_CAP:
+                logger.info("company_enrich_cap_reached", cap=_COMPANY_ENRICH_CAP)
+                break
+            if run_guard.is_stop_requested():
+                logger.info("company_enrichment_stopped_by_user", enriched=enriched)
+                break
+            info = entries[key]
+            try:
+                data = await self._run_company_waterfall(
+                    page, settings, llm,
+                    company_name=info["company_name"],
+                    company_url=info["company_url"],
+                    seed_size=info["company_size"],
+                )
+            except Exception as exc:
+                logger.debug("company_waterfall_failed", company=info["company_name"], error=str(exc))
+                data = {}
+            enriched += 1
+            try:
+                async with session_factory() as db:
+                    await upsert_company_enrichment(
+                        db,
+                        company_key=key,
+                        company_name=info["company_name"],
+                        domain=data.get("domain", ""),
+                        company_size=data.get("company_size", ""),
+                        company_country=data.get("company_country", ""),
+                        company_state=data.get("company_state", ""),
+                        company_industry=data.get("company_industry", ""),
+                        apollo_attempted=data.get("apollo_attempted", False),
+                    )
+                    await db.commit()
+            except Exception as exc:
+                logger.warning("company_cache_write_failed", company=info["company_name"], error=str(exc))
+
+        logger.info("company_enrichment_pass_complete", companies=len(keys), enriched=enriched)
+
+    async def _run_company_waterfall(
+        self, page: Page, settings: Any, llm: Any, *,
+        company_name: str, company_url: str, seed_size: str = "",
+    ) -> dict:
+        """Fill one company's size + HQ location, in the order the product wants:
+
+          1. Apollo organizations/enrich by domain (recruiter-learned domain if we
+             have one, else inferred from the name). Preferred when it matches.
+          2. If size or country is STILL missing → open the company's LinkedIn page,
+             pull the Overview "card" text with BeautifulSoup, and let the LLM turn
+             that into {size, HQ location, industry}.
+
+        `seed_size` is any size already scraped from a job, kept so a company that
+        only needs its HQ location doesn't lose it. Returns the merged fields
+        {company_size, company_country, company_state, company_industry, domain,
+        apollo_attempted}."""
+        out = {"company_size": seed_size or "", "company_country": "", "company_state": "",
+               "company_industry": "", "domain": "", "apollo_attempted": False}
+
+        def _fill(d: dict) -> None:
+            for f in ("company_size", "company_country", "company_state", "company_industry"):
+                if not out[f] and d.get(f):
+                    out[f] = d[f]
+
+        def _missing() -> bool:
+            return not out["company_size"] or not out["company_country"]
+
+        # ── Step 1 — Apollo organizations/enrich by domain ──
+        from app.core.company_domain import infer_company_domain
+        out["domain"] = infer_company_domain(company_name)[0]
+        if settings.apollo_enrich_company and settings.apollo_api_key and out["domain"]:
+            try:
+                from app.core.company_size import band_from_employee_count
+                from app.services.apollo_client import ApolloClient
+                out["apollo_attempted"] = True
+                org = await ApolloClient(settings).enrich_organization(out["domain"])
+                if org:
+                    for f, v in (("company_country", org.country or ""),
+                                 ("company_state", org.state or ""),
+                                 ("company_industry", org.industry or ""),
+                                 ("company_size", band_from_employee_count(org.size))):
+                        if v:
+                            out[f] = v  # Apollo preferred → overwrite
+                    if org.domain:
+                        out["domain"] = org.domain
+            except Exception as exc:
+                logger.debug("company_apollo_failed", domain=out["domain"], error=str(exc))
+
+        # ── Step 2 — LinkedIn company card (BeautifulSoup) → LLM ──
+        if _missing() and company_url:
+            tab = None
+            try:
+                tab = await page.context.new_page()
+                card_text = await _scrape_linkedin_company_card_text(tab, company_url)
+                if card_text and llm:
+                    _fill(await _llm_extract_company_fields(llm, card_text, company_url))
+                elif not card_text:
+                    logger.debug("company_card_text_empty", url=company_url)
+            except Exception as exc:
+                logger.debug("company_li_card_failed", url=company_url, error=str(exc))
+            finally:
+                if tab:
+                    try:
+                        await tab.close()
+                    except Exception:
+                        pass
+
+        return out
 
     async def _llm_fallback_extract_contact(self, page: Page, profile_url: str) -> dict:
         """

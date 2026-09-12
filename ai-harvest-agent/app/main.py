@@ -200,6 +200,46 @@ def _ensure_email_outreach_columns(sync_conn) -> None:
             logger.info("email_outreach_column_added", column=name)
 
 
+def _backfill_scraped_jobs_location(sync_conn) -> None:
+    """One-time data backfill: populate country/state on pre-existing scraped_jobs
+    rows by re-parsing their free-text `location` (app/core/location.py).
+
+    Rows harvested before location parsing was wired into bulk_insert_scraped_jobs
+    have country=''/state='' even when their `location` clearly names a country
+    (e.g. "Cairo, Cairo, Egypt"). New inserts already set these. Idempotent: only
+    rows still missing BOTH country and state are considered, and only those whose
+    location actually parses to something are UPDATEd — so after the first pass the
+    only rows re-examined are genuinely unparseable ones (e.g. "Remote"), which is
+    cheap. Company HQ location (company_country/state) is NOT backfilled here — it
+    needs the Apollo/scraping waterfall and fills on the next harvest of a company."""
+    from app.core.location import parse_location
+
+    inspector = sa_inspect(sync_conn)
+    if "scraped_jobs" not in inspector.get_table_names():
+        return
+    cols = {c["name"] for c in inspector.get_columns("scraped_jobs")}
+    if not {"country", "state", "location"} <= cols:
+        return  # columns not present yet (ensure-columns runs before this)
+
+    rows = sync_conn.execute(sa_text(
+        "SELECT id, location FROM scraped_jobs "
+        "WHERE (country = '' OR country IS NULL) AND (state = '' OR state IS NULL) "
+        "AND location IS NOT NULL AND location <> ''"
+    )).fetchall()
+    updated = 0
+    for row_id, location in rows:
+        _, st, ctry = parse_location(location or "")
+        if not st and not ctry:
+            continue
+        sync_conn.execute(
+            sa_text("UPDATE scraped_jobs SET country = :c, state = :s WHERE id = :id"),
+            {"c": ctry, "s": st, "id": row_id},
+        )
+        updated += 1
+    if updated:
+        logger.info("scraped_jobs_location_backfilled", rows=updated)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Startup: launch browser pool + scheduler. Shutdown: clean up both."""
@@ -231,6 +271,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # email_outreach gained channel + follow-up threading (outreach_kind,
         # parent_outreach_id) + provider_message_id — same idempotent treatment.
         await conn.run_sync(_ensure_email_outreach_columns)
+        # Data backfill: re-parse country/state onto scraped_jobs rows harvested
+        # before location parsing was wired (columns above exist but stayed empty).
+        await conn.run_sync(_backfill_scraped_jobs_location)
 
     # Reconcile stale 'running' runs left by a previous process (a harvest runs
     # in a detached task that doesn't survive a restart). Without this, the
