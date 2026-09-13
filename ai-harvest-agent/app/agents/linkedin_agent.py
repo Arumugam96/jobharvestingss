@@ -1222,11 +1222,13 @@ class LinkedInAgent:
             logger.warning("recruiter_enrichment_pass_failed", error=str(exc))
 
         # Company-level enrichment waterfall — fills company size / HQ location for
-        # EVERY company in the run (LinkedIn company page → Apollo → website → LLM,
-        # try:
-        #     await self._enrich_companies(page, jobs)
-        # except Exception as exc:
-        #     logger.warning("company_enrichment_pass_failed", error=str(exc))
+        # EVERY company in the run (Apollo only for now; the LinkedIn company-card
+        # web scraping is disabled — see apollo_only in _enrich_companies). Cached on
+        # CompanyORM. Best-effort: failure must not affect the job list.
+        try:
+            await self._enrich_companies(page, jobs)
+        except Exception as exc:
+            logger.warning("company_enrichment_pass_failed", error=str(exc))
 
         return jobs
 
@@ -1786,14 +1788,6 @@ class LinkedInAgent:
         CompanyORM so bulk_insert_scraped_jobs applies it to all of that company's
         jobs.
 
-        Per company, in order (each stage only runs while data is still missing):
-          1. LinkedIn company page (company_url) → size band, HQ location, website
-             (→domain), industry — the primary use of the scraped company_url.
-          2. Apollo organizations/enrich(domain) — authoritative; gated by
-             settings.apollo_enrich_company. Preferred for size/country/state/industry.
-          3. Company website (/, /about, /about-us) → size band + collected text.
-          4. LLM extraction over the collected page text (COMPANY_ENRICH).
-
         Best-effort throughout; deduped per company; a recheck cooldown
         (settings.apollo_recheck_days) skips companies enriched recently. Companies
         that already have a size on some job are skipped (within-run propagation
@@ -1854,8 +1848,10 @@ class LinkedInAgent:
             # LinkedIn About page won't surface data the first pass missed, so retry
             # via Apollo ONLY. A brand-new company (no stamp) runs the full waterfall
             # incl. the LinkedIn card. See _run_company_waterfall(apollo_only=...).
-            _row = cached.get(key)
-            apollo_only = bool(_row is not None and _row.apollo_enriched_at is not None)
+            # LinkedIn company-card web scraping disabled for now — Apollo only.
+            apollo_only = True
+            # _row = cached.get(key)
+            # apollo_only = bool(_row is not None and _row.apollo_enriched_at is not None)
             try:
                 data = await self._run_company_waterfall(
                     page, settings, llm,
