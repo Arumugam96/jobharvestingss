@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
 import re
 import time
 import urllib.parse
@@ -627,6 +628,12 @@ def _save_summary(run_id: str, result: "ProspectIntelligenceResult") -> None:
 # Browser helpers
 # ═══════════════════════════════════════════════════════════════════════════════
 
+async def _delay(page: Any, lo: int, hi: int) -> None:
+    """Human-like pause (random lo–hi ms) after a page's DOM loads, to reduce the
+    bot-detection signal from mechanical, fixed-interval navigation."""
+    await page.wait_for_timeout(random.randint(lo, hi))
+
+
 async def _ddg_search_raw(page: Any, query: str, timeout_ms: int = 12000) -> list[dict]:
     """Execute a DuckDuckGo HTML search. Returns [{href, title, snippet}]."""
     encoded = urllib.parse.quote(query)
@@ -799,7 +806,7 @@ async def _extract_linkedin_contact_info(
             return out
 
         out["profile_opened"] = True
-        await page.wait_for_timeout(2000)
+        await _delay(page, 2_000, 5_000)   # human-like pause after DOM load
 
         # ── Grab headline + location from profile ─────────────────────────────
         for sel in ['h2.text-heading-xlarge', '.pv-top-card--list h2', '.top-card-layout__headline']:
