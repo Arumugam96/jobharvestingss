@@ -920,6 +920,9 @@ async def _scrape_linkedin_company_card_text(tab: Page, company_url: str) -> str
     if not resp or resp.status >= 400:
         return ""
 
+    # Human-like pause (2–5s) after the DOM loads before reading the page.
+    await _delay(tab, 2_000, 5_000)
+
     # Wait for the Overview card to render rather than sleeping a fixed interval.
     # "Company size" / "Headquarters" are the two labels we actually need; either
     # appearing means the card is in the DOM. Bounded at 8s: a company page that
@@ -1220,12 +1223,10 @@ class LinkedInAgent:
 
         # Company-level enrichment waterfall — fills company size / HQ location for
         # EVERY company in the run (LinkedIn company page → Apollo → website → LLM,
-        # cached), so jobs with no recruiter still get company data. Best-effort,
-        # never affects the collected job list.
-        try:
-            await self._enrich_companies(page, jobs)
-        except Exception as exc:
-            logger.warning("company_enrichment_pass_failed", error=str(exc))
+        # try:
+        #     await self._enrich_companies(page, jobs)
+        # except Exception as exc:
+        #     logger.warning("company_enrichment_pass_failed", error=str(exc))
 
         return jobs
 
@@ -1430,7 +1431,7 @@ class LinkedInAgent:
                 break
 
             try:
-                await _delay(page, 2_000, 3_000)
+                await _delay(page, 2_000, 5_000)   # human-like pause after DOM load
                 self._check_blocked(page.url)
                 await self._dismiss_overlays(page)
 
@@ -1497,18 +1498,6 @@ class LinkedInAgent:
                         new_jobs.append(j)
                 logger.info("next_page_found", source="linkedin", page=page_num + 1, jobs_this_page=len(page_jobs))
 
-                # (Incremental persistence now happens inside Phase B — see
-                # _parse_cards_with_detail — flushing every N cards as they are
-                # scraped, so the live counter ticks steadily instead of jumping
-                # once per ~25-card page here.)
-
-                # No domain-match early-stop: the domain filter is now applied by
-                # LinkedIn's own native job-function filter (f_F, see
-                # _build_search_url), so LinkedIn's filtered result set is the
-                # source of truth. Pagination stops only on result exhaustion
-                # (empty pages) or the max_jobs safety cap — re-classifying cards
-                # here with the substring domain matcher would diverge from what
-                # LinkedIn actually returned.
 
             logger.info("linkedin_page_done", page=page_num + 1, page_new=len(page_jobs), total=len(all_jobs))
             logger.info("page_processed", source="linkedin", page=page_num + 1, jobs_this_page=len(page_jobs), total_collected=len(all_jobs))
@@ -2603,7 +2592,7 @@ class LinkedInAgent:
                 logger.info("linkedin_detail_page_nav_failed", idx=idx, url=url, error=str(exc))
                 return detail
 
-            await _delay(detail_page, 1_500, 2_500)
+            await _delay(detail_page, 2_000, 5_000)   # human-like pause after DOM load
             await self._dismiss_overlays(detail_page)
             logger.info(
                 "job_opened", source="linkedin", index=idx,
