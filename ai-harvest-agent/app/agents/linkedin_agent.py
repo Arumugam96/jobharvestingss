@@ -903,14 +903,41 @@ def _extract_company_card_text(html: str) -> str:
 
 
 async def _scrape_linkedin_company_card_text(tab: Page, company_url: str) -> str:
-    """Navigate to a company's LinkedIn About page and return the Overview card text
-    (via BeautifulSoup over the page HTML). "" when the page can't be opened or the
-    card isn't found. The caller feeds this to the LLM to extract size + location."""
+    """Navigate to a company's LinkedIn About page, wait until the Overview card has
+    actually rendered, then return ONLY that card's text (via BeautifulSoup over the
+    page HTML). "" when the page can't be opened or the card never appears. The
+    caller feeds this compact card text — not the whole page — to the LLM to extract
+    size + location.
+
+    LinkedIn's company About tab is a client-rendered SPA: the Overview card (Company
+    size / Headquarters) is injected after the initial document loads. The previous
+    fixed 1.5s wait raced ahead of that and captured an empty page shell — which is
+    why ~every company logged company_card_text_empty. Instead, poll the rendered
+    page until the card's own labels are present (bounded, so a company that genuinely
+    never shows the card can't hang the run)."""
     resp = await tab.goto(_canonicalize_company_url(company_url),
                           wait_until="domcontentloaded", timeout=20000)
     if not resp or resp.status >= 400:
         return ""
-    await tab.wait_for_timeout(1500)
+
+    # Wait for the Overview card to render rather than sleeping a fixed interval.
+    # "Company size" / "Headquarters" are the two labels we actually need; either
+    # appearing means the card is in the DOM. Bounded at 8s: a company page that
+    # never lists them (or an interstitial) falls through to the extractor, which
+    # returns "" so the caller logs company_card_text_empty as before.
+    try:
+        await tab.wait_for_function(
+            """() => {
+                const t = document.body ? document.body.innerText : '';
+                return /company size/i.test(t) || /headquarters/i.test(t);
+            }""",
+            timeout=8000,
+        )
+        # Let the values (dd) settle after their labels paint.
+        await tab.wait_for_timeout(600)
+    except Exception:
+        await tab.wait_for_timeout(1500)
+
     html = await tab.content()
     return _extract_company_card_text(html)
 
@@ -1833,12 +1860,20 @@ class LinkedInAgent:
                 logger.info("company_enrichment_stopped_by_user", enriched=enriched)
                 break
             info = entries[key]
+            # A company already attempted once (its cache row carries an Apollo
+            # stamp) only reaches here after the 30-day cooldown — re-scraping its
+            # LinkedIn About page won't surface data the first pass missed, so retry
+            # via Apollo ONLY. A brand-new company (no stamp) runs the full waterfall
+            # incl. the LinkedIn card. See _run_company_waterfall(apollo_only=...).
+            _row = cached.get(key)
+            apollo_only = bool(_row is not None and _row.apollo_enriched_at is not None)
             try:
                 data = await self._run_company_waterfall(
                     page, settings, llm,
                     company_name=info["company_name"],
                     company_url=info["company_url"],
                     seed_size=info["company_size"],
+                    apollo_only=apollo_only,
                 )
             except Exception as exc:
                 logger.debug("company_waterfall_failed", company=info["company_name"], error=str(exc))
@@ -1866,6 +1901,7 @@ class LinkedInAgent:
     async def _run_company_waterfall(
         self, page: Page, settings: Any, llm: Any, *,
         company_name: str, company_url: str, seed_size: str = "",
+        apollo_only: bool = False,
     ) -> dict:
         """Fill one company's size + HQ location, in the order the product wants:
 
@@ -1874,6 +1910,12 @@ class LinkedInAgent:
           2. If size or country is STILL missing → open the company's LinkedIn page,
              pull the Overview "card" text with BeautifulSoup, and let the LLM turn
              that into {size, HQ location, industry}.
+
+        `apollo_only` runs Step 1 ONLY and skips the LinkedIn scrape — used for the
+        30-day recheck of a company already attempted once: if its About card was
+        going to yield data, the first pass (with a proper render wait) already
+        captured it, so re-scraping the same page is wasted work; only Apollo is
+        worth retrying. See _enrich_companies.
 
         `seed_size` is any size already scraped from a job, kept so a company that
         only needs its HQ location doesn't lose it. Returns the merged fields
@@ -1912,7 +1954,8 @@ class LinkedInAgent:
                 logger.debug("company_apollo_failed", domain=out["domain"], error=str(exc))
 
         # ── Step 2 — LinkedIn company card (BeautifulSoup) → LLM ──
-        if _missing() and company_url:
+        # Skipped on an Apollo-only recheck (see the apollo_only docstring note).
+        if _missing() and company_url and not apollo_only:
             tab = None
             try:
                 tab = await page.context.new_page()

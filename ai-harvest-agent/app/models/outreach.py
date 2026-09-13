@@ -28,9 +28,6 @@ class EmailOutreachORM(Base):
     # (mirrors LlmCallORM.job_url's rationale).
     job_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     recruiter_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
-    # Outreach channel: "email" | "linkedin". Email is sent over SMTP; LinkedIn is
-    # logged when the user manually marks a copied message as sent (no programmatic
-    # LinkedIn transport exists).
     channel: Mapped[str] = mapped_column(String(20), nullable=False, default="email")
     # "initial" (first contact) | "followup" (a nudge referencing an earlier send).
     outreach_kind: Mapped[str] = mapped_column(String(20), nullable=False, default="initial")
@@ -65,20 +62,10 @@ class EmailOutreachORM(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     # ── Delivery engagement (updated by Mailjet event webhooks) ─────────────────
-    # Furthest-along delivery state seen from Mailjet's event callbacks:
-    #   "sent" (accepted) → "delivered" → "opened" → "clicked", or a terminal
-    #   "bounced" | "blocked" | "spam". NULL for LinkedIn rows and email rows with
-    #   no events yet — the UI then falls back to the send `status` (sent/failed).
-    # See app/routes/outreach_routes.py::mailjet_events. Correlated via CustomID
-    # (the row id) set on the Mailjet send.
     delivery_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     opened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     bounced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Reserved for the later inbound-reply-tracking phase — no writer yet.
     replied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    # Full ordered trail of Mailjet events this send passed through — every event
-    # (sent/open/click/spam/unsub/…) appended as {"event", "at"}, even ones that
-    # don't advance the headline `delivery_status`. NULL/[] until the first event.
-    # Lets the Mail logs UI show every status a mail hit, not just the latest.
     events: Mapped[list | None] = mapped_column(JSON, nullable=True)
