@@ -26,7 +26,6 @@ import httpx
 import structlog
 
 from app.config import Settings
-from app.services.suppression_service import make_unsubscribe_token
 
 logger = structlog.get_logger(__name__)
 
@@ -103,7 +102,7 @@ def _title_matcher(job_title: str) -> re.Pattern | None:
     return re.compile(pattern, re.IGNORECASE)
 
 
-def _outreach_body_to_html(body: str, job_title: str = "", job_url: str = "", unsub_url: str = "") -> str:
+def _outreach_body_to_html(body: str, job_title: str = "", job_url: str = "", show_unsub: bool = False) -> str:
     """Render the plain-text outreach body as HTML: preserve line breaks; turn any
     http(s) URL (the deck link) into a clickable link; turn any line containing an
     email address (the appended reach-out line) into a bold line whose address is a
@@ -113,10 +112,9 @@ def _outreach_body_to_html(body: str, job_title: str = "", job_url: str = "", un
     bold, blue link to the posting that opens in a new tab — the raw URL itself is
     never shown. All other text is HTML-escaped verbatim.
 
-    When `unsub_url` is given, a subtle footer is appended whose visible text is just
-    the word "unsubscribe" (the host URL stays in the href, never shown as text) — so
-    the body must be passed WITHOUT the raw-URL unsubscribe line the plain-text part
-    carries, otherwise _linkify_bare would expose that host here."""
+    When `show_unsub` is True, a subtle footer with a plain, link-free unsubscribe
+    message is appended (Mailjet owns the actual opt-out mechanism now — we no longer
+    embed a self-hosted unsubscribe URL)."""
     url = (job_url or "").strip()
     matcher = _title_matcher(job_title) if url else None
     title_linked = False
@@ -149,14 +147,12 @@ def _outreach_body_to_html(body: str, job_title: str = "", job_url: str = "", un
             rendered = f"<strong>{rendered}</strong>"
         out_lines.append(rendered)
     inner = "<br>\n".join(out_lines)
-    if unsub_url:
-        # Visible text is only "unsubscribe"; the signed host URL lives in the href so
-        # it's never exposed as plain text in the rendered email.
+    if show_unsub:
+        # Plain, link-free unsubscribe message — Mailjet owns the opt-out mechanism now,
+        # so no self-hosted URL is embedded.
         inner += (
             '<br>\n<div style="margin-top:18px;font-size:12px;color:#94A3B8;">'
-            'Not interested? '
-            f'<a href="{html_lib.escape(unsub_url)}" '
-            'style="color:#94A3B8;text-decoration:underline;">unsubscribe</a>.'
+            'Not interested? Reply to this email to unsubscribe.'
             "</div>"
         )
     return (
@@ -363,16 +359,6 @@ def _mailjet_message_ref(result: dict | None) -> str | None:
     return str(ref) if ref else None
 
 
-def _unsubscribe_url(settings: Settings, email: str) -> str:
-    """Absolute, signed self-hosted unsubscribe URL for an outreach recipient, or ""
-    when the public base URL isn't configured (we never embed a broken localhost
-    link in a sent email — the footer/header are simply omitted then)."""
-    base = (settings.public_base_url or "").strip().rstrip("/")
-    if not base or not email:
-        return ""
-    return f"{base}/outreach/unsubscribe?u={make_unsubscribe_token(email)}"
-
-
 class EmailSender:
     """Mailjet transport. AuthService only ever calls ``send_otp``; the outreach and
     harvest-report flows call ``send_email_with_attachments``."""
@@ -483,15 +469,14 @@ class EmailSender:
         msgid_domain = sender_addr.split("@")[-1] if "@" in sender_addr else None
         message_id = make_msgid(domain=msgid_domain) if msgid_domain else make_msgid()
 
-        # Outreach only (custom_id set): a working unsubscribe footer — a signed
-        # self-hosted link. Built here because the recipient (and thus the per-address
-        # token) is only known at send time. The plain-text part must carry the raw URL
-        # (a text/plain part can't hide a link), but the HTML part renders it as an
-        # "unsubscribe" anchor with the host hidden — so `body` stays un-mutated and the
-        # raw-URL footer goes only into `text_body`. The same URL is advertised via the
-        # List-Unsubscribe header below for Gmail/Outlook one-click.
-        unsub_url = _unsubscribe_url(settings, recipients[0]) if (custom_id and recipients) else ""
-        text_body = f"{body.rstrip()}\n\n—\nNot interested? Unsubscribe: {unsub_url}" if unsub_url else body
+        # Outreach only (custom_id set): a plain, link-free unsubscribe message. We no
+        # longer host our own unsubscribe URL — Mailjet owns the opt-out mechanism and
+        # fires an `unsub` webhook event that the suppression workflow reacts to. `body`
+        # stays un-mutated; the footer message goes only into `text_body`.
+        text_body = (
+            f"{body.rstrip()}\n\n—\nNot interested? Reply to this email to unsubscribe."
+            if custom_id else body
+        )
 
         message: dict = {
             "From": sender,
@@ -508,22 +493,19 @@ class EmailSender:
         if html_body is not None:
             message["HTMLPart"] = html_body
         elif as_html:
-            message["HTMLPart"] = _outreach_body_to_html(body, job_title, job_url, unsub_url=unsub_url)
+            message["HTMLPart"] = _outreach_body_to_html(body, job_title, job_url, show_unsub=bool(custom_id))
 
         attachments = _build_attachments(paths, blobs, log)
         if attachments:
             message["Attachments"] = attachments
 
-        # Outreach only: correlate delivery events to the send row + track opens/clicks,
-        # and advertise the unsubscribe endpoint for one-click opt-out.
+        # Outreach only: correlate delivery events to the send row + track opens/clicks.
+        # Unsubscribe is now Mailjet-managed, so we no longer advertise a self-hosted
+        # List-Unsubscribe endpoint here.
         if custom_id:
             message["CustomID"] = custom_id
             message["TrackOpens"] = "enabled"
             message["TrackClicks"] = "enabled"
-            if unsub_url:
-                headers = message.setdefault("Headers", {})
-                headers["List-Unsubscribe"] = f"<{unsub_url}>"
-                headers["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
 
         result = await self._send_via_mailjet(message, log)
         log.info("email_with_attachments_sent")

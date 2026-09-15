@@ -103,6 +103,10 @@ export default function EmailComposeModal({
   // send route enforces it regardless; this is the up-front UX.
   const [suppressed, setSuppressed] = useState(false);
   const metaLoaded = useRef(false);
+  // Track manual edits to From/To so the initial in-flight draft's seeding (below)
+  // never clobbers an address the user already typed.
+  const toTouched = useRef(false);
+  const fromTouched = useRef(false);
 
   // Manual follow-up mode shows the previously sent email(s) first and only drafts
   // a new follow-up once the user clicks "Generate follow-up" (draftStarted).
@@ -170,10 +174,12 @@ export default function EmailComposeModal({
       setJobUrl(res.job_url || "");
       if (followup && res.parent_outreach_id) setResolvedParentId(res.parent_outreach_id);
       // Seed the editable From/To only on the first successful draft, so a user's
-      // manual edits to those fields survive a tone change / regenerate.
+      // manual edits to those fields survive a tone change / regenerate. Skip a field
+      // the user already edited — otherwise an edit made while this initial draft was
+      // still in flight would be silently reverted to the job's DB address.
       if (!metaLoaded.current) {
-        if (res.from_email) setFromEmail(res.from_email);
-        if (res.to_email) setToEmail(res.to_email);
+        if (res.from_email && !fromTouched.current) setFromEmail(res.from_email);
+        if (res.to_email && !toTouched.current) setToEmail(res.to_email);
         metaLoaded.current = true;
       }
     } catch (err) {
@@ -325,7 +331,7 @@ export default function EmailComposeModal({
           <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
             <div className="ecm-field" style={{ flex: 1, minWidth: 220 }}>
               <span className="ecm-label">From</span>
-              <input className="ecm-input" value={fromEmail} onChange={(e) => setFromEmail(e.target.value)} placeholder="you@sightspectrum.com" />
+              <input className="ecm-input" value={fromEmail} onChange={(e) => { fromTouched.current = true; setFromEmail(e.target.value); }} placeholder="you@sightspectrum.com" />
             </div>
             <div className="ecm-field" style={{ flex: 1, minWidth: 220 }}>
               <span className="ecm-label">
@@ -333,7 +339,7 @@ export default function EmailComposeModal({
                 {toOptions.length > 1 && <span style={{ color: "#94A3B8", fontWeight: 500, textTransform: "none", letterSpacing: 0 }}>· pick a recipient</span>}
               </span>
               {toOptions.length > 1 ? (
-                <select className="ecm-input ecm-select" value={toEmail} onChange={(e) => setToEmail(e.target.value)} aria-label="Recipient email">
+                <select className="ecm-input ecm-select" value={toEmail} onChange={(e) => { toTouched.current = true; setToEmail(e.target.value); }} aria-label="Recipient email">
                   {/* Keep any seeded/edited address that isn't one of the labeled options selectable. */}
                   {toEmail.trim() && !toOptions.some((o) => o.email.toLowerCase() === toEmail.trim().toLowerCase()) && (
                     <option value={toEmail}>{toEmail}</option>
@@ -343,7 +349,7 @@ export default function EmailComposeModal({
                   ))}
                 </select>
               ) : (
-                <input className="ecm-input" value={toEmail} onChange={(e) => setToEmail(e.target.value)} placeholder="recruiter@company.com" />
+                <input className="ecm-input" value={toEmail} onChange={(e) => { toTouched.current = true; setToEmail(e.target.value); }} placeholder="recruiter@company.com" />
               )}
             </div>
           </div>
