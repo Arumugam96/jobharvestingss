@@ -6,11 +6,12 @@ import {
   SlidersHorizontal, Download,
   Search, Mail, ArrowUpDown, ArrowUp, ArrowDown, Eye, RefreshCw, ArrowLeft,
   CheckCircle2, XCircle, Loader2, HelpCircle, Play, FileJson, FileSpreadsheet,
-  AlertTriangle, ChevronDown, Square,
+  AlertTriangle, ChevronDown, Square, MapPin,
 } from "lucide-react";
 import JobDetailsView from "./JobDetailsView";
 import RuleEngineConfig from "./RuleEngineConfig";
 import OutreachHistoryPage from "./OutreachHistoryPage";
+import OutreachThreadPage from "./OutreachThreadPage";
 import Sidebar from "./components/Sidebar";
 import EmailComposeModal from "./components/EmailComposeModal";
 import LinkedInMessageModal from "./components/LinkedInMessageModal";
@@ -93,10 +94,12 @@ const ThemeStyles = () => (
     .ha-multiselect-opt{display:flex;align-items:center;gap:8px;padding:7px 8px;border-radius:6px;font-size:14px;color:${C.text};cursor:pointer;white-space:nowrap;}
     .ha-multiselect-opt:hover{background:${C.pale};}
     .ha-multiselect-opt input{cursor:pointer;}
-    .ha-filterbar{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px 16px;align-items:center;width:100%;max-width:100%;box-sizing:border-box;}
+    .ha-filterbar{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:14px 16px;align-items:end;width:100%;max-width:100%;box-sizing:border-box;}
     .ha-daterow{display:flex;flex-wrap:wrap;align-items:center;gap:12px;max-width:100%;box-sizing:border-box;}
-    .ha-filter-field{display:flex;align-items:center;gap:8px;width:100%;min-width:0;box-sizing:border-box;}
-    .ha-filter-field>span{font-size:14px;font-weight:500;color:${C.textSoft};white-space:nowrap;flex-shrink:0;}
+    .ha-filter-field{display:flex;flex-direction:column;align-items:stretch;gap:6px;width:100%;min-width:0;box-sizing:border-box;}
+    .ha-filter-field>span{font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:${C.textSoft};white-space:nowrap;display:flex;align-items:center;gap:5px;}
+    .ha-filter-loc>span{color:${C.primary};}
+    .ha-filter-loc .ha-select{background:#F4F8FF;border-color:#BFDBFE;}
     .ha-filter-search{position:relative;min-width:0;box-sizing:border-box;grid-column:1/-1;}
     .ha-filter-search .ha-input{width:100%;min-width:0;max-width:100%;padding-left:34px;box-sizing:border-box;}
     .ha-filter-search svg{position:absolute;left:10px;top:50%;transform:translateY(-50%);color:#94A3B8;pointer-events:none;}
@@ -337,10 +340,11 @@ const PlainHeader = ({ label, align = "left", width }) => (
   <th className="ha-th" style={{ textAlign: align, ...(width ? { width, minWidth: width } : null) }}>{label}</th>
 );
 
-function Select({ label, value, onChange, options }) {
+function Select({ label, value, onChange, options, variant }) {
+  const isLoc = variant === "location";
   return (
-    <label className="ha-filter-field">
-      <span>{label}</span>
+    <label className={"ha-filter-field" + (isLoc ? " ha-filter-loc" : "")}>
+      <span>{isLoc && <MapPin size={13} />}{label}</span>
       <select className="ha-input ha-select" value={value} onChange={(e) => onChange(e.target.value)}>
         {options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
       </select>
@@ -830,14 +834,14 @@ function JobsTable({
           options={[{ value: "all", label: "All" }, ...companies.map((c) => ({ value: c, label: c }))]} />
         <Select label="Company size" value={filters.size || "all"} onChange={(v) => setFilters((f) => ({ ...f, size: v }))}
           options={COMPANY_SIZE_FILTER_OPTIONS} />
-        <Select label="Company country" value={filters.companyCountry} onChange={(v) => setFilters((f) => ({ ...f, companyCountry: v }))}
+        <Select label="Company country" variant="location" value={filters.companyCountry} onChange={(v) => setFilters((f) => ({ ...f, companyCountry: v }))}
           options={[{ value: "all", label: "All" }, ...companyCountries.map((c) => ({ value: c, label: c }))]} />
-        <MultiSelect label="Contact" selected={filters.contact} onChange={(v) => setFilters((f) => ({ ...f, contact: v }))}
-          options={CONTACT_FILTER_OPTIONS} />
+        <Select label="Job country" variant="location" value={filters.country} onChange={(v) => setFilters((f) => ({ ...f, country: v }))}
+          options={[{ value: "all", label: "All" }, ...countries.map((c) => ({ value: c, label: c }))]} />
         <Select label="Job" value={filters.job} onChange={(v) => setFilters((f) => ({ ...f, job: v }))}
           options={[{ value: "all", label: "All" }, ...jobTitles.map((t) => ({ value: t, label: t }))]} />
-        <Select label="Job country" value={filters.country} onChange={(v) => setFilters((f) => ({ ...f, country: v }))}
-          options={[{ value: "all", label: "All" }, ...countries.map((c) => ({ value: c, label: c }))]} />
+        <MultiSelect label="Contact" selected={filters.contact} onChange={(v) => setFilters((f) => ({ ...f, contact: v }))}
+          options={CONTACT_FILTER_OPTIONS} />
         <Select label="POC" value={filters.poc} onChange={(v) => setFilters((f) => ({ ...f, poc: v }))}
           options={[{ value: "all", label: "All" }, ...pocNames.map((p) => ({ value: p, label: p }))]} />
         <div className="ha-filter-search">
@@ -1992,7 +1996,7 @@ function activeKeyFromPath(pathname) {
   if (pathname.startsWith("/history")) return "history";
   if (pathname.startsWith("/sources")) return "sources";
   if (pathname.startsWith("/leads")) return "leads";
-  if (pathname.startsWith("/outreach")) return "outreach";
+  if (pathname.startsWith("/outreach") || pathname.startsWith("/mail")) return "outreach";
   return "jobs"; // "/", "/jobs", "/jobs/:id"
 }
 
@@ -2263,6 +2267,7 @@ export default function HarvestAgent({ onLogout }) {
           <Route path="/leads" element={<LeadIntelligencePage />} />
           <Route path="/rules" element={<RulesRoute />} />
           <Route path="/outreach" element={<OutreachHistoryPage />} />
+          <Route path="/mail/:id" element={<OutreachThreadPage />} />
           <Route path="*" element={<NotFound />} />
         </Route>
       </Routes>

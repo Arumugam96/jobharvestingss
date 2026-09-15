@@ -2758,9 +2758,7 @@ class LinkedInAgent:
         except Exception as exc:
             logger.debug("linkedin_llm_fallback_company_links_failed", idx=idx, error=str(exc))
 
-        # Pre-resolve the posting date here in Python (card text first, then
-        # detail text) instead of asking the LLM to do the "X days ago" →
-        # YYYY-MM-DD arithmetic itself — see _resolve_posted_date.
+        # Pre-resolve the posting date here in Python (card text first, then detail text)
         resolved_date = (
             _resolve_posted_date(card_text_clean, self._harvest_started_at)
             or _resolve_posted_date(detail_text, self._harvest_started_at)
@@ -2810,9 +2808,9 @@ class LinkedInAgent:
             "candidate company links below by matching the name, null if no match), "
             "\"location\": str (city/region and Remote/Hybrid/On-site if stated; "
             "empty if not present), "
-            "\"posted\": str or null (copy the pre-calculated posting date given "
-            "above verbatim — do not calculate or derive it yourself; null if it "
-            "was marked unavailable), "
+            # "\"posted\": str or null (copy the pre-calculated posting date given "
+            # "above verbatim — do not calculate or derive it yourself; null if it "
+            # "was marked unavailable), "
             + description_fields
             + "\"employment_type\": str (e.g. Full-time, Contract; empty if not stated), "
             "\"salary\": str (empty if not disclosed), "
@@ -2854,7 +2852,7 @@ class LinkedInAgent:
             f"---CARD TEXT---\n{card_text_clean or '(none)'}\n\n"
             f"---COMPANY LINKS---\n{json.dumps(company_links, ensure_ascii=False)}\n\n"
             f"---PROFILE LINKS---\n{json.dumps(profile_links, ensure_ascii=False)}\n\n"
-            f"---POSTING DATE (pre-calculated)---\n{resolved_date or 'unavailable'}\n\n"
+            # f"---POSTING DATE (pre-calculated)---\n{resolved_date or 'unavailable'}\n\n"
             f"---ABOUT THE COMPANY---\n{about_company or '(none)'}\n\n"
             f"---JOB DETAIL PAGE---\n{detail_text}"
         )
@@ -2926,6 +2924,7 @@ class LinkedInAgent:
                 )
 
         result: dict = {}
+        result["posted"] = resolved_date
         if extracted.get("title"):
             result["title"] = str(extracted["title"]).strip()
         if extracted.get("company"):
@@ -2934,8 +2933,6 @@ class LinkedInAgent:
             result["company_url"] = str(extracted["company_url"]).strip()
         if extracted.get("location"):
             result["location"] = str(extracted["location"]).strip()
-        if extracted.get("posted"):
-            result["posted"] = str(extracted["posted"]).strip()
         if extracted.get("description"):
             result["description"] = str(extracted["description"]).strip()[:20_000]
         if extracted.get("description_html"):

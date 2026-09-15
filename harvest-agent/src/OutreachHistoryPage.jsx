@@ -1,135 +1,17 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  RefreshCw, Send, Mail, X, Download, Search, Calendar, ChevronDown, Copy, Check, CornerUpRight, Building2,
-  CheckCircle2, MailOpen, MousePointerClick, Ban, CornerUpLeft, ShieldAlert, BellOff,
-} from "lucide-react";
+import { useSearchParams } from "react-router-dom";
+import { RefreshCw, Send, Mail, X, Download, Search, Calendar, ChevronDown, Check, Building2 } from "lucide-react";
 import { getOutreachHistory, getOutreachStats, ApiError } from "./api";
-import OutreachThread from "./components/OutreachThread";
-import EmailComposeModal from "./components/EmailComposeModal";
+import { fmtAbs, fmtRel, initials, avatarColor, engagement, EngagementCell, CLIENT_LABEL } from "./components/outreachUi";
 
 /* Mail logs (route /outreach) — the log of every outreach email sent from
  * HarvestAgent, read from the backend (GET /outreach/history). It's the DB source
  * of truth for what's been sent: initial emails, follow-ups, and manually logged
  * LinkedIn messages. Each row shows the contact, company, subject, tone, delivery
- * engagement (Mailjet events), and when it was sent; opening a row reads the full
- * message + thread and offers a follow-up. Renders inside the shared layout
- * (ha-root → Sidebar → this <main>), reusing the app's ha-* container styles. */
-
-// ── Formatting helpers ──────────────────────────────────────────────────────
-
-function fmtAbs(iso) {
-  if (!iso) return "—";
-  try {
-    return new Date(iso).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
-  } catch {
-    return iso;
-  }
-}
-
-function fmtTime(iso) {
-  if (!iso) return "—";
-  try {
-    return new Date(iso).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
-  } catch {
-    return iso;
-  }
-}
-
-// Compact "3h ago" / "2d ago" relative label for the Sent column.
-function fmtRel(iso) {
-  if (!iso) return "—";
-  const then = new Date(iso).getTime();
-  if (Number.isNaN(then)) return "—";
-  const secs = Math.max(0, Math.floor((Date.now() - then) / 1000));
-  if (secs < 60) return "just now";
-  const mins = Math.floor(secs / 60);
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  const days = Math.floor(hrs / 24);
-  if (days < 30) return `${days}d ago`;
-  return fmtAbs(iso);
-}
-
-const AVATAR_COLORS = ["#6366F1", "#0EA5E9", "#8B5CF6", "#10B981", "#F43F5E", "#F59E0B", "#14B8A6", "#EC4899"];
-function initials(name, email) {
-  const base = (name || email || "?").trim();
-  const parts = base.split(/\s+/).filter(Boolean);
-  if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
-  return base.slice(0, 2).toUpperCase();
-}
-function avatarColor(seed) {
-  const s = (seed || "?");
-  let n = 0;
-  for (let i = 0; i < s.length; i += 1) n = (n + s.charCodeAt(i)) % AVATAR_COLORS.length;
-  return AVATAR_COLORS[n];
-}
-
-// Delivery engagement — derived from the send status + latest Mailjet event.
-function engagement(it) {
-  if (it.status === "failed") return { label: "Failed", color: "#B91C1C", dot: "#B91C1C" };
-  switch (it.delivery_status) {
-    case "clicked":
-      return { label: "Clicked", color: "#0D9488", dot: "#0D9488" };
-    case "opened":
-      return { label: "Opened", color: "#0E7C5A", dot: "#0E7C5A" };
-    case "delivered":
-      return { label: "Delivered", color: "#1E40AF", dot: "#2563EB" };
-    case "bounced":
-      return { label: "Bounced", color: "#B91C1C", dot: "#B91C1C" };
-    case "blocked":
-      return { label: "Blocked", color: "#B91C1C", dot: "#B91C1C" };
-    case "spam":
-      return { label: "Spam", color: "#B91C1C", dot: "#B91C1C" };
-    case "unsubscribed":
-      return { label: "Unsubscribed", color: "#6D28D9", dot: "#6D28D9" };
-    default:
-      return { label: "Sent", color: "#64748B", dot: "#94A3B8" };
-  }
-}
-
-// Delivery-state label → dot/text color, shared by the detail timeline steps.
-const EVENT_COLOR = {
-  Delivered: "#1E40AF", Opened: "#0E7C5A", Clicked: "#0D9488",
-  Bounced: "#B91C1C", Blocked: "#B91C1C", Spam: "#B91C1C", Unsubscribed: "#6D28D9",
-};
-
-// The ordered delivery lifecycle for the detail timeline, built from the row's scalar
-// timestamps + event trail (not just events[]). This surfaces states the raw trail
-// misses: "Delivered" is seeded from the send's 200 response (delivered_at, no webhook),
-// and a click implies an open (opened_at), so both show even when Mailjet only fired a
-// click. De-duped by label in Sent → Delivered → Opened → Clicked order, with any
-// terminal negative (Bounced/Blocked/Spam) or Unsubscribed appended.
-function deliveryTimeline(it) {
-  const steps = [];
-  const add = (label, at) => { if (at && !steps.some((s) => s.label === label)) steps.push({ label, at }); };
-  add("Sent", it.created_at);            // always present
-  add("Delivered", it.delivered_at);     // from the 200 (or a 'sent' webhook)
-  add("Opened", it.opened_at);           // open, or click implies open
-  const click = (it.events || []).find((e) => (e.event || "").toLowerCase() === "click");
-  if (click) add("Clicked", click.at);
-  if (["bounced", "blocked", "spam"].includes(it.delivery_status)) add(engagement(it).label, it.bounced_at);
-  if (it.delivery_status === "unsubscribed") {
-    const un = (it.events || []).find((e) => (e.event || "").toLowerCase() === "unsub");
-    add("Unsubscribed", (un && un.at) || it.created_at);
-  }
-  return steps;
-}
-
-const TONE_STYLE = {
-  Formal: { color: "#3730A3", bg: "#EEF0FF" },
-  Friendly: { color: "#0E7C5A", bg: "#E7F7F0" },
-  Direct: { color: "#9A3412", bg: "#FFF1E8" },
-  "Follow-up": { color: "#92580B", bg: "#FFF6E9" },
-};
-function toneMeta(it) {
-  if (it.tone && TONE_STYLE[it.tone]) return { label: it.tone, ...TONE_STYLE[it.tone] };
-  if (it.tone) return { label: it.tone, color: "#475569", bg: "#F1F5F9" };
-  if (it.outreach_kind === "followup") return { label: "Follow-up", ...TONE_STYLE["Follow-up"] };
-  return null;
-}
-
-const CLIENT_LABEL = { active: "Active client", new: "New client", unknown: "" };
+ * engagement (Mailjet events), and when it was sent; clicking a row opens the full
+ * message + thread on its own page (route /mail/:id) where you can follow up.
+ * Renders inside the shared layout (ha-root → Sidebar → this <main>), reusing the
+ * app's ha-* container styles. */
 
 const RANGES = [
   { key: "24h", label: "Last 24 hours", ms: 24 * 3600e3 },
@@ -153,102 +35,41 @@ function StatCard({ icon, label, value, tone }) {
   );
 }
 
-// The positive delivery lifecycle, in order — the set of stages a mail progresses through.
-const ENGAGEMENT_STAGES = ["Delivered", "Opened", "Clicked"];
-
-// Per-status icon + soft-pill palette for the engagement badges.
-const STATUS_META = {
-  Delivered:    { Icon: CheckCircle2,      color: "#1E7F4F", bg: "#E7F7EE" },
-  Opened:       { Icon: MailOpen,          color: "#0E7C5A", bg: "#E7F7F0" },
-  Clicked:      { Icon: MousePointerClick, color: "#0D7D74", bg: "#E4F5F3" },
-  Sent:         { Icon: Send,              color: "#64748B", bg: "#F1F5F9" },
-  Failed:       { Icon: Ban,               color: "#DC2626", bg: "#FDECEC" },
-  Bounced:      { Icon: CornerUpLeft,      color: "#DC2626", bg: "#FDECEC" },
-  Blocked:      { Icon: Ban,               color: "#DC2626", bg: "#FDECEC" },
-  Spam:         { Icon: ShieldAlert,       color: "#DC2626", bg: "#FDECEC" },
-  Unsubscribed: { Icon: BellOff,           color: "#6D28D9", bg: "#F1EBFD" },
-};
-
-// The delivery states a mail has reached, as labels — one icon badge is rendered per
-// entry. A failed send or terminal negative (bounced/blocked/spam/unsubscribed) is a
-// single badge; a positive send shows the cumulative lifecycle up to the furthest stage
-// (e.g. Delivered → Opened → Clicked).
-function engagementLabels(it) {
-  if (it.status === "failed") return ["Failed"];
-  const ds = it.delivery_status;
-  if (ds === "bounced") return ["Bounced"];
-  if (ds === "blocked") return ["Blocked"];
-  if (ds === "spam") return ["Spam"];
-  if (ds === "unsubscribed") return ["Unsubscribed"];
-  const furthest = ds === "clicked" ? "Clicked" : ds === "opened" ? "Opened" : ds === "delivered" ? "Delivered" : null;
-  const idx = ENGAGEMENT_STAGES.indexOf(furthest);
-  return idx === -1 ? ["Sent"] : ENGAGEMENT_STAGES.slice(0, idx + 1);
-}
-
-function StatusBadge({ label }) {
-  const meta = STATUS_META[label] || STATUS_META.Sent;
-  const Icon = meta.Icon;
-  return (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 5, background: meta.bg, color: meta.color, borderRadius: 999, padding: "3px 10px 3px 8px", fontSize: 11.5, fontWeight: 700, whiteSpace: "nowrap" }}>
-      <Icon size={13} strokeWidth={2.5} /> {label}
-    </span>
-  );
-}
-
-// Engagement cell: the reached delivery states as horizontal icon badges.
-function EngagementCell({ it }) {
-  return (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-      {engagementLabels(it).map((label) => <StatusBadge key={label} label={label} />)}
-    </span>
-  );
-}
-
-function ToneChip({ it }) {
-  const t = toneMeta(it);
-  if (!t) return <span style={{ color: "#CBD5E1" }}>—</span>;
-  return <span style={{ fontSize: 11.5, fontWeight: 700, color: t.color, background: t.bg, borderRadius: 999, padding: "3px 10px", whiteSpace: "nowrap" }}>{t.label}</span>;
-}
-
 // ── Page ────────────────────────────────────────────────────────────────────
 
 export default function OutreachHistoryPage() {
+  const [searchParams, setSearchParams] = useSearchParams();
+
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
-  // Filters (applied server-side across the whole dataset).
-  const [search, setSearch] = useState("");        // point-of-contact name / email
-  const [companyQ, setCompanyQ] = useState("");     // company
-  const [rangeKey, setRangeKey] = useState("all");
-  const [customFrom, setCustomFrom] = useState("");
-  const [customTo, setCustomTo] = useState("");
+  // Filters (applied server-side across the whole dataset). Initialised from the
+  // URL query so a deep link — and the Back button from the thread page — restores
+  // the exact filtered, paged list instead of resetting everything.
+  const [search, setSearch] = useState(() => searchParams.get("search") || "");        // point-of-contact name / email
+  const [companyQ, setCompanyQ] = useState(() => searchParams.get("company") || "");     // company
+  const [rangeKey, setRangeKey] = useState(() => searchParams.get("range") || "all");
+  const [customFrom, setCustomFrom] = useState(() => searchParams.get("from") || "");
+  const [customTo, setCustomTo] = useState(() => searchParams.get("to") || "");
   const [dateOpen, setDateOpen] = useState(false);
   const dateRef = useRef(null);
 
-  // Debounced search values so typing doesn't fire a request per keystroke.
-  const [dq, setDq] = useState("");
-  const [dCompany, setDCompany] = useState("");
+  // Debounced search values so typing doesn't fire a request per keystroke. Seeded
+  // from the restored filters so the first load is already filtered (no flicker).
+  const [dq, setDq] = useState(() => (searchParams.get("search") || "").trim());
+  const [dCompany, setDCompany] = useState(() => (searchParams.get("company") || "").trim());
   useEffect(() => { const t = setTimeout(() => setDq(search.trim()), 350); return () => clearTimeout(t); }, [search]);
   useEffect(() => { const t = setTimeout(() => setDCompany(companyQ.trim()), 350); return () => clearTimeout(t); }, [companyQ]);
 
   // Server pagination + whole-dataset stats.
   const PAGE_SIZE = 100;
-  const [page, setPage] = useState(1);
+  const [page, setPage] = useState(() => Math.max(1, parseInt(searchParams.get("page") || "1", 10) || 1));
   const [total, setTotal] = useState(0);
   const [totalPages, setTotalPages] = useState(1);
   const [stats, setStats] = useState({ sent: 0, failed: 0 });
   const [exporting, setExporting] = useState(false);
   const seqRef = useRef(0);
-
-  // The row whose full thread is open in the detail modal + that thread's messages.
-  const [detail, setDetail] = useState(null);
-  const [thread, setThread] = useState([]);
-  const [threadLoading, setThreadLoading] = useState(false);
-  const [copied, setCopied] = useState(false);
-
-  // Follow-up composer context ({ job, parentOutreachId }) — opens EmailComposeModal.
-  const [composeFor, setComposeFor] = useState(null);
 
   const rangeLabel = RANGES.find((r) => r.key === rangeKey)?.label || "All time";
   const hasDateFilter = rangeKey !== "all" || !!customFrom || !!customTo;
@@ -261,8 +82,27 @@ export default function OutreachHistoryPage() {
     return { date_from: "", date_to: "" };
   }, [rangeKey, customFrom, customTo]);
 
-  // Any filter change resets to page 1.
-  useEffect(() => { setPage(1); }, [dq, dCompany, dateParams]);
+  // Any filter change resets to page 1 — but not on the initial mount, so a page
+  // restored from the URL survives (the deps are already at their restored values).
+  const firstFilterRun = useRef(true);
+  useEffect(() => {
+    if (firstFilterRun.current) { firstFilterRun.current = false; return; }
+    setPage(1);
+  }, [dq, dCompany, dateParams]);
+
+  // Mirror the filter/page state back to the URL (replace, so it doesn't spam the
+  // history stack). This is what makes `location.pathname + location.search` — the
+  // `from` handed to the thread page — restore the list on Back.
+  useEffect(() => {
+    const sp = new URLSearchParams();
+    if (search.trim()) sp.set("search", search.trim());
+    if (companyQ.trim()) sp.set("company", companyQ.trim());
+    if (rangeKey && rangeKey !== "all") sp.set("range", rangeKey);
+    if (customFrom) sp.set("from", customFrom);
+    if (customTo) sp.set("to", customTo);
+    if (page > 1) sp.set("page", String(page));
+    setSearchParams(sp, { replace: true });
+  }, [search, companyQ, rangeKey, customFrom, customTo, page, setSearchParams]);
 
   const load = useCallback(async () => {
     const seq = ++seqRef.current;
@@ -298,29 +138,15 @@ export default function OutreachHistoryPage() {
     return () => window.removeEventListener("mousedown", onDown);
   }, [dateOpen]);
 
-  // Open a row → fetch the whole thread for its job (or recruiter).
-  const openDetail = useCallback(async (it) => {
-    setDetail(it);
-    setThread([]);
-    setThreadLoading(true);
-    try {
-      const params = it.job_id ? { job_id: it.job_id } : it.recruiter_id ? { recruiter_id: it.recruiter_id } : null;
-      const res = params ? await getOutreachHistory(params) : { items: [it] };
-      setThread(res.items && res.items.length ? res.items : [it]);
-    } catch {
-      setThread([it]);
-    } finally {
-      setThreadLoading(false);
-    }
+  // Open a row → the standalone thread page in a NEW browser tab, so this list
+  // stays open and untouched. The new tab has no in-memory navigation state, so
+  // job_id/recruiter_id ride along in the query (?job=/?recruiter=) and the thread
+  // page fetches the thread from there; the row id in the path anchors the header.
+  const openDetail = useCallback((it) => {
+    const q = it.job_id ? `?job=${encodeURIComponent(it.job_id)}`
+      : it.recruiter_id ? `?recruiter=${encodeURIComponent(it.recruiter_id)}` : "";
+    window.open(`/mail/${encodeURIComponent(it.id)}${q}`, "_blank", "noopener");
   }, []);
-
-  // Escape closes the detail modal (but not while the composer is up).
-  useEffect(() => {
-    if (!detail || composeFor) return undefined;
-    const onKey = (e) => { if (e.key === "Escape") setDetail(null); };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [detail, composeFor]);
 
   const anyFilter = !!(dq || dCompany || hasDateFilter);
   const resetFilters = () => { setSearch(""); setCompanyQ(""); setRangeKey("all"); setCustomFrom(""); setCustomTo(""); };
@@ -360,23 +186,6 @@ export default function OutreachHistoryPage() {
     }
   };
 
-  const copyMessage = () => {
-    if (!detail) return;
-    navigator.clipboard?.writeText(`${detail.subject || ""}\n\n${detail.body || ""}`);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1600);
-  };
-
-  const canFollowUp = detail && detail.channel === "email" && detail.job_id;
-  const startFollowUp = () => {
-    if (!canFollowUp) return;
-    setComposeFor({
-      job: { id: detail.job_id, email: detail.to_email, company: detail.company },
-      parentOutreachId: detail.id,
-    });
-    setDetail(null);
-  };
-
   return (
     <main className="ha-main">
       <div className="ha-page-head" style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 8 }}>
@@ -410,7 +219,6 @@ export default function OutreachHistoryPage() {
             style={hasDateFilter ? { borderColor: "#2563EB", color: "#1E40AF", boxShadow: "0 0 0 2px #EAF1FF" } : undefined}
           >
             <Calendar size={15} /> {rangeLabel}
-            {hasDateFilter && <span style={{ background: "#2563EB", color: "#fff", fontSize: 11, fontWeight: 800, borderRadius: 999, minWidth: 18, height: 18, display: "inline-grid", placeItems: "center", padding: "0 5px" }}>1</span>}
             <ChevronDown size={14} />
           </button>
           {dateOpen && (
@@ -465,17 +273,17 @@ export default function OutreachHistoryPage() {
           <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 860 }}>
             <thead>
               <tr>
-                {["Contact", "Company", "Subject", "Engagement", "Sent"].map((h) => (
+                {["To", "From", "Company", "Subject", "Engagement", "Sent"].map((h) => (
                   <th key={h} style={{ textAlign: "left", fontSize: 11.5, letterSpacing: ".04em", textTransform: "uppercase", color: "#94A3B8", fontWeight: 700, padding: "13px 18px", borderBottom: "1px solid #E2E8F0", whiteSpace: "nowrap" }}>{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {loading && (
-                <tr><td colSpan={5} style={{ textAlign: "center", padding: "48px 16px", color: "#94A3B8" }}>Loading mail logs…</td></tr>
+                <tr><td colSpan={6} style={{ textAlign: "center", padding: "48px 16px", color: "#94A3B8" }}>Loading mail logs…</td></tr>
               )}
               {!loading && items.length === 0 && !error && (
-                <tr><td colSpan={5} style={{ textAlign: "center", padding: "48px 16px", color: "#94A3B8" }}>
+                <tr><td colSpan={6} style={{ textAlign: "center", padding: "48px 16px", color: "#94A3B8" }}>
                   {anyFilter ? "No mail matches your filters." : "No outreach sent yet."}
                 </td></tr>
               )}
@@ -483,7 +291,7 @@ export default function OutreachHistoryPage() {
                 const name = it.contact_name || (it.channel === "linkedin" ? "(LinkedIn)" : it.to_email || "—");
                 const client = CLIENT_LABEL[it.client_type] || "";
                 return (
-                  <tr key={it.id} onClick={() => openDetail(it)} title="Read message + thread"
+                  <tr key={it.id} onClick={() => openDetail(it)} title="Open message + thread in a new tab"
                     style={{ cursor: "pointer", borderBottom: "1px solid #E2E8F0" }}
                     onMouseEnter={(e) => { e.currentTarget.style.background = "#F8FAFC"; }}
                     onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}>
@@ -497,6 +305,9 @@ export default function OutreachHistoryPage() {
                           <div style={{ color: "#64748B", fontSize: 12.5 }}>{it.to_email || (it.channel === "linkedin" ? "(LinkedIn)" : "—")}</div>
                         </div>
                       </div>
+                    </td>
+                    <td style={{ padding: "13px 18px", whiteSpace: "nowrap" }}>
+                      <div style={{ fontSize: 13, color: "#334155" }}>{it.from_email || "—"}</div>
                     </td>
                     <td style={{ padding: "13px 18px" }}>
                       <div style={{ fontWeight: 600, fontSize: 13.5, color: "#1E293B" }}>{it.company || "—"}</div>
@@ -534,92 +345,6 @@ export default function OutreachHistoryPage() {
           </div>
         </div>
       )}
-
-      {/* Detail modal */}
-      {detail && !composeFor && (
-        <div
-          onMouseDown={(e) => { if (e.target === e.currentTarget) setDetail(null); }}
-          style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,.45)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24, zIndex: 1000 }}
-        >
-          <div role="dialog" aria-modal="true" aria-label="Sent outreach"
-            style={{ width: "100%", maxWidth: 620, maxHeight: "calc(100vh - 48px)", background: "#fff", borderRadius: 12, boxShadow: "0 24px 48px rgba(15,23,42,.2)", display: "flex", flexDirection: "column", overflow: "hidden", fontFamily: "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif" }}>
-            <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, padding: "18px 22px", borderBottom: "1px solid #E2E8F0" }}>
-              <div>
-                <div style={{ fontSize: 16, fontWeight: 800, letterSpacing: "-.01em", textWrap: "balance" }}>
-                  {detail.subject || (detail.channel === "linkedin" ? "LinkedIn message" : "Outreach")}
-                </div>
-                <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10, flexWrap: "wrap" }}>
-                  <StatusBadge label={engagement(detail).label} />
-                  <ToneChip it={detail} />
-                  <span style={{ color: "#94A3B8", fontSize: 12 }}>{fmtAbs(detail.created_at)}</span>
-                </div>
-              </div>
-              <button onClick={() => setDetail(null)} aria-label="Close" style={{ border: "none", background: "transparent", cursor: "pointer", color: "#64748B", display: "inline-flex", padding: 4 }}>
-                <X size={18} />
-              </button>
-            </div>
-
-            <div style={{ padding: "16px 22px", overflowY: "auto" }}>
-              {/* Delivery event trail — every status this mail passed through. */}
-              <div style={{ fontSize: 11, letterSpacing: ".12em", textTransform: "uppercase", color: "#94A3B8", fontWeight: 700, marginBottom: 10 }}>Delivery</div>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 16px", marginBottom: 18, fontSize: 12 }}>
-                {deliveryTimeline(detail).map((e) => (
-                  <TimelineStep key={e.label} on label={e.label} time={fmtTime(e.at)} color={EVENT_COLOR[e.label] || "#94A3B8"} />
-                ))}
-                {deliveryTimeline(detail).length <= 1 && (
-                  <span style={{ color: "#CBD5E1" }}>Awaiting delivery events…</span>
-                )}
-              </div>
-
-              <div style={{ fontSize: 11, letterSpacing: ".12em", textTransform: "uppercase", color: "#94A3B8", fontWeight: 700, marginBottom: 12 }}>Message</div>
-              <div style={{ display: "grid", gridTemplateColumns: "72px 1fr", gap: "6px 14px", fontSize: 13.5, marginBottom: 4 }}>
-                {detail.from_email && (<><div style={{ color: "#64748B" }}>From</div><div style={{ color: "#0F172A", fontWeight: 600 }}>{detail.from_email}</div></>)}
-                <div style={{ color: "#64748B" }}>To</div>
-                <div style={{ color: "#0F172A", fontWeight: 600 }}>
-                  {detail.contact_name ? `${detail.contact_name} · ` : ""}<span style={{ color: "#64748B", fontWeight: 500 }}>{detail.to_email || (detail.channel === "linkedin" ? "(LinkedIn)" : "—")}</span>
-                </div>
-                {detail.company && (<><div style={{ color: "#64748B" }}>Company</div><div style={{ color: "#0F172A", fontWeight: 600 }}>{detail.company}</div></>)}
-              </div>
-
-              <div style={{ marginTop: 16 }}>
-                <div style={{ fontSize: 11, letterSpacing: ".12em", textTransform: "uppercase", color: "#94A3B8", fontWeight: 700, marginBottom: 10 }}>Thread</div>
-                <OutreachThread messages={thread} loading={threadLoading} emptyText="No sent messages found for this contact." collapsible />
-              </div>
-            </div>
-
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, padding: "14px 22px", borderTop: "1px solid #E2E8F0", background: "#F8FAFC" }}>
-              <button className="ha-btn ha-btn-secondary" onClick={copyMessage}>
-                {copied ? <Check size={15} /> : <Copy size={15} />} {copied ? "Copied" : "Copy message"}
-              </button>
-              {canFollowUp && (
-                <button className="ha-btn" onClick={startFollowUp} style={{ background: "#2563EB", color: "#fff", border: "1px solid #2563EB" }}>
-                  <CornerUpRight size={15} /> Follow up
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Follow-up composer (opens over the page; the detail modal is closed first) */}
-      {composeFor && (
-        <EmailComposeModal
-          job={composeFor.job}
-          followup
-          parentOutreachId={composeFor.parentOutreachId}
-          onClose={() => setComposeFor(null)}
-          onSent={() => { setComposeFor(null); load(); }}
-        />
-      )}
     </main>
-  );
-}
-
-function TimelineStep({ on, label, time, color = "#0E7C5A" }) {
-  return (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 6, color: on ? "#334155" : "#94A3B8" }}>
-      <span style={{ width: 7, height: 7, borderRadius: "50%", background: on ? color : "#CBD5E1" }} />
-      {label} {on && <b style={{ color: "#0F172A", fontWeight: 700 }}>{time}</b>}
-    </span>
   );
 }

@@ -59,19 +59,12 @@ class Settings(BaseSettings):
 
     # ── HTML extraction LLM provider ──────────────────────────────────────────────
     extraction_llm_model: str = "claude"
-    # Single failover provider tried when the primary extraction provider is down
-    # (same value format as EXTRACTION_LLM_MODEL, e.g. "claude" | "openrouter").
-    # "" disables failover — the run degrades straight to re-enrichment instead.
     extraction_fallback_model: str = ""
     local_llm_url:        str = "http://localhost:11434"
     local_llm_model:      str = "llama3.1:8b"
 
     # ── Re-enrichment (degraded jobs when all LLM providers were down) ─────────────
-    # Jobs stored for re-enrichment are retried at the start of each harvest run
-    # for this many days; past that they're marked permanently failed.
     reenrichment_max_age_days: int = 7
-    # Cap on how many pending jobs one start-of-run sweep re-extracts, so the
-    # sweep never delays a harvest's start by much.
     reenrichment_sweep_limit: int = 50
 
     # ── OpenRouter (fallback LLM for HTML extraction) ──────────────────────────────
@@ -92,9 +85,7 @@ class Settings(BaseSettings):
     apollo_recheck_days: int = 30
     # Company-enrichment Apollo stage: the LinkedIn company-enrichment waterfall
     # (LinkedIn company page → Apollo → company website → LLM) spends a credit on
-    # POST /organizations/enrich (keyed on a domain resolved from the company page)
-    # to fill company size / HQ location for EVERY company — including those with no
-    # recruiter to piggyback a people-match on. On by default; the per-company
+    # POST /organizations/enrich. On by default; the per-company
     # 30-day recheck cooldown (apollo_recheck_days) prevents re-billing.
     apollo_enrich_company: bool = True
 
@@ -118,8 +109,6 @@ class Settings(BaseSettings):
     microsoft_password: str = ""
 
     # ── LinkedIn Home Feed lead harvest ──────────────────────────────────────────
-    # Scrapes the authenticated recruiter's Home Feed (/feed/), NOT the Jobs board.
-    # All stop conditions are env-tunable so a run can be bounded without a redeploy.
     linkedin_feed_max_posts:             int = 10      # max posts to inspect, then stop
     linkedin_feed_max_scrolls:           int = 40      # max scroll actions, then stop
     linkedin_feed_scroll_delay_ms:       int = 2500    # pause between scrolls (lazy-load)

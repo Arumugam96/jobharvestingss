@@ -33,9 +33,6 @@ class RecruiterORM(Base):
     linkedin_profile_url: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
     person_name: Mapped[str] = mapped_column(String(255), nullable=False)
     company_name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
-    # LinkedIn headline / role free text — no real length ceiling (scraped
-    # values exceed 255 chars), so Text not String(255). Same data class as
-    # ScrapedJobORM.job_poster_designation and linkedin_headline below.
     designation: Mapped[str] = mapped_column(Text, nullable=False, default="")
     harvest_source: Mapped[str] = mapped_column(String(50), nullable=False, default="")
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -44,16 +41,10 @@ class RecruiterORM(Base):
     )
 
     # ── Contact-discovery cache (app/services/recruiter_service.py::save_enrichment) ──
-    # Written back by RecruiterContactAgent/ProspectIntelligenceAgent after
-    # scraped enrichment, mirroring app/models/prospect_models.py::ProspectResult
-    # so a person enriched once by either pipeline doesn't get re-scraped by
-    # the other. NOT_FOUND/"" defaults match ProspectResult's own defaults.
     company_domain: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     company_website: Mapped[str] = mapped_column(String(500), nullable=False, default="")
     official_email_id: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     email_status: Mapped[str] = mapped_column(String(20), nullable=False, default="NOT_FOUND")
-    # Second/personal address from the Apollo people match — the primary stays
-    # in official_email_id. Apollo-only, so default "".
     secondary_email: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     contact_number: Mapped[str] = mapped_column(String(50), nullable=False, default="")
     phone_status: Mapped[str] = mapped_column(String(20), nullable=False, default="NOT_FOUND")

@@ -82,11 +82,7 @@ class ScrapedJobORM(Base):
     posted_date: Mapped[str] = mapped_column(String(100), nullable=False, default="")
     job_url: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     job_description: Mapped[str] = mapped_column(Text, nullable=False, default="")
-    # Sanitized inner HTML of the LinkedIn description container, kept separate
-    # from the plain-text job_description so the JSON/Excel reports (which read
-    # job_description via scraped_job_view) stay tag-free. Empty for Naukri/Dice
-    # and any job where the description container couldn't be captured — the UI
-    # falls back to rendering the plain-text job_description in that case.
+    # Sanitized inner HTML of the LinkedIn description container
     job_description_html: Mapped[str] = mapped_column(Text, nullable=False, default="")
     skills: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     work_mode: Mapped[str] = mapped_column(String(20), nullable=False, default="not_specified")
@@ -160,23 +156,7 @@ class LlmCallType:
     """Purpose discriminator for LlmCallORM.call_type — lets one audit table
     cover every LLM call across the app, tagged by which workflow it belongs to
     so rows are easy to classify:
-
-      job_harvest         — extracting scraped-job data (title/company/JD/etc.)
-      contact_harvest     — extracting recruiter email/phone contact details
-      company_enrich      — extracting company size / HQ location from a scraped
-                            company page (LLM fallback of the enrichment waterfall)
-      feed_classify       — classifying a LinkedIn Home Feed post as an IT hiring
-                            lead (stage 1 of the feed workflow — cheap, per candidate)
-      feed_extract        — extracting job + recruiter data from a feed post that
-                            classified as a genuine IT hiring lead (stage 2)
-      email_generation    — composing an outreach email (outreach flow)
-      email_followup      — composing a follow-up outreach email (outreach flow)
-      linkedin_generation — composing a LinkedIn message (outreach flow)
-
-    Harvest calls come from the scrape pipeline (run-scoped); the generation
-    types come from the outreach flow (run_id is NULL). NOTE: rows written before
-    this rename retain the legacy value "harvest" (and any stray
-    "contact_extraction")."""
+    """
     JOB_HARVEST = "job_harvest"
     CONTACT_HARVEST = "contact_harvest"
     COMPANY_ENRICH = "company_enrich"
@@ -258,12 +238,7 @@ class CompanyORM(Base):
     normalized company name). Populated by the company-enrichment pass
     (app/services/company_service.py, driven from the LinkedIn agent) via Apollo's
     organizations/enrich, so a company's size / HQ location is fetched ONCE and
-    reused across every job of that company — including jobs with no recruiter to
-    piggyback the Apollo people-match on. HarvestRunService.bulk_insert_scraped_jobs
-    reads this cache to fill each job's company_size/company_country/company_state.
-
-    apollo_enriched_at drives a recheck cooldown (settings.apollo_recheck_days) so
-    a company isn't re-billed to Apollo every run.
+    reused across every job of that company
     """
     __tablename__ = "companies"
 
@@ -272,8 +247,6 @@ class CompanyORM(Base):
     company_key: Mapped[str] = mapped_column(String(600), nullable=False, unique=True, index=True)
     company_name: Mapped[str] = mapped_column(String(500), nullable=False, default="")
     domain: Mapped[str] = mapped_column(String(255), nullable=False, default="")
-    # Canonical "<band> employees" band (app/core/company_size.py), matching
-    # ScrapedJobORM.company_size's format so tier filtering is identical.
     company_size: Mapped[str] = mapped_column(String(100), nullable=False, default="")
     company_country: Mapped[str] = mapped_column(String(120), nullable=False, default="")
     company_state: Mapped[str] = mapped_column(String(120), nullable=False, default="")

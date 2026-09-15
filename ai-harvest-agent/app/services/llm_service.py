@@ -356,12 +356,12 @@ class LLMService:
 
     # ── Provider selection ────────────────────────────────────────────────────
 
-    def resolve_target(self) -> tuple[str, str]:
-        """Public accessor for the centrally configured (provider, model) pair —
-        the same selection extraction and generation use. Callers (e.g.
-        OutreachService) use it to stamp the provider/model on an audit row even
-        when the call itself fails before generate_text() can report them back."""
-        return self._resolve_extraction_target()
+    # def resolve_target(self) -> tuple[str, str]:
+    #     """Public accessor for the centrally configured (provider, model) pair —
+    #     the same selection extraction and generation use. Callers (e.g.
+    #     OutreachService) use it to stamp the provider/model on an audit row even
+    #     when the call itself fails before generate_text() can report them back."""
+    #     return self._resolve_extraction_target()
 
     def _resolve_extraction_target(self) -> tuple[str, str]:
         """The primary (provider, model) extract_json()/generate_text() call, driven
@@ -756,11 +756,15 @@ class LLMService:
                 prompt, system, json_mode=True, call_type=call_type, job_url=job_url,
                 validate=_clean_and_parse,
             )
+        except LLMUnavailableError as exc:
+            # Every provider in the chain was down / returned garbage. Propagate
+            # AS LLMUnavailableError (not wrapped into LLMError) so callers that
+            # halt the whole run on an outage still see the right type. Must be
+            # caught before LLMError below — LLMUnavailableError subclasses it.
+            logger.warning("llm_extraction_all_providers_failed", error=str(exc))
+            raise
         except LLMError:
             raise
-        except LLMUnavailableError as exc:
-            logger.warning("llm_extraction_all_providers_failed", error=str(exc))
-            raise LLMError(f"extraction failed on every provider: {exc}") from exc
         except Exception as exc:
             logger.error("llm_extraction_request_failed", error=str(exc))
             raise LLMError(f"extraction request failed: {exc}") from exc
