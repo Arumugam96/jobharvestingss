@@ -304,10 +304,10 @@ def _shared_identity_from(settings: Settings) -> dict:
     username = (settings.smtp_username or "").strip()
     if "@" in configured:
         name, addr = parseaddr(configured)
-        return {"Email": addr or username, "Name": name or "SS"}
+        return {"Email": addr or username, "Name": f"SS - {configured}"}
     # Bare display name (or empty) → send from the authenticated mailbox and show
     # the display name as the sender name.
-    return {"Email": username or configured, "Name": configured or "SS"}
+    return {"Email": username , "Name": f"SS - {configured}"}
 
 
 def _parse_from(from_header: str, fallback_email: str) -> dict:

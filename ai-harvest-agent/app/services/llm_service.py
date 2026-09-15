@@ -356,12 +356,12 @@ class LLMService:
 
     # ── Provider selection ────────────────────────────────────────────────────
 
-    # def resolve_target(self) -> tuple[str, str]:
-    #     """Public accessor for the centrally configured (provider, model) pair —
-    #     the same selection extraction and generation use. Callers (e.g.
-    #     OutreachService) use it to stamp the provider/model on an audit row even
-    #     when the call itself fails before generate_text() can report them back."""
-    #     return self._resolve_extraction_target()
+    def resolve_target(self) -> tuple[str, str]:
+        """Public accessor for the centrally configured (provider, model) pair —
+        the same selection extraction and generation use. Callers (e.g.
+        OutreachService) use it to stamp the provider/model on an audit row even
+        when the call itself fails before generate_text() can report them back."""
+        return self._resolve_extraction_target()
 
     def _resolve_extraction_target(self) -> tuple[str, str]:
         """The primary (provider, model) extract_json()/generate_text() call, driven
