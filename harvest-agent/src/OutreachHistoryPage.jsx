@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useSearchParams } from "react-router-dom";
 import { RefreshCw, Send, Mail, X, Download, Search, Calendar, ChevronDown, Check, Building2 } from "lucide-react";
 import { getOutreachHistory, getOutreachStats, ApiError } from "./api";
-import { fmtAbs, fmtRel, initials, avatarColor, engagement, EngagementCell, CLIENT_LABEL } from "./components/outreachUi";
+import { fmtAbs, fmtRel, initials, avatarColor, engagement, EngagementStack } from "./components/outreachUi";
 
 /* Mail logs (route /outreach) — the log of every outreach email sent from
  * HarvestAgent, read from the backend (GET /outreach/history). It's the DB source
@@ -289,41 +289,57 @@ export default function OutreachHistoryPage() {
               )}
               {!loading && items.map((it) => {
                 const name = it.contact_name || (it.channel === "linkedin" ? "(LinkedIn)" : it.to_email || "—");
-                const client = CLIENT_LABEL[it.client_type] || "";
+                const clientShort = it.client_type === "active" ? "Active" : it.client_type === "new" ? "New" : "";
+                const clientChip = it.client_type === "active"
+                  ? { color: "#0E7C5A", background: "#E7F7F0" }
+                  : { color: "#64748B", background: "#F1F5F9" };
                 return (
                   <tr key={it.id} onClick={() => openDetail(it)} title="Open message + thread in a new tab"
-                    style={{ cursor: "pointer", borderBottom: "1px solid #E2E8F0" }}
+                    style={{ cursor: "pointer", borderBottom: "1px solid #EDF1F6" }}
                     onMouseEnter={(e) => { e.currentTarget.style.background = "#F8FAFC"; }}
                     onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}>
-                    <td style={{ padding: "13px 18px" }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 11 }}>
-                        <div style={{ width: 38, height: 38, borderRadius: "50%", flex: "none", display: "grid", placeItems: "center", fontWeight: 700, fontSize: 13, color: "#fff", background: avatarColor(name) }}>
+                    {/* To — avatar + name · email, one line */}
+                    <td style={{ padding: "9px 16px" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 9, minWidth: 0 }}>
+                        <div style={{ width: 28, height: 28, borderRadius: "50%", flex: "none", display: "grid", placeItems: "center", fontWeight: 700, fontSize: 11, color: "#fff", background: avatarColor(name) }}>
                           {initials(it.contact_name, it.to_email)}
                         </div>
-                        <div style={{ minWidth: 0 }}>
-                          <div style={{ fontWeight: 700, fontSize: 14, color: "#0F172A" }}>{name}</div>
-                          <div style={{ color: "#64748B", fontSize: 12.5 }}>{it.to_email || (it.channel === "linkedin" ? "(LinkedIn)" : "—")}</div>
+                        <div style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "26ch" }}>
+                          <span style={{ fontWeight: 700, fontSize: 13.5, color: "#0F172A" }}>{name}</span>
+                          <span style={{ color: "#64748B", fontSize: 12.5 }}> · {it.to_email || (it.channel === "linkedin" ? "(LinkedIn)" : "—")}</span>
                         </div>
                       </div>
                     </td>
-                    <td style={{ padding: "13px 18px", whiteSpace: "nowrap" }}>
-                      <div style={{ fontSize: 13, color: "#334155" }}>{it.from_email || "—"}</div>
+                    {/* From — sender glyph + mailbox, one line */}
+                    <td style={{ padding: "9px 16px" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+                        <span title="Sent from your outreach mailbox" style={{ width: 24, height: 24, borderRadius: "50%", flex: "none", display: "grid", placeItems: "center", background: "#EAF1FF", color: "#1E40AF", border: "1px solid #C7D9FF" }}>
+                          <Send size={12} />
+                        </span>
+                        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "22ch", fontSize: 12.5, color: "#334155" }}>{it.from_email || "—"}</span>
+                      </div>
                     </td>
-                    <td style={{ padding: "13px 18px" }}>
-                      <div style={{ fontWeight: 600, fontSize: 13.5, color: "#1E293B" }}>{it.company || "—"}</div>
-                      {client && <div style={{ color: "#64748B", fontSize: 12, marginTop: 2 }}>{client}</div>}
+                    {/* Company — name + client mini-chip, one line */}
+                    <td style={{ padding: "9px 16px" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+                        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "18ch", fontWeight: 600, fontSize: 13, color: "#1E293B" }}>{it.company || "—"}</span>
+                        {clientShort && <span style={{ flex: "none", fontSize: 10.5, fontWeight: 700, borderRadius: 6, padding: "2px 6px", ...clientChip }}>{clientShort}</span>}
+                      </div>
                     </td>
-                    <td style={{ padding: "13px 18px" }}>
-                      <div style={{ fontWeight: 600, fontSize: 13.5, color: "#0F172A", maxWidth: "34ch", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {/* Subject — one line */}
+                    <td style={{ padding: "9px 16px" }}>
+                      <div style={{ fontWeight: 600, fontSize: 13, color: "#0F172A", maxWidth: "30ch", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                         {it.subject || (it.channel === "linkedin" ? "(LinkedIn message)" : "—")}
                       </div>
                     </td>
-                    <td style={{ padding: "13px 18px" }}>
-                      <EngagementCell it={it} />
+                    {/* Engagement — overlapping status icons + hover timeline */}
+                    <td style={{ padding: "9px 16px" }}>
+                      <EngagementStack it={it} />
                     </td>
-                    <td style={{ padding: "13px 18px", whiteSpace: "nowrap" }}>
-                      <div style={{ fontWeight: 700, fontSize: 13, color: "#334155", fontVariantNumeric: "tabular-nums" }}>{fmtRel(it.created_at)}</div>
-                      <div style={{ color: "#94A3B8", fontSize: 12, marginTop: 2, fontVariantNumeric: "tabular-nums" }}>{fmtAbs(it.created_at)}</div>
+                    {/* Sent */}
+                    <td style={{ padding: "9px 16px", whiteSpace: "nowrap" }}>
+                      <div style={{ fontWeight: 700, fontSize: 12.5, color: "#334155", fontVariantNumeric: "tabular-nums" }}>{fmtRel(it.created_at)}</div>
+                      <div style={{ color: "#94A3B8", fontSize: 11.5, marginTop: 1, fontVariantNumeric: "tabular-nums" }}>{fmtAbs(it.created_at)}</div>
                     </td>
                   </tr>
                 );

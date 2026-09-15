@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   Send, CheckCircle2, MailOpen, MousePointerClick, Ban, CornerUpLeft, ShieldAlert, BellOff,
 } from "lucide-react";
@@ -188,6 +188,92 @@ export function TimelineStep({ on, label, time, color = "#0E7C5A" }) {
     <span style={{ display: "inline-flex", alignItems: "center", gap: 6, color: on ? "#334155" : "#94A3B8" }}>
       <span style={{ width: 7, height: 7, borderRadius: "50%", background: on ? color : "#CBD5E1" }} />
       {label} {on && <b style={{ color: "#0F172A", fontWeight: 700 }}>{time}</b>}
+    </span>
+  );
+}
+
+// Solid fill per delivery stage for the compact engagement circles + timeline dots.
+const STAGE_FILL = {
+  Sent: "#94A3B8", Delivered: "#2563EB", Opened: "#0E7C5A", Clicked: "#0D9488",
+  Bounced: "#DC2626", Blocked: "#DC2626", Spam: "#DC2626", Failed: "#DC2626", Unsubscribed: "#6D28D9",
+};
+
+/* Compact engagement for the Mail-logs list: the delivery stages a mail reached,
+ * rendered as overlapping colored icon circles (Sent → Delivered → Opened →
+ * Clicked, or a single terminal state), with the furthest stage labelled. Hovering
+ * or focusing reveals the full timeline with timestamps in a small popover. The
+ * popover is position:fixed (positioned from the trigger's rect) so it escapes the
+ * table's horizontal-scroll container instead of being clipped. */
+export function EngagementStack({ it }) {
+  const eng = engagement(it);
+  const failed = it.status === "failed";
+  const tl = deliveryTimeline(it);
+  const circles = failed ? ["Failed"] : (tl.length ? tl.map((s) => s.label) : ["Sent"]);
+  const rows = failed ? [{ label: "Failed", at: it.created_at }] : tl;
+
+  const ref = useRef(null);
+  const [pop, setPop] = useState(null); // { left, top, placement } | null
+
+  const show = useCallback(() => {
+    const el = ref.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const below = r.top < 210; // not enough room above near the top of the viewport
+    setPop({ left: r.left, top: below ? r.bottom + 8 : r.top - 8, placement: below ? "below" : "above" });
+  }, []);
+  const hide = useCallback(() => setPop(null), []);
+
+  // A fixed popover would drift from its trigger on scroll/resize — just close it.
+  useEffect(() => {
+    if (!pop) return undefined;
+    const onMove = () => setPop(null);
+    window.addEventListener("scroll", onMove, true);
+    window.addEventListener("resize", onMove);
+    return () => { window.removeEventListener("scroll", onMove, true); window.removeEventListener("resize", onMove); };
+  }, [pop]);
+
+  return (
+    <span
+      ref={ref}
+      tabIndex={0}
+      onMouseEnter={show}
+      onMouseLeave={hide}
+      onFocus={show}
+      onBlur={hide}
+      style={{ display: "inline-flex", alignItems: "center", gap: 9, cursor: "default", outline: "none" }}
+    >
+      <span style={{ display: "inline-flex", flex: "none" }}>
+        {circles.map((label, i) => {
+          const Icon = (STATUS_META[label] || STATUS_META.Sent).Icon;
+          return (
+            <span key={`${label}-${i}`} style={{ width: 22, height: 22, borderRadius: "50%", display: "grid", placeItems: "center", color: "#fff", background: STAGE_FILL[label] || "#94A3B8", border: "2px solid #fff", marginLeft: i === 0 ? 0 : -8, boxShadow: "0 1px 1.5px rgba(15,23,42,.16)" }}>
+              <Icon size={11} strokeWidth={2.4} />
+            </span>
+          );
+        })}
+      </span>
+      <span style={{ fontSize: 12, fontWeight: 700, color: eng.color, whiteSpace: "nowrap" }}>{eng.label}</span>
+      {pop && (
+        <span
+          role="tooltip"
+          style={{
+            position: "fixed", left: pop.left, top: pop.top,
+            transform: pop.placement === "above" ? "translateY(-100%)" : "none",
+            zIndex: 1200, background: "#fff", border: "1px solid #E2E8F0", borderRadius: 11,
+            boxShadow: "0 20px 46px rgba(15,23,42,.16)", padding: "11px 13px", minWidth: 188,
+            pointerEvents: "none", fontFamily: "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif",
+          }}
+        >
+          <div style={{ fontSize: 10.5, letterSpacing: ".12em", textTransform: "uppercase", color: "#94A3B8", fontWeight: 800, marginBottom: 9 }}>Delivery timeline</div>
+          {rows.map((e) => (
+            <div key={e.label} style={{ display: "flex", alignItems: "center", gap: 9, padding: "3px 0" }}>
+              <span style={{ width: 9, height: 9, borderRadius: "50%", flex: "none", background: STAGE_FILL[e.label] || "#94A3B8" }} />
+              <span style={{ fontSize: 12.5, color: "#334155", fontWeight: 600, flex: 1 }}>{e.label}</span>
+              <span style={{ fontSize: 12.5, color: "#0F172A", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{fmtTime(e.at)}</span>
+            </div>
+          ))}
+        </span>
+      )}
     </span>
   );
 }

@@ -1,18 +1,23 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { useParams, useLocation, useNavigate, useSearchParams } from "react-router-dom";
-import { ArrowLeft, Copy, Check, CornerUpRight } from "lucide-react";
+import { Copy, Check, CornerUpRight } from "lucide-react";
 import { getOutreachHistory } from "./api";
 import OutreachThread from "./components/OutreachThread";
 import EmailComposeModal from "./components/EmailComposeModal";
 import {
-  fmtAbs, fmtTime, engagement, deliveryTimeline, EVENT_COLOR, StatusBadge, ToneChip, TimelineStep,
+  fmtAbs, engagement, deliveryTimeline, EVENT_COLOR, StatusBadge, ToneChip, CLIENT_LABEL,
 } from "./components/outreachUi";
 
-/* Standalone view of one sent outreach + its full thread (route /mail/:id) — the
- * page form of what used to be the Mail logs row popup. Reached from a row click
- * (carrying the row + the list's URL as navigation state) and refresh-safe: on a
- * direct load/refresh it re-fetches the thread from the ?job=/?recruiter= query.
- * Renders inside the shared sidebar layout (ha-root → Sidebar → this <main>). */
+/* Standalone, full-page view of one sent outreach + its full thread (route
+ * /mail/:id) — the page form of what used to be the Mail logs row popup. Opened in
+ * a new tab from a row click, so it resolves entirely from the URL (?job=/?recruiter=)
+ * rather than navigation state. Renders inside the shared sidebar layout
+ * (ha-root → Sidebar → this <main>): subject as the page title, actions top-right,
+ * the conversation as the main column, and delivery + details in a right panel. */
+
+const LABEL = { fontSize: 11, letterSpacing: ".12em", textTransform: "uppercase", color: "#94A3B8", fontWeight: 800 };
+const K = { color: "#64748B" };
+const V = { color: "#0F172A", fontWeight: 600, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" };
 
 export default function OutreachThreadPage() {
   const { id } = useParams();
@@ -21,11 +26,10 @@ export default function OutreachThreadPage() {
   const [searchParams] = useSearchParams();
 
   const stateItem = location.state?.item || null;
-  const backTo = location.state?.from || "/outreach";
 
-  // The specific outreach row this page is about (header + delivery + message).
+  // The specific outreach row this page is about (header + delivery + details).
   const [detail, setDetail] = useState(stateItem);
-  const [thread, setThread] = useState(stateItem ? [] : []);
+  const [thread, setThread] = useState([]);
   const [threadLoading, setThreadLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -34,8 +38,8 @@ export default function OutreachThreadPage() {
   const [composeFor, setComposeFor] = useState(null);
 
   // Fetch the whole thread for this contact. Prefer identifiers from the passed
-  // row; on a refresh/direct link fall back to the ?job=/?recruiter= query so the
-  // page still resolves without any in-memory navigation state.
+  // row; on a fresh tab / direct link fall back to the ?job=/?recruiter= query so
+  // the page resolves without any in-memory navigation state.
   const loadThread = useCallback(async () => {
     const jobId = stateItem?.job_id || searchParams.get("job") || null;
     const recruiterId = stateItem?.recruiter_id || searchParams.get("recruiter") || null;
@@ -46,8 +50,6 @@ export default function OutreachThreadPage() {
       const res = params ? await getOutreachHistory(params) : { items: stateItem ? [stateItem] : [] };
       const items = res.items && res.items.length ? res.items : stateItem ? [stateItem] : [];
       setThread(items);
-      // Anchor the header/delivery/message to the row named in the URL; fall back
-      // to the passed row, then the first thread message.
       const anchor = items.find((m) => String(m.id) === String(id)) || stateItem || items[0] || null;
       setDetail(anchor);
       if (!anchor) setNotFound(true);
@@ -67,8 +69,6 @@ export default function OutreachThreadPage() {
 
   useEffect(() => { loadThread(); }, [loadThread]);
 
-  const goBack = () => navigate(backTo);
-
   const copyMessage = () => {
     if (!detail) return;
     navigator.clipboard?.writeText(`${detail.subject || ""}\n\n${detail.body || ""}`);
@@ -85,75 +85,37 @@ export default function OutreachThreadPage() {
     });
   };
 
-  const BackButton = (
-    <button
-      className="ha-btn ha-btn-secondary"
-      onClick={goBack}
-      style={{ padding: "8px 14px" }}
-    >
-      <ArrowLeft size={15} /> Back to Mail logs
-    </button>
-  );
-
-  // No row could be resolved (direct link with no state and no job/recruiter).
+  // Nothing resolved (direct link with no state and no job/recruiter to fetch by).
   if (!detail && !threadLoading && notFound) {
     return (
       <main className="ha-main">
-        <div style={{ marginBottom: 18 }}>{BackButton}</div>
-        <div className="ha-card" style={{ padding: "48px 24px", textAlign: "center", color: "#64748B" }}>
-          <div style={{ marginBottom: 6, fontWeight: 600, color: "#334155" }}>This thread isn’t available here.</div>
-          <div>Open it from Mail logs to read the message and follow up.</div>
+        <div className="ha-card" style={{ padding: "48px 24px", textAlign: "center", color: "#64748B", maxWidth: 560, margin: "40px auto" }}>
+          <div style={{ marginBottom: 6, fontWeight: 700, color: "#334155" }}>This thread isn’t available here.</div>
+          <div style={{ marginBottom: 18 }}>Open it from Mail logs to read the message and follow up.</div>
+          <button className="ha-btn ha-btn-secondary" onClick={() => navigate("/outreach")}>Go to Mail logs</button>
         </div>
       </main>
     );
   }
 
+  const timeline = detail ? deliveryTimeline(detail) : [];
+  const clientLabel = (detail && CLIENT_LABEL[detail.client_type]) || "";
+
   return (
     <main className="ha-main">
-      <div style={{ marginBottom: 18 }}>{BackButton}</div>
-
-      <div className="ha-card" style={{ overflow: "hidden", maxWidth: 720 }}>
-        {/* Header — subject + engagement/tone + timestamp */}
-        <div style={{ padding: "18px 22px", borderBottom: "1px solid #E2E8F0" }}>
-          <div style={{ fontSize: 18, fontWeight: 800, letterSpacing: "-.01em", textWrap: "balance" }}>
+      {/* Page header — subject as title, engagement/tone, actions top-right */}
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 20, flexWrap: "wrap", paddingBottom: 18, borderBottom: "1px solid #E2E8F0" }}>
+        <div style={{ minWidth: 0 }}>
+          <h1 style={{ fontSize: 24, fontWeight: 800, letterSpacing: "-.02em", margin: 0, textWrap: "balance", maxWidth: "34ch" }}>
             {detail?.subject || (detail?.channel === "linkedin" ? "LinkedIn message" : "Outreach")}
-          </div>
-          <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10, flexWrap: "wrap" }}>
+          </h1>
+          <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap", marginTop: 11 }}>
             {detail && <StatusBadge label={engagement(detail).label} />}
             {detail && <ToneChip it={detail} />}
-            {detail && <span style={{ color: "#94A3B8", fontSize: 12 }}>{fmtAbs(detail.created_at)}</span>}
+            {detail && <span style={{ color: "#94A3B8", fontSize: 12.5 }}>{fmtAbs(detail.created_at)}</span>}
           </div>
         </div>
-
-        <div style={{ padding: "16px 22px" }}>
-          {/* Delivery event trail — every status this mail passed through. */}
-          <div style={{ fontSize: 11, letterSpacing: ".12em", textTransform: "uppercase", color: "#94A3B8", fontWeight: 700, marginBottom: 10 }}>Delivery</div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 16px", marginBottom: 18, fontSize: 12 }}>
-            {detail && deliveryTimeline(detail).map((e) => (
-              <TimelineStep key={e.label} on label={e.label} time={fmtTime(e.at)} color={EVENT_COLOR[e.label] || "#94A3B8"} />
-            ))}
-            {(!detail || deliveryTimeline(detail).length <= 1) && (
-              <span style={{ color: "#CBD5E1" }}>Awaiting delivery events…</span>
-            )}
-          </div>
-
-          <div style={{ fontSize: 11, letterSpacing: ".12em", textTransform: "uppercase", color: "#94A3B8", fontWeight: 700, marginBottom: 12 }}>Message</div>
-          <div style={{ display: "grid", gridTemplateColumns: "72px 1fr", gap: "6px 14px", fontSize: 13.5, marginBottom: 4 }}>
-            {detail?.from_email && (<><div style={{ color: "#64748B" }}>From</div><div style={{ color: "#0F172A", fontWeight: 600 }}>{detail.from_email}</div></>)}
-            <div style={{ color: "#64748B" }}>To</div>
-            <div style={{ color: "#0F172A", fontWeight: 600 }}>
-              {detail?.contact_name ? `${detail.contact_name} · ` : ""}<span style={{ color: "#64748B", fontWeight: 500 }}>{detail?.to_email || (detail?.channel === "linkedin" ? "(LinkedIn)" : "—")}</span>
-            </div>
-            {detail?.company && (<><div style={{ color: "#64748B" }}>Company</div><div style={{ color: "#0F172A", fontWeight: 600 }}>{detail.company}</div></>)}
-          </div>
-
-          <div style={{ marginTop: 16 }}>
-            <div style={{ fontSize: 11, letterSpacing: ".12em", textTransform: "uppercase", color: "#94A3B8", fontWeight: 700, marginBottom: 10 }}>Thread</div>
-            <OutreachThread messages={thread} loading={threadLoading} emptyText="No sent messages found for this contact." collapsible />
-          </div>
-        </div>
-
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, padding: "14px 22px", borderTop: "1px solid #E2E8F0", background: "#F8FAFC" }}>
+        <div style={{ display: "flex", gap: 9, flex: "none" }}>
           <button className="ha-btn ha-btn-secondary" onClick={copyMessage} disabled={!detail}>
             {copied ? <Check size={15} /> : <Copy size={15} />} {copied ? "Copied" : "Copy message"}
           </button>
@@ -162,6 +124,44 @@ export default function OutreachThreadPage() {
               <CornerUpRight size={15} /> Follow up
             </button>
           )}
+        </div>
+      </div>
+
+      {/* Body — conversation (main) + delivery/details (right panel) */}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 26, marginTop: 22, alignItems: "flex-start" }}>
+        <div style={{ flex: "1 1 420px", minWidth: 0 }}>
+          <div style={{ ...LABEL, marginBottom: 12 }}>Thread</div>
+          <OutreachThread messages={thread} loading={threadLoading} emptyText="No sent messages found for this contact." collapsible />
+        </div>
+
+        <div style={{ flex: "0 1 300px", minWidth: 260, display: "flex", flexDirection: "column", gap: 18 }}>
+          <div className="ha-card" style={{ padding: "16px 16px" }}>
+            <div style={{ ...LABEL, marginBottom: 14 }}>Delivery</div>
+            {timeline.map((e, i) => (
+              <div key={e.label} style={{ display: "flex", gap: 11, position: "relative", paddingBottom: i === timeline.length - 1 ? 0 : 16 }}>
+                {i !== timeline.length - 1 && <span style={{ position: "absolute", left: 6, top: 16, bottom: 0, width: 2, background: "#E2E8F0" }} />}
+                <span style={{ width: 14, height: 14, borderRadius: "50%", flex: "none", marginTop: 1, border: "3px solid #fff", background: EVENT_COLOR[e.label] || "#94A3B8" }} />
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: "#334155" }}>{e.label}</div>
+                  <div style={{ fontSize: 12, color: "#64748B", fontVariantNumeric: "tabular-nums", marginTop: 1 }}>{fmtAbs(e.at)}</div>
+                </div>
+              </div>
+            ))}
+            {timeline.length <= 1 && (
+              <div style={{ color: "#94A3B8", fontSize: 12.5, marginTop: 4 }}>Awaiting delivery events…</div>
+            )}
+          </div>
+
+          <div className="ha-card" style={{ padding: "16px 16px" }}>
+            <div style={{ ...LABEL, marginBottom: 14 }}>Details</div>
+            <div style={{ display: "grid", gridTemplateColumns: "68px 1fr", gap: "8px 12px", fontSize: 13 }}>
+              {detail?.from_email && (<><span style={K}>From</span><span style={V} title={detail.from_email}>{detail.from_email}</span></>)}
+              <span style={K}>To</span><span style={V}>{detail?.contact_name || detail?.to_email || "—"}</span>
+              {detail?.to_email && (<><span style={K}>Email</span><span style={V} title={detail.to_email}>{detail.to_email}</span></>)}
+              {detail?.company && (<><span style={K}>Company</span><span style={V} title={detail.company}>{detail.company}</span></>)}
+              {clientLabel && (<><span style={K}>Client</span><span style={V}>{clientLabel}</span></>)}
+            </div>
+          </div>
         </div>
       </div>
 
