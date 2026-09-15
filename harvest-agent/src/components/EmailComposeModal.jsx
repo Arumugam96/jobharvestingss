@@ -68,6 +68,10 @@ export default function EmailComposeModal({
   job = {},
   followup = false,
   parentOutreachId = null,
+  // When true, a follow-up drafts immediately on open (skipping the "Previously
+  // sent" preview + "Generate follow-up" gate) — used where the thread is already
+  // visible on the page, so the user just wants the AI draft straight away.
+  autoDraft = false,
   onClose = () => {},
   onSent = () => {},
 }) {
@@ -100,12 +104,13 @@ export default function EmailComposeModal({
   const [suppressed, setSuppressed] = useState(false);
   const metaLoaded = useRef(false);
 
-  // Follow-up mode shows the previously sent email(s) first and only drafts a new
-  // follow-up once the user clicks "Generate follow-up" (draftStarted). Initial
-  // mode drafts immediately, so draftStarted starts true there.
+  // Manual follow-up mode shows the previously sent email(s) first and only drafts
+  // a new follow-up once the user clicks "Generate follow-up" (draftStarted).
+  // Initial mode — and autoDraft follow-ups — draft immediately, so draftStarted
+  // starts true and there's no history preview.
   const [history, setHistory] = useState([]);
-  const [historyLoading, setHistoryLoading] = useState(followup);
-  const [draftStarted, setDraftStarted] = useState(!followup);
+  const [historyLoading, setHistoryLoading] = useState(followup && !autoDraft);
+  const [draftStarted, setDraftStarted] = useState(!followup || autoDraft);
 
   // Check the recipient against the do-not-contact list (debounced on the To field).
   useEffect(() => {
@@ -178,10 +183,11 @@ export default function EmailComposeModal({
     }
   }, [job.id, followup, parentOutreachId]);
 
-  // On open: initial mode drafts immediately; follow-up mode instead loads the
-  // already-sent email thread and waits for the user to ask for a new draft.
+  // On open: initial mode — and autoDraft follow-ups — draft immediately. A manual
+  // follow-up instead loads the already-sent email thread and waits for the user
+  // to ask for a new draft.
   useEffect(() => {
-    if (!followup) { generate("Formal", false); return undefined; }
+    if (!followup || autoDraft) { generate("Formal", false); return undefined; }
     let cancelled = false;
     setHistoryLoading(true);
     (async () => {
@@ -199,7 +205,7 @@ export default function EmailComposeModal({
       }
     })();
     return () => { cancelled = true; };
-  }, [followup, job.id, generate]);
+  }, [followup, autoDraft, job.id, generate]);
 
   // Kick off the follow-up draft on demand, then reveal the editable compose UI.
   const startFollowup = () => {
@@ -284,7 +290,7 @@ export default function EmailComposeModal({
         </div>
 
         <div className="ecm-body">
-          {followup && (
+          {followup && !autoDraft && (
             <div className="ecm-field">
               <span className="ecm-label">Previously sent</span>
               {/* Collapsible cards — click one to read it (opens from above); they

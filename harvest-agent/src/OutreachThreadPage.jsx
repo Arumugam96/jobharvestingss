@@ -170,6 +170,7 @@ export default function OutreachThreadPage() {
         <EmailComposeModal
           job={composeFor.job}
           followup
+          autoDraft
           parentOutreachId={composeFor.parentOutreachId}
           onClose={() => setComposeFor(null)}
           onSent={() => { setComposeFor(null); loadThread(); }}
