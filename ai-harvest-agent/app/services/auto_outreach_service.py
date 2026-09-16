@@ -32,7 +32,7 @@ import structlog
 from app.config import get_settings
 from app.models.harvest_run import ScrapedJobORM
 from app.services.active_clients import classify_client
-from app.services.email_service import EmailSender
+from app.services.email_service import EmailSender, apply_automation_contact_block
 from app.services.harvest_run_service import db_read, db_write, scraped_job_view
 from app.services.llm_service import LLMService
 from app.services.outreach_log_service import build_email_outreach_row, initial_email_sent
@@ -156,20 +156,28 @@ async def run_auto_outreach_after_harvest(
                     sender_email=reply_to, deck_url=deck_url,
                 )
 
+                # The exact body the recruiter receives = LLM/closing body + the desk
+                # contact block. Compute it once via the shared helper and use it for
+                # BOTH the send and the send-log row, so the Mail-logs UI shows what was
+                # actually delivered. (email_service appends the same block for the
+                # outgoing message; passing the pre-appended body with is_automation=False
+                # avoids a double append.)
+                full_body = apply_automation_contact_block(draft.body)
+
                 outreach_id = str(uuid4())
                 send_status, error_message, message_id = "sent", None, None
                 try:
                     message_id = await email_sender.send_email_with_attachments(
                         recipients=[email],
                         subject=draft.subject,
-                        body=draft.body,
+                        body=full_body,
                         from_email=reply_to or None,
                         reply_to=reply_to or None,
                         as_html=True,
                         job_title=target["job_title"],
                         job_url=target["job_url"],
                         custom_id=outreach_id,
-                        is_automation=True,
+                        is_automation=False,  # block already applied via full_body above
                     )
                 except Exception as exc:  # Mailjet/config failure — log the failed row
                     send_status, error_message = "failed", str(exc)
@@ -186,7 +194,7 @@ async def run_auto_outreach_after_harvest(
                     to_email=email,
                     from_email=reply_to,
                     subject=draft.subject,
-                    body=draft.body,
+                    body=full_body,
                     fallback_used=draft.fallback_used,
                     status=send_status,
                     error_message=error_message,

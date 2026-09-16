@@ -42,6 +42,16 @@ AUTOMATION_CONTACT_BLOCK = (
 )
 
 
+def apply_automation_contact_block(body: str) -> str:
+    """Append AUTOMATION_CONTACT_BLOCK below the body's closing website/deck line.
+
+    Shared by the outgoing-message render (send_email_with_attachments with
+    is_automation=True) AND by the auto-outreach send-log write, so the body stored
+    in email_outreach matches what the recruiter actually received (the Mail-logs UI
+    renders that stored body)."""
+    return f"{body.rstrip()}\n\n{AUTOMATION_CONTACT_BLOCK}"
+
+
 def _resolve_sender(settings: Settings) -> tuple[str, str]:
     """Resolve the visible From header and the SMTP envelope sender for the
     harvest report from ``SMTP_FROM_EMAIL`` / ``SMTP_USERNAME``.
@@ -489,9 +499,7 @@ class EmailSender:
         # closing website/deck line. Everything downstream (unsubscribe footer, HTML
         # render) then flows from this augmented body, so the line lands under the
         # website link in both parts. Manual sends leave `body` untouched.
-        body_for_render = (
-            f"{body.rstrip()}\n\n{AUTOMATION_CONTACT_BLOCK}" if is_automation else body
-        )
+        body_for_render = apply_automation_contact_block(body) if is_automation else body
 
         # Outreach only (custom_id set): a plain, link-free unsubscribe message. We no
         # longer host our own unsubscribe URL — Mailjet owns the opt-out mechanism and
