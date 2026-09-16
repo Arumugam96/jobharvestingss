@@ -113,7 +113,7 @@ async def run_auto_outreach_after_harvest(
 
         # Unattended send identity: shared From (resolved inside EmailSender), the
         # configured reply-to (or SMTP_FROM_EMAIL) as Reply-To and recorded sent_by.
-        reply_to = (settings.outreach_auto_reply_to or settings.smtp_from_email or "").strip()
+        reply_to = (settings.outreach_auto_reply_to or settings.smtp_username or "").strip()
         sent_by = reply_to or "auto-harvest"
         deck_url = settings.outreach_deck_url
 

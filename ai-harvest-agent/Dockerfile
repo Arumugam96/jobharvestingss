@@ -31,8 +31,13 @@ RUN rm -rf /var/lib/apt/lists/* \
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install -r requirements.txt
+# --no-cache-dir: don't bake pip's download cache (~114 MB) into the image layer.
+RUN pip install --no-cache-dir -r requirements.txt
 
+# chromium here installs full Chromium + chromium-headless-shell. Both are needed:
+# PlaywrightService launches headless=True with no channel, which in PW 1.49
+# resolves to the headless-shell binary; the headful/persistent path uses full
+# Chromium. --no-shell was tried and broke the headless path — do not re-add it.
 RUN playwright install chromium
 
 COPY . .
