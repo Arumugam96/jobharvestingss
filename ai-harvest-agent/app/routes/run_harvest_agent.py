@@ -560,6 +560,21 @@ async def _run_harvest_background_impl(
         insights    = insights,
     )
 
+    # ── Automated end-of-harvest outreach (best-effort, never raises) ─────────
+    # Send an initial recruiter email for every harvested job with a resolvable
+    # email and log it to the email_outreach table (visible in the Mail-logs UI).
+    # Gated by OUTREACH_AUTO_SEND_ON_HARVEST; idempotent via initial_email_sent.
+    # Reuse the ORM rows already loaded for the report (this run + any flushed
+    # deferred runs, recruiter eager-loaded); reload only if that set is empty.
+    from app.services.auto_outreach_service import run_auto_outreach_after_harvest
+
+    outreach_rows = insight_rows
+    if not outreach_rows and run_pk:
+        outreach_rows = await db_read(
+            lambda db: HarvestRunService(db).list_jobs_for_run(run_pk)
+        ) or []
+    await run_auto_outreach_after_harvest(outreach_rows or [], run_id=run_id)
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # POST /run-harvest-agent

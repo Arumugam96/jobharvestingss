@@ -101,36 +101,44 @@ export default function OutreachThreadPage() {
   const timeline = detail ? deliveryTimeline(detail) : [];
   const clientLabel = (detail && CLIENT_LABEL[detail.client_type]) || "";
 
+  // Copy + Follow up — rendered at the top-right of the Thread box (see below).
+  const actionButtons = (
+    <div style={{ display: "flex", gap: 9, flex: "none" }}>
+      <button className="ha-btn ha-btn-secondary" onClick={copyMessage} disabled={!detail}>
+        {copied ? <Check size={15} /> : <Copy size={15} />} {copied ? "Copied" : "Copy message"}
+      </button>
+      {canFollowUp && (
+        <button className="ha-btn" onClick={startFollowUp} style={{ background: "#2563EB", color: "#fff", border: "1px solid #2563EB" }}>
+          <CornerUpRight size={15} /> Follow up
+        </button>
+      )}
+    </div>
+  );
+
   return (
-    <main className="ha-main">
-      {/* Page header — subject as title, engagement/tone, actions top-right */}
-      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 20, flexWrap: "wrap", paddingBottom: 18, borderBottom: "1px solid #E2E8F0" }}>
-        <div style={{ minWidth: 0 }}>
-          <h1 style={{ fontSize: 24, fontWeight: 800, letterSpacing: "-.02em", margin: 0, textWrap: "balance", maxWidth: "34ch" }}>
-            {detail?.subject || (detail?.channel === "linkedin" ? "LinkedIn message" : "Outreach")}
-          </h1>
-          <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap", marginTop: 11 }}>
-            {detail && <StatusBadge label={engagement(detail).label} />}
-            {detail && <ToneChip it={detail} />}
-            {detail && <span style={{ color: "#94A3B8", fontSize: 12.5 }}>{fmtAbs(detail.created_at)}</span>}
-          </div>
-        </div>
-        <div style={{ display: "flex", gap: 9, flex: "none" }}>
-          <button className="ha-btn ha-btn-secondary" onClick={copyMessage} disabled={!detail}>
-            {copied ? <Check size={15} /> : <Copy size={15} />} {copied ? "Copied" : "Copy message"}
-          </button>
-          {canFollowUp && (
-            <button className="ha-btn" onClick={startFollowUp} style={{ background: "#2563EB", color: "#fff", border: "1px solid #2563EB" }}>
-              <CornerUpRight size={15} /> Follow up
-            </button>
-          )}
+    <main className="ha-main" style={{ paddingTop: 18 }}>
+      {/* Page header — subject as title + engagement/tone. The title uses the full
+          available width (no artificial cap) so it stays on one line where it fits
+          and only wraps the overflow onto a second line when it truly must. */}
+      <div style={{ paddingBottom: 18, borderBottom: "1px solid #E2E8F0" }}>
+        <h1 style={{ fontSize: 24, fontWeight: 800, letterSpacing: "-.02em", margin: 0, lineHeight: 1.25 }}>
+          {detail?.subject || (detail?.channel === "linkedin" ? "LinkedIn message" : "Outreach")}
+        </h1>
+        <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap", marginTop: 11 }}>
+          {detail && <StatusBadge label={engagement(detail).label} />}
+          {detail && <ToneChip it={detail} />}
+          {detail && <span style={{ color: "#94A3B8", fontSize: 12.5 }}>{fmtAbs(detail.created_at)}</span>}
         </div>
       </div>
 
       {/* Body — conversation (main) + delivery/details (right panel) */}
       <div style={{ display: "flex", flexWrap: "wrap", gap: 26, marginTop: 22, alignItems: "flex-start" }}>
         <div style={{ flex: "1 1 420px", minWidth: 0 }}>
-          <div style={{ ...LABEL, marginBottom: 12 }}>Thread</div>
+          {/* Thread heading with Copy + Follow up parked at its top-right. */}
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 12, minHeight: 34 }}>
+            <div style={LABEL}>Thread</div>
+            {actionButtons}
+          </div>
           <OutreachThread messages={thread} loading={threadLoading} emptyText="No sent messages found for this contact." collapsible />
         </div>
 

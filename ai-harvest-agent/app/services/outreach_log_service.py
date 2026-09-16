@@ -400,3 +400,63 @@ async def get_by_id(db: AsyncSession, outreach_id: str) -> EmailOutreachORM | No
     return (
         await db.execute(select(EmailOutreachORM).where(EmailOutreachORM.id == outreach_id))
     ).scalar_one_or_none()
+
+
+def build_email_outreach_row(
+    *,
+    id: str,
+    job_id: str | None,
+    recruiter_id: str | None,
+    provider_message_id: str | None,
+    company: str,
+    client_type: str,
+    tone: str,
+    to_email: str,
+    from_email: str,
+    subject: str,
+    body: str,
+    fallback_used: bool,
+    status: str,
+    error_message: str | None,
+    sent_by: str,
+    outreach_kind: str = "initial",
+    parent_outreach_id: str | None = None,
+    sent_at: datetime | None = None,
+) -> EmailOutreachORM:
+    """Construct an EmailOutreachORM send-log row for an EMAIL outreach send — the
+    single source of truth for the row shape shared by the manual send route
+    (outreach_routes.send_email) and the automated end-of-harvest sweep
+    (auto_outreach_service), so the two writers can't drift.
+
+    Seeds the optimistic delivery lifecycle exactly as the manual route did: a
+    successful hand-off to Mailjet (``status == "sent"`` — send_email_with_attachments
+    raises otherwise) counts as delivered immediately, so the row shows "Delivered"
+    without waiting on a webhook; the event webhook only advances it further
+    (opened/clicked) or to a terminal negative (bounced/blocked/spam). A failed send
+    leaves the delivery fields NULL."""
+    delivered = status == "sent"
+    when = sent_at or datetime.now(timezone.utc)
+    return EmailOutreachORM(
+        id=id,
+        job_id=job_id,
+        recruiter_id=recruiter_id,
+        channel="email",
+        outreach_kind=outreach_kind,
+        parent_outreach_id=parent_outreach_id,
+        provider_message_id=provider_message_id,
+        company=company,
+        client_type=client_type,
+        tone=tone or "",
+        to_email=to_email,
+        from_email=from_email,
+        subject=subject,
+        body=body,
+        attachment_name="",
+        llm_generated=not fallback_used,
+        fallback_used=fallback_used,
+        status=status,
+        error_message=error_message,
+        delivery_status="delivered" if delivered else None,
+        delivered_at=when if delivered else None,
+        sent_by=sent_by,
+    )

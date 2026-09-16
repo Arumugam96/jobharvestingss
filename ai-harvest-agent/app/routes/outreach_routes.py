@@ -38,6 +38,7 @@ from app.services.harvest_run_service import HarvestRunService, insert_llm_call,
 from app.services.llm_service import LLMService
 from app.services.outreach_service import OutreachService
 from app.services.outreach_log_service import (
+    build_email_outreach_row,
     contact_names_for_rows,
     get_by_id,
     initial_email_sent,
@@ -289,11 +290,13 @@ async def send_email(
         send_status, error_message = "failed", str(exc)
         logger.warning("outreach_send_failed", to=to_email, error=str(exc))
 
-    row = EmailOutreachORM(
+    # Row shape (incl. the optimistic delivered-on-success seed) lives in
+    # build_email_outreach_row, shared with the automated end-of-harvest sweep so the
+    # two writers can't drift.
+    row = build_email_outreach_row(
         id=outreach_id,
         job_id=body.job_id,
         recruiter_id=recruiter_id,
-        channel="email",
         outreach_kind=outreach_kind,
         parent_outreach_id=body.parent_outreach_id,
         provider_message_id=message_id,
@@ -304,19 +307,11 @@ async def send_email(
         from_email=from_email,
         subject=body.subject,
         body=body.body,
-        attachment_name="",
-        llm_generated=not body.fallback_used,
         fallback_used=body.fallback_used,
         status=send_status,
         error_message=error_message,
-        # Seed the delivery lifecycle: a successful hand-off to Mailjet (HTTP 200 +
-        # per-message success — send_email_with_attachments raises otherwise) counts as
-        # delivered, so the row shows "Delivered" immediately without waiting on a
-        # webhook. The event webhook only advances it further (opened/clicked) or to a
-        # terminal negative (bounced/blocked/spam). A failed send leaves it NULL.
-        delivery_status="delivered" if send_status == "sent" else None,
-        delivered_at=sent_at if send_status == "sent" else None,
         sent_by=current_user.email,
+        sent_at=sent_at,
     )
     db.add(row)
     await db.flush()

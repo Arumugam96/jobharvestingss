@@ -194,6 +194,27 @@ class Settings(BaseSettings):
     # "https://app.example.com" — used to build absolute links in outreach emails
     # (the unsubscribe link + List-Unsubscribe header). Falls back to localhost.
     public_base_url: str = ""
+    # Outreach open/click tracking. When True, outreach sends set Mailjet's
+    # TrackOpens/TrackClicks (adds a tracking pixel + rewrites links through Mailjet's
+    # redirector). Those are classic "bulk/marketing" signals that push Gmail to the
+    # Promotions tab, so this defaults to OFF for 1:1 recruiter outreach. Delivery
+    # events (sent/bounce/blocked/spam/unsub) still fire regardless — only open/click
+    # analytics are lost when disabled.
+    outreach_track_engagement: bool = True
+
+    # ── Automated end-of-harvest outreach ────────────────────────────────────────
+    # When True (default), a completed harvest run automatically sends an initial
+    # outreach email to every harvested job's recruiter that has a resolvable email,
+    # reusing the same generation → Mailjet → email_outreach logging as a manual send
+    # (each auto-send shows up in the Mail-logs UI). Suppressed/unsubscribed/already-
+    # contacted recruiters are skipped, so it is idempotent across runs. Set False to
+    # disable the auto-send entirely.
+    outreach_auto_send_on_harvest: bool = True
+    # Reply-To used for unattended auto-sends (there is no logged-in salesperson). The
+    # visible From stays the shared harvest-agent identity; recruiter replies go here,
+    # and this address is recorded as the send's `sent_by`. Falls back to
+    # SMTP_FROM_EMAIL when empty.
+    outreach_auto_reply_to: str = ""
 
     # ── CORS ─────────────────────────────────────────────────────────────────────
     cors_origins: str = "http://localhost:3000,http://localhost:8080"

@@ -31,6 +31,15 @@ logger = structlog.get_logger(__name__)
 
 OTP_EMAIL_SUBJECT = "Your Sightspectrum Login OTP"
 
+# Contact block appended ONLY to automated end-of-harvest outreach emails (see
+# send_email_with_attachments(is_automation=True)). Rendered directly below the
+# body's closing website/deck line so the recruiter has a human to reach. Dummy
+# names/numbers for now — replace with the real desk contacts when available.
+AUTOMATION_CONTACT_BLOCK = (
+    "For any queries, reach out to us:\n"
+    "Shanker, Sanjeetha  |  Phone: XXXXX, XXXX"
+)
+
 
 def _resolve_sender(settings: Settings) -> tuple[str, str]:
     """Resolve the visible From header and the SMTP envelope sender for the
@@ -413,6 +422,7 @@ class EmailSender:
         job_title: str = "",
         job_url: str = "",
         custom_id: str | None = None,
+        is_automation: bool = False,
     ) -> str | None:
         """Generic Mailjet send with attachments — same transport/credentials as
         send_otp. Attachments come as file paths and/or as in-memory
@@ -440,7 +450,12 @@ class EmailSender:
 
         `custom_id` (outreach) is echoed by Mailjet in its delivery-event webhooks
         so a send row can be matched back to its events; passing it also turns on
-        open + click tracking."""
+        open + click tracking.
+
+        `is_automation` (end-of-harvest auto-outreach only) appends AUTOMATION_CONTACT_BLOCK
+        — a "reach out to us" name/phone line — directly below the body's closing
+        website/deck line (and above the unsubscribe footer), in both the plain-text
+        and HTML parts. Manual sends leave it False, so their body is unchanged."""
         settings = self._settings
         paths = attachment_paths or []
         blobs = attachment_blobs or []
@@ -469,13 +484,21 @@ class EmailSender:
         msgid_domain = sender_addr.split("@")[-1] if "@" in sender_addr else None
         message_id = make_msgid(domain=msgid_domain) if msgid_domain else make_msgid()
 
+        # Automated outreach only: append the desk contact block below the body's
+        # closing website/deck line. Everything downstream (unsubscribe footer, HTML
+        # render) then flows from this augmented body, so the line lands under the
+        # website link in both parts. Manual sends leave `body` untouched.
+        body_for_render = (
+            f"{body.rstrip()}\n\n{AUTOMATION_CONTACT_BLOCK}" if is_automation else body
+        )
+
         # Outreach only (custom_id set): a plain, link-free unsubscribe message. We no
         # longer host our own unsubscribe URL — Mailjet owns the opt-out mechanism and
         # fires an `unsub` webhook event that the suppression workflow reacts to. `body`
         # stays un-mutated; the footer message goes only into `text_body`.
         text_body = (
-            f"{body.rstrip()}\n\n—\nNot interested? Reply to this email to unsubscribe."
-            if custom_id else body
+            f"{body_for_render.rstrip()}\n\n—\nNot interested? Reply to this email to unsubscribe."
+            if custom_id else body_for_render
         )
 
         message: dict = {
@@ -489,23 +512,27 @@ class EmailSender:
             message["ReplyTo"] = {"Email": reply_addr}
 
         # HTML alternative: a pre-rendered report body wins; otherwise derive the
-        # outreach HTML from `body`. With neither, the mail is text-only.
+        # outreach HTML from `body` (augmented with the automation contact block when
+        # applicable). With neither, the mail is text-only.
         if html_body is not None:
             message["HTMLPart"] = html_body
         elif as_html:
-            message["HTMLPart"] = _outreach_body_to_html(body, job_title, job_url, show_unsub=bool(custom_id))
+            message["HTMLPart"] = _outreach_body_to_html(body_for_render, job_title, job_url, show_unsub=bool(custom_id))
 
         attachments = _build_attachments(paths, blobs, log)
         if attachments:
             message["Attachments"] = attachments
 
-        # Outreach only: correlate delivery events to the send row + track opens/clicks.
-        # Unsubscribe is now Mailjet-managed, so we no longer advertise a self-hosted
-        # List-Unsubscribe endpoint here.
+        # Outreach only: correlate delivery events to the send row. Open/click tracking
+        # is gated behind OUTREACH_TRACK_ENGAGEMENT (default off) — the tracking pixel +
+        # link rewriting it enables are strong Gmail-Promotions signals, and delivery
+        # events (sent/bounce/blocked/spam/unsub) don't depend on it. Unsubscribe is now
+        # Mailjet-managed, so we no longer advertise a self-hosted List-Unsubscribe here.
         if custom_id:
             message["CustomID"] = custom_id
-            message["TrackOpens"] = "enabled"
-            message["TrackClicks"] = "enabled"
+            track = "enabled" if settings.outreach_track_engagement else "disabled"
+            message["TrackOpens"] = track
+            message["TrackClicks"] = track
 
         result = await self._send_via_mailjet(message, log)
         log.info("email_with_attachments_sent")

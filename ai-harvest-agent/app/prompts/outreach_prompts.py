@@ -1,13 +1,14 @@
 """Prompts + templates for recruiter outreach generation
 (app/services/outreach_service.py).
 
-The outreach email is a short, direct offer: a greeting, three brief lines
-(reference the posting → a fixed "3-4 pre-screened contract profiles in 48 hrs,
-no fee unless you hire" offer → a low-pressure CTA), then a deterministic closing
-(sign-off, optional website link, and a one-line STOP notice). The three middle
-lines are LLM-generated but must preserve the fixed offer claims; when LLM
-generation fails, render_email_fallback builds the same fixed template
-deterministically from the job context.
+The outreach email is a short, personal note: a greeting, three brief lines
+(reference the posting → a general, conversational mention of how Sightspectrum
+can help with their contract IT hiring → a low-pressure CTA), then a deterministic
+closing (sign-off and optional website link). The middle lines are LLM-generated
+and kept deliberately general and varied — no fixed marketing offer or quantified
+claims (candidate counts, turnaround windows, pricing) — so the mail reads as 1:1
+correspondence rather than a promotional blast; when LLM generation fails,
+render_email_fallback builds an equivalent plain template from the job context.
 
 Two audiences steer only the phrasing (not the fixed claims):
   * active client  — a company already on ss_active_clients.json
@@ -43,14 +44,17 @@ TONE_INSTRUCTIONS = {
 }
 
 # ── Subject taglines (one picked at random per generation) ───────────────────
-# All mean the same thing; randomizing keeps subjects from looking mass-generated.
+# Neutral, conversational subject fragments — no offers, counts, or time windows —
+# so the subject reads like a personal note about the role, not a marketing blast
+# (offer-y subjects with numbers/"48 hrs" are a strong Gmail-Promotions signal).
+# Randomizing also keeps subjects from looking mass-generated.
 SUBJECT_TAGLINES = (
-    "contract profiles ready in 48 hrs",
-    "3-4 pre-screened profiles in 48 hrs",
-    "contract IT profiles within 48 hours",
-    "pre-screened contract profiles, 48 hr turnaround",
-    "ready-to-interview profiles in 48 hrs",
-    "contract staffing — profiles in 48 hrs",
+    "quick note on your open role",
+    "regarding your recent posting",
+    "about your IT hiring",
+    "supporting your open role",
+    "a quick introduction",
+    "regarding your job post",
 )
 
 # ── Per-audience positioning (LLM prompt) ─────────────────────────────────────
@@ -82,25 +86,25 @@ _AUDIENCE = {
 # "{company}" placeholder leaks into the text.
 _GENERIC_COMPANY = "your organization"
 
-# ── Offer claims + deterministic closing ─────────────────────────────────────
-# The offer's business claims, kept as one canonical sentence. This exact line is
-# the deterministic FALLBACK body; the LLM is NOT handed this string — the email/
-# follow-up system prompts instead list the underlying facts and have the model
-# write the offer in its own words, so only the claims are fixed, never the phrasing.
+# ── General value line + deterministic closing ───────────────────────────────
+# A general, non-promotional value statement used as the deterministic FALLBACK
+# body. The LLM is NOT handed this string — the email/follow-up system prompts ask
+# the model to convey the same idea in its own words and vary it each time. Kept
+# deliberately free of quantified offers (candidate counts, turnaround windows) and
+# pricing/"no fee" language — those are the phrases that push mail to Promotions.
 OFFER_LINE = (
-    "We staff contract IT roles across India and can share 3-4 pre-screened "
-    "profiles within 48 hours. No fee unless you hire."
+    "We help teams hire contract IT talent across India and can put forward "
+    "candidates suited to your role."
 )
 # Low-pressure CTA line — the fallback uses this verbatim; the LLM writes its own
 # closing question from the intent described in the system prompt.
-CTA_LINE = "Should I send the profiles, or would a 10-minute call be easier?"
+CTA_LINE = "Would it help if I shared a few relevant profiles, or would a quick call be easier?"
 # Hardcoded sender title in the sign-off (spelling per business template).
 SENDER_TITLE = "HR Recruiter, SightSpectrum"
-# NOTE: the opt-out footer is no longer part of the generated copy. A real,
-# per-recipient unsubscribe LINK (+ List-Unsubscribe header) is appended at send
-# time in app/services/email_service.py — the old reply-based "Reply STOP" line was
-# non-functional (nothing read replies) so it was removed.
-DECK_LINK_TEMPLATE = "Visit our WebSite : {url}"
+# NOTE: no opt-out text is part of the generated copy. Unsubscribe is Mailjet-managed
+# now (Mailjet injects its own List-Unsubscribe + hosted opt-out), and email_service
+# appends a plain "reply to unsubscribe" line at send time.
+DECK_LINK_TEMPLATE = "More about us: {url}"
 
 _SIGNOFF_MARKERS = (
     "best regards", "warm regards", "kind regards", "best wishes", "best,",
@@ -178,7 +182,7 @@ def append_closing(pitch: str, sender_email: str, deck_url: str = "") -> str:
     and the website/deck link when `deck_url` is set. Blocks are separated by blank
     lines. The sender email and website URL are left as plain text here; email_service
     turns them into a bold clickable mailto link and a clickable link when the email
-    is sent as HTML, and appends the per-recipient unsubscribe footer at send time."""
+    is sent as HTML, and appends a plain unsubscribe line at send time."""
     body = _greeting_on_own_line(_strip_trailing_closing(pitch))
     url = (deck_url or "").strip()
     blocks = [body] if body else []
@@ -202,12 +206,13 @@ EMAIL_SYSTEM_PROMPT = (
     "<JOB TITLE> at <COMPANY>.' — write the job title using its EXACT text, "
     "verbatim as given in the context (do not paraphrase, shorten, reorder, or "
     "change capitalization), and use the company name from the context. "
-    "(2) The offer — write it in your OWN words and vary the phrasing on every "
-    "generation (do NOT reproduce a fixed sentence). It must convey all of these "
-    "facts, and no others: we staff contract IT roles across India; we can share "
-    "3-4 pre-screened profiles within 48 hours; there is no fee unless they hire. "
-    "Keep it to one or two short sentences, and do NOT add other services, skills, "
-    "technologies, statistics, or claims. "
+    "(2) One or two short sentences, in your OWN words and varied every time, on how "
+    "you can help — that Sightspectrum supports contract IT hiring across India and "
+    "can put forward candidates suited to their role. Keep it natural and "
+    "conversational, the way you'd mention it to a colleague. Do NOT frame it as a "
+    "marketing offer: no candidate counts or turnaround windows (e.g. '3-4 profiles', "
+    "'48 hours'), no pricing or 'free'/'no fee' phrasing, and do NOT add other "
+    "services, skills, technologies, statistics, or guarantees. "
     "(3) A brief, low-pressure closing question inviting an easy next step — for "
     "instance offering to send the profiles or to set up a short call. Phrase it "
     "freshly in your own words each time, as one short sentence; do NOT reuse a "
@@ -216,9 +221,14 @@ EMAIL_SYSTEM_PROMPT = (
     "TONE: "
     "Concise, professional, and human. Apply the requested tone and audience note "
     "from the user prompt only to lightly steer phrasing (warmth, word choice, and — "
-    "for an existing client — a brief nod to the ongoing partnership). The tone and "
-    "audience must NEVER change or expand the fixed offer claims in line (2). Avoid "
-    "generic sales hype ('industry-leading', 'best-in-class', 'cutting-edge', etc.). "
+    "for an existing client — a brief nod to the ongoing partnership). Avoid generic "
+    "sales hype ('industry-leading', 'best-in-class', 'cutting-edge', etc.). "
+
+    "WRITE FOR THE PRIMARY INBOX (avoid the Promotions tab): "
+    "Sound like one person emailing another, not a campaign. Do NOT use bulk-marketing "
+    "patterns — quantified or time-bound offers, deadlines, 'free'/'no fee'/'no cost'/"
+    "'discount', superlatives, urgency, repeated calls to action, or promotional "
+    "taglines. Keep it plain, specific, and low-key, and vary the wording every time. "
 
     "GREETING RULES: "
     "Address the recipient by first name when a recipient name is given (e.g. "
@@ -357,7 +367,8 @@ def build_email_subject(job: dict) -> str:
     Used for both the LLM and fallback paths so the subject format is guaranteed."""
     title = (job.get("job_title") or "").strip()
     tagline = random.choice(SUBJECT_TAGLINES)
-    return f"{title} — {tagline}" if title else f"Contract IT {tagline}"
+    # With a title: "<Role> — <tagline>". Without one: the tagline alone, capitalized.
+    return f"{title} — {tagline}" if title else tagline[:1].upper() + tagline[1:]
 
 
 def render_email_fallback(
@@ -409,12 +420,12 @@ FOLLOWUP_SYSTEM_PROMPT = (
     "job title EXACTLY as given in the context (verbatim — do not paraphrase, "
     "shorten, reorder, or change capitalization). Do NOT re-introduce Sightspectrum "
     "as if for the first time. "
-    "(2) A brief reminder of the offer — write it in your OWN words and vary the "
-    "phrasing on every generation (do NOT reproduce a fixed sentence). It must "
-    "convey all of these facts, and no others: we staff contract IT roles across "
-    "India; we can share 3-4 pre-screened profiles within 48 hours; there is no fee "
-    "unless they hire. Keep it to one short sentence, and do NOT add other services, "
-    "skills, technologies, statistics, or claims. "
+    "(2) A brief, general reminder of how you can help — in your OWN words, varied "
+    "every time: that Sightspectrum supports their contract IT hiring across India "
+    "and can put forward suitable candidates. Keep it to one natural, conversational "
+    "sentence. Do NOT frame it as a marketing offer: no candidate counts or turnaround "
+    "windows (e.g. '3-4 profiles', '48 hours'), no pricing or 'free'/'no fee' phrasing, "
+    "and do NOT add other services, skills, technologies, statistics, or guarantees. "
     "(3) A brief, low-pressure closing question inviting an easy next step — for "
     "instance offering to send the profiles or to set up a short call. Phrase it "
     "freshly in your own words each time, as one short sentence; do NOT reuse a "
@@ -424,6 +435,12 @@ FOLLOWUP_SYSTEM_PROMPT = (
     "Concise, professional, human, and unpushy — acknowledge they may be busy. Apply "
     "the requested tone only to lightly steer phrasing. Never guilt-trip or over-"
     "apologize. Avoid sales hype ('industry-leading', 'best-in-class', etc.). "
+
+    "WRITE FOR THE PRIMARY INBOX (avoid the Promotions tab): "
+    "Sound like one person following up with another, not a campaign. Do NOT use bulk-"
+    "marketing patterns — quantified or time-bound offers, deadlines, 'free'/'no fee', "
+    "superlatives, urgency, repeated calls to action, or promotional taglines. Keep it "
+    "plain and low-key, and vary the wording every time. "
 
     "GREETING RULES: "
     "Address the recipient by first name when a recipient name is given (e.g. "

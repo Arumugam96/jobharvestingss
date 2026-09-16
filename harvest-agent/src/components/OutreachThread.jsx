@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { Mail, ChevronDown } from "lucide-react";
 
 /* Read-only view of a recruiter-outreach thread — the messages already sent for
- * one job/recruiter (initial email, follow-ups, logged LinkedIn notes), oldest
+ * one job/recruiter (initial email, follow-ups, logged LinkedIn notes), newest
  * first. Presentational only: the caller fetches via getOutreachHistory and
  * passes the items. Shared by the Mail logs page (row detail modal) and the
  * follow-up composer (EmailComposeModal) so a "sent thread" looks identical in
@@ -96,10 +96,14 @@ export default function OutreachThread({
     return <div style={{ color: "#94A3B8", fontSize: 13, padding: "10px 2px" }}>{emptyText}</div>;
   }
 
+  // Newest first — the most recent message sits at the top of the thread. The
+  // caller passes items oldest-first; reverse a copy for display without mutating.
+  const ordered = [...messages].reverse();
+
   if (!collapsible) {
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        {messages.map((m) => {
+        {ordered.map((m) => {
           const failed = m.status && m.status !== "sent";
           return (
             <div key={m.id} style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: "10px 12px", background: "#FFFFFF" }}>
@@ -120,7 +124,7 @@ export default function OutreachThread({
   // Collapsible accordion — one card open at a time, "opens from above".
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
-      {messages.map((m) => {
+      {ordered.map((m) => {
         const failed = m.status && m.status !== "sent";
         const open = openId === m.id && !forceCollapsed;
         return (
