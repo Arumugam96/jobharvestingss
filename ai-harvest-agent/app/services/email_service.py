@@ -37,7 +37,8 @@ OTP_EMAIL_SUBJECT = "Your Sightspectrum Login OTP"
 # names/numbers for now — replace with the real desk contacts when available.
 AUTOMATION_CONTACT_BLOCK = (
     "For any queries, reach out to us:\n"
-    "Shanker, Sanjeetha  |  Phone: XXXXX, XXXX"
+    "Shanker - +91 8056081469\n"
+    # "Sanjeetha - +91 "
 )
 
 
