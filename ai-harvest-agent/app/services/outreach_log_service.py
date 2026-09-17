@@ -92,6 +92,26 @@ async def contact_names_for_rows(
 _NEG_STATUS = {"bounce": "bounced", "blocked": "blocked", "spam": "spam"}
 _POS_RANK = {"delivered": 1, "opened": 2, "clicked": 3}
 
+# Brevo (transactional webhook) event names → the internal vocab _apply_delivery_event
+# understands (which was modelled on Mailjet's). Brevo's "delivered" maps to our "sent"
+# (both mean "accepted by the recipient server"); proxy opens (Apple Mail Privacy et al.)
+# count as opens; hard/soft bounce and invalid_email all land as a negative "bounce".
+# Names with no entry (request/deferred/error/sent) are ignored by record_brevo_events.
+BREVO_EVENT_MAP = {
+    "delivered": "sent",
+    "opened": "open",
+    "unique_opened": "open",
+    "proxy_open": "open",
+    "unique_proxy_open": "open",
+    "click": "click",
+    "hard_bounce": "bounce",
+    "soft_bounce": "bounce",
+    "invalid_email": "bounce",
+    "blocked": "blocked",
+    "spam": "spam",
+    "unsubscribed": "unsub",
+}
+
 
 def _event_time(raw: Any) -> datetime:
     try:
@@ -156,9 +176,10 @@ def _apply_delivery_event(row: EmailOutreachORM, event: str | None, occurred_at:
     return changed
 
 
-async def record_delivery_events(db: AsyncSession, events: list[dict]) -> int:
-    """Apply a batch of Mailjet event objects to their outreach rows — matched by the
+async def record_delivery_events(db: AsyncSession, events: list[dict], source: str = "mailjet_webhook") -> int:
+    """Apply a batch of provider event objects to their outreach rows — matched by the
     CustomID we set at send time (= the row id). Returns the number of rows changed.
+    ``source`` labels any resulting suppression (the Brevo path passes "brevo_webhook").
 
     An ``unsub`` event is routed through the suppression store (keyed by the event's
     email, so it suppresses globally even if the exact send row can't be matched);
@@ -180,7 +201,7 @@ async def record_delivery_events(db: AsyncSession, events: list[dict]) -> int:
                 row = await get_by_id(db, str(custom_id))
                 email = row.to_email if row else None
             if email:
-                await add_suppression(db, email=email, source="mailjet_webhook", raw_payload=ev)
+                await add_suppression(db, email=email, source=source, raw_payload=ev)
                 updated += 1
             continue  # add_suppression already stamps the row(s); skip the generic path
 
@@ -192,6 +213,33 @@ async def record_delivery_events(db: AsyncSession, events: list[dict]) -> int:
         if _apply_delivery_event(row, ev.get("event"), _event_time(ev.get("time"))):
             updated += 1
     return updated
+
+
+async def record_brevo_events(db: AsyncSession, events: list[dict]) -> int:
+    """Apply a batch of Brevo transactional-webhook events to their outreach rows, reusing
+    the Mailjet path. Each Brevo event is normalized to the internal shape
+    record_delivery_events expects — CustomID from the ``X-Mailin-custom`` header we set at
+    send time (= the row id), the event name mapped via BREVO_EVENT_MAP, the timestamp from
+    ``ts_event``/``ts``, and the recipient email — then delegated, so matching-by-id, the
+    terminal-state guards, the events trail, and unsub→suppression are all shared with the
+    Mailjet path. Brevo events with no internal mapping (request/deferred/error/sent) are
+    dropped. Returns the number of rows changed."""
+    normalized: list[dict] = []
+    for ev in events or []:
+        if not isinstance(ev, dict):
+            continue
+        internal = BREVO_EVENT_MAP.get((ev.get("event") or "").strip().lower())
+        if internal is None:
+            continue  # unmapped Brevo event (request/deferred/error/…) — nothing to record
+        normalized.append({
+            "CustomID": ev.get("X-Mailin-custom") or ev.get("x-mailin-custom"),
+            "event": internal,
+            "time": ev.get("ts_event") or ev.get("ts"),
+            "email": ev.get("email"),
+        })
+    if not normalized:
+        return 0
+    return await record_delivery_events(db, normalized, source="brevo_webhook")
 
 
 async def sent_status_for_jobs(db: AsyncSession, job_ids: list[str]) -> dict[str, dict]:

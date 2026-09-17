@@ -1,17 +1,23 @@
-"""Mailjet delivery for OTP, outreach, and harvest-report emails.
+"""Email delivery for OTP, outreach, and harvest-report emails.
 
-Sends over the Mailjet Send API v3.1 (POST https://api.mailjet.com/v3.1/send) with
-HTTP Basic auth (public/private key), using the app-wide async ``httpx`` idiom (see
-apollo_client.py / llm_service.py) — no SMTP, no ``asyncio.to_thread``, no new
-dependency. AuthService depends on ``send_otp``; the outreach flow
-(app/routes/outreach_routes.py) and the harvest report flow
-(app/services/harvest_notification_service.py) depend on
-``send_email_with_attachments`` — both share the same Mailjet transport/settings.
+Two interchangeable transports, selected by ``Settings.email_provider``:
+  * ``"mailjet"`` (default) — the Mailjet Send API v3.1
+    (POST https://api.mailjet.com/v3.1/send) with HTTP Basic auth, using the app-wide
+    async ``httpx`` idiom (see apollo_client.py / llm_service.py).
+  * ``"smtp"`` — a plain SMTP relay (stdlib ``smtplib`` on a worker thread), which is how
+    mail is routed through Brevo (smtp-relay.brevo.com). Brevo tracks opens/clicks itself
+    and echoes our row id back on its webhooks via the ``X-Mailin-custom`` header, which
+    the SMTP path sets from ``CustomID``.
 
-The public method signatures are unchanged from the previous SMTP implementation so
-every call site (and tests/conftest.py::MockEmailSender) keeps working; only the
-transport differs. ``send_email_with_attachments`` still returns a stable
-``Message-ID`` string persisted as EmailOutreachORM.provider_message_id.
+Both build the SAME Mailjet-shaped message dict; ``_dispatch`` picks the transport and
+``_send_via_smtp`` translates that dict into a stdlib ``EmailMessage``. AuthService depends
+on ``send_otp``; the outreach flow (app/routes/outreach_routes.py) and the harvest report
+flow (app/services/harvest_notification_service.py) depend on ``send_email_with_attachments``.
+
+The public method signatures are unchanged, so every call site (and
+tests/conftest.py::MockEmailSender) keeps working; only the transport differs.
+``send_email_with_attachments`` still returns a stable ``Message-ID``/provider reference
+string persisted as EmailOutreachORM.provider_message_id.
 """
 from __future__ import annotations
 
@@ -20,6 +26,8 @@ import base64
 import html as html_lib
 import mimetypes
 import re
+import smtplib
+from email.message import EmailMessage
 from email.utils import formataddr, make_msgid, parseaddr
 from pathlib import Path
 
@@ -51,6 +59,17 @@ _RETRYABLE_TRANSPORT_ERRORS = (
 # temporary server error) rather than a permanent rejection — safe to retry.
 _RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 
+# Transient SMTP failures worth retrying on the ``email_provider="smtp"`` path — a dropped
+# relay connection, a connect failure, or a socket timeout. Authentication/recipient
+# errors (SMTPAuthenticationError, SMTPRecipientsRefused, …) are permanent and NOT retried.
+_RETRYABLE_SMTP_ERRORS = (
+    smtplib.SMTPServerDisconnected,
+    smtplib.SMTPConnectError,
+    ConnectionError,
+    TimeoutError,
+    OSError,
+)
+
 AUTOMATION_CONTACT_BLOCK = (
     "For any queries, please reach out to us:\n"
     "Shanker - +91 8056081469\n"
@@ -70,19 +89,26 @@ def apply_automation_contact_block(body: str) -> str:
 
 def _resolve_sender(settings: Settings) -> tuple[str, str]:
     """Resolve the visible From header and the SMTP envelope sender for the
-    harvest report from ``SMTP_FROM_EMAIL`` / ``SMTP_USERNAME``.
+    harvest report.
 
     Returns ``(from_header, envelope_addr)``.
 
-    * ``from_header``  — what the recipient sees. If ``SMTP_FROM_EMAIL`` is a real
-      address it's used as-is; if it's a bare display name (e.g.
-      ``"JOB HARVEST AGENT"``) it becomes the display name paired with the
-      authenticated mailbox — so the inbox shows that name instead of the Gmail
-      account owner (which is why the harvest mail used to read "Hariprasath").
+    * ``from_header``  — what the recipient sees.
     * ``envelope_addr`` — the SMTP ``MAIL FROM``. Always a real address (never a
-      bare display name, which providers reject): the configured address when it
-      has one, else the authenticated mailbox.
+      bare display name, which providers reject).
+
+    Preferred: the explicit ``SMTP_SENDER_MAIL`` (+ ``SMTP_ENVELOPE_NAME`` display name) —
+    a real, provider-verified sender, required for Brevo (the SMTP login is not a sendable
+    From). When ``SMTP_SENDER_MAIL`` is unset, falls back to the legacy behavior: a real
+    ``SMTP_FROM_EMAIL`` as-is, or a bare display name paired with the authenticated mailbox
+    (``SMTP_USERNAME``) — so the inbox shows that name instead of the account owner.
     """
+    sender_mail = (settings.smtp_sender_mail or "").strip()
+    if sender_mail:
+        envelope_name = (settings.smtp_envelope_name or "").strip()
+        from_header = formataddr((envelope_name, sender_mail)) if envelope_name else sender_mail
+        return from_header, sender_mail
+
     username = (settings.smtp_username or "").strip()
     configured = (settings.smtp_from_email or "").strip()
 
@@ -327,11 +353,25 @@ def _load_logo_bytes() -> bytes | None:
 
 def _shared_identity_from(settings: Settings) -> dict:
     """The shared harvest-agent From used by OTP + outreach, as a Mailjet
-    ``{"Email","Name"}`` object. When SMTP_FROM_EMAIL is a real address it's used
-    as-is; when it's a bare display name (e.g. "JOB HARVEST AGENT") that name is
-    shown and the mail is sent from the authenticated mailbox (SMTP_USERNAME).
-    Mailjet's From.Email must be a real, account-validated address — never a bare
-    display name (that's what caused the "'JOB' is an invalid email address" 400)."""
+    ``{"Email","Name"}`` object.
+
+    Preferred: the explicit ``SMTP_SENDER_MAIL`` (the From address) + ``SMTP_ENVELOPE_NAME``
+    (the display name, e.g. "JOB HARVEST AGENT"). This is required for Brevo, whose SMTP
+    login (``SMTP_USERNAME``) is NOT a sendable From — mail must come from a verified sender.
+
+    Fallback (when SMTP_SENDER_MAIL is unset): the legacy behavior — a real
+    ``SMTP_FROM_EMAIL`` used as-is, else its bare display name shown while sending from the
+    authenticated mailbox (``SMTP_USERNAME``). The From address must always be a real,
+    provider-validated address, never a bare display name (that's what caused the
+    "'JOB' is an invalid email address" 400)."""
+    sender_mail = (settings.smtp_sender_mail or "").strip()
+    if sender_mail:
+        envelope_name = (settings.smtp_envelope_name or "").strip()
+        out = {"Email": sender_mail}
+        if envelope_name:
+            out["Name"] = envelope_name
+        return out
+
     configured = (settings.smtp_from_email or "").strip()
     username = (settings.smtp_username or "").strip()
     if "@" in configured:
@@ -396,8 +436,10 @@ def _mailjet_message_ref(result: dict | None) -> str | None:
 
 
 class EmailSender:
-    """Mailjet transport. AuthService only ever calls ``send_otp``; the outreach and
-    harvest-report flows call ``send_email_with_attachments``."""
+    """Email transport (Mailjet API or SMTP relay, per ``settings.email_provider``).
+    AuthService only ever calls ``send_otp``; the outreach and harvest-report flows call
+    ``send_email_with_attachments``. Both build a Mailjet-shaped message dict and hand it
+    to ``_dispatch``, which routes to the configured transport."""
 
     _MAILJET_URL = "https://api.mailjet.com/v3.1/send"
 
@@ -432,7 +474,7 @@ class EmailSender:
                 "Base64Content": base64.b64encode(logo_bytes).decode("ascii"),
             }]
 
-        await self._send_via_mailjet(message, log)
+        await self._dispatch(message, log)
         log.info("otp_email_sent")
 
     async def send_email_with_attachments(
@@ -559,11 +601,22 @@ class EmailSender:
             message["TrackOpens"] = track
             message["TrackClicks"] = track
 
-        result = await self._send_via_mailjet(message, log)
+        # `message_id` is the RFC Message-ID the SMTP path stamps + returns; the Mailjet
+        # path returns its own MessageUUID/MessageID. Either way, fall back to the
+        # locally-generated id if the transport yields nothing.
+        ref = await self._dispatch(message, log, fallback_message_id=message_id)
         log.info("email_with_attachments_sent")
-        # Prefer the identifier Mailjet assigned (the real message reference); fall
-        # back to the locally-generated id only if the response lacks one.
-        return _mailjet_message_ref(result) or message_id
+        return ref or message_id
+
+    async def _dispatch(self, message: dict, log=None, fallback_message_id: str | None = None) -> str | None:
+        """Send `message` (a Mailjet-shaped dict) via the configured transport and return
+        a provider message reference (or None). Mailjet → its MessageUUID/MessageID; SMTP
+        → the RFC Message-ID we stamp. Both raise on failure so the caller records
+        status="failed"."""
+        if (self._settings.email_provider or "mailjet").lower() == "smtp":
+            return await self._send_via_smtp(message, log, fallback_message_id)
+        result = await self._send_via_mailjet(message, log)
+        return _mailjet_message_ref(result)
 
     async def _send_via_mailjet(self, message: dict, log=None) -> dict:
         """POST a single v3.1 message to the Mailjet Send API, retrying transient
@@ -657,6 +710,87 @@ class EmailSender:
         # attempt. Guards against a future edit dropping the terminal raise.
         raise RuntimeError("Mailjet send exhausted all attempts without a result.")
 
+    async def _send_via_smtp(self, message: dict, log=None, fallback_message_id: str | None = None) -> str | None:
+        """Send the Mailjet-shaped `message` over a plain SMTP relay (Brevo), retrying
+        transient failures. Translates the dict into a stdlib ``EmailMessage`` and sends
+        it on a worker thread (``smtplib`` is blocking). Returns the RFC ``Message-ID``
+        stamped on the outgoing mail (persisted as provider_message_id); raises with a
+        descriptive message on permanent failure or after exhausting retries.
+
+        ``CustomID`` rides along as the ``X-Mailin-custom`` header so Brevo echoes the
+        outreach-row id back on its transactional webhooks (the correlation key). Open/click
+        tracking is Brevo-side and on by default, so the Mailjet-only ``TrackOpens``/
+        ``TrackClicks`` keys are simply ignored here."""
+        log = log or logger
+        settings = self._settings
+        if not settings.smtp_host:
+            raise RuntimeError(
+                "SMTP host is not configured (set SMTP_HOST for email_provider='smtp')."
+            )
+        # Stamp a Message-ID we control (SMTP relays preserve it) so provider_message_id is
+        # populated for threading; derive the domain from the From address.
+        from_addr = (message.get("From") or {}).get("Email") or ""
+        domain = from_addr.split("@")[-1] if "@" in from_addr else None
+        message_id = fallback_message_id or (make_msgid(domain=domain) if domain else make_msgid())
+        email_msg, recipients = _mailjet_dict_to_email_message(message, message_id)
+
+        # Reuse the same retry knobs as the Mailjet path (attempts + exponential backoff).
+        attempts = max(1, settings.mailjet_max_attempts)
+        backoff = max(0.0, settings.mailjet_retry_backoff_seconds)
+        log.debug("smtp_sending", host=settings.smtp_host, port=settings.smtp_port,
+                  to=recipients, max_attempts=attempts)
+
+        for attempt in range(1, attempts + 1):
+            retry_in = backoff * (2 ** (attempt - 1))  # 0.5s → 1s → 2s …
+            try:
+                await asyncio.to_thread(self._smtp_send_sync, email_msg)
+            except _RETRYABLE_SMTP_ERRORS as exc:
+                if attempt < attempts:
+                    log.warning(
+                        "smtp_transport_error_retrying",
+                        error=repr(exc), error_type=type(exc).__name__,
+                        attempt=attempt, max_attempts=attempts, retry_in=retry_in,
+                    )
+                    await asyncio.sleep(retry_in)
+                    continue
+                log.error(
+                    "smtp_transport_error",
+                    error=repr(exc), error_type=type(exc).__name__, attempt=attempt,
+                )
+                raise RuntimeError(
+                    f"SMTP transport error after {attempts} attempt(s): "
+                    f"{type(exc).__name__}: {exc!r}"
+                ) from exc
+            except smtplib.SMTPException as exc:
+                # Auth failure / recipients refused / message rejected — permanent, no retry.
+                log.error(
+                    "smtp_send_rejected",
+                    error=repr(exc), error_type=type(exc).__name__, attempt=attempt,
+                )
+                raise RuntimeError(
+                    f"SMTP send rejected: {type(exc).__name__}: {exc!r}"
+                ) from exc
+
+            if attempt > 1:
+                log.info("smtp_send_ok", attempt=attempt, recovered=True)
+            else:
+                log.debug("smtp_send_ok")
+            return message_id
+
+        # Unreachable — mirrors the Mailjet loop's terminal guard.
+        raise RuntimeError("SMTP send exhausted all attempts without a result.")
+
+    def _smtp_send_sync(self, email_msg: EmailMessage) -> None:
+        """Blocking SMTP send (runs on a worker thread). Envelope sender/recipients are
+        taken from the message's From/To headers by ``send_message``."""
+        settings = self._settings
+        with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=settings.smtp_timeout_seconds) as server:
+            if settings.smtp_use_tls:
+                server.starttls()
+            if settings.smtp_username:
+                server.login(settings.smtp_username, settings.smtp_password)
+            server.send_message(email_msg)
+
 
 def _guess_attachment_type(path: Path) -> tuple[str, str]:
     content_type, _ = mimetypes.guess_type(path.name)
@@ -664,3 +798,76 @@ def _guess_attachment_type(path: Path) -> tuple[str, str]:
         return "application", "octet-stream"
     maintype, subtype = content_type.split("/", 1)
     return maintype, subtype
+
+
+def _split_content_type(ctype: str | None) -> tuple[str, str]:
+    """Split a ``"maintype/subtype"`` string into a pair, defaulting to a generic binary
+    type — for turning a Mailjet-shaped attachment's ContentType back into EmailMessage's
+    ``maintype``/``subtype`` args."""
+    if ctype and "/" in ctype:
+        maintype, subtype = ctype.split("/", 1)
+        return maintype, subtype
+    return "application", "octet-stream"
+
+
+def _mailjet_dict_to_email_message(message: dict, message_id: str) -> tuple[EmailMessage, list[str]]:
+    """Translate the Mailjet-shaped message dict (the one both send_* methods build) into a
+    stdlib ``EmailMessage`` for the SMTP transport. Returns ``(email_message, recipients)``.
+
+    Mapping: From/To/ReplyTo objects → headers; TextPart → plain body; HTMLPart →
+    multipart/alternative HTML part; InlinedAttachments → CID-related images on the HTML
+    part (so the OTP logo renders inline); Attachments → regular attachments; CustomID →
+    the ``X-Mailin-custom`` header (Brevo's webhook correlation key). Mailjet-only tracking
+    keys (TrackOpens/TrackClicks) are ignored — Brevo tracks by default."""
+    msg = EmailMessage()
+
+    frm = message.get("From") or {}
+    from_email = (frm.get("Email") or "").strip()
+    from_name = (frm.get("Name") or "").strip()
+    msg["From"] = formataddr((from_name, from_email)) if from_name else from_email
+
+    recipients = [(m.get("Email") or "").strip() for m in (message.get("To") or []) if m.get("Email")]
+    msg["To"] = ", ".join(recipients)
+
+    reply_to = (message.get("ReplyTo") or {}).get("Email")
+    if reply_to:
+        msg["Reply-To"] = reply_to
+
+    msg["Subject"] = message.get("Subject") or ""
+    if message_id:
+        msg["Message-ID"] = message_id
+    custom_id = message.get("CustomID")
+    if custom_id:
+        # Brevo echoes this header verbatim on its transactional webhooks, letting the
+        # brevo-events endpoint match a delivery/open/click event back to the send row.
+        msg["X-Mailin-custom"] = str(custom_id)
+
+    # Bodies: plain-text is the required root; HTML (if any) is the alternative.
+    msg.set_content(message.get("TextPart") or "")
+    html = message.get("HTMLPart")
+    if html:
+        msg.add_alternative(html, subtype="html")
+
+    # Inline images (the OTP logo) → related to the HTML part so they render inline.
+    inlined = message.get("InlinedAttachments") or []
+    if inlined and html:
+        html_part = msg.get_payload()[-1]
+        for att in inlined:
+            data = base64.b64decode(att.get("Base64Content") or "")
+            maintype, subtype = _split_content_type(att.get("ContentType"))
+            cid = att.get("ContentID") or ""
+            html_part.add_related(
+                data, maintype=maintype, subtype=subtype,
+                cid=f"<{cid}>", filename=att.get("Filename") or None,
+            )
+
+    # Regular file attachments (e.g. the harvest report) added after the alternative.
+    for att in (message.get("Attachments") or []):
+        data = base64.b64decode(att.get("Base64Content") or "")
+        maintype, subtype = _split_content_type(att.get("ContentType"))
+        msg.add_attachment(
+            data, maintype=maintype, subtype=subtype,
+            filename=att.get("Filename") or "attachment",
+        )
+
+    return msg, recipients

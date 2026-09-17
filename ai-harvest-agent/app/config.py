@@ -170,7 +170,19 @@ class Settings(BaseSettings):
     session_cookie_samesite: Literal["lax", "strict", "none"] = "lax"
     session_cookie_domain: str = ""           # empty → host-only cookie
 
+    # ── Email transport selection ─────────────────────────────────────────────────
+    # Which transport EmailSender uses for ALL mail (OTP, outreach, harvest report):
+    #   "mailjet" → the Mailjet Send API v3.1 (default; keeps current behavior)
+    #   "smtp"    → a plain SMTP relay using the SMTP_* fields below. Set this to route
+    #               mail through Brevo (smtp-relay.brevo.com:587, STARTTLS) with the SMTP
+    #               login + SMTP key; Brevo tracks opens/clicks itself and echoes our row
+    #               id back on its webhooks via the X-Mailin-custom header.
+    email_provider: Literal["mailjet", "smtp"] = "mailjet"
+
     # ── SMTP ─────────────────────────────────────────────────────────────────────
+    # Used both to derive the From/identity AND, when email_provider="smtp", as the live
+    # transport (Brevo relay: host=smtp-relay.brevo.com, port=587, use_tls=True,
+    # username=<SMTP login>, password=<SMTP key — NOT the account password / API key>).
     smtp_host: str = ""
     smtp_port: int = 587
     smtp_username: str = ""
@@ -178,6 +190,14 @@ class Settings(BaseSettings):
     smtp_from_email: str = ""
     smtp_use_tls: bool = True
     smtp_timeout_seconds: int = 60
+    # Explicit outgoing sender identity — preferred over smtp_from_email/smtp_username for
+    # the visible From on ALL mail (OTP, outreach, harvest report). REQUIRED for Brevo,
+    # whose SMTP login (smtp_username) is NOT a valid From: mail must come from a
+    # Brevo-verified sender address.
+    #   smtp_sender_mail    → the From email address (SMTP_SENDER_MAIL) — a verified sender
+    #   smtp_envelope_name  → the From display name (SMTP_ENVELOPE_NAME), e.g. "JOB HARVEST AGENT"
+    smtp_sender_mail: str = ""
+    smtp_envelope_name: str = ""
     outreach_deck_url: str = ""
 
     # ── Mailjet (transactional email transport — replaces the SMTP send path) ─────
@@ -198,6 +218,12 @@ class Settings(BaseSettings):
     # Shared secret embedded in the Mailjet event-webhook URL (?token=…) so only
     # Mailjet's delivery-event callbacks are accepted. Empty disables the check.
     mailjet_webhook_token: str = ""
+    # Shared secret in the Brevo event-webhook URL (/outreach/brevo-events?token=…) so
+    # only Brevo's transactional callbacks are accepted. Empty disables the check.
+    brevo_webhook_token: str = ""
+    # Brevo v3 API key (header "api-key"). Used ONLY by scripts/register_brevo_events.py to
+    # create/update the transactional event webhook — NOT the SMTP key used to send mail.
+    brevo_api_key: str = ""
     # Public base URL of the app (scheme + host, no trailing slash), e.g.
     # "https://app.example.com" — used to build absolute links in outreach emails
     # (the unsubscribe link + List-Unsubscribe header). Falls back to localhost.

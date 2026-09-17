@@ -46,6 +46,7 @@ from app.services.outreach_log_service import (
     outreach_list_stats,
     outreach_to_dict,
     recent_outreach,
+    record_brevo_events,
     record_delivery_events,
     sent_status_for_jobs,
     thread_messages,
@@ -552,6 +553,27 @@ async def mailjet_events(
     events = payload if isinstance(payload, list) else [payload] if isinstance(payload, dict) else []
     updated = await record_delivery_events(db, events)
     logger.info("mailjet_events_received", count=len(events), updated=updated)
+    return {"received": len(events), "updated": updated}
+
+
+@webhook_router.post("/brevo-events", status_code=status.HTTP_200_OK)
+async def brevo_events(
+    payload: list[dict] | dict | None = Body(default=None),
+    token: str | None = Query(default=None, description="Shared webhook secret (BREVO_WEBHOOK_TOKEN)."),
+    db: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """Receive Brevo transactional event callbacks (delivered/opened/click/bounce/spam/
+    unsubscribed) and advance the matching outreach row's delivery engagement — matched by
+    the X-Mailin-custom header (= the send row id) Brevo echoes back. Brevo posts a single
+    event object or a batch array; both are handled. Always returns 200 so Brevo doesn't
+    retry on a benign no-match."""
+    settings = get_settings()
+    expected = (settings.brevo_webhook_token or "").strip()
+    if expected and (token or "") != expected:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid webhook token")
+    events = payload if isinstance(payload, list) else [payload] if isinstance(payload, dict) else []
+    updated = await record_brevo_events(db, events)
+    logger.info("brevo_events_received", count=len(events), updated=updated)
     return {"received": len(events), "updated": updated}
 
 
