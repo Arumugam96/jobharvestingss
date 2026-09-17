@@ -45,6 +45,10 @@ logger = structlog.get_logger(__name__)
 # and Mailjet from a burst on a large harvest. NOT a per-run cap: all eligible
 # recruiters are still emailed, just a few at a time.
 _CONCURRENCY = 3
+# Pause after each send attempt before the slot picks up the next recruiter — spaces
+# sends so a large harvest doesn't burst the relay (Brevo enforces a per-second send-rate
+# limit). Applied per semaphore slot; skipped rows (suppressed/already/…) don't wait.
+_SEND_DELAY_SECONDS = 2.0
 # Tone used for every automated send (matches the manual composer's default).
 _AUTO_TONE = "Formal"
 
@@ -213,6 +217,12 @@ async def run_auto_outreach_after_harvest(
                     counts["sent"] += 1
                 else:
                     counts["failed"] += 1
+
+                # Throttle before this slot picks up the next recruiter so a large harvest
+                # doesn't burst the relay. Awaited — a blocking sleep would freeze the loop.
+                # Placed after the send-log row is persisted, and only send attempts reach
+                # here (the early-skip paths above return first, so skipped rows don't wait).
+                await asyncio.sleep(_SEND_DELAY_SECONDS)
 
         await asyncio.gather(*(_process(t) for t in targets), return_exceptions=True)
         logger.info("auto_outreach_complete", run_id=run_id, eligible=len(targets), **counts)

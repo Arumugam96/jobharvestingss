@@ -252,6 +252,12 @@ async def _resend_one(sender: EmailSender, factory, cand: _Candidate) -> str:
         except Exception:
             await db.rollback()
             raise
+
+    # Throttle between sends so a large backlog doesn't burst the relay (Brevo enforces a
+    # per-second send-rate limit). Awaited — NOT time.sleep(), which would block the event
+    # loop and stall every other concurrent resend. Placed after the DB commit so a kill
+    # during the pause can't leave a delivered email recorded as "failed" (→ double-send).
+    await asyncio.sleep(2)
     return outcome
 
 
