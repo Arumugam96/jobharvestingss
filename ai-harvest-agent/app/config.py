@@ -187,6 +187,14 @@ class Settings(BaseSettings):
     mailjet_api_key: str = Field(default="", validation_alias=AliasChoices("MJ_APIKEY_PUBLIC", "MAILJET_API_KEY"))
     mailjet_secret_key: str = Field(default="", validation_alias=AliasChoices("MJ_APIKEY_PRIVATE", "MAILJET_SECRET_KEY"))
     mailjet_timeout_seconds: int = 30
+    # Transient-failure retry for the Mailjet Send API. A single flaky TLS handshake
+    # (ConnectError/BrokenResourceError) or a 429/5xx used to PERMANENTLY fail a send
+    # (status="failed", empty error); now each send is retried up to
+    # mailjet_max_attempts times with exponential backoff — mailjet_retry_backoff_seconds
+    # doubling each attempt (0.5s → 1s → 2s) — on connect/read/write/timeout errors and
+    # retryable HTTP statuses (429, 500, 502, 503, 504). Set attempts to 1 to disable.
+    mailjet_max_attempts: int = 2
+    mailjet_retry_backoff_seconds: float = 0.5
     # Shared secret embedded in the Mailjet event-webhook URL (?token=…) so only
     # Mailjet's delivery-event callbacks are accepted. Empty disables the check.
     mailjet_webhook_token: str = ""

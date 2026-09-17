@@ -15,6 +15,7 @@ transport differs. ``send_email_with_attachments`` still returns a stable
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import html as html_lib
 import mimetypes
@@ -31,12 +32,27 @@ logger = structlog.get_logger(__name__)
 
 OTP_EMAIL_SUBJECT = "Your Sightspectrum Login OTP"
 
-# Contact block appended ONLY to automated end-of-harvest outreach emails (see
-# send_email_with_attachments(is_automation=True)). Rendered directly below the
-# body's closing website/deck line so the recruiter has a human to reach. Dummy
-# names/numbers for now — replace with the real desk contacts when available.
+# Transient httpx transport failures worth retrying — network blips and broken/reset
+# TLS handshakes to api.mailjet.com (the ConnectError(BrokenResourceError()) that was
+# turning ~2 of every 5 auto-outreach sends into permanent "failed" rows), plus
+# read/write/pool timeouts. Distinct from httpx.HTTPStatusError, which we retry only
+# for the statuses in _RETRYABLE_STATUS.
+_RETRYABLE_TRANSPORT_ERRORS = (
+    httpx.ConnectError,
+    httpx.ConnectTimeout,
+    httpx.ReadError,
+    httpx.ReadTimeout,
+    httpx.WriteError,
+    httpx.WriteTimeout,
+    httpx.PoolTimeout,
+    httpx.RemoteProtocolError,
+)
+# Mailjet/edge HTTP statuses that represent a transient condition (rate-limit or a
+# temporary server error) rather than a permanent rejection — safe to retry.
+_RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
+
 AUTOMATION_CONTACT_BLOCK = (
-    "For any queries, reach out to us:\n"
+    "For any queries, please reach out to us:\n"
     "Shanker - +91 8056081469\n"
     # "Sanjeetha - +91 "
 )
@@ -550,8 +566,17 @@ class EmailSender:
         return _mailjet_message_ref(result) or message_id
 
     async def _send_via_mailjet(self, message: dict, log=None) -> dict:
-        """POST a single v3.1 message to the Mailjet Send API. Raises on a transport
-        error or a non-success message status so callers can record the failure."""
+        """POST a single v3.1 message to the Mailjet Send API, retrying transient
+        failures. Raises on a permanent transport error, a retryable error that
+        outlives its attempts, or a non-success message status so callers can record
+        the failure.
+
+        A single flaky TLS handshake to api.mailjet.com used to fail a send outright;
+        connect/read/write/timeout errors and retryable HTTP statuses (429/5xx) are now
+        retried up to ``mailjet_max_attempts`` times with exponential backoff
+        (``mailjet_retry_backoff_seconds``, doubling each attempt). On final failure the
+        raised error carries a descriptive message (the bare ``ConnectError`` stringifies
+        to ""), so the caller stores a meaningful ``error_message`` instead of a blank."""
         log = log or logger
         settings = self._settings
         if not settings.mailjet_api_key or not settings.mailjet_secret_key:
@@ -560,29 +585,77 @@ class EmailSender:
                 "(set MJ_APIKEY_PUBLIC / MJ_APIKEY_PRIVATE)."
             )
         payload = {"Messages": [message]}
-        log.debug("mailjet_sending", to=message.get("To"))
-        try:
-            async with httpx.AsyncClient(timeout=settings.mailjet_timeout_seconds) as client:
-                resp = await client.post(
-                    self._MAILJET_URL,
-                    json=payload,
-                    auth=(settings.mailjet_api_key, settings.mailjet_secret_key),
-                )
-            resp.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            log.error("mailjet_http_error", status=exc.response.status_code, body=exc.response.text[:500])
-            raise
-        except httpx.HTTPError as exc:
-            log.error("mailjet_transport_error", error=str(exc))
-            raise
+        attempts = max(1, settings.mailjet_max_attempts)
+        backoff = max(0.0, settings.mailjet_retry_backoff_seconds)
+        log.debug("mailjet_sending", to=message.get("To"), max_attempts=attempts)
 
-        data = resp.json()
-        result = (data.get("Messages") or [{}])[0]
-        if str(result.get("Status", "")).lower() != "success":
-            log.error("mailjet_message_rejected", result=result)
-            raise RuntimeError(f"Mailjet rejected the message: {result}")
-        log.debug("mailjet_send_ok")
-        return result
+        for attempt in range(1, attempts + 1):
+            retry_in = backoff * (2 ** (attempt - 1))  # 0.5s → 1s → 2s …
+            try:
+                async with httpx.AsyncClient(timeout=settings.mailjet_timeout_seconds) as client:
+                    resp = await client.post(
+                        self._MAILJET_URL,
+                        json=payload,
+                        auth=(settings.mailjet_api_key, settings.mailjet_secret_key),
+                    )
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                status_code = exc.response.status_code
+                body = exc.response.text[:500]
+                if status_code in _RETRYABLE_STATUS and attempt < attempts:
+                    log.warning(
+                        "mailjet_http_error_retrying",
+                        status=status_code, attempt=attempt, max_attempts=attempts,
+                        retry_in=retry_in, body=body,
+                    )
+                    await asyncio.sleep(retry_in)
+                    continue
+                log.error("mailjet_http_error", status=status_code, attempt=attempt, body=body)
+                raise
+            except _RETRYABLE_TRANSPORT_ERRORS as exc:
+                # These stringify to "" (e.g. ConnectError(BrokenResourceError())) — log
+                # and, on exhaustion, raise with repr() so the failure is diagnosable.
+                if attempt < attempts:
+                    log.warning(
+                        "mailjet_transport_error_retrying",
+                        error=repr(exc), error_type=type(exc).__name__,
+                        attempt=attempt, max_attempts=attempts, retry_in=retry_in,
+                    )
+                    await asyncio.sleep(retry_in)
+                    continue
+                log.error(
+                    "mailjet_transport_error",
+                    error=repr(exc), error_type=type(exc).__name__, attempt=attempt,
+                )
+                raise RuntimeError(
+                    f"Mailjet transport error after {attempts} attempt(s): "
+                    f"{type(exc).__name__}: {exc!r}"
+                ) from exc
+            except httpx.HTTPError as exc:
+                # Non-retryable transport error (e.g. an unsupported protocol/URL issue).
+                log.error(
+                    "mailjet_transport_error",
+                    error=repr(exc), error_type=type(exc).__name__, attempt=attempt,
+                )
+                raise RuntimeError(
+                    f"Mailjet transport error: {type(exc).__name__}: {exc!r}"
+                ) from exc
+
+            data = resp.json()
+            result = (data.get("Messages") or [{}])[0]
+            if str(result.get("Status", "")).lower() != "success":
+                # A rejection is a permanent content/recipient problem — not retried.
+                log.error("mailjet_message_rejected", result=result)
+                raise RuntimeError(f"Mailjet rejected the message: {result}")
+            if attempt > 1:
+                log.info("mailjet_send_ok", attempt=attempt, recovered=True)
+            else:
+                log.debug("mailjet_send_ok")
+            return result
+
+        # Unreachable: the loop either returns on success or raises on the final
+        # attempt. Guards against a future edit dropping the terminal raise.
+        raise RuntimeError("Mailjet send exhausted all attempts without a result.")
 
 
 def _guess_attachment_type(path: Path) -> tuple[str, str]:
