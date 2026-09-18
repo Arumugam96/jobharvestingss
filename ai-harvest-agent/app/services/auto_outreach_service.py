@@ -7,9 +7,10 @@ INITIAL outreach email and logs an `email_outreach` row, so the send shows up in
 the "/outreach" (Mail logs) UI exactly like a manual send.
 
 Everything is reused from the manual per-recruiter flow (app/routes/outreach_routes.py):
-  * content     — OutreachService.generate_email (same LLM provider + fallback)
-  * transport   — EmailSender.send_email_with_attachments (Mailjet, is_automation=True
-                  so the delivered email carries the desk contact block)
+  * content     — OutreachService.generate_email (same LLM provider + fallback), with
+                  the desk contact block passed in so it lands above the sign-off
+  * transport   — EmailSender.send_email_with_attachments (delivered body already
+                  carries the desk contact block, plus the configured BCC trackers)
   * dedup guard — outreach_log_service.initial_email_sent (idempotent across runs)
   * do-not-contact — suppression_service.is_suppressed + RecruiterORM.unsubscribed
   * row shape   — outreach_log_service.build_email_outreach_row (shared with the route)
@@ -32,7 +33,7 @@ import structlog
 from app.config import get_settings
 from app.models.harvest_run import ScrapedJobORM
 from app.services.active_clients import classify_client
-from app.services.email_service import EmailSender, apply_automation_contact_block
+from app.services.email_service import AUTOMATION_CONTACT_BLOCK, EmailSender
 from app.services.harvest_run_service import db_read, db_write, scraped_job_view
 from app.services.llm_service import LLMService
 from app.services.outreach_log_service import build_email_outreach_row, initial_email_sent
@@ -155,18 +156,16 @@ async def run_auto_outreach_after_harvest(
                     return
 
                 client_type = classify_client(target["company"])
+                # Pass the desk contact block into generation so append_closing places
+                # it ABOVE the sign-off (website → contact → Regards). draft.body is then
+                # the exact body the recruiter receives — used for BOTH the send and the
+                # send-log row, so the Mail-logs UI shows what was actually delivered.
                 draft = await outreach.generate_email(
                     target["view"], client_type, _AUTO_TONE,
                     sender_email=reply_to, deck_url=deck_url,
+                    contact_block=AUTOMATION_CONTACT_BLOCK,
                 )
-
-                # The exact body the recruiter receives = LLM/closing body + the desk
-                # contact block. Compute it once via the shared helper and use it for
-                # BOTH the send and the send-log row, so the Mail-logs UI shows what was
-                # actually delivered. (email_service appends the same block for the
-                # outgoing message; passing the pre-appended body with is_automation=False
-                # avoids a double append.)
-                full_body = apply_automation_contact_block(draft.body)
+                full_body = draft.body
 
                 outreach_id = str(uuid4())
                 send_status, error_message, message_id = "sent", None, None
@@ -177,11 +176,12 @@ async def run_auto_outreach_after_harvest(
                         body=full_body,
                         from_email=reply_to or None,
                         reply_to=reply_to or None,
+                        bcc=settings.outreach_bcc_recipients,
                         as_html=True,
                         job_title=target["job_title"],
                         job_url=target["job_url"],
                         custom_id=outreach_id,
-                        is_automation=False,  # block already applied via full_body above
+                        is_automation=False,  # contact block already in draft.body (append_closing)
                     )
                 except Exception as exc:  # Mailjet/config failure — log the failed row
                     send_status, error_message = "failed", str(exc)

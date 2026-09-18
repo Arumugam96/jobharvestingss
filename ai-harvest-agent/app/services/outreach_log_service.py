@@ -101,6 +101,8 @@ BREVO_EVENT_MAP = {
     "delivered": "sent",
     "opened": "open",
     "unique_opened": "open",
+    "first_opening": "open",   # Brevo's first-open event (fires once per recipient)
+    "firstopening": "open",
     "proxy_open": "open",
     "unique_proxy_open": "open",
     "click": "click",
@@ -120,19 +122,27 @@ def _event_time(raw: Any) -> datetime:
         return datetime.now(timezone.utc)
 
 
-def _apply_delivery_event(row: EmailOutreachORM, event: str | None, occurred_at: datetime) -> bool:
+def _apply_delivery_event(
+    row: EmailOutreachORM, event: str | None, occurred_at: datetime, url: str | None = None
+) -> bool:
     """Mutate one send row for a single Mailjet event; return True if it changed.
 
     Records EVERY event in the ordered `events` trail (so the UI can show every
     status the mail hit) and advances the headline `delivery_status`/timestamps for
-    the events that represent forward progress."""
+    the events that represent forward progress. When the event carries a `url` (a
+    click's target link), it's stored on the trail entry so the detail page can show
+    exactly what the recipient clicked."""
     ev = (event or "").strip().lower()
     if not ev:
         return False
     # Append to the ordered trail first — even events that don't move the headline
     # (an open after a click, a duplicate sent, a spam). Reassign (not list.append)
     # so SQLAlchemy detects the JSON mutation and flushes it.
-    row.events = [*(row.events or []), {"event": ev, "at": occurred_at.isoformat()}]
+    entry = {"event": ev, "at": occurred_at.isoformat()}
+    link = (url or "").strip()
+    if link:
+        entry["url"] = link
+    row.events = [*(row.events or []), entry]
     changed = True
     current = row.delivery_status
     if ev == "unsub":
@@ -210,7 +220,7 @@ async def record_delivery_events(db: AsyncSession, events: list[dict], source: s
         row = await get_by_id(db, str(custom_id))
         if row is None:
             continue
-        if _apply_delivery_event(row, ev.get("event"), _event_time(ev.get("time"))):
+        if _apply_delivery_event(row, ev.get("event"), _event_time(ev.get("time")), url=ev.get("url")):
             updated += 1
     return updated
 
@@ -236,6 +246,9 @@ async def record_brevo_events(db: AsyncSession, events: list[dict]) -> int:
             "event": internal,
             "time": ev.get("ts_event") or ev.get("ts"),
             "email": ev.get("email"),
+            # Brevo puts the clicked target on the "link" field (Mailjet uses "url");
+            # carry it through so a click entry records exactly what was clicked.
+            "url": ev.get("link") or ev.get("URL") or ev.get("url"),
         })
     if not normalized:
         return 0
@@ -382,21 +395,40 @@ async def outreach_list_stats(
     date_from: str | None = None,
     date_to: str | None = None,
 ) -> dict[str, int]:
-    """Whole-dataset sent/failed counts over the *filtered* Mail-logs set (so the stat
-    tiles stay accurate under pagination). 'failed' = a failed send OR a
-    bounced/blocked delivery, matching the UI's Failed tile."""
+    """Whole-dataset engagement counts over the *filtered* Mail-logs set (so the stat
+    panel stays accurate under pagination). Each count is a subquery over the shared
+    filtered base; the UI shows every count as a percentage of `sent`.
+
+      * sent         — successfully dispatched (status=='sent'); the "emails delivered"
+                       headline AND the denominator for every percentage
+      * failed       — send rejected by the relay at send time (status=='failed')
+      * opened       — a recorded open (opened_at set; a click implies an open). Brevo's
+                       'opened'/'first_opening' both feed this.
+      * clicked      — headline delivery_status 'clicked'
+      * unsubscribed — headline 'unsubscribed'
+      * blocked      — headline 'blocked'
+      * bounced      — headline 'bounced' (soft/hard/invalid collapse here; shown as
+                       "Soft bounce" since only soft bounces are enabled)
+    """
     base = _apply_list_filters(
         select(EmailOutreachORM), search=search, company=company, date_from=date_from, date_to=date_to
     )
-    total = (await db.execute(select(func.count()).select_from(base.subquery()))).scalar_one()
-    failed_stmt = base.where(
-        or_(
-            EmailOutreachORM.status == "failed",
-            EmailOutreachORM.delivery_status.in_(["bounced", "blocked"]),
-        )
-    )
-    failed = (await db.execute(select(func.count()).select_from(failed_stmt.subquery()))).scalar_one()
-    return {"sent": max(0, total - failed), "failed": failed}
+
+    async def _count(stmt) -> int:
+        return (await db.execute(select(func.count()).select_from(stmt.subquery()))).scalar_one()
+
+    async def _status(value: str) -> int:
+        return await _count(base.where(EmailOutreachORM.delivery_status == value))
+
+    return {
+        "sent": await _count(base.where(EmailOutreachORM.status == "sent")),
+        "failed": await _count(base.where(EmailOutreachORM.status == "failed")),
+        "opened": await _count(base.where(EmailOutreachORM.opened_at.isnot(None))),
+        "clicked": await _status("clicked"),
+        "unsubscribed": await _status("unsubscribed"),
+        "blocked": await _status("blocked"),
+        "bounced": await _status("bounced"),
+    }
 
 
 async def latest_sent_email(

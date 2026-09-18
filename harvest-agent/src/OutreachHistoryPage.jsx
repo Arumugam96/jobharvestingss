@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { RefreshCw, Send, Mail, X, Download, Search, Calendar, ChevronDown, Check, Building2 } from "lucide-react";
+import { RefreshCw, Send, X, Download, Search, Calendar, ChevronDown, Check, Building2 } from "lucide-react";
 import { getOutreachHistory, getOutreachStats, ApiError } from "./api";
 import { fmtAbs, fmtRel, initials, avatarColor, engagement, EngagementStack } from "./components/outreachUi";
 
@@ -20,17 +20,70 @@ const RANGES = [
   { key: "all", label: "All time", ms: null },
 ];
 
-// ── Small presentational bits ───────────────────────────────────────────────
+// ── Engagement stats panel ───────────────────────────────────────────────────
 
-function StatCard({ icon, label, value, tone }) {
-  const color = tone === "bad" ? "#B91C1C" : "#0F172A";
-  const labelColor = tone === "bad" ? "#B91C1C" : "#64748B";
+// The events we surface, in order, with their accent + soft glass tint. Colors mirror
+// engagement() in components/outreachUi.jsx. `key` is the field on the /stats response.
+// "bounced" is labelled "Soft bounce" (only soft bounces are enabled upstream).
+const STAT_EVENTS = [
+  { key: "opened",       label: "Opened",       c: "#0E7C5A", tint: "rgba(14,124,90,.14)",  tint2: "rgba(14,124,90,.04)" },
+  { key: "clicked",      label: "Clicked",      c: "#0D9488", tint: "rgba(13,148,136,.14)", tint2: "rgba(13,148,136,.04)" },
+  { key: "unsubscribed", label: "Unsubscribed", c: "#7C3AED", tint: "rgba(124,58,237,.14)", tint2: "rgba(124,58,237,.04)" },
+  { key: "blocked",      label: "Blocked",      c: "#B91C1C", tint: "rgba(185,28,28,.13)",  tint2: "rgba(185,28,28,.04)" },
+  { key: "bounced",      label: "Soft bounce",  c: "#EA580C", tint: "rgba(234,88,12,.13)",  tint2: "rgba(234,88,12,.04)" },
+];
+
+// Frosted glass cards for the panel — self-contained, injected once with the panel.
+const STATS_CSS = `
+.ha-stats { border:1px solid #E2E8F0; border-radius:18px; padding:18px 18px 20px; margin:18px 0 16px;
+  background:linear-gradient(135deg,#eef2fb 0%,#f6f8fc 46%,#eef6f2 100%); box-shadow:0 1px 2px rgba(15,23,42,.04); }
+.ha-stats-head { display:flex; align-items:baseline; gap:9px; margin-bottom:16px; }
+.ha-stats-head .big { font-size:34px; font-weight:800; letter-spacing:-.03em; color:#0F172A; line-height:1; font-variant-numeric:tabular-nums; }
+.ha-stats-head .cap { font-size:14px; color:#64748B; font-weight:500; }
+.ha-stats-grid { display:grid; grid-template-columns:repeat(5, minmax(0,1fr)); gap:13px; }
+.ha-stat { position:relative; overflow:hidden; border-radius:14px; padding:14px 15px 20px;
+  background:linear-gradient(150deg, var(--tint), var(--tint2) 52%, rgba(255,255,255,0) 78%), linear-gradient(160deg, rgba(255,255,255,.92), rgba(255,255,255,.6));
+  -webkit-backdrop-filter:blur(10px) saturate(140%); backdrop-filter:blur(10px) saturate(140%);
+  border:1px solid rgba(255,255,255,.75); box-shadow:0 6px 20px -12px rgba(15,23,42,.22), inset 0 1px 0 rgba(255,255,255,.7);
+  transition:transform .18s ease, box-shadow .18s ease; }
+.ha-stat:hover { transform:translateY(-4px); box-shadow:0 18px 34px -14px rgba(15,23,42,.34), inset 0 1px 0 rgba(255,255,255,.85); }
+.ha-stat .lab { display:flex; align-items:center; gap:7px; font-size:12.5px; color:#64748B; font-weight:600; }
+.ha-stat .dot { width:8px; height:8px; border-radius:50%; flex:none; background:var(--c); box-shadow:0 0 0 3px var(--tint); }
+.ha-stat .row { display:flex; align-items:baseline; justify-content:space-between; gap:8px; margin-top:9px; }
+.ha-stat .count { font-size:25px; font-weight:800; letter-spacing:-.02em; color:#0F172A; line-height:1; font-variant-numeric:tabular-nums; }
+.ha-stat .pct { font-size:13px; font-weight:700; color:#0F172A; font-variant-numeric:tabular-nums; }
+.ha-stat .track { position:absolute; left:0; right:0; bottom:0; height:6px; background:rgba(15,23,42,.06); }
+.ha-stat .fill { height:100%; background:var(--c); box-shadow:0 0 10px -1px var(--tint); }
+@media (max-width:1100px){ .ha-stats-grid{ grid-template-columns:repeat(3,1fr); } }
+@media (max-width:680px){ .ha-stats-grid{ grid-template-columns:repeat(2,1fr); } }
+@media (prefers-reduced-motion: reduce){ .ha-stat{ transition:none; } .ha-stat:hover{ transform:none; } }
+`;
+
+// Frosted engagement panel: a big "emails delivered" total, then one glass card per
+// event with the count (left), percentage of sent (lower-right), and a bar pinned to
+// the card's bottom edge. Percentages are of `sent` (the delivered total).
+function StatsPanel({ stats }) {
+  const base = stats.sent || 0;
   return (
-    <div style={{ background: "#fff", border: "1px solid #E2E8F0", borderRadius: 14, padding: "16px 18px", minWidth: 180, boxShadow: "0 1px 2px rgba(15,23,42,.04)" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 9, color: labelColor, fontSize: 13, fontWeight: 600 }}>
-        {icon} {label}
+    <div className="ha-stats">
+      <style>{STATS_CSS}</style>
+      <div className="ha-stats-head">
+        <span className="big">{base}</span>
+        <span className="cap">emails delivered</span>
       </div>
-      <div style={{ fontSize: 28, fontWeight: 800, marginTop: 8, letterSpacing: "-.02em", color, fontVariantNumeric: "tabular-nums" }}>{value}</div>
+      <div className="ha-stats-grid">
+        {STAT_EVENTS.map((e) => {
+          const count = stats[e.key] || 0;
+          const pct = base > 0 ? (count / base) * 100 : 0;
+          return (
+            <div key={e.key} className="ha-stat" style={{ "--c": e.c, "--tint": e.tint, "--tint2": e.tint2 }}>
+              <div className="lab"><span className="dot" /> {e.label}</div>
+              <div className="row"><span className="count">{count}</span><span className="pct">{pct.toFixed(2)}%</span></div>
+              <div className="track"><div className="fill" style={{ width: `${Math.min(100, pct)}%` }} /></div>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -67,7 +120,7 @@ export default function OutreachHistoryPage() {
   const [page, setPage] = useState(() => Math.max(1, parseInt(searchParams.get("page") || "1", 10) || 1));
   const [total, setTotal] = useState(0);
   const [totalPages, setTotalPages] = useState(1);
-  const [stats, setStats] = useState({ sent: 0, failed: 0 });
+  const [stats, setStats] = useState({ sent: 0, failed: 0, opened: 0, clicked: 0, unsubscribed: 0, blocked: 0, bounced: 0 });
   const [exporting, setExporting] = useState(false);
   const seqRef = useRef(0);
 
@@ -118,11 +171,11 @@ export default function OutreachHistoryPage() {
       setItems(res.items || []);
       setTotal(res.total || 0);
       setTotalPages(res.total_pages || 1);
-      setStats(st || { sent: 0, failed: 0 });
+      setStats(st || { sent: 0, failed: 0, opened: 0, clicked: 0, unsubscribed: 0, blocked: 0, bounced: 0 });
     } catch (err) {
       if (seq !== seqRef.current) return;
       setError(err instanceof ApiError ? `Could not load mail logs: ${err.message}` : "Could not reach the harvest backend.");
-      setItems([]); setTotal(0); setTotalPages(1); setStats({ sent: 0, failed: 0 });
+      setItems([]); setTotal(0); setTotalPages(1); setStats({ sent: 0, failed: 0, opened: 0, clicked: 0, unsubscribed: 0, blocked: 0, bounced: 0 });
     } finally {
       if (seq === seqRef.current) setLoading(false);
     }
@@ -187,7 +240,7 @@ export default function OutreachHistoryPage() {
   };
 
   return (
-    <main className="ha-main">
+    <main className="ha-main" style={{ padding: "24px 24px 32px" }}>
       <div className="ha-page-head" style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 8 }}>
         <div>
           <h1 style={{ fontSize: 24, fontWeight: 800, margin: 0, letterSpacing: "-.02em" }}>Mail logs</h1>
@@ -205,10 +258,9 @@ export default function OutreachHistoryPage() {
         </div>
       </div>
 
-      <div style={{ display: "flex", gap: 14, margin: "18px 0 16px", flexWrap: "wrap" }}>
-        <StatCard icon={<Send size={16} color="#2563EB" />} label="Emails sent" value={stats.sent} />
-        <StatCard icon={<Mail size={16} />} label="Failed" value={stats.failed} tone="bad" />
-      </div>
+      {/* Engagement stats — counts are over the whole filtered set (not just this page);
+          each event is a % of the delivered total. */}
+      <StatsPanel stats={stats} />
 
       {/* Filter bar */}
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>

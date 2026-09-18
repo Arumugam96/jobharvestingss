@@ -176,19 +176,36 @@ def _build_sign_off(sender_email: str) -> str:
     return "\n".join(lines)
 
 
-def append_closing(pitch: str, sender_email: str, deck_url: str = "") -> str:
-    """Append the deterministic closing to an LLM- or template-generated pitch:
-    a blank line, the sign-off block (name + HR Recruiter title + sender email),
-    and the website/deck link when `deck_url` is set. Blocks are separated by blank
-    lines. The sender email and website URL are left as plain text here; email_service
-    turns them into a bold clickable mailto link and a clickable link when the email
-    is sent as HTML, and appends a plain unsubscribe line at send time."""
+def append_closing(pitch: str, sender_email: str, deck_url: str = "", contact_block: str = "") -> str:
+    """Append the deterministic closing to an LLM- or template-generated pitch, in
+    this order (blocks separated by blank lines):
+
+        <pitch>
+
+        More about us: <deck_url>        (when deck_url is set)
+
+        <contact_block>                  (when given — the automated-send desk
+                                          "reach out to us" name/phone block)
+
+        Regards,                         (sign-off block — ALWAYS LAST)
+        <Name>
+        HR Recruiter, SightSpectrum
+        <sender_email>
+
+    The sign-off is placed last so the signature closes the email; the website link
+    and contact block sit above it. The sender email, website URL, and phone number
+    are left as plain text here; email_service turns them into a bold clickable mailto
+    link, a clickable link, and a bold clickable tel: link when the email is sent as
+    HTML, and appends a plain unsubscribe line at send time."""
     body = _greeting_on_own_line(_strip_trailing_closing(pitch))
     url = (deck_url or "").strip()
+    contact = (contact_block or "").strip()
     blocks = [body] if body else []
-    blocks.append(_build_sign_off(sender_email))
     if url:
         blocks.append(DECK_LINK_TEMPLATE.format(url=url))
+    if contact:
+        blocks.append(contact)
+    blocks.append(_build_sign_off(sender_email))
     return "\n\n".join(b for b in blocks if b).strip()
 
 
@@ -202,17 +219,12 @@ EMAIL_SYSTEM_PROMPT = (
     "EMAIL STRUCTURE: "
     "Output a greeting line, then EXACTLY three short lines, each as its own "
     "paragraph (a blank line between each). Nothing else. "
-    "(1) A one-line reference to the posting in the form 'Saw your post for "
-    "<JOB TITLE> at <COMPANY>.' — write the job title using its EXACT text, "
-    "verbatim as given in the context (do not paraphrase, shorten, reorder, or "
-    "change capitalization), and use the company name from the context. "
-    "(2) One or two short sentences, in your OWN words and varied every time, on how "
-    "you can help — that Sightspectrum supports contract IT hiring across India and "
-    "can put forward candidates suited to their role. Keep it natural and "
-    "conversational, the way you'd mention it to a colleague. Do NOT frame it as a "
-    "marketing offer: no candidate counts or turnaround windows (e.g. '3-4 profiles', "
-    "'48 hours'), no pricing or 'free'/'no fee' phrasing, and do NOT add other "
-    "services, skills, technologies, statistics, or guarantees. "
+    "(1) Start with a natural one-line reference to the job posting. It must clearly"
+    "mention the job title and company in the context. "
+    "(2)In one or two short sentences, naturally explain how Sightspectrum could help with the role."
+    "Convey only that Sightspectrum supports contract IT hiring and can put forward candidates"
+    " suited to the role. Use your own wording and vary the sentence structure, tone, and"
+    " phrasing between messages so the result feels individually written rather than templated."
     "(3) A brief, low-pressure closing question inviting an easy next step — for "
     "instance offering to send the profiles or to set up a short call. Phrase it "
     "freshly in your own words each time, as one short sentence; do NOT reuse a "
@@ -372,14 +384,15 @@ def build_email_subject(job: dict) -> str:
 
 
 def render_email_fallback(
-    client_type: str, job: dict, sender_email: str = "", deck_url: str = ""
+    client_type: str, job: dict, sender_email: str = "", deck_url: str = "", contact_block: str = ""
 ) -> tuple[str, str]:
     """Deterministic fallback used when LLM generation fails — builds the same
     fixed template (greeting + posting reference + fixed offer + CTA) directly
     from the job context, with the same closing appended as the LLM path. For an
     existing ("active") client the offer line carries a brief partnership nod;
     the fixed claims are unchanged. `client_type` other than "active" is treated
-    as a new/unknown prospect."""
+    as a new/unknown prospect. `contact_block` (automated sends) is placed above
+    the sign-off, mirroring the LLM path."""
     company = (job.get("company") or "").strip() or _GENERIC_COMPANY
     title = (job.get("job_title") or "").strip()
     poster = (job.get("job_poster_name") or "").strip()
@@ -396,7 +409,7 @@ def render_email_fallback(
         else OFFER_LINE
     )
     body = "\n\n".join([greeting, reference, offer, CTA_LINE])
-    return build_email_subject(job), append_closing(body, sender_email, deck_url)
+    return build_email_subject(job), append_closing(body, sender_email, deck_url, contact_block)
 
 
 # ── Follow-up email ──────────────────────────────────────────────────────────
@@ -514,10 +527,11 @@ def build_followup_subject(prior_subject: str, job: dict) -> str:
 
 
 def render_followup_fallback(
-    job: dict, prior_subject: str = "", sender_email: str = "", deck_url: str = ""
+    job: dict, prior_subject: str = "", sender_email: str = "", deck_url: str = "", contact_block: str = ""
 ) -> tuple[str, str]:
     """Deterministic follow-up used when LLM generation fails — a brief nudge built
-    from the job context, with the same closing appended as the LLM path."""
+    from the job context, with the same closing appended as the LLM path.
+    `contact_block` (automated sends) is placed above the sign-off."""
     company = (job.get("company") or "").strip() or _GENERIC_COMPANY
     title = (job.get("job_title") or "").strip()
     poster = (job.get("job_poster_name") or "").strip()
@@ -529,7 +543,7 @@ def render_followup_fallback(
         else f"Just following up on my earlier note about your hiring at {company}."
     )
     body = "\n\n".join([greeting, reference, OFFER_LINE, CTA_LINE])
-    return build_followup_subject(prior_subject, job), append_closing(body, sender_email, deck_url)
+    return build_followup_subject(prior_subject, job), append_closing(body, sender_email, deck_url, contact_block)
 
 
 # ── LinkedIn ─────────────────────────────────────────────────────────────────

@@ -76,15 +76,39 @@ AUTOMATION_CONTACT_BLOCK = (
     # "Sanjeetha - +91 "
 )
 
+# The deterministic sign-off always opens with this line (see
+# app/prompts/outreach_prompts._build_sign_off), and append_closing makes it the
+# final block. Used to keep the signature the LAST thing in every email: any trailing
+# addition (unsubscribe notice, desk contact block) is inserted ABOVE this block.
+_SIGNOFF_LEAD = "regards,"
+
+
+def _insert_above_signoff(body: str, block: str) -> str:
+    """Insert `block` (its own blank-line-separated paragraph) immediately ABOVE the
+    trailing sign-off block ("Regards," …), so the Regards signature stays the very
+    last thing in the email — with everything else above it. Falls back to appending
+    at the end only if no sign-off block can be found."""
+    text = (body or "").rstrip()
+    extra = (block or "").strip()
+    if not extra:
+        return text
+    paras = text.split("\n\n")
+    for i in range(len(paras) - 1, -1, -1):
+        if paras[i].lstrip().lower().startswith(_SIGNOFF_LEAD):
+            paras.insert(i, extra)
+            return "\n\n".join(paras)
+    return f"{text}\n\n{extra}"
+
 
 def apply_automation_contact_block(body: str) -> str:
-    """Append AUTOMATION_CONTACT_BLOCK below the body's closing website/deck line.
+    """Insert AUTOMATION_CONTACT_BLOCK above the closing sign-off so the Regards
+    signature stays last (website/deck link → contact block → signature).
 
     Shared by the outgoing-message render (send_email_with_attachments with
-    is_automation=True) AND by the auto-outreach send-log write, so the body stored
-    in email_outreach matches what the recruiter actually received (the Mail-logs UI
-    renders that stored body)."""
-    return f"{body.rstrip()}\n\n{AUTOMATION_CONTACT_BLOCK}"
+    is_automation=True) AND historically by the auto-outreach send-log write. The
+    live auto-outreach flow now threads the block through append_closing instead, so
+    this is a defensive fallback that still keeps the signature last if used."""
+    return _insert_above_signoff(body, AUTOMATION_CONTACT_BLOCK)
 
 
 def _resolve_sender(settings: Settings) -> tuple[str, str]:
@@ -131,12 +155,30 @@ _BODY_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
 # Matches an http(s) URL (the hosted company-overview deck link) so it can be
 # rendered as a clickable link in the HTML part.
 _BODY_URL_RE = re.compile(r'https?://[^\s<>"]+')
+# Matches an international phone number (the desk contact block's "+91 8056081469").
+# Requires a leading "+" then a digit, so it never matches digits inside a URL, a
+# date, or an email local part — only genuine E.164-style numbers. Spaces/dashes are
+# allowed as separators and stripped when building the tel: href.
+_BODY_PHONE_RE = re.compile(r"\+\d[\d\s\-]{7,}\d")
+# Separators stripped from a matched phone number to form the tel: href digits.
+_PHONE_SEP_RE = re.compile(r"[\s\-]")
+
+
+def _phone_anchor(m: re.Match) -> str:
+    """Render a matched phone number as a bold, highlighted ``tel:`` link. The href
+    strips spaces/dashes (``+91 8056081469`` → ``tel:+918056081469``) so tapping it
+    on a phone dials directly; the visible text keeps the readable spacing."""
+    num = m.group(0)
+    href = "tel:" + _PHONE_SEP_RE.sub("", num)
+    return f'<a href="{href}" style="color:#5f7fd0;font-weight:700;">{num}</a>'
 
 
 def _linkify_bare(escaped: str) -> str:
-    """Turn bare http(s) URLs (deck link) and email addresses (reach-out line) in an
-    already-HTML-escaped text segment into clickable links. Applied only to text
-    OUTSIDE the job-title link, so an already-anchored URL is never wrapped twice."""
+    """Turn bare http(s) URLs (deck link), email addresses (reach-out line), and
+    phone numbers (desk contact block) in an already-HTML-escaped text segment into
+    clickable links. Applied only to text OUTSIDE the job-title link, so an already-
+    anchored URL is never wrapped twice. Phone numbers become bold, highlighted
+    ``tel:`` links so tapping them on a phone opens the dialer."""
     if _BODY_URL_RE.search(escaped):
         escaped = _BODY_URL_RE.sub(
             lambda m: f'<a href="{m.group(0)}" style="color:#5f7fd0;">{m.group(0)}</a>',
@@ -147,6 +189,8 @@ def _linkify_bare(escaped: str) -> str:
             lambda m: f'<a href="mailto:{m.group(0)}" style="color:#5f7fd0;">{m.group(0)}</a>',
             escaped,
         )
+    if _BODY_PHONE_RE.search(escaped):
+        escaped = _BODY_PHONE_RE.sub(_phone_anchor, escaped)
     return escaped
 
 
@@ -181,7 +225,12 @@ def _outreach_body_to_html(body: str, job_title: str = "", job_url: str = "", sh
     matcher = _title_matcher(job_title) if url else None
     title_linked = False
     out_lines: list[str] = []
+    signoff_idx: int | None = None  # index in out_lines where the sign-off begins
     for line in (body or "").split("\n"):
+        # Remember where the sign-off block starts so the unsubscribe footer can be
+        # placed ABOVE it (keeping the Regards signature the last thing in the email).
+        if signoff_idx is None and line.strip().lower().startswith(_SIGNOFF_LEAD):
+            signoff_idx = len(out_lines)
         # Bold the whole line when it carries an email address (the reach-out line).
         bold = bool(_BODY_EMAIL_RE.search(line))
         match = matcher.search(line) if (matcher and not title_linked) else None
@@ -208,15 +257,20 @@ def _outreach_body_to_html(body: str, job_title: str = "", job_url: str = "", sh
         if bold:
             rendered = f"<strong>{rendered}</strong>"
         out_lines.append(rendered)
-    inner = "<br>\n".join(out_lines)
     if show_unsub:
         # Plain, link-free unsubscribe message — Mailjet owns the opt-out mechanism now,
-        # so no self-hosted URL is embedded.
-        inner += (
-            '<br>\n<div style="margin-top:18px;font-size:12px;color:#94A3B8;">'
+        # so no self-hosted URL is embedded. Inserted ABOVE the sign-off so the Regards
+        # signature stays the last thing in the email; appended only if no sign-off found.
+        unsub = (
+            '<div style="margin-top:18px;font-size:12px;color:#94A3B8;">'
             'Not interested? Reply to this email to unsubscribe.'
             "</div>"
         )
+        if signoff_idx is not None:
+            out_lines.insert(signoff_idx, unsub)
+        else:
+            out_lines.append(unsub)
+    inner = "<br>\n".join(out_lines)
     return (
         '<!DOCTYPE html><html><body style="margin:0;padding:0;">'
         "<div style=\"font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',"
@@ -486,6 +540,7 @@ class EmailSender:
         attachment_blobs: list[tuple[str, bytes]] | None = None,
         from_email: str | None = None,
         reply_to: str | None = None,
+        bcc: list[str] | None = None,
         as_html: bool = False,
         html_body: str | None = None,
         job_title: str = "",
@@ -509,6 +564,11 @@ class EmailSender:
         recruiter replies reach the salesperson. Callers that omit `from_email`
         (the harvest report) send under the configured sender identity resolved by
         _resolve_sender.
+
+        `bcc` (outreach only) is a list of addresses blind-copied on the send so
+        additional people can track the mail; the recipient never sees them. Works on
+        both transports (Mailjet `Bcc` array; an SMTP `Bcc` header stdlib strips before
+        transmission). Omit it (the harvest report does) to send with no BCC.
 
         HTML alternative part: pass `html_body` to supply a fully-formed HTML
         body (the harvest report renders its own) — `body` stays as the plain-text
@@ -561,10 +621,11 @@ class EmailSender:
 
         # Outreach only (custom_id set): a plain, link-free unsubscribe message. We no
         # longer host our own unsubscribe URL — Mailjet owns the opt-out mechanism and
-        # fires an `unsub` webhook event that the suppression workflow reacts to. `body`
-        # stays un-mutated; the footer message goes only into `text_body`.
+        # fires an `unsub` webhook event that the suppression workflow reacts to. It's
+        # placed ABOVE the sign-off so the Regards signature stays the last thing in the
+        # email; `body` stays un-mutated (the message goes only into `text_body`).
         text_body = (
-            f"{body_for_render.rstrip()}\n\n—\nNot interested? Reply to this email to unsubscribe."
+            _insert_above_signoff(body_for_render, "Not interested? Reply to this email to unsubscribe.")
             if custom_id else body_for_render
         )
 
@@ -577,6 +638,15 @@ class EmailSender:
         reply_addr = (reply_to or from_email or "").strip()
         if reply_addr:
             message["ReplyTo"] = {"Email": reply_addr}
+
+        # BCC (outreach only): copy the configured trackers so more than one person
+        # can follow the mail. Deduped/cleaned by the caller; the recipient never sees
+        # these. The harvest report omits `bcc`, so it's excluded. On the SMTP path the
+        # Bcc rides as a header that stdlib strips before transmission (see
+        # _mailjet_dict_to_email_message).
+        bcc_clean = [b.strip() for b in (bcc or []) if b and b.strip()]
+        if bcc_clean:
+            message["Bcc"] = [{"Email": b} for b in bcc_clean]
 
         # HTML alternative: a pre-rendered report body wins; otherwise derive the
         # outreach HTML from `body` (augmented with the automation contact block when
@@ -832,6 +902,12 @@ def _mailjet_dict_to_email_message(message: dict, message_id: str) -> tuple[Emai
     reply_to = (message.get("ReplyTo") or {}).get("Email")
     if reply_to:
         msg["Reply-To"] = reply_to
+
+    # Bcc: set as a header so send_message adds them to the SMTP envelope recipients
+    # and strips the header before transmission — the recipient never sees the BCC.
+    bcc_addrs = [(b.get("Email") or "").strip() for b in (message.get("Bcc") or []) if b.get("Email")]
+    if bcc_addrs:
+        msg["Bcc"] = ", ".join(bcc_addrs)
 
     msg["Subject"] = message.get("Subject") or ""
     if message_id:

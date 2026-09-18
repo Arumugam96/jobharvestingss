@@ -1,11 +1,11 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { useParams, useLocation, useNavigate, useSearchParams } from "react-router-dom";
-import { Copy, Check, CornerUpRight } from "lucide-react";
+import { Copy, Check, CornerUpRight, Link2 } from "lucide-react";
 import { getOutreachHistory } from "./api";
 import OutreachThread from "./components/OutreachThread";
 import EmailComposeModal from "./components/EmailComposeModal";
 import {
-  fmtAbs, engagement, deliveryTimeline, EVENT_COLOR, StatusBadge, ToneChip, CLIENT_LABEL,
+  fmtAbs, engagement, deliveryTimeline, clickedLinks, EVENT_COLOR, StatusBadge, ToneChip, CLIENT_LABEL,
 } from "./components/outreachUi";
 
 /* Standalone, full-page view of one sent outreach + its full thread (route
@@ -88,7 +88,7 @@ export default function OutreachThreadPage() {
   // Nothing resolved (direct link with no state and no job/recruiter to fetch by).
   if (!detail && !threadLoading && notFound) {
     return (
-      <main className="ha-main">
+      <main className="ha-main" style={{ padding: "24px 24px 32px" }}>
         <div className="ha-card" style={{ padding: "48px 24px", textAlign: "center", color: "#64748B", maxWidth: 560, margin: "40px auto" }}>
           <div style={{ marginBottom: 6, fontWeight: 700, color: "#334155" }}>This thread isn’t available here.</div>
           <div style={{ marginBottom: 18 }}>Open it from Mail logs to read the message and follow up.</div>
@@ -99,6 +99,7 @@ export default function OutreachThreadPage() {
   }
 
   const timeline = detail ? deliveryTimeline(detail) : [];
+  const links = detail ? clickedLinks(detail) : []; // the links the recipient clicked
   const clientLabel = (detail && CLIENT_LABEL[detail.client_type]) || "";
 
   // Copy + Follow up — rendered at the top-right of the Thread box (see below).
@@ -116,7 +117,7 @@ export default function OutreachThreadPage() {
   );
 
   return (
-    <main className="ha-main" style={{ paddingTop: 18 }}>
+    <main className="ha-main" style={{ padding: "24px 24px 32px" }}>
       {/* Page header — subject as title + engagement/tone. The title uses the full
           available width (no artificial cap) so it stays on one line where it fits
           and only wraps the overflow onto a second line when it truly must. */}
@@ -149,9 +150,19 @@ export default function OutreachThreadPage() {
               <div key={e.label} style={{ display: "flex", gap: 11, position: "relative", paddingBottom: i === timeline.length - 1 ? 0 : 16 }}>
                 {i !== timeline.length - 1 && <span style={{ position: "absolute", left: 6, top: 16, bottom: 0, width: 2, background: "#E2E8F0" }} />}
                 <span style={{ width: 14, height: 14, borderRadius: "50%", flex: "none", marginTop: 1, border: "3px solid #fff", background: EVENT_COLOR[e.label] || "#94A3B8" }} />
-                <div>
+                <div style={{ minWidth: 0 }}>
                   <div style={{ fontSize: 13, fontWeight: 600, color: "#334155" }}>{e.label}</div>
                   <div style={{ fontSize: 12, color: "#64748B", fontVariantNumeric: "tabular-nums", marginTop: 1 }}>{fmtAbs(e.at)}</div>
+                  {e.label === "Clicked" && links.length > 0 && (
+                    <div style={{ marginTop: 7, display: "flex", flexDirection: "column", gap: 6 }}>
+                      {links.map((l, idx) => (
+                        <a key={idx} href={l.url} target="_blank" rel="noreferrer"
+                          style={{ display: "flex", gap: 7, alignItems: "flex-start", fontSize: 12, color: "#0D9488", textDecoration: "none", fontWeight: 600, background: "#E6F6F4", border: "1px solid #C7ECE7", borderRadius: 8, padding: "6px 9px", wordBreak: "break-all" }}>
+                          <Link2 size={12} style={{ flex: "none", marginTop: 2 }} /> <span>{l.url}</span>
+                        </a>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
             ))}

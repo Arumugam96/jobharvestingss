@@ -249,6 +249,11 @@ class Settings(BaseSettings):
     # and this address is recorded as the send's `sent_by`. Falls back to
     # SMTP_FROM_EMAIL when empty.
     outreach_auto_reply_to: str = ""
+    # Comma-separated addresses BCC'd on EVERY outreach send (both the automated
+    # end-of-harvest sweep and manual composer sends) so more than one person can
+    # track the mail. The harvest-report email is NOT affected. Empty = no BCC.
+    # Parse via `outreach_bcc_recipients` (splits/strips/deduped), never split raw.
+    outreach_auto_reply_bcc: str = ""
 
     # ── CORS ─────────────────────────────────────────────────────────────────────
     cors_origins: str = "http://localhost:3000,http://localhost:8080"
@@ -257,6 +262,21 @@ class Settings(BaseSettings):
     @property
     def cors_origins_list(self) -> list[str]:
         return [o for o in self.cors_origins.split(",") if o.strip()]
+
+    @property
+    def outreach_bcc_recipients(self) -> list[str]:
+        """BCC addresses for outreach sends, parsed from the comma-separated
+        OUTREACH_AUTO_REPLY_BCC. Stripped, empties dropped, order-preserving
+        de-dupe. Empty list when unset (no BCC added)."""
+        seen: set[str] = set()
+        out: list[str] = []
+        for addr in (self.outreach_auto_reply_bcc or "").split(","):
+            a = addr.strip()
+            key = a.lower()
+            if a and key not in seen:
+                seen.add(key)
+                out.append(a)
+        return out
 
     @property
     def is_production(self) -> bool:

@@ -109,6 +109,15 @@ export function deliveryTimeline(it) {
   return steps;
 }
 
+// The links a recipient clicked, in the order recorded — pulled from the event trail's
+// click entries that carry a `url` (captured from the Brevo/Mailjet click webhook). Empty
+// for older clicks recorded before URL capture shipped, or when nothing was clicked.
+export function clickedLinks(it) {
+  return (it.events || [])
+    .filter((e) => (e.event || "").toLowerCase() === "click" && e.url)
+    .map((e) => ({ url: e.url, at: e.at }));
+}
+
 export const TONE_STYLE = {
   Formal: { color: "#3730A3", bg: "#EEF0FF" },
   Friendly: { color: "#0E7C5A", bg: "#E7F7F0" },
@@ -210,6 +219,7 @@ export function EngagementStack({ it }) {
   const tl = deliveryTimeline(it);
   const circles = failed ? ["Failed"] : (tl.length ? tl.map((s) => s.label) : ["Sent"]);
   const rows = failed ? [{ label: "Failed", at: it.created_at }] : tl;
+  const links = clickedLinks(it);
 
   const ref = useRef(null);
   const [pop, setPop] = useState(null); // { left, top, placement } | null
@@ -260,7 +270,7 @@ export function EngagementStack({ it }) {
             position: "fixed", left: pop.left, top: pop.top,
             transform: pop.placement === "above" ? "translateY(-100%)" : "none",
             zIndex: 1200, background: "#fff", border: "1px solid #E2E8F0", borderRadius: 11,
-            boxShadow: "0 20px 46px rgba(15,23,42,.16)", padding: "11px 13px", minWidth: 188,
+            boxShadow: "0 20px 46px rgba(15,23,42,.16)", padding: "11px 13px", minWidth: 188, maxWidth: 300,
             pointerEvents: "none", fontFamily: "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif",
           }}
         >
@@ -272,6 +282,17 @@ export function EngagementStack({ it }) {
               <span style={{ fontSize: 12.5, color: "#0F172A", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{fmtTime(e.at)}</span>
             </div>
           ))}
+          {links.length > 0 && (
+            <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid #EEF1F6" }}>
+              <div style={{ fontSize: 10.5, letterSpacing: ".12em", textTransform: "uppercase", color: "#94A3B8", fontWeight: 800, marginBottom: 6 }}>Clicked links</div>
+              {links.map((l, i) => (
+                <div key={i} style={{ display: "flex", gap: 8, alignItems: "baseline", padding: "2px 0" }}>
+                  <span style={{ fontSize: 12, color: "#0D9488", fontWeight: 600, wordBreak: "break-all", flex: 1 }}>{l.url}</span>
+                  <span style={{ fontSize: 11.5, color: "#94A3B8", fontVariantNumeric: "tabular-nums", flex: "none" }}>{fmtTime(l.at)}</span>
+                </div>
+              ))}
+            </div>
+          )}
         </span>
       )}
     </span>

@@ -17,13 +17,18 @@ const LINK_STYLE = { color: LINK_COLOR };
 // The job-title link is bold, mirroring the backend's title anchor
 // (email_service.py: font-weight:700). Same blue as every other link.
 const JOB_TITLE_LINK_STYLE = { color: LINK_COLOR, fontWeight: 700 };
+// The phone (desk contact block) is a bold tel: link, mirroring the backend's
+// _phone_anchor (email_service.py: font-weight:700).
+const PHONE_LINK_STYLE = { color: LINK_COLOR, fontWeight: 700 };
 
-// Same two patterns the backend uses (app/services/email_service.py) so the
-// preview and the sent HTML linkify identically. URL first in the combined
-// tokenizer so a URL is never partially matched as an email.
+// Same patterns the backend uses (app/services/email_service.py) so the preview and
+// the sent HTML linkify identically. URL first in the combined tokenizer so a URL is
+// never partially matched as an email; the phone token requires a leading "+" and a
+// digit so it never matches digits inside a URL or an email local part.
 const URL_TOKEN = "https?://[^\\s<>\"]+";
 const EMAIL_TOKEN = "[\\w.+-]+@[\\w-]+\\.[\\w.-]+";
-const TOKEN_RE = new RegExp(`(${URL_TOKEN})|(${EMAIL_TOKEN})`, "g");
+const PHONE_TOKEN = "\\+\\d[\\d\\s-]{7,}\\d";
+const TOKEN_RE = new RegExp(`(${URL_TOKEN})|(${EMAIL_TOKEN})|(${PHONE_TOKEN})`, "g");
 const HAS_EMAIL_RE = new RegExp(EMAIL_TOKEN);
 
 // Turn one line into React nodes, wrapping URLs / emails in blue anchors and
@@ -41,9 +46,14 @@ function renderLine(line, key) {
       nodes.push(
         <a key={`${key}-${i}`} href={token} target="_blank" rel="noreferrer" style={LINK_STYLE}>{token}</a>
       );
-    } else {
+    } else if (m[2]) {
       nodes.push(
         <a key={`${key}-${i}`} href={`mailto:${token}`} style={LINK_STYLE}>{token}</a>
+      );
+    } else {
+      // Phone → bold tel: link; strip spaces/dashes for the href so tapping dials.
+      nodes.push(
+        <a key={`${key}-${i}`} href={`tel:${token.replace(/[\s-]/g, "")}`} style={PHONE_LINK_STYLE}>{token}</a>
       );
     }
     last = m.index + token.length;

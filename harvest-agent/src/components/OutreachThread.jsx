@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { Mail, ChevronDown } from "lucide-react";
+import { linkifyOutreachBody } from "./OutreachBodyField";
 
 /* Read-only view of a recruiter-outreach thread — the messages already sent for
  * one job/recruiter (initial email, follow-ups, logged LinkedIn notes), newest
@@ -66,8 +67,10 @@ function MessageBody({ m }) {
       {m.subject && (
         <div style={{ fontSize: 13.5, fontWeight: 600, color: "#1E293B", marginBottom: 4 }}>{m.subject}</div>
       )}
-      <div style={{ fontSize: 13, color: "#334155", whiteSpace: "pre-wrap", lineHeight: 1.5, maxHeight: 220, overflowY: "auto" }}>
-        {m.body || (m.channel === "linkedin" ? "(LinkedIn message)" : "—")}
+      <div style={{ fontSize: 13, color: "#334155", whiteSpace: "pre-wrap", overflowWrap: "anywhere", lineHeight: 1.5, maxHeight: 220, overflowY: "auto" }}>
+        {m.body
+          ? linkifyOutreachBody(m.body)
+          : (m.channel === "linkedin" ? "(LinkedIn message)" : "—")}
       </div>
     </>
   );
