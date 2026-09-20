@@ -76,10 +76,6 @@ AUTOMATION_CONTACT_BLOCK = (
     # "Sanjeetha - +91 "
 )
 
-# The deterministic sign-off always opens with this line (see
-# app/prompts/outreach_prompts._build_sign_off), and append_closing makes it the
-# final block. Used to keep the signature the LAST thing in every email: any trailing
-# addition (unsubscribe notice, desk contact block) is inserted ABOVE this block.
 _SIGNOFF_LEAD = "regards,"
 
 
@@ -540,7 +536,6 @@ class EmailSender:
         attachment_blobs: list[tuple[str, bytes]] | None = None,
         from_email: str | None = None,
         reply_to: str | None = None,
-        bcc: list[str] | None = None,
         as_html: bool = False,
         html_body: str | None = None,
         job_title: str = "",
@@ -564,11 +559,6 @@ class EmailSender:
         recruiter replies reach the salesperson. Callers that omit `from_email`
         (the harvest report) send under the configured sender identity resolved by
         _resolve_sender.
-
-        `bcc` (outreach only) is a list of addresses blind-copied on the send so
-        additional people can track the mail; the recipient never sees them. Works on
-        both transports (Mailjet `Bcc` array; an SMTP `Bcc` header stdlib strips before
-        transmission). Omit it (the harvest report does) to send with no BCC.
 
         HTML alternative part: pass `html_body` to supply a fully-formed HTML
         body (the harvest report renders its own) — `body` stays as the plain-text
@@ -635,18 +625,27 @@ class EmailSender:
             "Subject": subject,
             "TextPart": text_body,
         }
-        reply_addr = (reply_to or from_email or "").strip()
-        if reply_addr:
-            message["ReplyTo"] = {"Email": reply_addr}
-
-        # BCC (outreach only): copy the configured trackers so more than one person
-        # can follow the mail. Deduped/cleaned by the caller; the recipient never sees
-        # these. The harvest report omits `bcc`, so it's excluded. On the SMTP path the
-        # Bcc rides as a header that stdlib strips before transmission (see
-        # _mailjet_dict_to_email_message).
-        bcc_clean = [b.strip() for b in (bcc or []) if b and b.strip()]
-        if bcc_clean:
-            message["Bcc"] = [{"Email": b} for b in bcc_clean]
+        # Reply-To: the salesperson's own address, plus any configured EXTRA
+        # Reply-To addresses on outreach sends (from_email set). The extras are
+        # NEVER recipients of this email — a recruiter's reply reaches them only
+        # because their mail client addresses every Reply-To when they hit Reply
+        # (RFC 5322 permits multiple Reply-To mailboxes). The harvest report has no
+        # from_email, so it never gets the extras.
+        reply_addrs: list[str] = []
+        primary = (reply_to or from_email or "").strip()
+        if primary:
+            reply_addrs.append(primary)
+        if from_email:
+            for a in settings.outreach_extra_reply_to_recipients:
+                if a and a.lower() not in {r.lower() for r in reply_addrs}:
+                    reply_addrs.append(a)
+        if len(reply_addrs) == 1:
+            message["ReplyTo"] = {"Email": reply_addrs[0]}
+        elif len(reply_addrs) > 1:
+            # Mailjet's ReplyTo field is single-valued, so carry the full list as a
+            # Reply-To header instead (Mailjet passes `Headers` through to the message;
+            # the SMTP converter reads it too — see _mailjet_dict_to_email_message).
+            message["Headers"] = {**(message.get("Headers") or {}), "Reply-To": ", ".join(reply_addrs)}
 
         # HTML alternative: a pre-rendered report body wins; otherwise derive the
         # outreach HTML from `body` (augmented with the automation contact block when
@@ -896,18 +895,15 @@ def _mailjet_dict_to_email_message(message: dict, message_id: str) -> tuple[Emai
     from_name = (frm.get("Name") or "").strip()
     msg["From"] = formataddr((from_name, from_email)) if from_name else from_email
 
-    recipients = [(m.get("Email") or "").strip() for m in (message.get("To") or []) if m.get("Email")]
+    recipients = [(m.get("Email")).strip() for m in (message.get("To") or []) if m.get("Email")]
     msg["To"] = ", ".join(recipients)
 
-    reply_to = (message.get("ReplyTo") or {}).get("Email")
+    # Reply-To: a multi-address send carries the full comma-separated list in
+    # Headers["Reply-To"] (Mailjet's ReplyTo object is single-valued); a single-address
+    # send uses the ReplyTo object. Prefer the header list when present.
+    reply_to = (message.get("Headers") or {}).get("Reply-To") or (message.get("ReplyTo") or {}).get("Email")
     if reply_to:
         msg["Reply-To"] = reply_to
-
-    # Bcc: set as a header so send_message adds them to the SMTP envelope recipients
-    # and strips the header before transmission — the recipient never sees the BCC.
-    bcc_addrs = [(b.get("Email") or "").strip() for b in (message.get("Bcc") or []) if b.get("Email")]
-    if bcc_addrs:
-        msg["Bcc"] = ", ".join(bcc_addrs)
 
     msg["Subject"] = message.get("Subject") or ""
     if message_id:

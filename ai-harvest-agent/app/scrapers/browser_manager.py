@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import random
 import signal
 import socket
 from pathlib import Path
@@ -109,11 +110,51 @@ async def _reclaim_stale_chrome_lock(profile_dir: Path) -> None:
 
 # ── Browser fingerprint constants ─────────────────────────────────────────────
 
-_USER_AGENT = (
+# Fallback UA used only when the live Chromium version can't be read. Kept
+# reasonably current — a stale major (the old value was Chrome/124) is itself a
+# weak bot signal, and a UA that lags the real engine mismatches the Sec-CH-UA
+# client hints Chromium reports.
+_USER_AGENT_FALLBACK = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/124.0.0.0 Safari/537.36"
+    "Chrome/140.0.0.0 Safari/537.36"
 )
+# Back-compat alias — kept for any external importer of the old name.
+_USER_AGENT = _USER_AGENT_FALLBACK
+
+_UA_TEMPLATE = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/{major}.0.0.0 Safari/537.36"
+)
+
+
+def _build_user_agent(version: str | None) -> str:
+    """Build a Windows-Chrome UA whose MAJOR version matches the live Chromium
+    engine (Playwright's ``browser.version``, e.g. "140.0.7259.5"), so the UA
+    agrees with the Sec-CH-UA client hints Chromium reports and never leaks a
+    "HeadlessChrome" marker. Falls back to _USER_AGENT_FALLBACK when the version
+    isn't a parseable number."""
+    if version:
+        major = version.split(".", 1)[0].strip()
+        if major.isdigit():
+            return _UA_TEMPLATE.format(major=major)
+    return _USER_AGENT_FALLBACK
+
+
+# Base viewport; jittered per context (see _jittered_viewport) so runs aren't a
+# byte-identical fingerprint.
+_BASE_VIEWPORT = {"width": 1366, "height": 900}
+
+
+def _jittered_viewport() -> dict[str, int]:
+    """A slightly randomized viewport around _BASE_VIEWPORT — a fixed viewport
+    repeated across every run/session is a (weak) automation signal. Kept within
+    a few dozen px so layout and selectors are unaffected."""
+    return {
+        "width":  _BASE_VIEWPORT["width"] + random.randint(-40, 40),
+        "height": _BASE_VIEWPORT["height"] + random.randint(-30, 30),
+    }
 
 _LAUNCH_ARGS: list[str] = [
     "--disable-blink-features=AutomationControlled",
@@ -163,6 +204,34 @@ _STEALTH_SCRIPTS: list[str] = [
 
     # Remove Playwright-specific window properties
     "delete window.__playwright; delete window.__pw_manual;",
+
+    # Consistent desktop hardware fingerprint — headless/VM Chromium can report
+    # unusual (or zero) values for these, which stands out. Values chosen to
+    # match a typical Windows desktop and agree with the Win-Chrome UA above.
+    "Object.defineProperty(navigator,'hardwareConcurrency',{get:()=>8});",
+    "Object.defineProperty(navigator,'deviceMemory',{get:()=>8});",
+    "Object.defineProperty(navigator,'platform',{get:()=>'Win32'});",
+
+    # Light canvas-fingerprint noise: perturb bit 0 of a sparse pixel sample in
+    # the ImageData RETURNED by getImageData (a fresh object each call — the live
+    # canvas is never mutated, so rendering is unaffected). Enough to break a
+    # stable canvas hash without visual or perf impact. Fully wrapped so it can
+    # never throw into page scripts.
+    """(() => {
+        try {
+            const proto = CanvasRenderingContext2D && CanvasRenderingContext2D.prototype;
+            if (!proto || !proto.getImageData) return;
+            const orig = proto.getImageData;
+            proto.getImageData = function(...args){
+                const res = orig.apply(this, args);
+                try {
+                    const d = res.data;
+                    for (let i = 0; i < d.length; i += 1024 * 4) { d[i] = d[i] ^ 1; }
+                } catch (e) { /* leave data untouched on any error */ }
+                return res;
+            };
+        } catch (e) { /* never break the page */ }
+    })();""",
 ]
 
 
@@ -198,8 +267,8 @@ class BrowserManager:
         )
 
         ctx_kwargs: dict = dict(
-            viewport            = {"width": 1366, "height": 900},
-            user_agent          = _USER_AGENT,
+            viewport            = _jittered_viewport(),
+            user_agent          = _build_user_agent(self._browser.version),
             locale              = "en-US",
             timezone_id         = "Europe/London",
             color_scheme        = "light",
@@ -348,8 +417,11 @@ class PersistentBrowserManager:
                     "--disable-gpu",
                 ],
                 ignore_https_errors = True,
-                viewport            = {"width": 1366, "height": 900},
-                user_agent          = _USER_AGENT,
+                viewport            = _jittered_viewport(),
+                # Persistent context exposes no browser handle to read the live
+                # version, so use the current fallback UA (still far better than
+                # the old stale Chrome/124).
+                user_agent          = _build_user_agent(None),
                 locale              = "en-US",
                 timezone_id         = "Europe/London",
                 color_scheme        = "light",

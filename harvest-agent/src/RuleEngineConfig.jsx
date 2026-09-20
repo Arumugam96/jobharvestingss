@@ -68,6 +68,12 @@ const FREQUENCIES = [
   { value: "daily", label: "Daily" },
   { value: "weekly", label: "Weekly" },
 ];
+// Two supported LinkedIn accounts. Each has its own saved session + Chrome
+// profile on the server (see app/services/session_manager.py account keying).
+const LINKEDIN_ACCOUNTS = [
+  { id: "1", label: "Account 1" },
+  { id: "2", label: "Account 2" },
+];
 const TIMEZONES = [
   { value: "Asia/Kolkata", label: "IST (UTC+5:30)" },
   { value: "UTC", label: "GMT (UTC+0)" },
@@ -136,7 +142,7 @@ const nowLabel = () => {
 };
 
 const DEFAULT_CONFIG = {
-  sources: { linkedin: true, naukri: false, dice: false },
+  sources: { linkedin: true, naukri: false, dice: false, linkedin_account: "1" },
   filters: {
     keyword: "", location: "", job_type: "Any", work_mode: "Any",
     search_window_hours: 24, max_jobs: 500,
@@ -159,7 +165,11 @@ export default function RuleEngineConfig({
   const [configLoading, setConfigLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
 
-  const [sources, setSources] = useState(DEFAULT_CONFIG.sources);
+  // `sources` holds ONLY the three source toggles — the selected LinkedIn
+  // account lives in its own state (linkedinAccount) so its truthy string can't
+  // leak into the `errors.jobSource` "at least one source enabled" check.
+  const [sources, setSources] = useState({ linkedin: true, naukri: false, dice: false });
+  const [linkedinAccount, setLinkedinAccount] = useState(DEFAULT_CONFIG.sources.linkedin_account);
   const [keyword, setKeyword] = useState(DEFAULT_CONFIG.filters.keyword);
   const [location, setLocation] = useState(DEFAULT_CONFIG.filters.location);
   const [jobType, setJobType] = useState(DEFAULT_CONFIG.filters.job_type);
@@ -237,7 +247,14 @@ export default function RuleEngineConfig({
 
   function applyConfig(config) {
     setLoadedConfig(config);
-    setSources(config.sources);
+    // Spread only the source toggles — never `linkedin_account` (see the
+    // `sources` state comment) — then load the selected account separately.
+    setSources({
+      linkedin: !!config.sources.linkedin,
+      naukri:   !!config.sources.naukri,
+      dice:     !!config.sources.dice,
+    });
+    setLinkedinAccount(config.sources?.linkedin_account || "1");
     setKeyword(config.filters.keyword || "");
     setLocation(config.filters.location || "");
     setJobType(config.filters.job_type || "Any");
@@ -261,7 +278,7 @@ export default function RuleEngineConfig({
   }
 
   const errors = {
-    jobSource: !Object.values(sources).some(Boolean),
+    jobSource: !(sources.linkedin || sources.naukri || sources.dice),
     jobType: !jobType,
     domain: !domain,
     hiring: !hiringEntity,
@@ -275,7 +292,7 @@ export default function RuleEngineConfig({
   function buildPayload() {
     return {
       ...loadedConfig,
-      sources: { ...sources },
+      sources: { ...sources, linkedin_account: linkedinAccount },
       filters: {
         ...loadedConfig.filters,
         keyword: keyword.trim(),
@@ -450,18 +467,25 @@ export default function RuleEngineConfig({
     }
   };
 
-  const [linkedinSetup, setLinkedinSetup] = useState({ loading: false, message: "" });
+  // Per-account setup status, keyed by account id ("1" | "2").
+  const [linkedinSetup, setLinkedinSetup] = useState({
+    "1": { loading: false, message: "" },
+    "2": { loading: false, message: "" },
+  });
   const [naukriSetup, setNaukriSetup] = useState({ loading: false, message: "" });
   const [liveViewSource, setLiveViewSource] = useState(null); // "linkedin" | "naukri" | null
 
-  const handleLinkedinSetup = async () => {
-    setLinkedinSetup({ loading: true, message: "Log in below — this is the live browser. Waiting up to 10 minutes…" });
+  const setAcctStatus = (accountId, patch) =>
+    setLinkedinSetup((s) => ({ ...s, [accountId]: { ...s[accountId], ...patch } }));
+
+  const handleLinkedinSetup = async (accountId = "1") => {
+    setAcctStatus(accountId, { loading: true, message: "Log in below — this is the live browser. Waiting up to 10 minutes…" });
     setLiveViewSource("linkedin");
     try {
-      const res = await setupLinkedinSession();
-      setLinkedinSetup({ loading: false, message: res.status === "ready" ? (res.message || "LinkedIn session saved.") : (res.reason || res.message || "Could not confirm login.") });
+      const res = await setupLinkedinSession(accountId);
+      setAcctStatus(accountId, { loading: false, message: res.status === "ready" ? (res.message || "LinkedIn session saved.") : (res.reason || res.message || "Could not confirm login.") });
     } catch (err) {
-      setLinkedinSetup({ loading: false, message: err instanceof ApiError ? err.message : "Could not reach the harvest backend." });
+      setAcctStatus(accountId, { loading: false, message: err instanceof ApiError ? err.message : "Could not reach the harvest backend." });
     } finally {
       setLiveViewSource(null);
     }
@@ -698,21 +722,51 @@ export default function RuleEngineConfig({
               <div className="rec-panel" style={{ marginTop: 18 }}>
                 <div className="rec-panel-head">Connect Accounts</div>
                 <p className="rec-card-desc" style={{ marginBottom: 16 }}>
-                  Log in once per source in the browser window that opens — the session is saved to the server's
-                  Chrome profile and reused on every future harvest run.
+                  Log in once per account in the browser window that opens — the session is saved on the server
+                  and reused on every future harvest run. LinkedIn supports two accounts, each with its own saved
+                  session; the <strong>Active LinkedIn account</strong> below is the one every harvest run uses.
                 </p>
+
+                {/* Active LinkedIn account selector — persisted in harvest_config (sources.linkedin_account) */}
+                <div className="rec-field" style={{ maxWidth: 320, marginBottom: 16 }}>
+                  <label>Active LinkedIn account (used for harvest runs)</label>
+                  <Select
+                    value={LINKEDIN_ACCOUNTS.find((a) => a.id === linkedinAccount)?.label || "Account 1"}
+                    onChange={(label) => { setLinkedinAccount(LINKEDIN_ACCOUNTS.find((a) => a.label === label).id); markDirty(); }}
+                    ariaLabel="Active LinkedIn account"
+                    options={LINKEDIN_ACCOUNTS.map((a) => a.label)}
+                  />
+                </div>
+
+                {/* Two LinkedIn account cards — each connects/saves its own session */}
                 <div className="rec-field-row">
-                  <div className="rec-source" style={{ flex: 1, border: "1px solid var(--line)", borderRadius: 10, padding: "12px 14px" }}>
-                    <LinkedInIcon />
-                    <div className="rec-source-text">
-                      <div className="rec-source-name">LinkedIn</div>
-                      <div className="rec-source-sub">{linkedinSetup.message || "Not connected in this session"}</div>
-                    </div>
-                    <button type="button" className="rec-btn rec-btn--save" onClick={handleLinkedinSetup} disabled={linkedinSetup.loading}>
-                      {linkedinSetup.loading ? <Loader2 size={16} className="rec-spin" /> : <LogIn size={16} />}
-                      {linkedinSetup.loading ? "Waiting…" : "Connect"}
-                    </button>
-                  </div>
+                  {LINKEDIN_ACCOUNTS.map((a) => {
+                    const st = linkedinSetup[a.id] || {};
+                    const isActive = linkedinAccount === a.id;
+                    return (
+                      <div key={a.id} className="rec-source"
+                        style={{ flex: 1, border: isActive ? "1px solid #0A66C2" : "1px solid var(--line)",
+                                 background: isActive ? "rgba(10,102,194,0.06)" : undefined,
+                                 borderRadius: 10, padding: "12px 14px" }}>
+                        <LinkedInIcon />
+                        <div className="rec-source-text">
+                          <div className="rec-source-name">
+                            LinkedIn · {a.label}{isActive && <span className="rec-on"> · active</span>}
+                          </div>
+                          <div className="rec-source-sub">{st.message || "Not connected in this session"}</div>
+                        </div>
+                        <button type="button" className="rec-btn rec-btn--save"
+                          onClick={() => handleLinkedinSetup(a.id)} disabled={st.loading}>
+                          {st.loading ? <Loader2 size={16} className="rec-spin" /> : <LogIn size={16} />}
+                          {st.loading ? "Waiting…" : "Connect"}
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Naukri (single account) */}
+                <div className="rec-field-row" style={{ marginTop: 12 }}>
                   <div className="rec-source" style={{ flex: 1, border: "1px solid var(--line)", borderRadius: 10, padding: "12px 14px" }}>
                     <NaukriIcon />
                     <div className="rec-source-text">

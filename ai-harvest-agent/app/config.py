@@ -9,6 +9,20 @@ from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def _split_email_csv(value: str | None) -> list[str]:
+    """Parse a comma-separated address list: strip each, drop empties, and
+    de-dupe case-insensitively while preserving first-seen order."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for addr in (value or "").split(","):
+        a = addr.strip()
+        key = a.lower()
+        if a and key not in seen:
+            seen.add(key)
+            out.append(a)
+    return out
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=str(Path(__file__).resolve().parent.parent / ".env"),
@@ -30,9 +44,6 @@ class Settings(BaseSettings):
     # this only controls what prints to the terminal.
     log_level: str = "INFO"
     data_source: Literal["auto", "database", "json"] = "database"
-
-    # Global daily harvest cap: max jobs that may be scraped across all runs in a
-    # UTC day. 0 = unlimited. Enforced at the run start-gate
     max_jobs_per_day: int = 0
     harvest_persist_batch_size: int = 10
 
@@ -108,6 +119,22 @@ class Settings(BaseSettings):
     microsoft_email:    str = ""
     microsoft_password: str = ""
 
+    # ── LinkedIn profile-visit anti-detection ────────────────────────────────────
+    # Human-like randomized pause (ms) inserted BETWEEN recruiter /in/ profile
+    # visits during the post-harvest contact-discovery pass (and between prospect
+    # lookups). Back-to-back profile opens are a strong bot signal and were a
+    # cause of the account being restricted for "high volume of profile data".
+    linkedin_profile_visit_delay_min_ms: int = 8_000
+    linkedin_profile_visit_delay_max_ms: int = 25_000
+    # Max NEW recruiter /in/ profile pages opened per harvest run. Already-visited
+    # recruiters are never re-opened (see _enrich_recruiters), so this only bounds
+    # first-time visits.
+    linkedin_recruiter_visit_cap: int = 25
+    # Master switch for the manual Prospect Intelligence tool
+    # (POST /run-prospect-intelligence). Off by default — it visits /in/ profiles
+    # and is not part of the normal harvest pipeline.
+    prospect_intelligence_enabled: bool = False
+
     # ── LinkedIn Home Feed lead harvest ──────────────────────────────────────────
     linkedin_feed_max_posts:             int = 10      # max posts to inspect, then stop
     linkedin_feed_max_scrolls:           int = 40      # max scroll actions, then stop
@@ -177,7 +204,7 @@ class Settings(BaseSettings):
     #               mail through Brevo (smtp-relay.brevo.com:587, STARTTLS) with the SMTP
     #               login + SMTP key; Brevo tracks opens/clicks itself and echoes our row
     #               id back on its webhooks via the X-Mailin-custom header.
-    email_provider: Literal["mailjet", "smtp"] = "mailjet"
+    email_provider: Literal["mailjet", "smtp"] = "smtp"
 
     # ── SMTP ─────────────────────────────────────────────────────────────────────
     # Used both to derive the From/identity AND, when email_provider="smtp", as the live
@@ -190,36 +217,17 @@ class Settings(BaseSettings):
     smtp_from_email: str = ""
     smtp_use_tls: bool = True
     smtp_timeout_seconds: int = 60
-    # Explicit outgoing sender identity — preferred over smtp_from_email/smtp_username for
-    # the visible From on ALL mail (OTP, outreach, harvest report). REQUIRED for Brevo,
-    # whose SMTP login (smtp_username) is NOT a valid From: mail must come from a
-    # Brevo-verified sender address.
-    #   smtp_sender_mail    → the From email address (SMTP_SENDER_MAIL) — a verified sender
-    #   smtp_envelope_name  → the From display name (SMTP_ENVELOPE_NAME), e.g. "JOB HARVEST AGENT"
     smtp_sender_mail: str = ""
     smtp_envelope_name: str = ""
     outreach_deck_url: str = ""
 
     # ── Mailjet (transactional email transport — replaces the SMTP send path) ─────
-    # All mail (OTP, outreach, harvest report) is delivered via the Mailjet Send API
-    # v3.1. Credentials accept the Mailjet-native env names used by check_mailjet.py
-    # (MJ_APIKEY_PUBLIC / MJ_APIKEY_PRIVATE) as well as MAILJET_* aliases.
     mailjet_api_key: str = Field(default="", validation_alias=AliasChoices("MJ_APIKEY_PUBLIC", "MAILJET_API_KEY"))
     mailjet_secret_key: str = Field(default="", validation_alias=AliasChoices("MJ_APIKEY_PRIVATE", "MAILJET_SECRET_KEY"))
     mailjet_timeout_seconds: int = 30
-    # Transient-failure retry for the Mailjet Send API. A single flaky TLS handshake
-    # (ConnectError/BrokenResourceError) or a 429/5xx used to PERMANENTLY fail a send
-    # (status="failed", empty error); now each send is retried up to
-    # mailjet_max_attempts times with exponential backoff — mailjet_retry_backoff_seconds
-    # doubling each attempt (0.5s → 1s → 2s) — on connect/read/write/timeout errors and
-    # retryable HTTP statuses (429, 500, 502, 503, 504). Set attempts to 1 to disable.
     mailjet_max_attempts: int = 2
     mailjet_retry_backoff_seconds: float = 0.5
-    # Shared secret embedded in the Mailjet event-webhook URL (?token=…) so only
-    # Mailjet's delivery-event callbacks are accepted. Empty disables the check.
     mailjet_webhook_token: str = ""
-    # Shared secret in the Brevo event-webhook URL (/outreach/brevo-events?token=…) so
-    # only Brevo's transactional callbacks are accepted. Empty disables the check.
     brevo_webhook_token: str = ""
     # Brevo v3 API key (header "api-key"). Used ONLY by scripts/register_brevo_events.py to
     # create/update the transactional event webhook — NOT the SMTP key used to send mail.
@@ -228,32 +236,12 @@ class Settings(BaseSettings):
     # "https://app.example.com" — used to build absolute links in outreach emails
     # (the unsubscribe link + List-Unsubscribe header). Falls back to localhost.
     public_base_url: str = ""
-    # Outreach open/click tracking. When True, outreach sends set Mailjet's
-    # TrackOpens/TrackClicks (adds a tracking pixel + rewrites links through Mailjet's
-    # redirector). Those are classic "bulk/marketing" signals that push Gmail to the
-    # Promotions tab, so this defaults to OFF for 1:1 recruiter outreach. Delivery
-    # events (sent/bounce/blocked/spam/unsub) still fire regardless — only open/click
-    # analytics are lost when disabled.
     outreach_track_engagement: bool = True
 
     # ── Automated end-of-harvest outreach ────────────────────────────────────────
-    # When True (default), a completed harvest run automatically sends an initial
-    # outreach email to every harvested job's recruiter that has a resolvable email,
-    # reusing the same generation → Mailjet → email_outreach logging as a manual send
-    # (each auto-send shows up in the Mail-logs UI). Suppressed/unsubscribed/already-
-    # contacted recruiters are skipped, so it is idempotent across runs. Set False to
-    # disable the auto-send entirely.
     outreach_auto_send_on_harvest: bool = True
-    # Reply-To used for unattended auto-sends (there is no logged-in salesperson). The
-    # visible From stays the shared harvest-agent identity; recruiter replies go here,
-    # and this address is recorded as the send's `sent_by`. Falls back to
-    # SMTP_FROM_EMAIL when empty.
     outreach_auto_reply_to: str = ""
-    # Comma-separated addresses BCC'd on EVERY outreach send (both the automated
-    # end-of-harvest sweep and manual composer sends) so more than one person can
-    # track the mail. The harvest-report email is NOT affected. Empty = no BCC.
-    # Parse via `outreach_bcc_recipients` (splits/strips/deduped), never split raw.
-    outreach_auto_reply_bcc: str = ""
+    outreach_extra_reply_to: str = ""
 
     # ── CORS ─────────────────────────────────────────────────────────────────────
     cors_origins: str = "http://localhost:3000,http://localhost:8080"
@@ -264,19 +252,20 @@ class Settings(BaseSettings):
         return [o for o in self.cors_origins.split(",") if o.strip()]
 
     @property
-    def outreach_bcc_recipients(self) -> list[str]:
-        """BCC addresses for outreach sends, parsed from the comma-separated
-        OUTREACH_AUTO_REPLY_BCC. Stripped, empties dropped, order-preserving
-        de-dupe. Empty list when unset (no BCC added)."""
-        seen: set[str] = set()
-        out: list[str] = []
-        for addr in (self.outreach_auto_reply_bcc or "").split(","):
-            a = addr.strip()
-            key = a.lower()
-            if a and key not in seen:
-                seen.add(key)
-                out.append(a)
-        return out
+    def outreach_extra_reply_to_recipients(self) -> list[str]:
+        """Extra Reply-To addresses for outreach, parsed from the comma-separated
+        OUTREACH_EXTRA_REPLY_TO. Stripped, empties dropped, order-preserving
+        de-dupe. Empty list when unset (no extra Reply-To added)."""
+        return _split_email_csv(self.outreach_extra_reply_to)
+
+    @property
+    def outreach_auto_reply_to_recipients(self) -> list[str]:
+        """Auto-outreach Reply-To addresses, parsed from the comma-separated
+        OUTREACH_AUTO_REPLY_TO. Stripped, empties dropped, order-preserving
+        de-dupe. Order matters: when two or more are configured, the auto-outreach
+        flow rotates the *primary* Reply-To through this list one address per
+        calendar day (day 1 → index 0, day 2 → index 1, …). Empty list when unset."""
+        return _split_email_csv(self.outreach_auto_reply_to)
 
     @property
     def is_production(self) -> bool:

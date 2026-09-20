@@ -10,15 +10,20 @@ Everything is reused from the manual per-recruiter flow (app/routes/outreach_rou
   * content     — OutreachService.generate_email (same LLM provider + fallback), with
                   the desk contact block passed in so it lands above the sign-off
   * transport   — EmailSender.send_email_with_attachments (delivered body already
-                  carries the desk contact block, plus the configured BCC trackers)
+                  carries the desk contact block)
   * dedup guard — outreach_log_service.initial_email_sent (idempotent across runs)
   * do-not-contact — suppression_service.is_suppressed + RecruiterORM.unsubscribed
   * row shape   — outreach_log_service.build_email_outreach_row (shared with the route)
 
 Unattended send identity: the visible From stays the shared harvest-agent identity;
 the configured OUTREACH_AUTO_REPLY_TO (falling back to SMTP_FROM_EMAIL) is the Reply-To
-and the recorded `sent_by`. There is no per-run cap — every eligible recruiter is
-emailed — but a small semaphore bounds concurrency so the LLM/Mailjet aren't hammered.
+and the recorded `sent_by`. When OUTREACH_AUTO_REPLY_TO lists two or more addresses,
+the primary Reply-To rotates through them one per calendar day (day 1 → first address,
+day 2 → second, wrapping around), anchored to the first automated send — see
+app/services/reply_to_rotation.py. Any OUTREACH_EXTRA_REPLY_TO addresses are still
+attached on top of the day's address on every send. There is no per-run cap — every
+eligible recruiter is emailed — but a small semaphore bounds concurrency so the
+LLM/Mailjet aren't hammered.
 
 This module is best-effort: it never raises, mirroring send_harvest_report /
 run_reenrichment_sweep, so a failure here can't break the harvest that triggered it.
@@ -38,6 +43,7 @@ from app.services.harvest_run_service import db_read, db_write, scraped_job_view
 from app.services.llm_service import LLMService
 from app.services.outreach_log_service import build_email_outreach_row, initial_email_sent
 from app.services.outreach_service import OutreachService
+from app.services.reply_to_rotation import rotation_index
 from app.services.suppression_service import is_suppressed
 
 logger = structlog.get_logger(__name__)
@@ -118,7 +124,27 @@ async def run_auto_outreach_after_harvest(
 
         # Unattended send identity: shared From (resolved inside EmailSender), the
         # configured reply-to (or SMTP_FROM_EMAIL) as Reply-To and recorded sent_by.
-        reply_to = (settings.outreach_auto_reply_to or settings.smtp_username or "").strip()
+        # OUTREACH_AUTO_REPLY_TO may hold several comma-separated addresses; when it
+        # does, the primary Reply-To rotates through them one per calendar day (day 1 →
+        # first address, day 2 → second, …) so recruiter replies alternate between the
+        # desk's salespeople day by day. Chosen ONCE here, before the fan-out below, so
+        # every send in this run uses the same day's address and the rotation anchor is
+        # touched once (no concurrency race). Any OUTREACH_EXTRA_REPLY_TO addresses are
+        # still attached on top by EmailSender. The single chosen value flows into
+        # sender_email / from_email / reply_to / sent_by below, so the sign-off reach-out
+        # line, the Reply-To header, and the logged sent_by all reflect the day's owner.
+        reply_addrs = settings.outreach_auto_reply_to_recipients
+        if len(reply_addrs) >= 2:
+            idx = rotation_index() % len(reply_addrs)
+            reply_to = reply_addrs[idx]
+            logger.info(
+                "auto_outreach_reply_to_rotated",
+                run_id=run_id, index=idx, of=len(reply_addrs), reply_to=reply_to,
+            )
+        elif reply_addrs:
+            reply_to = reply_addrs[0]
+        else:
+            reply_to = (settings.smtp_username or "").strip()
         sent_by = reply_to or "auto-harvest"
         deck_url = settings.outreach_deck_url
 
@@ -176,7 +202,6 @@ async def run_auto_outreach_after_harvest(
                         body=full_body,
                         from_email=reply_to or None,
                         reply_to=reply_to or None,
-                        bcc=settings.outreach_bcc_recipients,
                         as_html=True,
                         job_title=target["job_title"],
                         job_url=target["job_url"],

@@ -14,11 +14,12 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import structlog
 from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from app.agents.linkedin_agent import (
     LinkedInAgent,
@@ -63,6 +64,15 @@ def _detect_auth_state(url: str) -> str:
 
 _config_svc  = ConfigService()
 _storage_svc = LinkedInStorageService()
+
+
+# ── Request models ─────────────────────────────────────────────────────────────
+
+class SetupSessionRequest(BaseModel):
+    """Body for POST /linkedin-setup-session. `account` selects which LinkedIn
+    identity to log in as; restricted to the two supported ids (also prevents
+    path traversal via the account-keyed session filename / profile dir)."""
+    account: Literal["1", "2"] = "1"
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -293,24 +303,30 @@ async def run_linkedin_agent() -> Any:
 # ══════════════════════════════════════════════════════════════════════════════
 
 @router.post("/linkedin-setup-session", status_code=status.HTTP_200_OK)
-async def setup_linkedin_session() -> Any:
+async def setup_linkedin_session(body: SetupSessionRequest | None = None) -> Any:
     """
     Opens Chrome with the dedicated harvest agent profile directory.
 
-    **Session reuse**: if the Chrome profile already has a valid LinkedIn session
-    the endpoint returns immediately without opening a login page.
+    **Account**: `account` in the request body ("1" or "2") selects which
+    LinkedIn identity to log in as. Each account uses its own isolated Chrome
+    profile dir and saves its own session file, so logging into account "2"
+    never detects or overwrites account "1"'s session. Defaults to "1".
+
+    **Session reuse**: if the account's Chrome profile already has a valid
+    LinkedIn session the endpoint returns immediately without opening a login page.
 
     **MFA**: if LinkedIn requests multi-factor authentication, leave the browser
     open, complete MFA in the window, and the session is saved automatically.
 
-    Profile directory: data/chrome_profile (configurable in harvest_config.json)
-    Times out after 10 minutes.
+    Profile directory: data/chrome_profile[_<account>] (base configurable in
+    harvest_config.json). Times out after 10 minutes.
     """
     from app.scrapers.browser_manager import PersistentBrowserManager
-    from app.services.session_manager import SessionManager
+    from app.services.session_manager import SessionManager, account_profile_dir
 
+    account        = (body.account if body else "1")
     config         = ConfigService().load()
-    chrome_profile = config.browser.chrome_profile
+    chrome_profile = account_profile_dir(config.browser.chrome_profile, account)
 
     async def _open_for_login() -> dict:
         from pathlib import Path as _Path
@@ -362,11 +378,12 @@ async def setup_linkedin_session() -> Any:
                         msg = "Session already valid — skipping login page.",
                         url = page.url,
                     )
-                    sm = SessionManager("linkedin")
+                    sm = SessionManager("linkedin", account)
                     await sm.save_session(page)
                     return {
                         "auth_status": "logged_in",
                         "action":      "session_reused",
+                        "account":     account,
                         "profile":     chrome_profile,
                     }
                 # li_at missing: LinkedIn served cached shell without auth token
@@ -434,10 +451,11 @@ async def setup_linkedin_session() -> Any:
                 raise RuntimeError("Setup timed out — login not completed within 10 minutes")
 
             # ── Step 4: Persist to Chrome profile (auto) + sessions JSON ────
-            sm = SessionManager("linkedin")
+            sm = SessionManager("linkedin", account)
             await sm.save_session(page)
             logger.info(
                 "linkedin_session_saved",
+                account      = account,
                 profile      = chrome_profile,
                 session_file = str(sm.session_path),
                 msg          = "Session saved. Future runs will reuse it automatically.",
@@ -446,6 +464,7 @@ async def setup_linkedin_session() -> Any:
         return {
             "auth_status": "logged_in",
             "action":      "logged_in_and_saved",
+            "account":     account,
             "profile":     chrome_profile,
         }
 
@@ -460,7 +479,7 @@ async def setup_linkedin_session() -> Any:
             **result,
         }
     except Exception as exc:
-        logger.error("linkedin_setup_session_failed", error=str(exc))
+        logger.error("linkedin_setup_session_failed", account=account, error=str(exc))
         return _err("Failed to set up LinkedIn session", str(exc))
 
 

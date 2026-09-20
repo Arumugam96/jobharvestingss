@@ -32,6 +32,11 @@ class SourcesConfig(BaseModel):
     linkedin: bool = True
     naukri:   bool = False
     dice:     bool = False
+    # Which saved LinkedIn account (session/profile) the harvest runs under.
+    # "1" is the original single-account identity (backward compatible); "2" is
+    # a second account with its own session file + Chrome profile. Selected in
+    # the Rule Engine UI. See app/services/session_manager.py (account keying).
+    linkedin_account: str = "1"
 
 
 # ══════════════════════════════════════════════════════════════════════════════

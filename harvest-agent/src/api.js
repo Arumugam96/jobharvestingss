@@ -145,9 +145,11 @@ export function getRunHistoryEntry(runId) {
   return request(`/run-history/${runId}`);
 }
 
-/** POST /linkedin-setup-session — opens a Chrome window for one-time manual LinkedIn login. Blocks up to 10 min. */
-export function setupLinkedinSession() {
-  return request("/linkedin-setup-session", { method: "POST" });
+/** POST /linkedin-setup-session — opens a Chrome window for one-time manual LinkedIn
+ * login for the given account ("1" or "2"). Each account uses its own session file
+ * + Chrome profile. Blocks up to 10 min. */
+export function setupLinkedinSession(account = "1") {
+  return request("/linkedin-setup-session", { method: "POST", body: JSON.stringify({ account }) });
 }
 
 /** POST /naukri-setup-session — opens a Chrome window for one-time manual Naukri login. Blocks up to 10 min. */

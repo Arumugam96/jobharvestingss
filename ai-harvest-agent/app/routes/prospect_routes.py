@@ -25,6 +25,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from app.agents.prospect_intelligence_agent import ProspectIntelligenceAgent
+from app.config import get_settings
 from app.core.proactor import needs_proactor, run_in_proactor
 
 logger = structlog.get_logger(__name__)
@@ -46,10 +47,11 @@ class ProspectIntelligenceRequest(BaseModel):
         description="Path to prospects.xlsx (columns: Client Name, Poc Name, Designation)",
     )
     concurrency: int = Field(
-        default=2,
+        default=1,
         ge=1,
         le=5,
-        description="Max parallel LinkedIn searches (1–5; default 2 to avoid rate-limiting)",
+        description="Deprecated/ignored — profile visits are always run sequentially "
+                    "(concurrency is clamped to 1) to avoid LinkedIn rate-limiting.",
     )
 
 
@@ -86,6 +88,19 @@ async def run_prospect_intelligence(
     - `data/results/lead_intelligence/<run_id>_lead_intelligence.json`
     - Intermediate JSON saves every 25 records
     """
+    # Master switch — this tool visits /in/ profiles and is NOT part of the
+    # normal harvest pipeline, so it's off by default to avoid accidental
+    # high-volume profile access. Enable via PROSPECT_INTELLIGENCE_ENABLED=true.
+    if not get_settings().prospect_intelligence_enabled:
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status":  "disabled",
+                "message": "Prospect Intelligence is disabled. Set "
+                           "PROSPECT_INTELLIGENCE_ENABLED=true to enable it.",
+            },
+        )
+
     input_path = body.input_file
     if not Path(input_path).exists():
         return JSONResponse(

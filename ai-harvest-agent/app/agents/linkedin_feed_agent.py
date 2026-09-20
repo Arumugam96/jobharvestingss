@@ -352,25 +352,29 @@ class LinkedInFeedAgent:
         leads. Raises FeedAuthError when the session is not authenticated."""
         from app.scrapers.browser_manager import BrowserManager, PersistentBrowserManager
         from app.services.config_service import ConfigService
-        from app.services.session_manager import SessionManager
+        from app.services.session_manager import SessionManager, account_profile_dir
 
-        chrome_profile = ConfigService().load().browser.chrome_profile
-        sm = SessionManager("linkedin")
+        _cfg           = ConfigService().load()
+        chrome_profile = _cfg.browser.chrome_profile
+        account        = _cfg.sources.linkedin_account
+        sm = SessionManager("linkedin", account)
         storage_state_arg = sm.storage_state_arg()
 
         if storage_state_arg:
-            logger.debug("linkedin_feed_using_session_file", session_file=storage_state_arg)
+            logger.debug("linkedin_feed_using_session_file", session_file=storage_state_arg, account=account)
             browser_ctx = BrowserManager(
                 headless=headless, slow_mo=slow_mo, storage_state=storage_state_arg,
             )
         else:
+            account_profile = account_profile_dir(chrome_profile, account)
             logger.warning(
                 "linkedin_feed_no_session_file",
-                hint="No data/sessions/linkedin_session.json — falling back to Chrome profile. "
-                     "Run POST /linkedin-setup-session to create it.",
+                account=account,
+                hint=f"No session file at {sm.session_path} — falling back to Chrome profile "
+                     f"{account_profile}. Run POST /linkedin-setup-session to create it.",
             )
             browser_ctx = PersistentBrowserManager(
-                profile_dir=chrome_profile, headless=headless, slow_mo=slow_mo,
+                profile_dir=account_profile, headless=headless, slow_mo=slow_mo,
             )
 
         async with browser_ctx as bm:

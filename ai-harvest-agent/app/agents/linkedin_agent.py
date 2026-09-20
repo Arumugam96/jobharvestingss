@@ -53,6 +53,7 @@ from app.core.linkedin_geo import resolve_geo
 from app.models.harvest_models import FiltersConfig
 from app.models.harvest_run import LlmCallType
 from app.scrapers.browser_manager import PersistentBrowserManager
+from app.scrapers.human import human_scroll
 from app.services import run_guard
 
 if TYPE_CHECKING:
@@ -1023,11 +1024,27 @@ class LinkedInAgent:
     # Recruiter contact-discovery post-harvest pass (see _enrich_recruiters) —
     # separate concern from the job-extraction LLM fallback above but shares
     # its call counter/cap (_llm_fallback_calls / _LLM_FALLBACK_MAX_CALLS_PER_RUN).
-    _RECRUITER_CONTACT_SCRAPE_CAP = 50
+    # Fallback default for the per-run NEW-profile-visit cap; the effective value
+    # comes from settings.linkedin_recruiter_visit_cap (read in __init__).
+    _RECRUITER_CONTACT_SCRAPE_CAP = 25
 
     def __init__(self, llm_service: "LLMService | None" = None) -> None:
-        self._llm_service        = llm_service or get_llm_service(get_settings())
+        _settings                = get_settings()
+        self._llm_service        = llm_service or get_llm_service(_settings)
         self._llm_fallback_calls = 0
+        # Anti-detection knobs for the recruiter profile-visit pass — a per-run
+        # cap on NEW /in/ visits and a human-like randomized gap between them.
+        # See _enrich_recruiters (the account was restricted for "high volume of
+        # profile data"; back-to-back, unbounded /in/ opens were the cause).
+        self._recruiter_visit_cap        = int(
+            getattr(_settings, "linkedin_recruiter_visit_cap", self._RECRUITER_CONTACT_SCRAPE_CAP)
+        )
+        self._profile_visit_delay_min_ms = int(
+            getattr(_settings, "linkedin_profile_visit_delay_min_ms", 8_000)
+        )
+        self._profile_visit_delay_max_ms = int(
+            getattr(_settings, "linkedin_profile_visit_delay_max_ms", 25_000)
+        )
         # Jobs whose LLM extraction hit a total provider outage (local + fallback
         # both down). Instead of aborting the run we keep the selector-only data
         # and stash the replayable extraction payload here; the route persists it
@@ -1088,7 +1105,9 @@ class LinkedInAgent:
         (user must call POST /linkedin-setup-session first).
         """
         from app.services.config_service import ConfigService
-        chrome_profile = ConfigService().load().browser.chrome_profile
+        _cfg           = ConfigService().load()
+        chrome_profile = _cfg.browser.chrome_profile
+        account        = _cfg.sources.linkedin_account
 
         logger.info(
             "config_loaded",
@@ -1101,6 +1120,7 @@ class LinkedInAgent:
             search_window_hours = filters.search_window_hours,
             max_jobs            = filters.max_jobs,
             chrome_profile      = chrome_profile,
+            linkedin_account    = account,
         )
         logger.info(
             "linkedin_agent_started",
@@ -1112,27 +1132,31 @@ class LinkedInAgent:
             chrome_profile = chrome_profile,
         )
         # Prefer session JSON (portable, always up to date after /linkedin-setup-session).
-        # Fall back to profile directory only when no session file exists.
+        # Fall back to profile directory only when no session file exists. Both are
+        # resolved per selected LinkedIn account so account "2" uses its own
+        # session file + isolated Chrome profile (account "1" == original paths).
         from app.scrapers.browser_manager import BrowserManager
-        from app.services.session_manager import SessionManager
-        sm = SessionManager("linkedin")
+        from app.services.session_manager import SessionManager, account_profile_dir
+        sm = SessionManager("linkedin", account)
         storage_state_arg = sm.storage_state_arg()
 
         if storage_state_arg:
-            logger.info("linkedin_using_session_file", session_file=storage_state_arg)
+            logger.info("linkedin_using_session_file", session_file=storage_state_arg, account=account)
             browser_ctx = BrowserManager(
                 headless      = headless,
                 slow_mo       = slow_mo,
                 storage_state = storage_state_arg,
             )
         else:
+            account_profile = account_profile_dir(chrome_profile, account)
             logger.warning(
                 "linkedin_no_session_file",
-                hint="No data/sessions/linkedin_session.json found — falling back to Chrome profile. "
-                     "Call POST /linkedin-setup-session to create the session file.",
+                account=account,
+                hint=f"No session file at {sm.session_path} — falling back to Chrome profile "
+                     f"{account_profile}. Call POST /linkedin-setup-session to create the session file.",
             )
             browser_ctx = PersistentBrowserManager(
-                profile_dir = chrome_profile,
+                profile_dir = account_profile,
                 headless    = headless,
                 slow_mo     = slow_mo,
             )
@@ -1545,18 +1569,27 @@ class LinkedInAgent:
         for recruiter identity/contact info — jobs are grouped by normalized
         recruiter LinkedIn URL (see _group_recruiters_for_enrichment), one
         RecruiterORM row is found-or-created per unique URL, and each
-        profile is visited at most once (across runs, not just this one —
-        a recruiter already fully enriched from a previous run is skipped
-        entirely) using the SAME authenticated page's browser context this
-        harvest just used, in a fresh tab that's always closed.
+        profile's /in/ page is opened AT MOST ONCE, EVER, using the SAME
+        authenticated page's browser context this harvest just used, in a
+        fresh tab that's always closed.
 
-        Capped at _RECRUITER_CONTACT_SCRAPE_CAP *profile visits* per run
-        (identity resolution/DB linking for the rest still happens — only
-        the expensive browser visit is capped). Every recruiter is
-        individually try/excepted: a DB outage, LinkedIn nav failure,
-        Contact Info miss, or LLM error affects only that one recruiter,
-        never the harvest's already-collected job list (the caller in _run
-        also wraps this whole method for the same reason).
+        A recruiter visited on any previous run (recruiter.last_enriched_at is
+        not None) is NOT re-opened — later runs re-check contact info only via
+        Apollo, which self-gates on settings.apollo_recheck_days. This is the
+        primary safeguard against LinkedIn restricting the account for "high
+        volume of profile data": the dominant cause was re-visiting the same
+        NOT_FOUND profiles on every run. A human-like randomized pause
+        (settings.linkedin_profile_visit_delay_*) separates consecutive real
+        visits.
+
+        NEW profile visits are capped at self._recruiter_visit_cap
+        (settings.linkedin_recruiter_visit_cap) *per run* — already-visited
+        recruiters don't count against it (identity resolution / DB job-linking
+        for them still happens; only the browser visit is skipped). Every
+        recruiter is individually try/excepted: a DB outage, LinkedIn nav
+        failure, Contact Info miss, or LLM error affects only that one
+        recruiter, never the harvest's already-collected job list (the caller
+        in _run also wraps this whole method for the same reason).
         """
         groups = _group_recruiters_for_enrichment(jobs)
         if not groups:
@@ -1577,11 +1610,11 @@ class LinkedInAgent:
 
         logger.info(
             "recruiter_enrichment_pass_started",
-            unique_recruiters=len(groups), cap=self._RECRUITER_CONTACT_SCRAPE_CAP,
+            unique_recruiters=len(groups), cap=self._recruiter_visit_cap,
         )
         logger.debug(
             "recruiter_enrichment_pass_started",
-            unique_recruiters=len(groups), cap=self._RECRUITER_CONTACT_SCRAPE_CAP,
+            unique_recruiters=len(groups), cap=self._recruiter_visit_cap,
         )
 
         for norm_url, group_jobs in groups.items():
@@ -1615,16 +1648,22 @@ class LinkedInAgent:
                     already_email = recruiter.email_status in ("VERIFIED", "PUBLIC")
                     already_phone = recruiter.phone_status in ("VERIFIED", "PUBLIC")
                     apollo_last   = recruiter.apollo_enriched_at  # for the Apollo recheck cooldown
+                    # last_enriched_at is stamped after EVERY contact-discovery
+                    # pass (save_enrichment below), so a non-null value means this
+                    # /in/ page was already opened on a previous run. We open each
+                    # profile AT MOST ONCE, ever — later runs re-check contact info
+                    # only via Apollo (self-gated on apollo_recheck_days).
+                    ever_visited  = recruiter.last_enriched_at is not None
                     await db.commit()
             except Exception as exc:
                 logger.warning("recruiter_upsert_failed", url=norm_url, error=str(exc))
                 continue
 
             if already_email and already_phone:
-                # Already fully enriched by a previous run — the "visit
-                # each unique recruiter profile only once" rule extends
-                # across runs, so skip the visit but still backfill any
-                # ScrapedJobORM rows from *this* run that reference them.
+                # Already fully enriched by a previous run — the "visit each
+                # unique recruiter profile only once" rule extends across runs,
+                # so skip the visit but still backfill any ScrapedJobORM rows
+                # from *this* run that reference them.
                 try:
                     async with session_factory() as db:
                         await link_recruiter_jobs_by_url(db, recruiter_id, norm_url)
@@ -1633,39 +1672,70 @@ class LinkedInAgent:
                     logger.warning("recruiter_job_link_failed", url=norm_url, error=str(exc))
                 continue
 
-            if visited >= self._RECRUITER_CONTACT_SCRAPE_CAP:
-                logger.info(
-                    "recruiter_contact_scrape_cap_reached",
-                    cap=self._RECRUITER_CONTACT_SCRAPE_CAP, unique_recruiters=len(groups),
-                )
-                break
-
-            visited += 1
             contact_page: Page | None = None
             contact_info: dict = {"email": "", "phone": "", "headline": "", "location": ""}
             apollo_result = None
+
+            # ── LinkedIn profile visit — FIRST TIME ONLY ──────────────────────
+            # A recruiter already opened on a previous run is never re-opened
+            # (the primary "high volume of profile data" safeguard). Only new
+            # profiles are visited, and only up to the per-run cap.
+            if not ever_visited:
+                if visited >= self._recruiter_visit_cap:
+                    logger.info(
+                        "recruiter_contact_scrape_cap_reached",
+                        cap=self._recruiter_visit_cap, unique_recruiters=len(groups),
+                    )
+                    break
+
+                visited += 1
+                try:
+                    contact_page = await page.context.new_page()
+                    contact_info = await _extract_linkedin_contact_info(
+                        contact_page, norm_url, llm_service=self._get_llm_service(),
+                    )
+
+                    if not contact_info.get("email") and not contact_info.get("phone"):
+                        llm_contact = await self._llm_fallback_extract_contact(contact_page, norm_url)
+                        if llm_contact.get("email"):
+                            contact_info["email"] = llm_contact["email"]
+                        if llm_contact.get("phone"):
+                            contact_info["phone"] = llm_contact["phone"]
+                except Exception as exc:
+                    logger.warning("recruiter_contact_visit_failed", url=norm_url, error=str(exc))
+                finally:
+                    if contact_page:
+                        try:
+                            await contact_page.close()
+                        except Exception:
+                            pass
+                    # Human-like randomized pause AFTER each real profile visit,
+                    # before moving to the next recruiter — back-to-back /in/
+                    # opens are a strong bot signal (A2).
+                    try:
+                        await _delay(
+                            page,
+                            self._profile_visit_delay_min_ms,
+                            self._profile_visit_delay_max_ms,
+                        )
+                    except Exception:
+                        pass
+            else:
+                logger.info("recruiter_profile_visit_skipped_already_visited", url=norm_url)
+
+            # ── Apollo fallback — reachable on the first visit AND on later runs
+            # for an already-visited recruiter (self-gates on apollo_recheck_days
+            # via apollo_last). `already_*` reflect what we already hold in the DB
+            # so Apollo never re-searches a field we already have.
             try:
-                contact_page = await page.context.new_page()
-                contact_info = await _extract_linkedin_contact_info(
-                    contact_page, norm_url, llm_service=self._get_llm_service(),
-                )
-
-                if not contact_info.get("email") and not contact_info.get("phone"):
-                    llm_contact = await self._llm_fallback_extract_contact(contact_page, norm_url)
-                    if llm_contact.get("email"):
-                        contact_info["email"] = llm_contact["email"]
-                    if llm_contact.get("phone"):
-                        contact_info["phone"] = llm_contact["phone"]
-
-                # Last-resort tier: LLM/regex found no email → ask Apollo by URL.
-                if not contact_info.get("email"):
+                if not (already_email or contact_info.get("email")):
                     apollo_result = await apollo_contact_fallback(
                         settings=settings,
                         linkedin_url=norm_url,
                         person_name=person_name,
                         company_name=company_name,
-                        already_email=bool(contact_info.get("email")),
-                        already_phone=bool(contact_info.get("phone")),
+                        already_email=already_email or bool(contact_info.get("email")),
+                        already_phone=already_phone or bool(contact_info.get("phone")),
                         apollo_enriched_at=apollo_last,
                     )
                     if apollo_result.email:
@@ -1697,13 +1767,7 @@ class LinkedInAgent:
                                 if org.state and not apollo_result.company_state:
                                     apollo_result.company_state = org.state
             except Exception as exc:
-                logger.warning("recruiter_contact_visit_failed", url=norm_url, error=str(exc))
-            finally:
-                if contact_page:
-                    try:
-                        await contact_page.close()
-                    except Exception:
-                        pass
+                logger.warning("recruiter_apollo_fallback_failed", url=norm_url, error=str(exc))
 
             found_email = bool(contact_info.get("email"))
             found_phone = bool(contact_info.get("phone"))
@@ -2159,31 +2223,18 @@ class LinkedInAgent:
         if not container:
             logger.info("jobs_container_not_found", source="linkedin", selectors_tried=_Sel.CONTAINER)
 
+        # Incremental, human-like scrolling (see app/scrapers/human.py) instead
+        # of jump-to-bottom scrollTo(scrollHeight) — the latter is an obvious
+        # automation tell. Terminates when the lazy-loaded list stops growing, so
+        # every card still lands in the DOM for _extract_cards (which reads by
+        # selector, not viewport position).
         if container:
-            prev_h = -1
-            iterations = 0
-            for _ in range(25):
-                h = await container.evaluate("el => el.scrollHeight")
-                if h == prev_h:
-                    break
-                prev_h = h
-                await container.evaluate("el => el.scrollTo(0, el.scrollHeight)")
-                await _delay(page, 400, 800)
-                iterations += 1
-            logger.debug("linkedin_scroll_done", mode="container", selector=matched_sel, iterations=iterations, final_height=prev_h)
+            iterations = await human_scroll(page, container=container, max_rounds=40)
+            logger.debug("linkedin_scroll_done", mode="container", selector=matched_sel, iterations=iterations)
         else:
             logger.debug("linkedin_no_container_scrolling_window")
-            prev_h = -1
-            iterations = 0
-            for _ in range(15):
-                h = await page.evaluate("document.body.scrollHeight")
-                if h == prev_h:
-                    break
-                prev_h = h
-                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                await _delay(page, 600, 1_000)
-                iterations += 1
-            logger.debug("linkedin_scroll_done", mode="window", iterations=iterations, final_height=prev_h)
+            iterations = await human_scroll(page, container=None, max_rounds=30)
+            logger.debug("linkedin_scroll_done", mode="window", iterations=iterations)
 
     # ── Card extraction ────────────────────────────────────────────────────────
 

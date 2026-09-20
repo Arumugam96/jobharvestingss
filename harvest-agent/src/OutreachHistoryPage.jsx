@@ -240,12 +240,12 @@ export default function OutreachHistoryPage() {
   };
 
   return (
-    <main className="ha-main" style={{ padding: "24px 24px 32px" }}>
+    <main className="ha-main" style={{ padding: "15px 15px 24px" }}>
       <div className="ha-page-head" style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 8 }}>
         <div>
           <h1 style={{ fontSize: 24, fontWeight: 800, margin: 0, letterSpacing: "-.02em" }}>Mail logs</h1>
-          <div style={{ color: "#64748B", fontSize: 13, marginTop: 6, maxWidth: "56ch" }}>
-            Every outreach email sent from HarvestAgent, with delivery status and engagement per point of contact. Open a row to read the message and follow up.
+          <div style={{ color: "#64748B", fontSize: 13, marginTop: 3, maxWidth: "56ch" }}>
+            Every outreach email sent using HarvestAgent, with delivery status and engagement per point of contact. Open a row to read the message and follow up.
           </div>
         </div>
         <div style={{ display: "flex", gap: 9 }}>

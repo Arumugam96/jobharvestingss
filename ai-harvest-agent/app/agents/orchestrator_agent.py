@@ -637,6 +637,7 @@ class OrchestratorAgent:
         from app.scrapers.browser_manager import PersistentBrowserManager
         from app.scrapers.dice_scraper import DiceScrapedJob, DiceScraper
         from app.services.llm_service import empty_usage_summary
+        from app.services.session_manager import account_profile_dir
 
         results:  dict[str, list[UnifiedJob]] = {}
         # Populated by _harvest_linkedin so token usage survives even if that
@@ -651,8 +652,24 @@ class OrchestratorAgent:
 
         logger.info("orchestrator_parallel_start", sources=enabled)
 
+        # Launch the shared browser under the SELECTED LinkedIn account's Chrome
+        # profile so account "2" reuses its own saved session (account "1"/default
+        # → the original profile, unchanged). LinkedInAgent auto-logs-in via env
+        # credentials if that profile isn't authenticated yet. NOTE: this shared
+        # context is also used by Naukri/Dice when enabled in the same run — for a
+        # non-default account they'd use the account-suffixed profile too; the
+        # account selector is a LinkedIn concern, so run other sources under
+        # account "1" if they need their own saved sessions.
+        linkedin_profile = account_profile_dir(
+            config.browser.chrome_profile, config.sources.linkedin_account,
+        )
+        logger.info(
+            "orchestrator_profile_selected",
+            linkedin_account=config.sources.linkedin_account, profile_dir=linkedin_profile,
+        )
+
         async with PersistentBrowserManager(
-            profile_dir = config.browser.chrome_profile,
+            profile_dir = linkedin_profile,
             headless    = config.browser.headless,
             slow_mo     = config.browser.slow_mo_ms,
         ) as pbm:

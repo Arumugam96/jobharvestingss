@@ -31,6 +31,23 @@ logger = structlog.get_logger(__name__)
 
 _SESSIONS_DIR = Path("data/sessions")
 
+# Account ids that resolve to the ORIGINAL single-account paths (session file
+# and Chrome profile dir), so existing sessions keep working unchanged.
+_DEFAULT_ACCOUNTS = {None, "", "1", "default", "primary"}
+
+
+def account_profile_dir(base_profile: str, account: str | None) -> str:
+    """Resolve a per-account persistent Chrome profile directory.
+
+    The default account reuses the shared `base_profile` (backward compatible).
+    Any other account gets its own suffixed sibling dir (e.g. `data/chrome_profile_2`)
+    so a second LinkedIn login can't detect / overwrite the first account's
+    `li_at` cookie in a shared profile.
+    """
+    if account in _DEFAULT_ACCOUNTS:
+        return base_profile
+    return f"{base_profile}_{account}"
+
 # Per-source configuration
 _SOURCE_CONFIG: dict[str, dict] = {
     "linkedin": {
@@ -80,15 +97,30 @@ class SessionManager:
     Parameters
     ──────────
     source   One of "linkedin", "naukri", "dice".
+    account  Optional account id. The default account (None/"1"/"default"/
+             "primary") uses the original session filename so existing sessions
+             keep working; any other id gets its own suffixed file
+             (e.g. "linkedin_session_2.json").
     """
 
-    def __init__(self, source: str) -> None:
+    def __init__(self, source: str, account: str | None = None) -> None:
         if source not in _SOURCE_CONFIG:
             raise ValueError(f"Unknown source '{source}'. Valid: {list(_SOURCE_CONFIG)}")
         self._source  = source
+        self._account = account
         self._cfg     = _SOURCE_CONFIG[source]
-        self._path    = _SESSIONS_DIR / self._cfg["session_file"]
+        self._path    = _SESSIONS_DIR / self._session_filename()
         _SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+
+    def _session_filename(self) -> str:
+        """Session filename keyed by account. Default account keeps the base
+        filename (backward compatible); other accounts insert the id before the
+        extension: "linkedin_session.json" → "linkedin_session_2.json"."""
+        base = self._cfg["session_file"]
+        if self._account in _DEFAULT_ACCOUNTS:
+            return base
+        stem, dot, ext = base.rpartition(".")
+        return f"{stem}_{self._account}{dot}{ext}" if dot else f"{base}_{self._account}"
 
     # ── Path helpers ───────────────────────────────────────────────────────────
 
@@ -196,6 +228,7 @@ class SessionManager:
         exists = self.session_exists()
         info: dict = {
             "source":       self._source,
+            "account":      self._account or "1",
             "session_file": str(self._path),
             "exists":       exists,
         }

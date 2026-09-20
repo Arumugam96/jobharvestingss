@@ -34,6 +34,7 @@ import structlog
 
 from app.core.contact_normalize import normalize_email, normalize_phone
 from app.models.harvest_run import LlmCallType
+from app.scrapers.human import human_click
 from app.models.prospect_models import (
     ProspectIntelligenceResult,
     ProspectRecord,
@@ -833,7 +834,9 @@ async def _extract_linkedin_contact_info(
             try:
                 btn = await page.query_selector(sel)
                 if btn:
-                    await btn.click()
+                    # Hover-then-click near the element centre rather than an
+                    # instantaneous programmatic click (anti-detection).
+                    await human_click(page, btn)
                     await page.wait_for_timeout(1800)
                     clicked = True
                     break
@@ -1062,8 +1065,19 @@ class ProspectIntelligenceAgent:
     """
 
     def __init__(self, concurrency: int = _DEFAULT_CONCURRENCY) -> None:
-        self._concurrency = max(1, min(concurrency, 5))
+        # Force SEQUENTIAL profile visits regardless of the requested value —
+        # parallel /in/ opens are a strong bot signal. The `concurrency` param is
+        # kept for backward compatibility but is always clamped to 1.
+        if concurrency and concurrency > 1:
+            logger.info("prospect_concurrency_clamped", requested=concurrency, effective=1)
+        self._concurrency = 1
         self._llm_service: Any = None
+        # Human-like gap (ms) inserted between sequential prospect profile visits,
+        # shared with the harvest recruiter pass (see _enrich_one below).
+        from app.config import get_settings
+        _s = get_settings()
+        self._visit_delay_min_ms = int(getattr(_s, "linkedin_profile_visit_delay_min_ms", 8_000))
+        self._visit_delay_max_ms = int(getattr(_s, "linkedin_profile_visit_delay_max_ms", 25_000))
 
     def _get_llm_service(self) -> Any:
         """Lazily build an LLMService from Settings — used as the authoritative
@@ -1126,6 +1140,18 @@ class ProspectIntelligenceAgent:
                 finally:
                     try:
                         await page.close()
+                    except Exception:
+                        pass
+                    # Human-like gap between sequential prospect profile visits,
+                    # held while the (size-1) semaphore is still owned so the next
+                    # prospect can't start until the pause elapses (anti-detection).
+                    try:
+                        await asyncio.sleep(
+                            random.uniform(
+                                self._visit_delay_min_ms / 1000.0,
+                                self._visit_delay_max_ms / 1000.0,
+                            )
+                        )
                     except Exception:
                         pass
 

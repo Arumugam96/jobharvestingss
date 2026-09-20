@@ -282,7 +282,6 @@ async def send_email(
             body=body.body,
             from_email=from_email or None,
             reply_to=from_email or None,
-            bcc=get_settings().outreach_bcc_recipients,
             as_html=True,
             job_title=job_title,
             job_url=job_url,

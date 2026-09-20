@@ -8,6 +8,8 @@ and nothing is written until an explicit save is requested.
 from __future__ import annotations
 
 import json
+import os
+import re
 from pathlib import Path
 
 import structlog
@@ -27,10 +29,46 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _CONFIG_PATH  = _PROJECT_ROOT / "data" / "config" / "harvest_config.json"
 
 
+# Matches a Windows drive-absolute path like "C:\..." or "C:/...".
+_WINDOWS_ABS_RE = re.compile(r"^[A-Za-z]:[\\/]")
+
+
 def _resolve_chrome_profile(value: str) -> str:
-    """Anchor a relative chrome_profile path to _PROJECT_ROOT; leave an
-    already-absolute path (e.g. an operator-supplied override) untouched."""
-    p = Path(value)
+    """Resolve the configured chrome_profile to an absolute path anchored at
+    _PROJECT_ROOT.
+
+    - A relative value is anchored under _PROJECT_ROOT.
+    - A genuine same-OS absolute override is honored untouched.
+    - A path that is absolute for a *different* OS than the one we're running on
+      (a Windows "C:\\..."/backslash value seen inside a Linux container, or a
+      POSIX "/..." value on Windows) is neither valid-absolute nor sanely
+      relative here: anchoring it verbatim silently creates a garbage profile
+      dir (e.g. "/app/C:\\app\\data\\chrome_profile") that has no saved session,
+      which surfaces as a spurious LinkedIn re-login on every run. Detect that
+      cross-platform-contaminated shape and normalize it to
+      _PROJECT_ROOT/data/<basename> with a loud warning instead.
+    """
+    raw = value or ""
+    on_windows = os.name == "nt"
+    looks_windows_abs = bool(_WINDOWS_ABS_RE.match(raw)) or "\\" in raw
+    looks_posix_abs   = raw.startswith("/")
+    foreign = (looks_windows_abs and not on_windows) or (looks_posix_abs and on_windows)
+
+    if foreign:
+        # Final path segment regardless of separator style; keep it under data/.
+        basename = re.split(r"[\\/]", raw.rstrip("\\/"))[-1] or "chrome_profile"
+        fallback = _PROJECT_ROOT / "data" / basename
+        logger.warning(
+            "chrome_profile_foreign_path_normalized",
+            configured = raw,
+            normalized = str(fallback),
+            hint = "chrome_profile looked absolute for a different OS "
+                   "(cross-platform config contamination) — normalized to the "
+                   "project data/ dir so the saved session profile is still found.",
+        )
+        return str(fallback)
+
+    p = Path(raw)
     return str(p) if p.is_absolute() else str(_PROJECT_ROOT / p)
 
 
