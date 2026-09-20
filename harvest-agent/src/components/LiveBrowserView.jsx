@@ -18,7 +18,13 @@ export default function LiveBrowserView({ title, onClose }) {
     const rfb = new RFB(containerRef.current, url);
     rfb.scaleViewport = true;
     rfb.resizeSession = false;
-    const onConnect = () => setStatus("connected");
+    rfb.viewOnly = false;
+    const onConnect = () => {
+      setStatus("connected");
+      // Give the canvas keyboard focus so typing (credentials/OTP) works
+      // without an extra click; mouse input is captured regardless.
+      try { rfb.focus(); } catch { /* not focusable yet */ }
+    };
     const onDisconnect = () => setStatus("error");
     rfb.addEventListener("connect", onConnect);
     rfb.addEventListener("disconnect", onDisconnect);
@@ -94,8 +100,13 @@ const styles = `
   .lbv-canvas {
     width: 100%; flex: 1 1 auto; min-height: 0;
     background: #000;
+    /* Center the canvas that noVNC sizes via scaleViewport. Do NOT override the
+       inner canvas width/height — noVNC computes click coordinates from the
+       canvas rect, so forcing 100%/object-fit letterboxes it and makes clicks
+       land off-target (esp. on small reCAPTCHA tiles). */
+    display: flex; align-items: center; justify-content: center;
+    overflow: hidden;
   }
-  .lbv-canvas canvas { width: 100% !important; height: 100% !important; object-fit: contain; }
   .lbv-spin { animation: lbv-rot 0.9s linear infinite; }
   @keyframes lbv-rot { to { transform: rotate(360deg); } }
 `;
