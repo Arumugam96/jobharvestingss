@@ -462,6 +462,7 @@ async def outreach_history(
     company: str = Query(default="", description="List branch: company name (partial)."),
     date_from: str = Query(default="", description="List branch: sent on/after (YYYY-MM-DD)."),
     date_to: str = Query(default="", description="List branch: sent on/before (YYYY-MM-DD)."),
+    engagement: str = Query(default="", description="List branch: one engagement-card bucket (opened/clicked/unsubscribed/blocked/bounced)."),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=100, ge=1, le=500),
     current_user: AuthenticatedUser = Depends(get_current_user),
@@ -478,7 +479,8 @@ async def outreach_history(
 
     rows, total = await recent_outreach(
         db, search=search or None, company=company or None,
-        date_from=date_from or None, date_to=date_to or None, page=page, page_size=page_size,
+        date_from=date_from or None, date_to=date_to or None,
+        engagement=engagement or None, page=page, page_size=page_size,
     )
     names = await contact_names_for_rows(db, rows)
     return {

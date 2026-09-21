@@ -330,11 +330,28 @@ def _parse_day(raw: str | None, *, end: bool = False) -> datetime | None:
     return d + timedelta(days=1) if end else d
 
 
-def _apply_list_filters(stmt, *, search=None, company=None, date_from=None, date_to=None):
+def _engagement_predicate(engagement: str | None):
+    """Map a Mail-logs engagement-card key to its row predicate. MUST mirror the
+    bucket counts in `outreach_list_stats` so a card's number matches the rows it
+    filters to (e.g. 'opened' uses `opened_at IS NOT NULL`, which — since a click
+    implies an open — includes clicked rows, exactly like the count). Returns None
+    for an unknown/empty key so callers can no-op."""
+    if not engagement:
+        return None
+    key = engagement.strip().lower()
+    if key == "opened":
+        return EmailOutreachORM.opened_at.isnot(None)
+    if key in ("clicked", "unsubscribed", "blocked", "bounced"):
+        return EmailOutreachORM.delivery_status == key
+    return None
+
+
+def _apply_list_filters(stmt, *, search=None, company=None, date_from=None, date_to=None, engagement=None):
     """Apply the Mail-logs list filters to a base `select(EmailOutreachORM)`:
       * `search` (point of contact) → joined poster/recruiter name OR recipient email
       * `company` → EmailOutreachORM.company (real column)
       * `date_from`/`date_to` → created_at range (end is inclusive)
+      * `engagement` → one engagement-card bucket (opened/clicked/unsubscribed/blocked/bounced)
     Outerjoins to scraped_jobs/recruiters are 1:1 on the PK, so no row multiplication."""
     if search:
         like = f"%{search.strip()}%"
@@ -358,6 +375,9 @@ def _apply_list_filters(stmt, *, search=None, company=None, date_from=None, date
         stmt = stmt.where(EmailOutreachORM.created_at >= df)
     if dt is not None:
         stmt = stmt.where(EmailOutreachORM.created_at < dt)
+    eng = _engagement_predicate(engagement)
+    if eng is not None:
+        stmt = stmt.where(eng)
     return stmt
 
 
@@ -368,6 +388,7 @@ async def recent_outreach(
     company: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
+    engagement: str | None = None,
     page: int = 1,
     page_size: int = 100,
 ) -> tuple[list[EmailOutreachORM], int]:
@@ -375,7 +396,8 @@ async def recent_outreach(
     Returns `(rows, total)` where `total` is the whole filtered count (across pages),
     mirroring HarvestRunService.list_scraped_jobs."""
     base = _apply_list_filters(
-        select(EmailOutreachORM), search=search, company=company, date_from=date_from, date_to=date_to
+        select(EmailOutreachORM), search=search, company=company,
+        date_from=date_from, date_to=date_to, engagement=engagement,
     )
     total = (await db.execute(select(func.count()).select_from(base.subquery()))).scalar_one()
     stmt = (

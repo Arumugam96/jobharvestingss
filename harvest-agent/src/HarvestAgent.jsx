@@ -1042,6 +1042,8 @@ function RunDetailView({ runId, onBack, onView }) {
     total: filteredRows.length,
     companies: new Set(filteredRows.map((j) => j.company)).size,
     pocs: filteredRows.filter((j) => j.poc).length,
+    emails: filteredRows.filter((j) => j.email).length,
+    whatsapp: filteredRows.filter((j) => j.whatsapp).length,
   }), [filteredRows]);
 
   function exportCsv() {
@@ -1136,6 +1138,8 @@ function RunDetailView({ runId, onBack, onView }) {
                     <span><b style={{ color: C.text }}>{jobStats.total}</b> jobs</span>
                     <span><b style={{ color: C.text }}>{jobStats.companies}</b> companies</span>
                     <span><b style={{ color: C.text }}>{jobStats.pocs}</b> POCs</span>
+                    <span><b style={{ color: C.text }}>{jobStats.emails}</b> emails</span>
+                    <span><b style={{ color: C.text }}>{jobStats.whatsapp}</b> WhatsApp</span>
                     <Select label="Rows per page" value={pageSizeSel} onChange={setPageSizeSel} options={PAGE_SIZE_OPTIONS} />
                     <button className="ha-btn ha-btn-primary" onClick={exportCsv} disabled={filteredRows.length === 0}>
                       <Download size={16} /> Export CSV

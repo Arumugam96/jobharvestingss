@@ -329,7 +329,7 @@ export function getOutreachStatus(jobIds = []) {
  * or the server-paginated + filtered recent list for the Mail logs page (returns
  * { items, total, page, page_size, total_pages }). Pass job_id/recruiter_id for the
  * thread; pass search/company/date_from/date_to/page/page_size for the list. */
-export function getOutreachHistory({ job_id, recruiter_id, limit, search, company, date_from, date_to, page, page_size } = {}) {
+export function getOutreachHistory({ job_id, recruiter_id, limit, search, company, date_from, date_to, engagement, page, page_size } = {}) {
   const qs = new URLSearchParams();
   if (job_id) qs.set("job_id", job_id);
   if (recruiter_id) qs.set("recruiter_id", recruiter_id);
@@ -338,6 +338,7 @@ export function getOutreachHistory({ job_id, recruiter_id, limit, search, compan
   if (company) qs.set("company", company);
   if (date_from) qs.set("date_from", date_from);
   if (date_to) qs.set("date_to", date_to);
+  if (engagement) qs.set("engagement", engagement);
   if (page) qs.set("page", String(page));
   if (page_size) qs.set("page_size", String(page_size));
   const q = qs.toString();

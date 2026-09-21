@@ -47,6 +47,11 @@ const STATS_CSS = `
   border:1px solid rgba(255,255,255,.75); box-shadow:0 6px 20px -12px rgba(15,23,42,.22), inset 0 1px 0 rgba(255,255,255,.7);
   transition:transform .18s ease, box-shadow .18s ease; }
 .ha-stat:hover { transform:translateY(-4px); box-shadow:0 18px 34px -14px rgba(15,23,42,.34), inset 0 1px 0 rgba(255,255,255,.85); }
+.ha-stat-btn { display:block; width:100%; text-align:left; font:inherit; color:inherit; cursor:pointer; -webkit-appearance:none; appearance:none; }
+.ha-stat-btn:focus-visible { outline:2px solid var(--c); outline-offset:2px; }
+.ha-stat.is-active { box-shadow:0 0 0 2px var(--c), 0 10px 26px -12px rgba(15,23,42,.3), inset 0 1px 0 rgba(255,255,255,.85); }
+.ha-stat.is-active:hover { box-shadow:0 0 0 2px var(--c), 0 18px 34px -14px rgba(15,23,42,.34), inset 0 1px 0 rgba(255,255,255,.85); }
+.ha-stat .clr { position:absolute; top:9px; right:10px; font-size:11px; font-weight:700; color:var(--c); opacity:.85; letter-spacing:.02em; }
 .ha-stat .lab { display:flex; align-items:center; gap:7px; font-size:12.5px; color:#64748B; font-weight:600; }
 .ha-stat .dot { width:8px; height:8px; border-radius:50%; flex:none; background:var(--c); box-shadow:0 0 0 3px var(--tint); }
 .ha-stat .row { display:flex; align-items:baseline; justify-content:space-between; gap:8px; margin-top:9px; }
@@ -62,7 +67,12 @@ const STATS_CSS = `
 // Frosted engagement panel: a big "emails delivered" total, then one glass card per
 // event with the count (left), percentage of sent (lower-right), and a bar pinned to
 // the card's bottom edge. Percentages are of `sent` (the delivered total).
-function StatsPanel({ stats }) {
+// Each event card is a clickable single-select filter: click to filter the list below
+// to that engagement bucket across the whole dataset, click again (or "Clear") to drop
+// it. `engagement` is the active bucket key; `onToggle(key)` flips it. The counts stay
+// scoped to the date+search filters (not the engagement one), so the cards remain a
+// stable legend you can switch between.
+function StatsPanel({ stats, engagement, onToggle }) {
   const base = stats.sent || 0;
   return (
     <div className="ha-stats">
@@ -75,12 +85,22 @@ function StatsPanel({ stats }) {
         {STAT_EVENTS.map((e) => {
           const count = stats[e.key] || 0;
           const pct = base > 0 ? (count / base) * 100 : 0;
+          const active = engagement === e.key;
           return (
-            <div key={e.key} className="ha-stat" style={{ "--c": e.c, "--tint": e.tint, "--tint2": e.tint2 }}>
+            <button
+              key={e.key}
+              type="button"
+              className={"ha-stat ha-stat-btn" + (active ? " is-active" : "")}
+              style={{ "--c": e.c, "--tint": e.tint, "--tint2": e.tint2 }}
+              aria-pressed={active}
+              title={active ? `Clear the ${e.label} filter` : `Filter to ${e.label}`}
+              onClick={() => onToggle(e.key)}
+            >
+              {active && <span className="clr">Clear ✕</span>}
               <div className="lab"><span className="dot" /> {e.label}</div>
               <div className="row"><span className="count">{count}</span><span className="pct">{pct.toFixed(2)}%</span></div>
               <div className="track"><div className="fill" style={{ width: `${Math.min(100, pct)}%` }} /></div>
-            </div>
+            </button>
           );
         })}
       </div>
@@ -102,6 +122,7 @@ export default function OutreachHistoryPage() {
   // the exact filtered, paged list instead of resetting everything.
   const [search, setSearch] = useState(() => searchParams.get("search") || "");        // point-of-contact name / email
   const [companyQ, setCompanyQ] = useState(() => searchParams.get("company") || "");     // company
+  const [engagement, setEngagement] = useState(() => searchParams.get("eng") || "");     // clickable stat-card bucket
   const [rangeKey, setRangeKey] = useState(() => searchParams.get("range") || "all");
   const [customFrom, setCustomFrom] = useState(() => searchParams.get("from") || "");
   const [customTo, setCustomTo] = useState(() => searchParams.get("to") || "");
@@ -141,7 +162,7 @@ export default function OutreachHistoryPage() {
   useEffect(() => {
     if (firstFilterRun.current) { firstFilterRun.current = false; return; }
     setPage(1);
-  }, [dq, dCompany, dateParams]);
+  }, [dq, dCompany, dateParams, engagement]);
 
   // Mirror the filter/page state back to the URL (replace, so it doesn't spam the
   // history stack). This is what makes `location.pathname + location.search` — the
@@ -150,21 +171,24 @@ export default function OutreachHistoryPage() {
     const sp = new URLSearchParams();
     if (search.trim()) sp.set("search", search.trim());
     if (companyQ.trim()) sp.set("company", companyQ.trim());
+    if (engagement) sp.set("eng", engagement);
     if (rangeKey && rangeKey !== "all") sp.set("range", rangeKey);
     if (customFrom) sp.set("from", customFrom);
     if (customTo) sp.set("to", customTo);
     if (page > 1) sp.set("page", String(page));
     setSearchParams(sp, { replace: true });
-  }, [search, companyQ, rangeKey, customFrom, customTo, page, setSearchParams]);
+  }, [search, companyQ, engagement, rangeKey, customFrom, customTo, page, setSearchParams]);
 
   const load = useCallback(async () => {
     const seq = ++seqRef.current;
     setLoading(true);
     setError("");
+    // Stats stay scoped to date+search only (a stable clickable legend); the list
+    // additionally narrows to the selected engagement bucket across the whole dataset.
     const filters = { search: dq, company: dCompany, ...dateParams };
     try {
       const [res, st] = await Promise.all([
-        getOutreachHistory({ ...filters, page, page_size: PAGE_SIZE }),
+        getOutreachHistory({ ...filters, engagement, page, page_size: PAGE_SIZE }),
         getOutreachStats(filters),
       ]);
       if (seq !== seqRef.current) return; // a newer request superseded this one
@@ -179,7 +203,7 @@ export default function OutreachHistoryPage() {
     } finally {
       if (seq === seqRef.current) setLoading(false);
     }
-  }, [page, dq, dCompany, dateParams]);
+  }, [page, dq, dCompany, dateParams, engagement]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -201,14 +225,16 @@ export default function OutreachHistoryPage() {
     window.open(`/mail/${encodeURIComponent(it.id)}${q}`, "_blank", "noopener");
   }, []);
 
-  const anyFilter = !!(dq || dCompany || hasDateFilter);
-  const resetFilters = () => { setSearch(""); setCompanyQ(""); setRangeKey("all"); setCustomFrom(""); setCustomTo(""); };
+  const anyFilter = !!(dq || dCompany || hasDateFilter || engagement);
+  const resetFilters = () => { setSearch(""); setCompanyQ(""); setEngagement(""); setRangeKey("all"); setCustomFrom(""); setCustomTo(""); };
+  // Single-select: clicking the active card clears the filter, any other card switches to it.
+  const toggleEngagement = useCallback((key) => setEngagement((cur) => (cur === key ? "" : key)), []);
 
   // Export the WHOLE filtered set (every page), not just the loaded page.
   const exportCsv = async () => {
     setExporting(true);
     try {
-      const filters = { search: dq, company: dCompany, ...dateParams };
+      const filters = { search: dq, company: dCompany, ...dateParams, engagement };
       const first = await getOutreachHistory({ ...filters, page: 1, page_size: PAGE_SIZE });
       let all = first.items || [];
       const pages = Math.min(first.total_pages || 1, 200); // safety cap (~20k rows)
@@ -258,9 +284,10 @@ export default function OutreachHistoryPage() {
         </div>
       </div>
 
-      {/* Engagement stats — counts are over the whole filtered set (not just this page);
-          each event is a % of the delivered total. */}
-      <StatsPanel stats={stats} />
+      {/* Engagement stats — counts are over the whole date+search filtered set (not just
+          this page); each event is a % of the delivered total. The event cards are also
+          clickable single-select filters that narrow the list below. */}
+      <StatsPanel stats={stats} engagement={engagement} onToggle={toggleEngagement} />
 
       {/* Filter bar */}
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>

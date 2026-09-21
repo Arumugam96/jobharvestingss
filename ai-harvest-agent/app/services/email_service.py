@@ -72,7 +72,7 @@ _RETRYABLE_SMTP_ERRORS = (
 
 AUTOMATION_CONTACT_BLOCK = (
     "For any queries, please reach out to us:\n"
-    "Shanker - +91 8056081469\n"
+    "Shankar - +91 8056081469\n"
     # "Sanjeetha - +91 "
 )
 
