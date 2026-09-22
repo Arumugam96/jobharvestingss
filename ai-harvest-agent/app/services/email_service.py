@@ -77,34 +77,37 @@ AUTOMATION_CONTACT_BLOCK = (
 )
 
 _SIGNOFF_LEAD = "regards,"
+# The website/deck link paragraph ("More about us: …"). The automation contact block
+# is inserted ABOVE this line so the order reads: contact block → website link → sign-off.
+_WEBSITE_LEAD = "more about us"
 
 
-def _insert_above_signoff(body: str, block: str) -> str:
+def _insert_above_signoff(body: str, block: str, lead: str = _SIGNOFF_LEAD) -> str:
     """Insert `block` (its own blank-line-separated paragraph) immediately ABOVE the
-    trailing sign-off block ("Regards," …), so the Regards signature stays the very
-    last thing in the email — with everything else above it. Falls back to appending
-    at the end only if no sign-off block can be found."""
+    paragraph that starts with `lead` (default: the trailing "Regards," sign-off), so
+    that anchor paragraph — and everything after it — stays last in the email. Falls
+    back to appending at the end only if no matching paragraph can be found."""
     text = (body or "").rstrip()
     extra = (block or "").strip()
     if not extra:
         return text
     paras = text.split("\n\n")
     for i in range(len(paras) - 1, -1, -1):
-        if paras[i].lstrip().lower().startswith(_SIGNOFF_LEAD):
+        if paras[i].lstrip().lower().startswith(lead):
             paras.insert(i, extra)
             return "\n\n".join(paras)
     return f"{text}\n\n{extra}"
 
 
 def apply_automation_contact_block(body: str) -> str:
-    """Insert AUTOMATION_CONTACT_BLOCK above the closing sign-off so the Regards
-    signature stays last (website/deck link → contact block → signature).
+    """Insert AUTOMATION_CONTACT_BLOCK immediately above the closing website/deck line
+    ("More about us: …") so the order reads: contact block → website link → sign-off.
 
     Shared by the outgoing-message render (send_email_with_attachments with
     is_automation=True) AND historically by the auto-outreach send-log write. The
     live auto-outreach flow now threads the block through append_closing instead, so
     this is a defensive fallback that still keeps the signature last if used."""
-    return _insert_above_signoff(body, AUTOMATION_CONTACT_BLOCK)
+    return _insert_above_signoff(body, AUTOMATION_CONTACT_BLOCK, lead=_WEBSITE_LEAD)
 
 
 def _resolve_sender(settings: Settings) -> tuple[str, str]:
