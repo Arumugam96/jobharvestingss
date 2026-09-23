@@ -101,6 +101,11 @@ OFFER_LINE = (
 CTA_LINE = "Would it help if I shared a few relevant profiles, or would a quick call be easier?"
 # Hardcoded sender title in the sign-off (spelling per business template).
 SENDER_TITLE = "HR Recruiter, SightSpectrum"
+# Company name used in the intro line and the email signature.
+COMPANY_NAME = "SightSpectrum"
+# Role-only fallback title (no company) for the intro + signature when a sender isn't
+# listed in SENDER_IDENTITIES — derived from SENDER_TITLE so the two stay in sync.
+DEFAULT_ROLE = SENDER_TITLE.split(",")[0].strip()
 # NOTE: no opt-out text is part of the generated copy. Unsubscribe is Mailjet-managed
 # now (Mailjet injects its own List-Unsubscribe + hosted opt-out), and email_service
 # appends a plain "reply to unsubscribe" line at send time.
@@ -158,53 +163,79 @@ def _build_sign_off(sender_email: str) -> str:
     """Sign-off block:
 
         Regards,
-        <Name>                    (only when derivable from sender_email)
-        HR Recruiter, SightSpectrum
-        <sender_email>            (only when present)
+        <Full name or First>       (only when a name resolves)
+        <Role Title>, SightSpectrum
+        <sender_email>             (only when present)
 
-    The name line is dropped for role mailboxes (see sender_display_name); the
-    email line is left as plain text here and becomes a bold clickable mailto link
-    when the email is sent as HTML."""
-    name = sender_display_name(sender_email)
+    Name and title come from resolve_identity so the plain-text sign-off matches the HTML
+    signature and the intro. The name line is dropped for role mailboxes with no derivable
+    name; the email line is left as plain text here and becomes a bold clickable mailto link
+    when the email is sent as HTML (where email_service replaces this whole block with a
+    formatted signature card)."""
+    identity = resolve_identity(sender_email)
+    name = identity["full"] or identity["first"]
     email = (sender_email or "").strip()
     lines = ["Regards,"]
     if name:
         lines.append(name)
-    lines.append(SENDER_TITLE)
+    lines.append(f"{identity['title']}, {COMPANY_NAME}")
     if email:
         lines.append(email)
     return "\n".join(lines)
 
 
-def append_closing(pitch: str, sender_email: str, deck_url: str = "", contact_block: str = "") -> str:
+def _insert_after_greeting(body: str, intro: str) -> str:
+    """Place the deterministic intro line right after the greeting. `body` has already been
+    through _greeting_on_own_line, so any greeting is isolated as the first paragraph; split
+    on the first blank line and inject the intro between the greeting and the rest. When the
+    body has no recognizable greeting, the intro simply leads."""
+    if not intro:
+        return body
+    parts = body.split("\n\n", 1)
+    if parts and _GREETING_RE.match(parts[0].strip()):
+        greeting = parts[0]
+        rest = parts[1] if len(parts) == 2 else ""
+        return f"{greeting}\n\n{intro}\n\n{rest}" if rest else f"{greeting}\n\n{intro}"
+    return f"{intro}\n\n{body}" if body else intro
+
+
+def append_closing(
+    pitch: str, sender_email: str, deck_url: str = "", contact_block: str = "", intro: str = "",
+) -> str:
     """Append the deterministic closing to an LLM- or template-generated pitch, in
     this order (blocks separated by blank lines):
 
-        <pitch>
+        Hi <name>,
 
-        More about us: <deck_url>        (when deck_url is set)
+        <intro>                          (when given — deterministic self-intro +
+                                          posting reference, right after the greeting)
+
+        <pitch body>
 
         <contact_block>                  (when given — the automated-send desk
                                           "reach out to us" name/phone block)
 
+        More about us: <deck_url>        (when deck_url is set)
+
         Regards,                         (sign-off block — ALWAYS LAST)
         <Name>
-        HR Recruiter, SightSpectrum
+        <Role Title>, SightSpectrum
         <sender_email>
 
-    The sign-off is placed last so the signature closes the email; the website link
-    and contact block sit above it. The sender email, website URL, and phone number
-    are left as plain text here; email_service turns them into a bold clickable mailto
-    link, a clickable link, and a bold clickable tel: link when the email is sent as
-    HTML, and appends a plain unsubscribe line at send time."""
-    body = _greeting_on_own_line(_strip_trailing_closing(pitch))
+    The sign-off is placed last so the signature closes the email; the phone/contact block
+    sits above the website link (phone → website → sign-off). The sender email, website URL,
+    and phone number are left as plain text here; email_service turns them into a bold
+    clickable mailto link, a clickable link, and a bold clickable tel: link when the email is
+    sent as HTML (and replaces the sign-off with a formatted signature card), and appends a
+    plain unsubscribe line at send time."""
+    body = _insert_after_greeting(_greeting_on_own_line(_strip_trailing_closing(pitch)), intro)
     url = (deck_url or "").strip()
     contact = (contact_block or "").strip()
     blocks = [body] if body else []
-    if url:
-        blocks.append(DECK_LINK_TEMPLATE.format(url=url))
     if contact:
         blocks.append(contact)
+    if url:
+        blocks.append(DECK_LINK_TEMPLATE.format(url=url))
     blocks.append(_build_sign_off(sender_email))
     return "\n\n".join(b for b in blocks if b).strip()
 
@@ -217,15 +248,16 @@ EMAIL_SYSTEM_PROMPT = (
     "hyped sales blast, never long. "
 
     "EMAIL STRUCTURE: "
-    "Output a greeting line, then EXACTLY three short lines, each as its own "
-    "paragraph (a blank line between each). Nothing else. "
-    "(1) Start with a natural one-line reference to the job posting. It must clearly"
-    "mention the job title and company in the context. "
-    "(2)In one or two short sentences, naturally explain how Sightspectrum could help with the role."
-    "Convey only that Sightspectrum supports contract IT hiring and can put forward candidates"
-    " suited to the role. Use your own wording and vary the sentence structure, tone, and"
-    " phrasing between messages so the result feels individually written rather than templated."
-    "(3) A brief, low-pressure closing question inviting an easy next step — for "
+    "Output a greeting line, then EXACTLY two short lines, each as its own "
+    "paragraph (a blank line between each). Nothing else. Do NOT open with a line that "
+    "references the job posting or introduces yourself — a fixed introduction line "
+    "(the sender's name + a reference to the posting) is added automatically right after "
+    "the greeting, so start straight into how you can help. "
+    "(1) In one or two short sentences, naturally explain how Sightspectrum could help with the role. "
+    "Convey only that Sightspectrum supports contract IT hiring and can put forward candidates "
+    "suited to the role. Use your own wording and vary the sentence structure, tone, and "
+    "phrasing between messages so the result feels individually written rather than templated. "
+    "(2) A brief, low-pressure closing question inviting an easy next step — for "
     "instance offering to send the profiles or to set up a short call. Phrase it "
     "freshly in your own words each time, as one short sentence; do NOT reuse a "
     "canned line. "
@@ -245,7 +277,7 @@ EMAIL_SYSTEM_PROMPT = (
     "GREETING RULES: "
     "Address the recipient by first name when a recipient name is given (e.g. "
     "'Hi Jane,'); when no name is given, use a neutral greeting such as 'Hello,'. "
-    "Put the greeting on its OWN line, followed by a blank line, then the three lines. "
+    "Put the greeting on its OWN line, followed by a blank line, then the two lines. "
 
     "PLACEHOLDER RULES: "
     "NEVER output a bracketed placeholder such as '[Recipient Name]', '[Name]', "
@@ -254,10 +286,10 @@ EMAIL_SYSTEM_PROMPT = (
     "addresses. "
 
     "CONTACT AND SIGN-OFF RULES: "
-    "Write ONLY the greeting and the three lines. Do NOT add a sign-off such as "
+    "Write ONLY the greeting and the two lines. Do NOT add a sign-off such as "
     "'Regards' or the sender's name, and do NOT add a phone number, email address, "
-    "website, or opt-out line — the sign-off, website link, and opt-out notice are "
-    "appended automatically by the application. "
+    "website, or opt-out line — the introduction, sign-off, website link, and opt-out "
+    "notice are appended automatically by the application. "
 
     "OUTPUT RULES: "
     "Return ONLY valid JSON in exactly this form: "
@@ -309,6 +341,42 @@ def sender_display_name(sender_email: str) -> str:
     return first.capitalize()
 
 
+# Per-sender display identity for the outreach intro + signature. The email local part
+# only yields a first name (see sender_display_name), so anything that can't be derived
+# from the address — the person's FULL name, their formal role title, and their direct
+# phone — is listed here, keyed by the lowercased sender email. Senders not listed fall
+# back to a first-name-only identity with the default role and no phone (resolve_identity),
+# so an unlisted sender still gets a valid signature, just without a bespoke full name.
+SENDER_IDENTITIES: dict[str, dict[str, str]] = {
+    "sanjeetha@sightspectrum.com": {
+        "first": "Sanjeeta",
+        "full": "Sanjeeta Mohanty",
+        "title": "Business Development Executive",
+        "phone": "",  # TODO: add Sanjeeta's direct number; the Tel row is omitted while empty.
+    },
+}
+
+
+def resolve_identity(sender_email: str) -> dict[str, str]:
+    """Resolve the sender's display identity (``first``, ``full``, ``title``, ``phone``)
+    used by the intro line, the plain-text sign-off, and the HTML signature — one source
+    of truth so all three always agree.
+
+    Looks up SENDER_IDENTITIES by lowercased email. For an unlisted sender, falls back to
+    the first name derived from the email (sender_display_name), an empty full name
+    (callers use ``first``), the role-only DEFAULT_ROLE, and no phone. ``title`` is always
+    role-only (no company); callers append COMPANY_NAME where a company is wanted."""
+    email = (sender_email or "").strip().lower()
+    entry = SENDER_IDENTITIES.get(email) or {}
+    first = entry.get("first") or sender_display_name(sender_email)
+    return {
+        "first": first,
+        "full": entry.get("full", ""),
+        "title": entry.get("title") or DEFAULT_ROLE,
+        "phone": entry.get("phone", ""),
+    }
+
+
 # ── Job-context block shared by both builders ────────────────────────────────
 
 def _job_context(job: dict, include_description: bool = True) -> str:
@@ -352,6 +420,36 @@ def _job_context(job: dict, include_description: bool = True) -> str:
 
 # ── Email ────────────────────────────────────────────────────────────────────
 
+def _article(word: str) -> str:
+    """Indefinite article for `word` — "an" before a vowel sound, else "a". Good enough
+    for role titles ("a Business Development Executive", "an HR Recruiter")."""
+    return "an" if word[:1].lower() in "aeiou" else "a"
+
+
+def build_intro(sender_email: str, job: dict) -> str:
+    """Deterministic self-introduction + posting reference, placed right after the greeting:
+
+        I'm <First>, a <Role Title> with SightSpectrum. I saw the listing for <Job Title> at <Company>.
+
+    The name/title come from resolve_identity(sender_email) so the intro matches the
+    sign-off/signature; <Job Title> is the EXACT stored title so the sent HTML links the
+    first occurrence of it to the posting (see email_service._outreach_body_to_html), and
+    <Company> falls back to a neutral stand-in. Returns "" when there's no job title
+    (nothing to reference). When no first name resolves (a role mailbox), drops the personal
+    "I'm <name>" opener for a neutral variant."""
+    title = (job.get("job_title") or "").strip()
+    if not title:
+        return ""
+    company = (job.get("company") or "").strip() or _GENERIC_COMPANY
+    identity = resolve_identity(sender_email)
+    first = identity["first"]
+    role = identity["title"]
+    listing = f"I saw the listing for {title} at {company}."
+    if first:
+        return f"I'm {first}, {_article(role)} {role} with {COMPANY_NAME}. {listing}"
+    return f"I'm reaching out from {COMPANY_NAME} about the listing for {title} at {company}."
+
+
 def build_email_prompt(client_type: str, tone: str, job: dict, sender_email: str = "") -> str:
     """User prompt for email generation. It supplies only the per-request
     variables — `client_type` picks the audience positioning and `tone` the
@@ -387,29 +485,24 @@ def render_email_fallback(
     client_type: str, job: dict, sender_email: str = "", deck_url: str = "", contact_block: str = ""
 ) -> tuple[str, str]:
     """Deterministic fallback used when LLM generation fails — builds the same
-    fixed template (greeting + posting reference + fixed offer + CTA) directly
-    from the job context, with the same closing appended as the LLM path. For an
-    existing ("active") client the offer line carries a brief partnership nod;
-    the fixed claims are unchanged. `client_type` other than "active" is treated
-    as a new/unknown prospect. `contact_block` (automated sends) is placed above
-    the sign-off, mirroring the LLM path."""
-    company = (job.get("company") or "").strip() or _GENERIC_COMPANY
-    title = (job.get("job_title") or "").strip()
+    fixed template (greeting + deterministic intro + fixed offer + CTA) directly
+    from the job context, with the same closing appended as the LLM path. The
+    posting reference now lives in the intro (build_intro), so the fallback body is
+    just the offer + CTA. For an existing ("active") client the offer line carries a
+    brief partnership nod; the fixed claims are unchanged. `client_type` other than
+    "active" is treated as a new/unknown prospect. `contact_block` (automated sends)
+    is placed above the sign-off, mirroring the LLM path."""
     poster = (job.get("job_poster_name") or "").strip()
 
     greeting = f"Hi {poster.split()[0]}," if poster else "Hello,"
-    reference = (
-        f"Saw your post for {title} at {company}."
-        if title
-        else f"Saw your hiring post at {company}."
-    )
     offer = (
         f"As your empaneled Sightspectrum partner, {OFFER_LINE[0].lower()}{OFFER_LINE[1:]}"
         if client_type == "active"
         else OFFER_LINE
     )
-    body = "\n\n".join([greeting, reference, offer, CTA_LINE])
-    return build_email_subject(job), append_closing(body, sender_email, deck_url, contact_block)
+    body = "\n\n".join([greeting, offer, CTA_LINE])
+    intro = build_intro(sender_email, job)
+    return build_email_subject(job), append_closing(body, sender_email, deck_url, contact_block, intro=intro)
 
 
 # ── Follow-up email ──────────────────────────────────────────────────────────

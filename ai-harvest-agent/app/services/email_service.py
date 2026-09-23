@@ -35,6 +35,7 @@ import httpx
 import structlog
 
 from app.config import Settings
+from app.prompts.outreach_prompts import COMPANY_NAME, resolve_identity
 
 logger = structlog.get_logger(__name__)
 
@@ -73,7 +74,7 @@ _RETRYABLE_SMTP_ERRORS = (
 AUTOMATION_CONTACT_BLOCK = (
     "For any queries, please reach out to us:\n"
     "Shankar - +91 8056081469\n"
-    # "Sanjeetha - +91 "
+    "Sanjeetha - +91 9949099528\n"
 )
 
 _SIGNOFF_LEAD = "regards,"
@@ -207,29 +208,131 @@ def _title_matcher(job_title: str) -> re.Pattern | None:
     return re.compile(pattern, re.IGNORECASE)
 
 
-def _outreach_body_to_html(body: str, job_title: str = "", job_url: str = "", show_unsub: bool = False) -> str:
+# Signature-card colours, pulled from the OTP email palette (navy → violet → blue).
+_SIG_NAME_COLOR = "#201a4a"
+_SIG_MUTED = "#5c5a70"
+_SIG_ICON = "#7b53c9"
+_SIG_LINK = "#5f7fd0"
+_SIG_TEXT = "#3f3d55"
+_SIG_HAIRLINE = "#c7bfe0"
+
+
+def _website_display(url: str) -> str:
+    """Human-readable form of a website URL for the signature — drops the scheme and any
+    trailing slash: 'https://www.sightspectrum.com/' -> 'www.sightspectrum.com'."""
+    return re.sub(r"^https?://", "", (url or "").strip()).rstrip("/")
+
+
+def render_signature_html(
+    name: str, title: str, phone: str, email: str, website: str, *, has_logo: bool
+) -> str:
+    """Business-card email signature rendered below the 'Regards,' line in the HTML part:
+    the SightSpectrum logo on the left (inline ``cid:`` image), then the sender's full name,
+    a role line (``<title> | SightSpectrum``), and the contacts — phone and email together
+    on ONE line (dot-separated), with the website on the next line.
+
+    Table-based with inline styles for Outlook compatibility (the same discipline as
+    render_otp_email_html). Icons are HTML entities (☎ ✉ 🌐) so no extra image attachments
+    are needed — email clients strip inline SVG. ``has_logo`` drops the logo cell when the
+    logo file is missing so nothing renders as a broken image. Rows with no value are
+    omitted (e.g. no phone → the Tel glyph is skipped)."""
+    esc = html_lib.escape
+    logo_cell = (
+        f'<td valign="top" style="padding:2px 16px 0 0;">'
+        f'<img src="cid:{LOGO_CID}" width="84" height="84" alt="{esc(COMPANY_NAME)}" '
+        'style="display:block;border:0;border-radius:10px;background:#ffffff;" />'
+        "</td>"
+        if has_logo else ""
+    )
+
+    role_line = esc(title)
+    if COMPANY_NAME:
+        role_line += f' <span style="color:{_SIG_HAIRLINE};">|</span> {esc(COMPANY_NAME)}'
+
+    # Phone + email share one line (dot separator); website goes on its own line below.
+    inline_bits: list[str] = []
+    if phone:
+        tel = "tel:" + _PHONE_SEP_RE.sub("", phone)
+        inline_bits.append(
+            f'<span style="color:{_SIG_ICON};">&#9742;</span>&nbsp;'
+            f'<a href="{tel}" style="color:{_SIG_TEXT};text-decoration:none;">{esc(phone)}</a>'
+        )
+    if email:
+        inline_bits.append(
+            f'<span style="color:{_SIG_ICON};">&#9993;</span>&nbsp;'
+            f'<a href="mailto:{esc(email)}" style="color:{_SIG_LINK};text-decoration:none;">{esc(email)}</a>'
+        )
+    contacts: list[str] = []
+    if inline_bits:
+        sep = f'<span style="color:{_SIG_HAIRLINE};">&nbsp;&nbsp;&bull;&nbsp;&nbsp;</span>'
+        contacts.append(sep.join(inline_bits))
+    if website:
+        href = website if re.match(r"^https?://", website) else f"https://{website}"
+        contacts.append(
+            f'<span style="color:{_SIG_ICON};">&#127760;</span>&nbsp;'
+            f'<a href="{esc(href)}" style="color:{_SIG_LINK};text-decoration:none;">'
+            f"{esc(_website_display(website))}</a>"
+        )
+    contacts_html = "<br>".join(contacts)
+
+    font = ("-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif")
+    return (
+        '<table role="presentation" cellpadding="0" cellspacing="0" border="0" '
+        'style="margin-top:8px;border-collapse:collapse;">'
+        f"<tr>{logo_cell}"
+        f'<td valign="middle" style="font-family:{font};">'
+        f'<div style="font-size:19px;font-weight:800;color:{_SIG_NAME_COLOR};line-height:1.15;">{esc(name)}</div>'
+        f'<div style="font-size:13px;color:{_SIG_MUTED};margin:3px 0 9px;">{role_line}</div>'
+        f'<div style="font-size:13px;color:{_SIG_TEXT};line-height:1.7;">{contacts_html}</div>'
+        "</td></tr></table>"
+    )
+
+
+def _outreach_body_to_html(
+    body: str,
+    job_title: str = "",
+    job_url: str = "",
+    show_unsub: bool = False,
+    logo_available: bool = False,
+) -> str:
     """Render the plain-text outreach body as HTML: preserve line breaks; turn any
     http(s) URL (the deck link) into a clickable link; turn any line containing an
-    email address (the appended reach-out line) into a bold line whose address is a
-    clickable mailto link — so the recipient can reply in one click; and, when
-    `job_title`/`job_url` are given, render the first occurrence of the job title
-    (the opening's role mention; matched case- and whitespace-insensitively) as a
-    bold, blue link to the posting that opens in a new tab — the raw URL itself is
-    never shown. All other text is HTML-escaped verbatim.
+    email address into a bold line whose address is a clickable mailto link; and, when
+    `job_title`/`job_url` are given, render the first occurrence of the job title (the
+    intro's role mention; matched case- and whitespace-insensitively) as a bold, blue
+    link to the posting that opens in a new tab — the raw URL itself is never shown. All
+    other text is HTML-escaped verbatim.
 
-    When `show_unsub` is True, a subtle footer with a plain, link-free unsubscribe
-    message is appended (Mailjet owns the actual opt-out mechanism now — we no longer
-    embed a self-hosted unsubscribe URL)."""
+    The trailing sign-off ("Regards, / name / title / email") is NOT rendered as plain
+    lines — it is replaced by a formatted business-card signature (render_signature_html):
+    the "Regards," line is kept, then the signature card is built from the sender identity
+    (resolve_identity, keyed by the email in the sign-off) plus the website (deck) link
+    parsed from the body. `logo_available` toggles the logo cell so the card only points at
+    the inline logo when it's actually attached to the message.
+
+    When `show_unsub` is True, a subtle plain, link-free unsubscribe message is placed
+    ABOVE the sign-off so the signature stays last (Mailjet/Brevo own the opt-out now)."""
     url = (job_url or "").strip()
     matcher = _title_matcher(job_title) if url else None
     title_linked = False
+
+    all_lines = (body or "").split("\n")
+    # Split off the sign-off ("Regards, …"): everything from that line down is replaced by
+    # the formatted signature card. The lines above keep the normal per-line rendering.
+    signoff_start = next(
+        (i for i, ln in enumerate(all_lines) if ln.strip().lower().startswith(_SIGNOFF_LEAD)),
+        None,
+    )
+    body_lines = all_lines if signoff_start is None else all_lines[:signoff_start]
+    signoff_lines = [] if signoff_start is None else all_lines[signoff_start:]
+
     out_lines: list[str] = []
-    signoff_idx: int | None = None  # index in out_lines where the sign-off begins
-    for line in (body or "").split("\n"):
-        # Remember where the sign-off block starts so the unsubscribe footer can be
-        # placed ABOVE it (keeping the Regards signature the last thing in the email).
-        if signoff_idx is None and line.strip().lower().startswith(_SIGNOFF_LEAD):
-            signoff_idx = len(out_lines)
+    website_url = ""  # first URL in the body = the "More about us" deck link (for the signature)
+    for line in body_lines:
+        if not website_url:
+            um = _BODY_URL_RE.search(line)
+            if um:
+                website_url = um.group(0)
         # Bold the whole line when it carries an email address (the reach-out line).
         bold = bool(_BODY_EMAIL_RE.search(line))
         match = matcher.search(line) if (matcher and not title_linked) else None
@@ -256,19 +359,38 @@ def _outreach_body_to_html(body: str, job_title: str = "", job_url: str = "", sh
         if bold:
             rendered = f"<strong>{rendered}</strong>"
         out_lines.append(rendered)
+
     if show_unsub:
-        # Plain, link-free unsubscribe message — Mailjet owns the opt-out mechanism now,
-        # so no self-hosted URL is embedded. Inserted ABOVE the sign-off so the Regards
-        # signature stays the last thing in the email; appended only if no sign-off found.
-        unsub = (
+        # Plain, link-free unsubscribe message — placed ABOVE the sign-off so the signature
+        # stays the last thing in the email.
+        out_lines.append(
             '<div style="margin-top:18px;font-size:12px;color:#94A3B8;">'
             'Not interested? Reply to this email to unsubscribe.'
             "</div>"
         )
-        if signoff_idx is not None:
-            out_lines.insert(signoff_idx, unsub)
-        else:
-            out_lines.append(unsub)
+
+    # Sign-off → "Regards," text line, then the formatted signature card in place of the
+    # plain name/title/email lines. Identity (full name, role title, phone) is resolved from
+    # the sender email in the sign-off block, so the card matches the intro and the plain-text
+    # sign-off; the website is the deck link parsed from the body above.
+    if signoff_lines:
+        sender_email = ""
+        for ln in signoff_lines:
+            em = _BODY_EMAIL_RE.search(ln)
+            if em:
+                sender_email = em.group(0)
+                break
+        identity = resolve_identity(sender_email)
+        out_lines.append(html_lib.escape(signoff_lines[0].strip()))  # "Regards,"
+        out_lines.append(render_signature_html(
+            name=identity["full"] or identity["first"] or COMPANY_NAME,
+            title=identity["title"],
+            phone=identity["phone"],
+            email=sender_email,
+            website=website_url,
+            has_logo=logo_available,
+        ))
+
     inner = "<br>\n".join(out_lines)
     return (
         '<!DOCTYPE html><html><body style="margin:0;padding:0;">'
@@ -656,7 +778,21 @@ class EmailSender:
         if html_body is not None:
             message["HTMLPart"] = html_body
         elif as_html:
-            message["HTMLPart"] = _outreach_body_to_html(body_for_render, job_title, job_url, show_unsub=bool(custom_id))
+            # Embed the logo inline (CID) so the signature card renders it without a remote
+            # fetch (same technique as send_otp). has_logo reflects whether it's attached, so
+            # the card never points at a missing image.
+            logo_bytes = _load_logo_bytes()
+            message["HTMLPart"] = _outreach_body_to_html(
+                body_for_render, job_title, job_url,
+                show_unsub=bool(custom_id), logo_available=logo_bytes is not None,
+            )
+            if logo_bytes is not None:
+                message.setdefault("InlinedAttachments", []).append({
+                    "ContentType": "image/jpeg",
+                    "Filename": "sight_spectrum_logo.jpg",
+                    "ContentID": LOGO_CID,
+                    "Base64Content": base64.b64encode(logo_bytes).decode("ascii"),
+                })
 
         attachments = _build_attachments(paths, blobs, log)
         if attachments:

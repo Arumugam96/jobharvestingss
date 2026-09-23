@@ -117,7 +117,10 @@ class OutreachService:
                 # Subject is built deterministically (exact job title + a random
                 # tagline) so its format is guaranteed; the LLM subject is ignored.
                 subject = outreach_prompts.build_email_subject(job)
-                body = outreach_prompts.append_closing(pitch, sender_email, deck_url, contact_block)
+                # The deterministic intro (self-intro + posting reference) is inserted
+                # right after the greeting; the LLM now writes only the value + CTA lines.
+                intro = outreach_prompts.build_intro(sender_email, job)
+                body = outreach_prompts.append_closing(pitch, sender_email, deck_url, contact_block, intro=intro)
                 return EmailDraft(subject=subject, body=body, fallback_used=False, meta=meta)
             # Model responded but not with usable JSON — mark the audit row and fall back.
             meta.success = False
