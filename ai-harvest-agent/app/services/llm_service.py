@@ -12,6 +12,7 @@ from typing import Any, Callable
 import anthropic
 import httpx
 import structlog
+from json_repair import repair_json
 from tenacity import (
     retry,
     retry_if_not_exception_type,
@@ -40,6 +41,10 @@ _PROVIDER_OPENROUTER = "openrouter"
 # stalling on the old 500s. The circuit breaker means only the first call pays it.
 _LOCAL_LLM_TIMEOUT_S = 300.0
 _OPENROUTER_TIMEOUT_S = 90.0
+# Context window sent with every local Ollama request. Pinned so a large extraction
+# prompt isn't silently truncated by a smaller server default; keep it matched to the
+# Ollama host's OLLAMA_CONTEXT_LENGTH so the model stays loaded at one size.
+_LOCAL_NUM_CTX = 8192
 _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 # Tracks tenacity's attempt count for the retry-decorated call made by the
@@ -549,10 +554,19 @@ class LLMService:
                 self._local_llm_unavailable_msg(model, url, "already unavailable this run")
             )
 
+        # num_ctx pins the context window so a large extraction prompt isn't silently
+        # truncated by a smaller Ollama server default. For structured output we also
+        # force temperature 0 — deterministic sampling adheres to the JSON grammar far
+        # more reliably (fewer malformed responses to fail over on). Free-text
+        # generation keeps the model's default sampling so outreach copy stays varied.
+        options: dict[str, Any] = {"num_ctx": _LOCAL_NUM_CTX}
+        if json_mode:
+            options["temperature"] = 0
         payload: dict[str, Any] = {
             "model": model,
             "prompt": prompt,
             "stream": False,
+            "options": options,
         }
         if json_mode:
             payload["format"] = "json"
@@ -746,7 +760,24 @@ class LLMService:
             cleaned = (raw or "").strip()
             if cleaned.startswith("```"):
                 cleaned = cleaned.split("\n", 1)[1].rsplit("```", 1)[0]
-            return json.loads(cleaned)
+            try:
+                return json.loads(cleaned)
+            except json.JSONDecodeError as exc:
+                # No provider fallback is guaranteed (e.g. OpenRouter unavailable), so
+                # try to salvage a near-valid response from a flaky local model instead
+                # of discarding the whole extraction. json_repair fixes the common LLM
+                # defects — missing commas/quotes, trailing text, unclosed braces — that
+                # raise errors like "Expecting ',' delimiter". Accept only a non-empty
+                # object; otherwise re-raise so the response is treated as invalid (and,
+                # when another provider exists, fails over).
+                repaired = repair_json(cleaned, return_objects=True)
+                if isinstance(repaired, dict) and repaired:
+                    logger.warning(
+                        "llm_extraction_json_repaired",
+                        error=str(exc), repaired_fields=list(repaired.keys()),
+                    )
+                    return repaired
+                raise
 
         # Provider failover + per-attempt call-log recording live in the shared
         # helper. Only LLMUnavailableError (every provider down OR every provider

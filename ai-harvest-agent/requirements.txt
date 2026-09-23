@@ -17,6 +17,10 @@ aiosqlite==0.20.0
 
 # ── AI / LLM ────────────────────────────────────────────────────────────────────
 anthropic==0.40.0
+# Salvages near-valid JSON from a flaky local LLM (missing commas/quotes, trailing
+# text, unclosed braces) inside extract_json, so a single malformed extraction isn't
+# lost when no provider fallback is available. See services/llm_service.py.
+json-repair>=0.30.0
 
 # ── Browser Automation ──────────────────────────────────────────────────────────
 playwright==1.49.0

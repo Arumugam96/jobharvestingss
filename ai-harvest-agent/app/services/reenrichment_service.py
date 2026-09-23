@@ -24,6 +24,14 @@ from app.services.llm_service import LLMService
 
 logger = structlog.get_logger(__name__)
 
+# Consecutive per-task LLM failures (provider down OR every provider returned invalid
+# JSON — the failover core surfaces both as LLMUnavailableError) that must pile up with
+# NO success in between before the sweep stops early. A single bad-JSON row no longer
+# aborts the whole backlog: it's recorded and skipped, staying pending for a later run;
+# only a genuine streak (a real outage) trips this. Kept small because the
+# _local_llm_down circuit breaker makes a truly-down server fail these near-instantly.
+_CONSECUTIVE_FAILURE_LIMIT = 5
+
 
 async def run_reenrichment_sweep(
     limit: int | None = None,
@@ -58,6 +66,7 @@ async def run_reenrichment_sweep(
     now = datetime.now(timezone.utc)
     logger.debug("reenrichment_sweep_start", pending=len(tasks))
 
+    consecutive_failures = 0
     for t in tasks:
         logger.debug(
             "reenrichment_task_started",
@@ -83,14 +92,30 @@ async def run_reenrichment_sweep(
                 system=t["system"],
                 job_url=t["job_url"],
             )
-        except LLMUnavailableError:
-            # Every provider is still down — record the attempt and STOP the sweep;
-            # the remaining tasks stay pending for a later run (don't burn the
-            # harvest's start-up waiting on a dead LLM for each one).
+        except LLMUnavailableError as exc:
+            # No provider could produce a usable response for this task — the LLM is
+            # down OR it's reachable but returned invalid JSON (the failover core
+            # surfaces both as LLMUnavailableError). Record the attempt and SKIP this
+            # one so a single bad extraction no longer aborts the whole backlog; it
+            # stays pending for a later run. Only stop early once failures pile up with
+            # no success in between (_CONSECUTIVE_FAILURE_LIMIT) — that streak means a
+            # genuine outage, so there's no point walking the rest (and _local_llm_down
+            # makes those remaining calls fail near-instantly anyway).
             await db_write(lambda db: HarvestRunService(db).bump_reenrichment_attempt(t["id"]))
             summary["still_pending"] += 1
-            logger.info("reenrichment_sweep_llm_still_down", processed=summary)
-            break
+            consecutive_failures += 1
+            logger.warning(
+                "reenrichment_task_llm_unavailable",
+                task_id=t["id"], job_url=t["job_url"],
+                consecutive_failures=consecutive_failures, error=str(exc),
+            )
+            if consecutive_failures >= _CONSECUTIVE_FAILURE_LIMIT:
+                logger.info(
+                    "reenrichment_sweep_llm_still_down",
+                    processed=summary, consecutive_failures=consecutive_failures,
+                )
+                break
+            continue
         except Exception as exc:
             # Content/parse error for this one — record the attempt, keep going.
             await db_write(lambda db: HarvestRunService(db).bump_reenrichment_attempt(t["id"]))
@@ -102,6 +127,7 @@ async def run_reenrichment_sweep(
             t["id"], t["run_id"], t["job_url"], extracted
         ))
         summary["done"] += 1
+        consecutive_failures = 0  # a success breaks any failure streak
 
     logger.info("reenrichment_sweep_done", **summary)
     return summary
