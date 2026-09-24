@@ -78,8 +78,6 @@ AUTOMATION_CONTACT_BLOCK = (
 )
 
 _SIGNOFF_LEAD = "regards,"
-# The website/deck link paragraph ("More about us: …"). The automation contact block
-# is inserted ABOVE this line so the order reads: contact block → website link → sign-off.
 _WEBSITE_LEAD = "more about us"
 
 
@@ -111,56 +109,48 @@ def apply_automation_contact_block(body: str) -> str:
     return _insert_above_signoff(body, AUTOMATION_CONTACT_BLOCK, lead=_WEBSITE_LEAD)
 
 
-def _resolve_sender(settings: Settings) -> tuple[str, str]:
-    """Resolve the visible From header and the SMTP envelope sender for the
-    harvest report.
+# def _resolve_sender(settings: Settings) -> tuple[str, str]:
+#     """Resolve the visible From header and the SMTP envelope sender for the
+#     harvest report.
 
-    Returns ``(from_header, envelope_addr)``.
+#     Returns ``(from_header, envelope_addr)``.
 
-    * ``from_header``  — what the recipient sees.
-    * ``envelope_addr`` — the SMTP ``MAIL FROM``. Always a real address (never a
-      bare display name, which providers reject).
+#     * ``from_header``  — what the recipient sees.
+#     * ``envelope_addr`` — the SMTP ``MAIL FROM``. Always a real address (never a
+#       bare display name, which providers reject).
 
-    Preferred: the explicit ``SMTP_SENDER_MAIL`` (+ ``SMTP_ENVELOPE_NAME`` display name) —
-    a real, provider-verified sender, required for Brevo (the SMTP login is not a sendable
-    From). When ``SMTP_SENDER_MAIL`` is unset, falls back to the legacy behavior: a real
-    ``SMTP_FROM_EMAIL`` as-is, or a bare display name paired with the authenticated mailbox
-    (``SMTP_USERNAME``) — so the inbox shows that name instead of the account owner.
-    """
-    sender_mail = (settings.smtp_sender_mail or "").strip()
-    if sender_mail:
-        envelope_name = (settings.smtp_envelope_name or "").strip()
-        from_header = formataddr((envelope_name, sender_mail)) if envelope_name else sender_mail
-        return from_header, sender_mail
+#     Preferred: the explicit ``SMTP_SENDER_MAIL`` (+ ``SMTP_ENVELOPE_NAME`` display name) —
+#     a real, provider-verified sender, required for Brevo (the SMTP login is not a sendable
+#     From). When ``SMTP_SENDER_MAIL`` is unset, falls back to the legacy behavior: a real
+#     ``SMTP_FROM_EMAIL`` as-is, or a bare display name paired with the authenticated mailbox
+#     (``SMTP_USERNAME``) — so the inbox shows that name instead of the account owner.
+#     """
+#     sender_mail = (settings.smtp_sender_mail or "").strip()
+#     if sender_mail:
+#         envelope_name = (settings.smtp_envelope_name or "").strip()
+#         from_header = formataddr((envelope_name, sender_mail)) if envelope_name else sender_mail
+#         return from_header, sender_mail
 
-    username = (settings.smtp_username or "").strip()
-    configured = (settings.smtp_from_email or "").strip()
+#     username = (settings.smtp_username or "").strip()
+#     configured = (settings.smtp_from_email or "").strip()
 
-    if "@" in configured:
-        name, addr = parseaddr(configured)
-        from_header = formataddr((name, addr)) if name else addr
-        return from_header, (addr or username)
+#     if "@" in configured:
+#         name, addr = parseaddr(configured)
+#         from_header = formataddr((name, addr)) if name else addr
+#         return from_header, (addr or username)
 
-    if configured:
-        # Display-name-only SMTP_FROM_EMAIL — show it as the sender name and send
-        # from the authenticated mailbox.
-        from_header = formataddr((configured, username)) if username else configured
-        return from_header, username
+#     if configured:
+#         # Display-name-only SMTP_FROM_EMAIL — show it as the sender name and send
+#         # from the authenticated mailbox.
+#         from_header = formataddr((configured, username)) if username else configured
+#         return from_header, username
 
-    return username, username
+#     return username, username
 
-# Matches an email address inside the plain-text outreach body so it can be
-# rendered as a bold, clickable mailto link in the HTML part (the reach-out line).
+
 _BODY_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
-# Matches an http(s) URL (the hosted company-overview deck link) so it can be
-# rendered as a clickable link in the HTML part.
 _BODY_URL_RE = re.compile(r'https?://[^\s<>"]+')
-# Matches an international phone number (the desk contact block's "+91 8056081469").
-# Requires a leading "+" then a digit, so it never matches digits inside a URL, a
-# date, or an email local part — only genuine E.164-style numbers. Spaces/dashes are
-# allowed as separators and stripped when building the tel: href.
 _BODY_PHONE_RE = re.compile(r"\+\d[\d\s\-]{7,}\d")
-# Separators stripped from a matched phone number to form the tel: href digits.
 _PHONE_SEP_RE = re.compile(r"[\s\-]")
 
 
@@ -226,16 +216,9 @@ def _website_display(url: str) -> str:
 def render_signature_html(
     name: str, title: str, phone: str, email: str, website: str, *, has_logo: bool
 ) -> str:
-    """Business-card email signature rendered below the 'Regards,' line in the HTML part:
-    the SightSpectrum logo on the left (inline ``cid:`` image), then the sender's full name,
-    a role line (``<title> | SightSpectrum``), and the contacts — phone and email together
-    on ONE line (dot-separated), with the website on the next line.
-
-    Table-based with inline styles for Outlook compatibility (the same discipline as
-    render_otp_email_html). Icons are HTML entities (☎ ✉ 🌐) so no extra image attachments
-    are needed — email clients strip inline SVG. ``has_logo`` drops the logo cell when the
-    logo file is missing so nothing renders as a broken image. Rows with no value are
-    omitted (e.g. no phone → the Tel glyph is skipped)."""
+    """Business-card email signature rendered below the 'Regards,' 
+    line in the HTML part:
+    """
     esc = html_lib.escape
     logo_cell = (
         f'<td valign="top" style="padding:2px 16px 0 0;">'

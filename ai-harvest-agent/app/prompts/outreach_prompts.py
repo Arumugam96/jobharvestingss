@@ -58,11 +58,6 @@ SUBJECT_TAGLINES = (
 )
 
 # ── Per-audience positioning (LLM prompt) ─────────────────────────────────────
-# What the system prompt can't know per request: how to position Sightspectrum
-# for an existing client vs. a new prospect. The full reference messages above
-# are NOT sent to the LLM (they'd fight the system prompt's "pick 1-2
-# capabilities, ~70-100 words" rules); these one-liners carry only the
-# positioning difference, which is all the model needs on top of the catalog.
 _AUDIENCE = {
     "active": (
         "This recipient's company is an existing Sightspectrum client — "
@@ -100,15 +95,13 @@ OFFER_LINE = (
 # closing question from the intent described in the system prompt.
 CTA_LINE = "Would it help if I shared a few relevant profiles, or would a quick call be easier?"
 # Hardcoded sender title in the sign-off (spelling per business template).
-SENDER_TITLE = "HR Recruiter, SightSpectrum"
+SENDER_TITLE = "Busssiness Development Executive, SightSpectrum"
 # Company name used in the intro line and the email signature.
 COMPANY_NAME = "SightSpectrum"
 # Role-only fallback title (no company) for the intro + signature when a sender isn't
 # listed in SENDER_IDENTITIES — derived from SENDER_TITLE so the two stay in sync.
 DEFAULT_ROLE = SENDER_TITLE.split(",")[0].strip()
-# NOTE: no opt-out text is part of the generated copy. Unsubscribe is Mailjet-managed
-# now (Mailjet injects its own List-Unsubscribe + hosted opt-out), and email_service
-# appends a plain "reply to unsubscribe" line at send time.
+
 DECK_LINK_TEMPLATE = "More about us: {url}"
 
 _SIGNOFF_MARKERS = (

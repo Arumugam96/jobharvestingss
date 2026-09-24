@@ -24,13 +24,13 @@ const RANGES = [
 
 // The events we surface, in order, with their accent + soft glass tint. Colors mirror
 // engagement() in components/outreachUi.jsx. `key` is the field on the /stats response.
-// "bounced" is labelled "Soft bounce" (only soft bounces are enabled upstream).
+// "bounced" is labelled "Undelivered" (only soft bounces are enabled upstream).
 const STAT_EVENTS = [
   { key: "opened",       label: "Opened",       c: "#0E7C5A", tint: "rgba(14,124,90,.14)",  tint2: "rgba(14,124,90,.04)" },
   { key: "clicked",      label: "Clicked",      c: "#0D9488", tint: "rgba(13,148,136,.14)", tint2: "rgba(13,148,136,.04)" },
   { key: "unsubscribed", label: "Unsubscribed", c: "#7C3AED", tint: "rgba(124,58,237,.14)", tint2: "rgba(124,58,237,.04)" },
   { key: "blocked",      label: "Blocked",      c: "#B91C1C", tint: "rgba(185,28,28,.13)",  tint2: "rgba(185,28,28,.04)" },
-  { key: "bounced",      label: "Soft bounce",  c: "#EA580C", tint: "rgba(234,88,12,.13)",  tint2: "rgba(234,88,12,.04)" },
+  { key: "bounced",      label: "Undelivered",  c: "#EA580C", tint: "rgba(234,88,12,.13)",  tint2: "rgba(234,88,12,.04)" },
 ];
 
 // Frosted glass cards for the panel — self-contained, injected once with the panel.
