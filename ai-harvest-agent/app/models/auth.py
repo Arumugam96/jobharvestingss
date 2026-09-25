@@ -23,6 +23,9 @@ class UserORM(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     email: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
+    # Tenant this user belongs to (app/models/tenant.py). Backfilled to 'internal';
+    # resolved from the email domain on first OTP login (AuthService).
+    tenant_id: Mapped[str] = mapped_column(String(40), nullable=False, server_default="'internal'", index=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     is_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -116,3 +119,4 @@ class AuthenticatedUser(BaseModel):
     email: str
     is_active: bool
     is_verified: bool
+    tenant_id: str = "internal"

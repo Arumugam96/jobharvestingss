@@ -12,7 +12,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.config import Settings, get_settings
 from app.core.security import InvalidTokenError, decode_access_token
+from app.core.tenant_context import bind_session_tenant, set_current_tenant
 from app.models.auth import AuthenticatedUser, UserORM
+from app.models.tenant import INTERNAL_TENANT_ID
 from app.services.email_service import EmailSender
 from app.services.llm_service import LLMService
 from app.services.playwright_service import PlaywrightService
@@ -134,11 +136,15 @@ async def get_current_user(
     # Dev bypass: when login enforcement is off, every protected route (and
     # /auth/me) resolves to a synthetic user without needing a token.
     if not settings.auth_enabled:
+        # Dev bypass runs as the internal (all-access) tenant.
+        set_current_tenant(INTERNAL_TENANT_ID)
+        await bind_session_tenant(db)
         return AuthenticatedUser(
             id="dev",
             email=f"dev@{settings.allowed_email_domain}",
             is_active=True,
             is_verified=True,
+            tenant_id=INTERNAL_TENANT_ID,
         )
 
     unauthorized = HTTPException(
@@ -157,6 +163,8 @@ async def get_current_user(
             result = await db.execute(select(UserORM).where(UserORM.id == session.user_id))
             user = result.scalar_one_or_none()
             if user is not None and user.is_active:
+                set_current_tenant(user.tenant_id)
+                await bind_session_tenant(db)
                 return AuthenticatedUser.model_validate(user)
         # Cookie present but stale/revoked — fall through to the bearer path
         # rather than 401 outright, so a client sending both still works.
@@ -177,4 +185,14 @@ async def get_current_user(
         unauthorized.detail = "User not found or inactive"
         raise unauthorized
 
+    set_current_tenant(user.tenant_id)
+    await bind_session_tenant(db)
     return AuthenticatedUser.model_validate(user)
+
+
+async def get_current_tenant(
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> str:
+    """The current request's tenant id (`internal` for the in-house team / dev
+    bypass). Content queries scope to it; `internal` is all-access."""
+    return current_user.tenant_id

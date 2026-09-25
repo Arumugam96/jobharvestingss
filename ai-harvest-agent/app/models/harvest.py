@@ -33,6 +33,7 @@ class HarvestJobORM(Base):
     __tablename__ = "harvest_jobs"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    tenant_id: Mapped[str] = mapped_column(String(40), nullable=False, server_default="'internal'", index=True)  # owning tenant
     url: Mapped[str] = mapped_column(Text, nullable=False)
     goal: Mapped[str] = mapped_column(Text, nullable=False)
     agent_type: Mapped[str] = mapped_column(String(50), default="harvest")
@@ -51,6 +52,7 @@ class HarvestResultORM(Base):
     __tablename__ = "harvest_results"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    tenant_id: Mapped[str] = mapped_column(String(40), nullable=False, server_default="'internal'", index=True)  # owning tenant
     job_id: Mapped[str] = mapped_column(ForeignKey("harvest_jobs.id"), nullable=False)
     page_url: Mapped[str] = mapped_column(Text, nullable=False)
     page_number: Mapped[int] = mapped_column(default=1)

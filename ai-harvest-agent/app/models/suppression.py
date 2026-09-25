@@ -22,6 +22,10 @@ class EmailSuppressionORM(Base):
     __tablename__ = "email_suppressions"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    # Owning tenant (for RLS/visibility). NOTE: `email` is still globally unique
+    # below, so suppression remains effectively global for now; a later change can
+    # switch to a composite unique (tenant_id, email) for true per-tenant opt-out.
+    tenant_id: Mapped[str] = mapped_column(String(40), nullable=False, server_default="'internal'", index=True)
     # Normalized (lowercased, trimmed) recipient email — the do-not-contact key.
     email: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
     # Why the address was suppressed. Only "unsubscribe" today (spam is recorded on

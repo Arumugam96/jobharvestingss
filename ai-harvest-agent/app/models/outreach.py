@@ -23,6 +23,7 @@ class EmailOutreachORM(Base):
     __tablename__ = "email_outreach"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    tenant_id: Mapped[str] = mapped_column(String(40), nullable=False, server_default="'internal'", index=True)  # owning tenant
     # Denormalized correlation keys, not hard FKs — the source job may be a
     # JSON-sourced row with a synthetic id, and recruiters aren't always linked
     # (mirrors LlmCallORM.job_url's rationale).

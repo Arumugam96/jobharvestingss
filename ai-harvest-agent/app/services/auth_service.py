@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import Settings
 from app.core.security import generate_otp, hash_otp, verify_otp_hash
 from app.models.auth import OTPPurpose, OTPVerificationORM, UserORM
+from app.models.tenant import INTERNAL_TENANT_ID, tenant_for_email
 from app.services.email_service import EmailSender
 
 logger = structlog.get_logger(__name__)
@@ -154,10 +155,16 @@ class AuthService:
     async def _get_or_create_user(self, email: str) -> UserORM:
         result = await self._db.execute(select(UserORM).where(UserORM.email == email))
         user = result.scalar_one_or_none()
+        # Assign the tenant from the email domain (northwindtalent -> client_us,
+        # meridianstaffing -> client_in, sightspectrum -> internal). Unknown
+        # domains can't reach here — validate_company_email rejects them first.
+        tenant_id = tenant_for_email(email) or INTERNAL_TENANT_ID
         if user is None:
-            user = UserORM(email=email, is_active=True, is_verified=True)
+            user = UserORM(email=email, is_active=True, is_verified=True, tenant_id=tenant_id)
             self._db.add(user)
         else:
             user.is_verified = True
+            if user.tenant_id != tenant_id:  # keep in sync if the domain map changed
+                user.tenant_id = tenant_id
         await self._db.flush()
         return user

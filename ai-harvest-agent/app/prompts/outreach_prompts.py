@@ -214,13 +214,7 @@ def append_closing(
         <Name>
         <Role Title>, SightSpectrum
         <sender_email>
-
-    The sign-off is placed last so the signature closes the email; the phone/contact block
-    sits above the website link (phone → website → sign-off). The sender email, website URL,
-    and phone number are left as plain text here; email_service turns them into a bold
-    clickable mailto link, a clickable link, and a bold clickable tel: link when the email is
-    sent as HTML (and replaces the sign-off with a formatted signature card), and appends a
-    plain unsubscribe line at send time."""
+    """
     body = _insert_after_greeting(_greeting_on_own_line(_strip_trailing_closing(pitch)), intro)
     url = (deck_url or "").strip()
     contact = (contact_block or "").strip()
@@ -345,20 +339,15 @@ SENDER_IDENTITIES: dict[str, dict[str, str]] = {
         "first": "Sanjeeta",
         "full": "Sanjeeta Mohanty",
         "title": "Business Development Executive",
-        "phone": "",  # TODO: add Sanjeeta's direct number; the Tel row is omitted while empty.
+        "phone": "", 
     },
 }
 
 
 def resolve_identity(sender_email: str) -> dict[str, str]:
-    """Resolve the sender's display identity (``first``, ``full``, ``title``, ``phone``)
-    used by the intro line, the plain-text sign-off, and the HTML signature — one source
-    of truth so all three always agree.
-
-    Looks up SENDER_IDENTITIES by lowercased email. For an unlisted sender, falls back to
-    the first name derived from the email (sender_display_name), an empty full name
-    (callers use ``first``), the role-only DEFAULT_ROLE, and no phone. ``title`` is always
-    role-only (no company); callers append COMPANY_NAME where a company is wanted."""
+    """Resolve the sender's display identity (``first``, ``full``, 
+    ``title``, ``phone``)
+    """
     email = (sender_email or "").strip().lower()
     entry = SENDER_IDENTITIES.get(email) or {}
     first = entry.get("first") or sender_display_name(sender_email)
@@ -584,11 +573,11 @@ def build_followup_email_prompt(
         prior_block_lines.append(f"- Sent: {prior_sent_at}")
     if prior_subject:
         prior_block_lines.append(f"- Subject: {prior_subject}")
-    if prior_body:
-        snippet = prior_body.strip()
-        if len(snippet) > 900:  # keep the prompt bounded — the opening carries the intent
-            snippet = snippet[:900] + " …"
-        prior_block_lines.append(f"- Body:\n{snippet}")
+    # if prior_body:
+    #     snippet = prior_body.strip()
+    #     if len(snippet) > 900:  # keep the prompt bounded — the opening carries the intent
+    #         snippet = snippet[:900] + " …"
+    #     prior_block_lines.append(f"- Body:\n{snippet}")
     prior_block = "\n".join(prior_block_lines)
     return (
         f"Audience — {audience}\n\n"

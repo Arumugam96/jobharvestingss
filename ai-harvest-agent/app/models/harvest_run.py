@@ -20,6 +20,10 @@ from app.models.harvest import Base  # shared metadata — one Base.metadata.cre
 class HarvestRunORM(Base):
     __tablename__ = "harvest_runs"
 
+    # Owning tenant (app/models/tenant.py). Backfilled to 'internal'; RLS + the
+    # app-level scoping helper both key off this column.
+    tenant_id: Mapped[str] = mapped_column(String(40), nullable=False, server_default="'internal'", index=True)
+
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     job_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     run_id: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
@@ -60,6 +64,10 @@ class HarvestRunORM(Base):
 class ScrapedJobORM(Base):
     __tablename__ = "scraped_jobs"
     __table_args__ = (Index("ix_scraped_jobs_run_source", "run_id", "source"),)
+
+    # Owning tenant (app/models/tenant.py) — stamped directly (not only via
+    # run_id) so jobs filter/RLS without a join. Backfilled to 'internal'.
+    tenant_id: Mapped[str] = mapped_column(String(40), nullable=False, server_default="'internal'", index=True)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     run_id: Mapped[str] = mapped_column(ForeignKey("harvest_runs.id"), nullable=False, index=True)
@@ -169,6 +177,8 @@ class LlmCallType:
 
 class LlmCallORM(Base):
     __tablename__ = "llm_calls"
+
+    tenant_id: Mapped[str] = mapped_column(String(40), nullable=False, server_default="'internal'", index=True)  # owning tenant
     __table_args__ = (Index("ix_llm_calls_run_called_at", "run_id", "called_at"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
@@ -210,6 +220,8 @@ class ReenrichmentTaskORM(Base):
     end-of-run replace_run_jobs delete+reinsert, unlike the row's UUID.
     """
     __tablename__ = "reenrichment_tasks"
+
+    tenant_id: Mapped[str] = mapped_column(String(40), nullable=False, server_default="'internal'", index=True)  # owning tenant
     __table_args__ = (Index("ix_reenrichment_tasks_status", "status", "first_seen_at"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
