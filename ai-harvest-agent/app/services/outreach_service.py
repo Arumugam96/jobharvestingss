@@ -117,10 +117,14 @@ class OutreachService:
                 # Subject is built deterministically (exact job title + a random
                 # tagline) so its format is guaranteed; the LLM subject is ignored.
                 subject = outreach_prompts.build_email_subject(job)
-                # The deterministic intro (self-intro + posting reference) is inserted
-                # right after the greeting; the LLM now writes only the value + CTA lines.
+                # Greeting + self-intro are deterministic — so the email always opens with a
+                # recipient greeting (never the sender's name) followed by the fixed self-
+                # intro; the LLM writes the posting reference + value + CTA lines.
                 intro = outreach_prompts.build_intro(sender_email, job)
-                body = outreach_prompts.append_closing(pitch, sender_email, deck_url, contact_block, intro=intro)
+                greeting = outreach_prompts.build_greeting(job)
+                body = outreach_prompts.append_closing(
+                    pitch, sender_email, deck_url, contact_block, intro=intro, greeting=greeting,
+                )
                 return EmailDraft(subject=subject, body=body, fallback_used=False, meta=meta)
             # Model responded but not with usable JSON — mark the audit row and fall back.
             meta.success = False
@@ -154,7 +158,12 @@ class OutreachService:
             if parsed:
                 _, pitch = parsed
                 subject = outreach_prompts.build_followup_subject(prior_subject, job)
-                body = outreach_prompts.append_closing(pitch, sender_email, deck_url, contact_block)
+                # Deterministic greeting leads the follow-up too (no self-intro on a
+                # second-touch); the LLM writes the nudge + value + CTA lines.
+                greeting = outreach_prompts.build_greeting(job)
+                body = outreach_prompts.append_closing(
+                    pitch, sender_email, deck_url, contact_block, greeting=greeting,
+                )
                 return EmailDraft(subject=subject, body=body, fallback_used=False, meta=meta)
             meta.success = False
             meta.error_message = meta.error_message or "unparseable LLM JSON"

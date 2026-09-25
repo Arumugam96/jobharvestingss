@@ -241,6 +241,11 @@ class _Sel:
 
     # Card list-view fields
     TITLE:    list[str] = [
+        # Verified-job cards nest a visible span + a visually-hidden "<Title> with
+        # verification" a11y span; scope to the visible one so inner_text() doesn't
+        # capture both (which produced "<Title> <Title> with verification").
+        "a.job-card-list__title--link span[aria-hidden='true']",
+        "a.job-card-list__title span[aria-hidden='true']",
         "a.job-card-list__title--link",     # authenticated 2024+
         "a.job-card-list__title",
         "strong a",

@@ -115,6 +115,9 @@ class _Sel:
     # Fields within each card
     TITLE = [
         "h3.base-search-card__title",
+        # Verified-job cards: take the visible span, not the hidden "<Title> with
+        # verification" a11y span, so the title isn't captured doubled.
+        "a.job-card-list__title span[aria-hidden='true']",
         "a.job-card-list__title",
         "span[aria-label]",
         "[class*='job-card'] h3",

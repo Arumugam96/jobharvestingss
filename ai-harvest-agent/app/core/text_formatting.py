@@ -230,3 +230,39 @@ def html_description_to_text(html: str) -> str:
         block.append("\n")
 
     return format_job_description(soup.get_text())
+
+
+# ── Job-title normalization (LinkedIn "verified" a11y artifact) ─────────────────
+
+# LinkedIn renders a "verified job" title anchor with two child spans — a visible
+# one and a visually-hidden accessibility label that appends " with verification":
+#   <a class="job-card-list__title--link">
+#     <span aria-hidden="true">Windows Device Driver</span>
+#     <span class="visually-hidden">Windows Device Driver with verification</span>
+#   </a>
+# Playwright's inner_text() returns BOTH spans (the hidden one is clipped, not
+# display:none), so a scraped title can arrive as "<Title> <Title> with verification"
+# (or just "<Title> with verification"). These strip that artifact deterministically.
+_VERIFIED_SUFFIX_RE = re.compile(r"\s*with verification\s*$", re.IGNORECASE)
+_TITLE_DUP_RE = re.compile(r"^(.+?)\s+\1$")
+
+
+def normalize_job_title(title: str) -> str:
+    """Strip LinkedIn's visually-hidden '<Title> with verification' accessibility
+    text (and the immediate title duplication it causes) from a scraped job title.
+
+        "Windows Device Driver Windows Device Driver with verification" -> "Windows Device Driver"
+        "Windows Device Driver with verification"                       -> "Windows Device Driver"
+
+    Only activates when the trailing " with verification" marker is present, so a
+    legitimately worded title is returned unchanged (only stripped of surrounding
+    whitespace). Idempotent — safe to call more than once."""
+    t = (title or "").strip()
+    if not _VERIFIED_SUFFIX_RE.search(t):
+        return t
+    # Collapse any internal whitespace (incl. a newline the scraper left between the
+    # two spans) so the duplication check works, then drop the a11y suffix + one copy.
+    t = " ".join(t.split())
+    core = _VERIFIED_SUFFIX_RE.sub("", t).strip()
+    dup = _TITLE_DUP_RE.match(core)
+    return (dup.group(1) if dup else core).strip()

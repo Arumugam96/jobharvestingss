@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.core.dependencies import get_current_user, get_db_session, get_email_sender, get_llm_service
+from app.core.text_formatting import normalize_job_title
 from app.models.auth import AuthenticatedUser
 from app.models.harvest_run import LlmCallType
 from app.models.outreach import EmailOutreachORM
@@ -252,7 +253,9 @@ async def send_email(
             company = job.company or ""
             recruiter_id = job.recruiter_id
             client_type = classify_client(company)
-            job_title = job.job_title or ""
+            # Normalize so the posting-link matcher looks for the same clean title the
+            # (view-based) generated body contains — otherwise the link won't attach.
+            job_title = normalize_job_title(job.job_title or "")
             job_url = job.job_url or ""
 
     # A send is a follow-up when it's linked to a prior outreach; otherwise it's an

@@ -192,8 +192,26 @@ def _insert_after_greeting(body: str, intro: str) -> str:
     return f"{intro}\n\n{body}" if body else intro
 
 
+def _ensure_greeting(body: str, greeting: str) -> str:
+    """Force `greeting` to be the single opening line of `body`, replacing any greeting the
+    model emitted. `body` has already been through _greeting_on_own_line, so a model greeting
+    is isolated as the first paragraph — drop it and prepend the deterministic one, so the
+    email always opens with a recipient greeting rather than the sender's self-introduction.
+    No-op when `greeting` is empty."""
+    if not greeting:
+        return body
+    text = (body or "").lstrip()
+    parts = text.split("\n\n", 1)
+    if parts and _GREETING_RE.match(parts[0].strip()):
+        rest = parts[1].lstrip() if len(parts) == 2 else ""
+    else:
+        rest = text
+    return f"{greeting}\n\n{rest}" if rest else greeting
+
+
 def append_closing(
     pitch: str, sender_email: str, deck_url: str = "", contact_block: str = "", intro: str = "",
+    greeting: str = "",
 ) -> str:
     """Append the deterministic closing to an LLM- or template-generated pitch, in
     this order (blocks separated by blank lines):
@@ -221,7 +239,13 @@ def append_closing(
     clickable mailto link, a clickable link, and a bold clickable tel: link when the email is
     sent as HTML (and replaces the sign-off with a formatted signature card), and appends a
     plain unsubscribe line at send time."""
-    body = _insert_after_greeting(_greeting_on_own_line(_strip_trailing_closing(pitch)), intro)
+    # When `greeting` is given (the live paths pass build_greeting(job)), force it as the
+    # single opening line so the email always leads with a recipient greeting — never the
+    # sender self-intro — regardless of whether the model emitted its own greeting.
+    pitch = _greeting_on_own_line(_strip_trailing_closing(pitch))
+    if greeting:
+        pitch = _ensure_greeting(pitch, greeting)
+    body = _insert_after_greeting(pitch, intro)
     url = (deck_url or "").strip()
     contact = (contact_block or "").strip()
     blocks = [body] if body else []
@@ -241,16 +265,20 @@ EMAIL_SYSTEM_PROMPT = (
     "hyped sales blast, never long. "
 
     "EMAIL STRUCTURE: "
-    "Output a greeting line, then EXACTLY two short lines, each as its own "
-    "paragraph (a blank line between each). Nothing else. Do NOT open with a line that "
-    "references the job posting or introduces yourself — a fixed introduction line "
-    "(the sender's name + a reference to the posting) is added automatically right after "
-    "the greeting, so start straight into how you can help. "
-    "(1) In one or two short sentences, naturally explain how Sightspectrum could help with the role. "
+    "Do NOT write a greeting and do NOT introduce yourself — a recipient greeting and a "
+    "one-line self-introduction (the sender's name + role) are added automatically before "
+    "your text. Output EXACTLY three short lines, each as its own paragraph (a blank line "
+    "between each). Nothing else. "
+    "(1) One short line referencing the job posting. You MUST refer to the role using the "
+    "EXACT job title text given in the context, verbatim — do not paraphrase, shorten, "
+    "reorder, or change its capitalization (the exact title is linked to the posting "
+    "automatically, so it must match). e.g. 'I came across your posting for <EXACT JOB "
+    "TITLE> at <Company>.' Vary the wording of this line between messages. "
+    "(2) In one or two short sentences, naturally explain how Sightspectrum could help with the role. "
     "Convey only that Sightspectrum supports contract IT hiring and can put forward candidates "
     "suited to the role. Use your own wording and vary the sentence structure, tone, and "
     "phrasing between messages so the result feels individually written rather than templated. "
-    "(2) A brief, low-pressure closing question inviting an easy next step — for "
+    "(3) A brief, low-pressure closing question inviting an easy next step — for "
     "instance offering to send the profiles or to set up a short call. Phrase it "
     "freshly in your own words each time, as one short sentence; do NOT reuse a "
     "canned line. "
@@ -267,11 +295,6 @@ EMAIL_SYSTEM_PROMPT = (
     "'discount', superlatives, urgency, repeated calls to action, or promotional "
     "taglines. Keep it plain, specific, and low-key, and vary the wording every time. "
 
-    "GREETING RULES: "
-    "Address the recipient by first name when a recipient name is given (e.g. "
-    "'Hi Jane,'); when no name is given, use a neutral greeting such as 'Hello,'. "
-    "Put the greeting on its OWN line, followed by a blank line, then the two lines. "
-
     "PLACEHOLDER RULES: "
     "NEVER output a bracketed placeholder such as '[Recipient Name]', '[Name]', "
     "'[Company]', or '[Your Name]'. If a detail is unknown, omit it or rephrase "
@@ -279,10 +302,11 @@ EMAIL_SYSTEM_PROMPT = (
     "addresses. "
 
     "CONTACT AND SIGN-OFF RULES: "
-    "Write ONLY the greeting and the two lines. Do NOT add a sign-off such as "
-    "'Regards' or the sender's name, and do NOT add a phone number, email address, "
-    "website, or opt-out line — the introduction, sign-off, website link, and opt-out "
-    "notice are appended automatically by the application. "
+    "Write ONLY the three lines described above. Do NOT add a greeting, a self-"
+    "introduction, a sign-off such as 'Regards' or the sender's name, and do NOT add a "
+    "phone number, email address, website, or opt-out line — the greeting, introduction, "
+    "sign-off, website link, and opt-out notice are all appended automatically by the "
+    "application. "
 
     "OUTPUT RULES: "
     "Return ONLY valid JSON in exactly this form: "
@@ -419,28 +443,32 @@ def _article(word: str) -> str:
     return "an" if word[:1].lower() in "aeiou" else "a"
 
 
-def build_intro(sender_email: str, job: dict) -> str:
-    """Deterministic self-introduction + posting reference, placed right after the greeting:
+def build_greeting(job: dict) -> str:
+    """Deterministic recipient greeting placed at the very top of the email: 'Hi <First>,'
+    when a job_poster_name is known, else a neutral 'Hello,'. Used by both the LLM path
+    (prepended via append_closing) and the deterministic fallbacks, so every outreach email
+    opens with a greeting to the RECIPIENT rather than the sender's self-introduction."""
+    poster = (job.get("job_poster_name") or "").strip()
+    return f"Hi {poster.split()[0]}," if poster else "Hello,"
 
-        I'm <First>, a <Role Title> with SightSpectrum. I saw the listing for <Job Title> at <Company>.
+
+def build_intro(sender_email: str, job: dict) -> str:
+    """Deterministic self-introduction, placed right after the greeting:
+
+        I'm <First>, a <Role Title> with SightSpectrum.
 
     The name/title come from resolve_identity(sender_email) so the intro matches the
-    sign-off/signature; <Job Title> is the EXACT stored title so the sent HTML links the
-    first occurrence of it to the posting (see email_service._outreach_body_to_html), and
-    <Company> falls back to a neutral stand-in. Returns "" when there's no job title
-    (nothing to reference). When no first name resolves (a role mailbox), drops the personal
-    "I'm <name>" opener for a neutral variant."""
-    title = (job.get("job_title") or "").strip()
-    if not title:
-        return ""
-    company = (job.get("company") or "").strip() or _GENERIC_COMPANY
+    sign-off/signature. The posting reference is NOT hard-coded here anymore — the LLM
+    writes it as its first body line (using the exact job title, which
+    email_service._outreach_body_to_html then links to the posting). When no first name
+    resolves (a role mailbox), drops the personal "I'm <name>" opener for a neutral variant.
+    `job` is accepted for call-site compatibility but is no longer used."""
     identity = resolve_identity(sender_email)
     first = identity["first"]
     role = identity["title"]
-    listing = f"I saw the listing for {title} at {company}."
     if first:
-        return f"I'm {first}, {_article(role)} {role} with {COMPANY_NAME}. {listing}"
-    return f"I'm reaching out from {COMPANY_NAME} about the listing for {title} at {company}."
+        return f"I'm {first}, {_article(role)} {role} with {COMPANY_NAME}."
+    return f"I'm reaching out from {COMPANY_NAME}."
 
 
 def build_email_prompt(client_type: str, tone: str, job: dict, sender_email: str = "") -> str:
@@ -477,25 +505,33 @@ def build_email_subject(job: dict) -> str:
 def render_email_fallback(
     client_type: str, job: dict, sender_email: str = "", deck_url: str = "", contact_block: str = ""
 ) -> tuple[str, str]:
-    """Deterministic fallback used when LLM generation fails — builds the same
-    fixed template (greeting + deterministic intro + fixed offer + CTA) directly
-    from the job context, with the same closing appended as the LLM path. The
-    posting reference now lives in the intro (build_intro), so the fallback body is
-    just the offer + CTA. For an existing ("active") client the offer line carries a
-    brief partnership nod; the fixed claims are unchanged. `client_type` other than
-    "active" is treated as a new/unknown prospect. `contact_block` (automated sends)
-    is placed above the sign-off, mirroring the LLM path."""
-    poster = (job.get("job_poster_name") or "").strip()
+    """Deterministic fallback used when LLM generation fails — builds the same fixed
+    structure the LLM path assembles (greeting + self-intro + posting reference + offer
+    + CTA) directly from the job context, with the same closing appended. Since the posting
+    reference is no longer part of build_intro, the fallback writes it here as the first body
+    line. For an existing ("active") client the offer line carries a brief partnership nod;
+    the fixed claims are unchanged. `client_type` other than "active" is treated as a
+    new/unknown prospect. `contact_block` (automated sends) is placed above the sign-off,
+    mirroring the LLM path."""
+    company = (job.get("company") or "").strip() or _GENERIC_COMPANY
+    title = (job.get("job_title") or "").strip()
 
-    greeting = f"Hi {poster.split()[0]}," if poster else "Hello,"
+    greeting = build_greeting(job)
+    reference = (
+        f"I came across your posting for {title} at {company}."
+        if title
+        else f"I wanted to reach out about your IT hiring at {company}."
+    )
     offer = (
         f"As your empaneled Sightspectrum partner, {OFFER_LINE[0].lower()}{OFFER_LINE[1:]}"
         if client_type == "active"
         else OFFER_LINE
     )
-    body = "\n\n".join([greeting, offer, CTA_LINE])
+    body = "\n\n".join([reference, offer, CTA_LINE])
     intro = build_intro(sender_email, job)
-    return build_email_subject(job), append_closing(body, sender_email, deck_url, contact_block, intro=intro)
+    return build_email_subject(job), append_closing(
+        body, sender_email, deck_url, contact_block, intro=intro, greeting=greeting,
+    )
 
 
 # ── Follow-up email ──────────────────────────────────────────────────────────
@@ -512,8 +548,9 @@ FOLLOWUP_SYSTEM_PROMPT = (
     "like a real person sending a brief, friendly check-in. "
 
     "STRUCTURE: "
-    "Output a greeting line, then EXACTLY three short lines, each its own paragraph "
-    "(a blank line between each). Nothing else. "
+    "Do NOT write a greeting — a recipient greeting is added automatically before your "
+    "text. Output EXACTLY three short lines, each its own paragraph (a blank line between "
+    "each). Nothing else. "
     "(1) A one-line gentle follow-up that references the earlier message about the "
     "role — e.g. 'Following up on my note about <JOB TITLE> at <COMPANY>.' Use the "
     "job title EXACTLY as given in the context (verbatim — do not paraphrase, "
@@ -542,9 +579,8 @@ FOLLOWUP_SYSTEM_PROMPT = (
     "plain and low-key, and vary the wording every time. "
 
     "GREETING RULES: "
-    "Address the recipient by first name when a recipient name is given (e.g. "
-    "'Hi Jane,'); when no name is given, use a neutral greeting such as 'Hello,'. "
-    "Put the greeting on its OWN line, followed by a blank line, then the three lines. "
+    "A recipient greeting is added automatically — do NOT write your own greeting or "
+    "salutation. "
 
     "PLACEHOLDER RULES: "
     "NEVER output a bracketed placeholder such as '[Recipient Name]', '[Name]', "
@@ -552,7 +588,7 @@ FOLLOWUP_SYSTEM_PROMPT = (
     "neutrally. Do not invent company information, names, phone numbers, or emails. "
 
     "CONTACT AND SIGN-OFF RULES: "
-    "Write ONLY the greeting and the three lines. Do NOT add a sign-off, the sender's "
+    "Write ONLY the three lines. Do NOT add a greeting, a sign-off, the sender's "
     "name, a phone number, email address, website, or opt-out line — these are "
     "appended automatically by the application. "
 
@@ -616,20 +652,22 @@ def render_followup_fallback(
     job: dict, prior_subject: str = "", sender_email: str = "", deck_url: str = "", contact_block: str = ""
 ) -> tuple[str, str]:
     """Deterministic follow-up used when LLM generation fails — a brief nudge built
-    from the job context, with the same closing appended as the LLM path.
+    from the job context, with the same closing appended as the LLM path. The greeting is
+    prepended deterministically by append_closing; a follow-up has no self-intro.
     `contact_block` (automated sends) is placed above the sign-off."""
     company = (job.get("company") or "").strip() or _GENERIC_COMPANY
     title = (job.get("job_title") or "").strip()
-    poster = (job.get("job_poster_name") or "").strip()
 
-    greeting = f"Hi {poster.split()[0]}," if poster else "Hello,"
+    greeting = build_greeting(job)
     reference = (
         f"Just following up on my earlier note about {title} at {company}."
         if title
         else f"Just following up on my earlier note about your hiring at {company}."
     )
-    body = "\n\n".join([greeting, reference, OFFER_LINE, CTA_LINE])
-    return build_followup_subject(prior_subject, job), append_closing(body, sender_email, deck_url, contact_block)
+    body = "\n\n".join([reference, OFFER_LINE, CTA_LINE])
+    return build_followup_subject(prior_subject, job), append_closing(
+        body, sender_email, deck_url, contact_block, greeting=greeting,
+    )
 
 
 # ── LinkedIn ─────────────────────────────────────────────────────────────────

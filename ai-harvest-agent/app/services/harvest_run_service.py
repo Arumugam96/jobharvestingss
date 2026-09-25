@@ -29,7 +29,7 @@ from app.core.company_size import (
 from app.core.contact_normalize import normalize_email, normalize_phone
 from app.core.dependencies import get_session_factory
 from app.core.location import parse_location
-from app.core.text_formatting import html_description_to_text
+from app.core.text_formatting import html_description_to_text, normalize_job_title
 from app.models.harvest_run import (
     HarvestRunORM,
     LlmCallORM,
@@ -244,7 +244,9 @@ class HarvestRunService:
                     id=str(uuid.uuid4()),
                     run_id=run_pk,
                     source=j.get("source", ""),
-                    job_title=j.get("job_title", ""),
+                    # Strip LinkedIn's "<Title> <Title> with verification" a11y artifact
+                    # so new harvests store a clean title everywhere it's read.
+                    job_title=normalize_job_title(j.get("job_title", "")),
                     company=j.get("company", ""),
                     location=j.get("location", ""),
                     country=j.get("country") or loc_country,
@@ -932,7 +934,9 @@ def scraped_job_view(job: ScrapedJobORM) -> dict[str, Any]:
     job_description = job.job_description or html_description_to_text(job.job_description_html)
     return {
         "id":                     job.id,
-        "job_title":              job.job_title,
+        # Normalize at read time too, so already-harvested rows with the doubled
+        # "<Title> with verification" artifact render clean in outreach + the UI.
+        "job_title":              normalize_job_title(job.job_title),
         "company":                job.company,
         "location":               job.location,
         # Job-location country/state parsed from `location` (display-time Country
