@@ -194,6 +194,9 @@ def _ensure_email_outreach_columns(sync_conn) -> None:
         # Full ordered event trail (JSON list). Postgres accepts JSON; SQLite gives
         # it TEXT affinity — both fine for a JSON-serialised list.
         ("events",              "ALTER TABLE email_outreach ADD COLUMN events JSON"),
+        # Rendered HTML part as actually delivered (signature card included);
+        # NULL for LinkedIn rows and pre-existing sends. Mirrored in alembic 0009.
+        ("body_html",           "ALTER TABLE email_outreach ADD COLUMN body_html TEXT"),
     ]
     for name, ddl in pending:
         if name not in existing_cols:

@@ -19,10 +19,21 @@ const RESEND_SECONDS = 60; // matches backend otp_resend_cooldown_seconds
 const MAX_RESENDS = 3;
 const MAX_ATTEMPTS = 5; // matches backend otp_max_attempts
 
-// Only Sightspectrum emails may log in — any single-label TLD (.com/.in/.org/.io…),
-// mirroring the backend validator (validate_company_email). Client-side check is
-// just instant feedback; the backend is authoritative (422 otherwise).
-const EMAIL_RE = /^[^\s@]+@sightspectrum\.[a-z]{2,}$/i;
+// Workspace routing — the login page carries the switch between the client
+// staffing workspaces. FOR NOW the chosen workspace decides the tenant (it's
+// sent with verify-otp and any allowed user may enter any workspace); the email
+// only has to be one of the allowed login domains below, mirroring the backend
+// validator (which stays authoritative — 422 otherwise). The internal tenant
+// still exists in the backend (dev bypass / all-access + WORKSPACE_TENANTS
+// accepts "internal") — it's only hidden from this page.
+// To re-tighten later: pair each workspace with its own domain regex again and
+// stop sending `workspace` (the backend then falls back to its domain map).
+const WORKSPACES = [
+  { key: "us", label: "US Staffing", flag: "🇺🇸", name: "Northwind Talent" },
+  { key: "in", label: "India Staffing", flag: "🇮🇳", name: "Meridian Staffing" },
+];
+// Any allowed login domain, regardless of the selected workspace.
+const EMAIL_RE = /^[^\s@]+@(?:sightspectrum|northwindtalent|meridianstaffing)\.[a-z]{2,}$/i;
 
 /* ------------------------------------------------------------------ */
 /* styles                                                              */
@@ -136,6 +147,19 @@ const CSS = `
 .link-btn:disabled{color:#94A3B8;cursor:not-allowed;text-decoration:none}
 .link-btn.back{color:var(--muted);margin-bottom:18px}
 .link-btn.back:hover{color:var(--text);text-decoration:none}
+
+/* ---------- workspace switch ---------- */
+.ws-row{display:flex;gap:8px}
+.ws-opt{
+  flex:1;display:inline-flex;align-items:center;justify-content:center;gap:7px;
+  height:40px;font-size:12.5px;font-weight:600;font-family:inherit;color:var(--muted);
+  background:var(--surface);border:1.5px solid var(--line);border-radius:9px;cursor:pointer;
+  transition:border-color .15s,color .15s,background .15s,box-shadow .15s;white-space:nowrap;
+}
+.ws-opt:hover{border-color:#CBD5E1;color:var(--text)}
+.ws-opt.on{border-color:var(--primary);color:var(--primary);background:#EFF6FF;box-shadow:0 0 0 3px rgba(37,99,235,.10)}
+.ws-flag{font-size:14px;line-height:1}
+@media (max-width:420px){.ws-opt{font-size:11.5px;gap:5px;padding:0 4px}}
 .spin{animation:spin .9s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
 
@@ -152,6 +176,9 @@ const CSS = `
 /* ------------------------------------------------------------------ */
 export default function LoginPage({ onAuthenticated }) {
   const [step, setStep] = useState("email"); // email | otp
+  // India pre-selected: daily ops are for the India client, and the workspace
+  // picked here decides which tenant new harvest data is tagged to.
+  const [workspace, setWorkspace] = useState("in"); // us | in
   const [email, setEmail] = useState("");
   const [digits, setDigits] = useState(Array(OTP_LENGTH).fill(""));
   const [error, setError] = useState("");
@@ -177,6 +204,7 @@ export default function LoginPage({ onAuthenticated }) {
   }, [step]);
 
   const code = digits.join("");
+  const ws = WORKSPACES.find((w) => w.key === workspace) || WORKSPACES[0];
   const emailValid = EMAIL_RE.test(email.trim());
 
   /* ---------------- send / resend ---------------- */
@@ -299,9 +327,11 @@ export default function LoginPage({ onAuthenticated }) {
       // On success the backend sets the Secure HttpOnly session cookie — there's
       // no token to stash in JS. The returned access_token is intentionally
       // ignored; the app authenticates via the cookie from here on.
-      await verifyOtp(email.trim(), code);
+      // The chosen workspace decides which client's data this session sees
+      // (US / India / internal) — sent to the backend, which sets the tenant.
+      await verifyOtp(email.trim(), code, workspace);
       setBusy(false);
-      onAuthenticated?.({ email: email.trim() });
+      onAuthenticated?.({ email: email.trim(), workspace });
       return;
     } catch (err) {
       setBusy(false);
@@ -364,6 +394,29 @@ export default function LoginPage({ onAuthenticated }) {
               <h2 className="card-title">Sign in</h2>
             </div>
 
+            {/* Workspace routing switch — internal team vs. the client staffing
+                workspaces. FOR NOW this selects which client's data the session
+                sees (sent to verify-otp; the backend sets the tenant). Same
+                people can switch context by signing in under a different one. */}
+            <div className="field">
+              <span className="label">Workspace</span>
+              <div className="ws-row" role="radiogroup" aria-label="Workspace">
+                {WORKSPACES.map((w) => (
+                  <button
+                    key={w.key}
+                    type="button"
+                    role="radio"
+                    aria-checked={workspace === w.key}
+                    className={"ws-opt" + (workspace === w.key ? " on" : "")}
+                    onClick={() => { setWorkspace(w.key); setError(""); }}
+                  >
+                    <span className="ws-flag">{w.flag}</span>
+                    <span>{w.label}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
             <div className="field">
               <label className="label" htmlFor="auth-email">
                 Work email
@@ -391,7 +444,7 @@ export default function LoginPage({ onAuthenticated }) {
                   <span>{error}</span>
                 </div>
               ) : (
-                <div className="field-hint">Use your Sightspectrum email.</div>
+                <div className="field-hint">Use your Sightspectrum email — you’ll see the <strong>{ws.name}</strong> workspace.</div>
               )}
             </div>
 

@@ -47,6 +47,7 @@ def outreach_to_dict(row: EmailOutreachORM, contact_name: str | None = None) -> 
         "from_email": row.from_email,
         "subject": row.subject,
         "body": row.body,
+        "body_html": row.body_html,
         "llm_generated": row.llm_generated,
         "fallback_used": row.fallback_used,
         "status": row.status,
@@ -524,6 +525,7 @@ def build_email_outreach_row(
     outreach_kind: str = "initial",
     parent_outreach_id: str | None = None,
     sent_at: datetime | None = None,
+    body_html: str | None = None,
 ) -> EmailOutreachORM:
     """Construct an EmailOutreachORM send-log row for an EMAIL outreach send — the
     single source of truth for the row shape shared by the manual send route
@@ -553,6 +555,7 @@ def build_email_outreach_row(
         from_email=from_email,
         subject=subject,
         body=body,
+        body_html=body_html,
         attachment_name="",
         llm_generated=not fallback_used,
         fallback_used=fallback_used,

@@ -1,3 +1,6 @@
+import { AUTH_ENABLED } from "./auth";
+import { getDevTenant } from "./devTenant";
+
 // `??` (not `||`) so an explicit empty string — same-origin deployment behind
 // nginx, see harvest-agent/Dockerfile — isn't overridden by the dev default.
 const API_BASE = process.env.REACT_APP_API_BASE_URL ?? "http://localhost:8000";
@@ -18,6 +21,9 @@ async function request(path, options = {}) {
     credentials: "include",
     headers: {
       "Content-Type": "application/json",
+      // Dev bypass only: tell the backend which tenant to impersonate (see
+      // devTenant.js). Compiled out of production builds (AUTH_ENABLED=true).
+      ...(AUTH_ENABLED ? {} : { "X-Dev-Tenant": getDevTenant() }),
       ...(options.headers || {}),
     },
     ...options,
@@ -67,9 +73,11 @@ export function requestOtp(email) {
   return request("/auth/request-otp", { method: "POST", body: JSON.stringify({ email }) });
 }
 
-/** POST /auth/verify-otp — exchange the OTP for a JWT; returns {access_token, token_type}. Generic 401 on wrong/expired/consumed/too-many. */
-export function verifyOtp(email, otp) {
-  return request("/auth/verify-otp", { method: "POST", body: JSON.stringify({ email, otp }) });
+/** POST /auth/verify-otp — exchange the OTP for a JWT; returns {access_token, token_type}. Generic 401 on wrong/expired/consumed/too-many.
+ * `workspace` ("internal"|"us"|"in") is the login page's switch — FOR NOW it decides
+ * the user's tenant (any allowed user may enter any workspace); omitted → domain fallback. */
+export function verifyOtp(email, otp, workspace) {
+  return request("/auth/verify-otp", { method: "POST", body: JSON.stringify({ email, otp, workspace }) });
 }
 
 /** GET /auth/me — the current authenticated user; used to validate the session cookie on load. */

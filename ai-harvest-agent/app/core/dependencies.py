@@ -14,12 +14,17 @@ from app.config import Settings, get_settings
 from app.core.security import InvalidTokenError, decode_access_token
 from app.core.tenant_context import bind_session_tenant, set_current_tenant
 from app.models.auth import AuthenticatedUser, UserORM
-from app.models.tenant import INTERNAL_TENANT_ID
+from app.models.tenant import INTERNAL_TENANT_ID, SEED_TENANTS
 from app.services.email_service import EmailSender
 from app.services.llm_service import LLMService
 from app.services.playwright_service import PlaywrightService
 
 logger = structlog.get_logger(__name__)
+
+# Tenant ids the dev bypass may impersonate via the X-Dev-Tenant header
+# (internal, client_us, client_in). Static set — no per-request DB hit; anything
+# else falls back to internal.
+_DEV_TENANT_IDS = {t["id"] for t in SEED_TENANTS}
 
 # ── Database ────────────────────────────────────────────────────────────────────
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -136,15 +141,21 @@ async def get_current_user(
     # Dev bypass: when login enforcement is off, every protected route (and
     # /auth/me) resolves to a synthetic user without needing a token.
     if not settings.auth_enabled:
-        # Dev bypass runs as the internal (all-access) tenant.
-        set_current_tenant(INTERNAL_TENANT_ID)
+        # X-Dev-Tenant lets developers preview a client workspace (slip, feature
+        # gating, data scoping) without OTP. Only read here — with auth on this
+        # branch is unreachable, so the header is inert in production by
+        # construction. Missing/invalid header keeps the internal (all-access)
+        # tenant, today's behavior.
+        requested = (request.headers.get("x-dev-tenant") or "").strip()
+        dev_tenant = requested if requested in _DEV_TENANT_IDS else INTERNAL_TENANT_ID
+        set_current_tenant(dev_tenant)
         await bind_session_tenant(db)
         return AuthenticatedUser(
             id="dev",
             email=f"dev@{settings.allowed_email_domain}",
             is_active=True,
             is_verified=True,
-            tenant_id=INTERNAL_TENANT_ID,
+            tenant_id=dev_tenant,
         )
 
     unauthorized = HTTPException(

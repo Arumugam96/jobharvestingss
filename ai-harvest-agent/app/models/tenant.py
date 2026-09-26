@@ -108,6 +108,18 @@ EMAIL_DOMAIN_TENANTS = {
 }
 
 
+# Login-page workspace switch → tenant id. FOR NOW the workspace a user picks at
+# login decides their tenant (any allowed user may enter any workspace) — the
+# email-domain map above is only the fallback when no workspace is sent. To
+# re-tighten later: ignore the workspace in AuthService._get_or_create_user and
+# let tenant_for_email() win again.
+WORKSPACE_TENANTS = {
+    "internal": INTERNAL_TENANT_ID,
+    "us": "client_us",
+    "in": "client_in",
+}
+
+
 def tenant_for_email(email: str) -> str | None:
     """Resolve an email's tenant from its second-level domain label (e.g.
     'name@northwindtalent.com' -> 'client_us'), or None if not an allowed

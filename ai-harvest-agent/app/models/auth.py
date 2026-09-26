@@ -89,6 +89,10 @@ class RequestOTPIn(BaseModel):
 class VerifyOTPIn(BaseModel):
     email: str
     otp: str
+    # Login-page workspace switch ("internal" | "us" | "in"). FOR NOW this decides
+    # the user's tenant — any allowed user may enter any workspace; omitted/None
+    # falls back to the email-domain map (see AuthService._get_or_create_user).
+    workspace: str | None = None
 
     @field_validator("email")
     @classmethod
@@ -100,6 +104,15 @@ class VerifyOTPIn(BaseModel):
     def _validate_otp_format(cls, v: str) -> str:
         if not v.isdigit():
             raise ValueError("OTP must be numeric")
+        return v
+
+    @field_validator("workspace")
+    @classmethod
+    def _validate_workspace(cls, v: str | None) -> str | None:
+        from app.models.tenant import WORKSPACE_TENANTS  # avoid import cycle
+
+        if v is not None and v not in WORKSPACE_TENANTS:
+            raise ValueError("Unknown workspace")
         return v
 
 
