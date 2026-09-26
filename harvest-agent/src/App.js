@@ -14,6 +14,11 @@ function App() {
   // The tenant "slip" from GET /auth/me (branding + feature flags). Defaults to
   // the internal full-access slip until /auth/me resolves (dev bypass keeps it).
   const [tenant, setTenant] = useState(INTERNAL_TENANT);
+  // True when the BACKEND reports it runs with AUTH_ENABLED=false (see
+  // /auth/me's auth_bypass flag). Detected at runtime so a production build —
+  // compiled with auth on — still shows the tenant-switcher pill when pointed
+  // at a bypassed backend. Always false against a normally-authed backend.
+  const [devBypass, setDevBypass] = useState(false);
 
   // api.js fires "auth:logout" whenever a non-auth call returns 401 — i.e. the
   // session cookie expired or was revoked server-side. Fall back to login.
@@ -48,6 +53,7 @@ function App() {
       .then((me) => {
         if (cancelled) return;
         if (me && me.tenant) setTenant(me.tenant);
+        setDevBypass(!!(me && me.auth_bypass));
         setStatus("authed");
       })
       .catch(() => { if (!cancelled) setStatus("anon"); });
@@ -89,6 +95,7 @@ function App() {
           try {
             const me = await getMe();
             if (me && me.tenant) setTenant(me.tenant);
+            setDevBypass(!!(me && me.auth_bypass));
           } catch { /* slip is presentation-only — enter with the default */ }
           try { sessionStorage.setItem("ss_fresh_login", "1"); } catch { /* ignore */ }
           setStatus("authed");
@@ -104,7 +111,9 @@ function App() {
     <TenantProvider tenant={tenant}>
       <BrowserRouter>
         <HarvestAgent
-          onLogout={async () => {
+          // With the backend bypass active there's no session to revoke and the
+          // login page is pointless — hide Sign out and show the switcher pill.
+          onLogout={devBypass ? undefined : async () => {
             try {
               await logout();
             } catch {
@@ -115,6 +124,7 @@ function App() {
             setStatus("anon");
           }}
         />
+        {devBypass && <DevTenantSwitcher />}
       </BrowserRouter>
     </TenantProvider>
   );

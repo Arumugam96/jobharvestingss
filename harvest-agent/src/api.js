@@ -1,4 +1,3 @@
-import { AUTH_ENABLED } from "./auth";
 import { getDevTenant } from "./devTenant";
 
 // `??` (not `||`) so an explicit empty string — same-origin deployment behind
@@ -21,9 +20,11 @@ async function request(path, options = {}) {
     credentials: "include",
     headers: {
       "Content-Type": "application/json",
-      // Dev bypass only: tell the backend which tenant to impersonate (see
-      // devTenant.js). Compiled out of production builds (AUTH_ENABLED=true).
-      ...(AUTH_ENABLED ? {} : { "X-Dev-Tenant": getDevTenant() }),
+      // Which tenant to impersonate under the backend's auth bypass (see
+      // devTenant.js). Sent unconditionally — even from production builds —
+      // because the backend only reads it when it runs with AUTH_ENABLED=false;
+      // with auth on it's ignored, so it's inert in a normal deployment.
+      "X-Dev-Tenant": getDevTenant(),
       ...(options.headers || {}),
     },
     ...options,

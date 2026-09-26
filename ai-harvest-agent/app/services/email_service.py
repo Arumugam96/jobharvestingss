@@ -109,43 +109,43 @@ def apply_automation_contact_block(body: str) -> str:
     return _insert_above_signoff(body, AUTOMATION_CONTACT_BLOCK, lead=_WEBSITE_LEAD)
 
 
-# def _resolve_sender(settings: Settings) -> tuple[str, str]:
-#     """Resolve the visible From header and the SMTP envelope sender for the
-#     harvest report.
+def _resolve_sender(settings: Settings) -> tuple[str, str]:
+    """Resolve the visible From header and the SMTP envelope sender for the
+    harvest report.
 
-#     Returns ``(from_header, envelope_addr)``.
+    Returns ``(from_header, envelope_addr)``.
 
-#     * ``from_header``  — what the recipient sees.
-#     * ``envelope_addr`` — the SMTP ``MAIL FROM``. Always a real address (never a
-#       bare display name, which providers reject).
+    * ``from_header``  — what the recipient sees.
+    * ``envelope_addr`` — the SMTP ``MAIL FROM``. Always a real address (never a
+      bare display name, which providers reject).
 
-#     Preferred: the explicit ``SMTP_SENDER_MAIL`` (+ ``SMTP_ENVELOPE_NAME`` display name) —
-#     a real, provider-verified sender, required for Brevo (the SMTP login is not a sendable
-#     From). When ``SMTP_SENDER_MAIL`` is unset, falls back to the legacy behavior: a real
-#     ``SMTP_FROM_EMAIL`` as-is, or a bare display name paired with the authenticated mailbox
-#     (``SMTP_USERNAME``) — so the inbox shows that name instead of the account owner.
-#     """
-#     sender_mail = (settings.smtp_sender_mail or "").strip()
-#     if sender_mail:
-#         envelope_name = (settings.smtp_envelope_name or "").strip()
-#         from_header = formataddr((envelope_name, sender_mail)) if envelope_name else sender_mail
-#         return from_header, sender_mail
+    Preferred: the explicit ``SMTP_SENDER_MAIL`` (+ ``SMTP_ENVELOPE_NAME`` display name) —
+    a real, provider-verified sender, required for Brevo (the SMTP login is not a sendable
+    From). When ``SMTP_SENDER_MAIL`` is unset, falls back to the legacy behavior: a real
+    ``SMTP_FROM_EMAIL`` as-is, or a bare display name paired with the authenticated mailbox
+    (``SMTP_USERNAME``) — so the inbox shows that name instead of the account owner.
+    """
+    sender_mail = (settings.smtp_sender_mail or "").strip()
+    if sender_mail:
+        envelope_name = (settings.smtp_envelope_name or "").strip()
+        from_header = formataddr((envelope_name, sender_mail)) if envelope_name else sender_mail
+        return from_header, sender_mail
 
-#     username = (settings.smtp_username or "").strip()
-#     configured = (settings.smtp_from_email or "").strip()
+    username = (settings.smtp_username or "").strip()
+    configured = (settings.smtp_from_email or "").strip()
 
-#     if "@" in configured:
-#         name, addr = parseaddr(configured)
-#         from_header = formataddr((name, addr)) if name else addr
-#         return from_header, (addr or username)
+    if "@" in configured:
+        name, addr = parseaddr(configured)
+        from_header = formataddr((name, addr)) if name else addr
+        return from_header, (addr or username)
 
-#     if configured:
-#         # Display-name-only SMTP_FROM_EMAIL — show it as the sender name and send
-#         # from the authenticated mailbox.
-#         from_header = formataddr((configured, username)) if username else configured
-#         return from_header, username
+    if configured:
+        # Display-name-only SMTP_FROM_EMAIL — show it as the sender name and send
+        # from the authenticated mailbox.
+        from_header = formataddr((configured, username)) if username else configured
+        return from_header, username
 
-#     return username, username
+    return username, username
 
 
 _BODY_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")

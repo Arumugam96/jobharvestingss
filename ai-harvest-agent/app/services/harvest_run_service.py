@@ -9,6 +9,7 @@ what the frontend-facing GET endpoints read from.
 """
 from __future__ import annotations
 
+import math
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, TypeVar
@@ -30,7 +31,7 @@ from app.core.contact_normalize import normalize_email, normalize_phone
 from app.core.dependencies import get_session_factory
 from app.core.location import parse_location
 from app.core.tenant_context import apply_tenant, bind_session_tenant, get_current_tenant_id
-from app.core.text_formatting import html_description_to_text
+from app.core.text_formatting import html_description_to_text, normalize_job_title
 from app.models.harvest_run import (
     HarvestRunORM,
     LlmCallORM,
@@ -945,6 +946,12 @@ def scraped_job_view(job: ScrapedJobORM) -> dict[str, Any]:
     # deriving here keeps the tag-free JSON/Excel downloads and the outreach
     # prompt populated without a separate stored/LLM-generated text field.
     job_description = job.job_description or html_description_to_text(job.job_description_html)
+    # A NaN/inf float would 500 the whole response at render time (Starlette
+    # encodes JSON with allow_nan=False) — coerce to None so one bad row can't
+    # take down the entire jobs list.
+    lead_confidence = job.lead_confidence
+    if lead_confidence is not None and not math.isfinite(lead_confidence):
+        lead_confidence = None
     return {
         "id":                     job.id,
         # Normalize at read time too, so already-harvested rows with the doubled
@@ -995,7 +1002,7 @@ def scraped_job_view(job: ScrapedJobORM) -> dict[str, Any]:
         "phone_recruiter":        phone_recruiter,
         # LinkedIn Home Feed leads carry an LLM lead-quality score; NULL for every
         # other source, so the UI shows a confidence badge only on feed leads.
-        "lead_confidence":        job.lead_confidence,
+        "lead_confidence":        lead_confidence,
     }
 
 

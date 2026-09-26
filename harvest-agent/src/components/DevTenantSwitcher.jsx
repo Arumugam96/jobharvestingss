@@ -1,16 +1,17 @@
-import { AUTH_ENABLED } from "../auth";
 import { DEV_TENANTS, getDevTenant, setDevTenant } from "../devTenant";
 
 /*
- * Floating dev-only tenant switcher — visible ONLY in the auth bypass
- * (REACT_APP_AUTH_ENABLED=false). Lets developers flip between the internal
- * (all-access) view and each client workspace without OTP login. Clicking a
- * tenant persists it (localStorage, see devTenant.js) and reloads so every data
- * fetch — including the /auth/me slip — reruns under the new X-Dev-Tenant
- * header. Production builds compile this to null (AUTH_ENABLED is true).
+ * Floating tenant switcher — only rendered when the BACKEND runs its auth
+ * bypass (AUTH_ENABLED=false): App.js mounts it either in the dev-build branch
+ * (REACT_APP_AUTH_ENABLED=false) or, in production builds, when /auth/me
+ * reports auth_bypass. Lets you flip between the internal (all-access) view and
+ * each client workspace without OTP login. Clicking a tenant persists it
+ * (localStorage, see devTenant.js) and reloads so every data fetch — including
+ * the /auth/me slip — reruns under the new X-Dev-Tenant header. Inert against a
+ * normally-authed backend: App.js never mounts it there, and the header is
+ * ignored server-side anyway.
  */
 export default function DevTenantSwitcher() {
-  if (AUTH_ENABLED) return null;
   const current = getDevTenant();
   return (
     <div

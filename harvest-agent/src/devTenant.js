@@ -1,16 +1,18 @@
 /*
- * Dev-only tenant selection for the auth bypass (REACT_APP_AUTH_ENABLED=false
- * paired with backend AUTH_ENABLED=false). The chosen tenant id is sent as the
- * X-Dev-Tenant header on every API call (see api.js); the backend's dev bypass
- * binds its tenant context to it, so /auth/me returns that tenant's real slip
- * and all reads/writes are scoped/stamped accordingly — no OTP login needed to
- * preview a client workspace.
+ * Tenant selection for the backend's auth bypass (AUTH_ENABLED=false). The
+ * chosen tenant id is sent as the X-Dev-Tenant header on every API call (see
+ * api.js) — from dev AND production builds; the backend only reads it in its
+ * bypass branch, so it's inert whenever auth is on. Under the bypass, /auth/me
+ * returns that tenant's real slip and all reads/writes are scoped/stamped
+ * accordingly — no OTP login needed to preview a client workspace. The floating
+ * switcher pill renders whenever the backend reports the bypass (see App.js /
+ * DevTenantSwitcher.jsx), so a production deployment can flip AUTH_ENABLED=false
+ * to demo tenants and back on to lock it down.
  *
  * Stored in localStorage (key ss_dev_tenant): the switcher swaps tenants via a
  * full page reload, and localStorage survives it and stays consistent across
  * tabs. A valid ?tenant= URL param wins and is persisted — shareable deep links
- * like http://localhost:3000/?tenant=client_us. Inert in production builds:
- * everything is gated on !AUTH_ENABLED, and the Docker image builds with auth on.
+ * like http://localhost:3000/?tenant=client_us.
  */
 
 export const DEV_TENANTS = [

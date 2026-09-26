@@ -12,7 +12,7 @@ from typing import Any, Callable
 import anthropic
 import httpx
 import structlog
-# from json_repair import repair_json
+from json_repair import repair_json
 from tenacity import (
     retry,
     retry_if_not_exception_type,

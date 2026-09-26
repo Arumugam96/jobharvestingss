@@ -124,6 +124,7 @@ async def logout(
 async def read_current_user(
     current_user: AuthenticatedUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
+    settings: Settings = Depends(get_settings),
 ) -> dict:
     """The user plus their tenant's "slip" — branding + feature flags the frontend
     renders from (theme accent, brand name, which nav items to show). The backend
@@ -139,6 +140,10 @@ async def read_current_user(
     cfg = (tenant_row.config or {}) if tenant_row is not None else {}
     return {
         **current_user.model_dump(),
+        # True only when the backend runs with AUTH_ENABLED=false (dev bypass).
+        # The frontend uses it at runtime to show the tenant-switcher pill even
+        # in production builds; with auth on it's always False.
+        "auth_bypass": not settings.auth_enabled,
         "tenant": {
             "id": current_user.tenant_id,
             "name": tenant_row.name if tenant_row else "SightSpectrum",

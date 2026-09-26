@@ -248,7 +248,9 @@ def _apply_sort(jobs: list[dict], sort_by: str, sort_order: str) -> list[dict]:
         sort_by = "posted_date"
     return sorted(
         jobs,
-        key     = lambda j: (j.get(sort_by) or "").lower(),
+        # str() first: older combined files may hold a non-string in the sort
+        # field (e.g. a numeric posted_date) — .lower() alone would 500 the route.
+        key     = lambda j: str(j.get(sort_by) or "").lower(),
         reverse = sort_order.lower() == "desc",
     )
 

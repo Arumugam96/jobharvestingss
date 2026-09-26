@@ -278,8 +278,11 @@ def _ensure_tenant_columns(sync_conn) -> None:
 
 
 def _ensure_tenants_seeded(sync_conn) -> None:
-    """Upsert the seed tenants (internal / client_us / client_in). Idempotent via
-    a per-row existence check so it's portable (no ON CONFLICT needed)."""
+    """Upsert the seed tenants (internal / client_us / client_in). SEED_TENANTS is
+    authoritative for name/type/region/config (there is no admin UI editing them),
+    so existing rows are re-synced on every boot — a config change in code reaches
+    an already-seeded DB on the next deploy. `is_active` is left untouched on
+    existing rows: deactivation is a runtime decision, not a seed value."""
     import json as _json
 
     from app.models.tenant import SEED_TENANTS
@@ -291,18 +294,26 @@ def _ensure_tenants_seeded(sync_conn) -> None:
     # SQLite stores JSON as TEXT so the plain param is fine.
     config_ph = "CAST(:config AS JSON)" if sync_conn.dialect.name == "postgresql" else ":config"
     for t in SEED_TENANTS:
+        params = {"id": t["id"], "name": t["name"], "type": t["type"],
+                  "region": t["region"], "config": _json.dumps(t["config"])}
         exists = sync_conn.execute(
             sa_text("SELECT 1 FROM tenants WHERE id = :id"), {"id": t["id"]}
         ).first()
         if exists:
+            sync_conn.execute(
+                sa_text(
+                    "UPDATE tenants SET name = :name, type = :type, region = :region, "
+                    f"config = {config_ph} WHERE id = :id"
+                ),
+                params,
+            )
             continue
         sync_conn.execute(
             sa_text(
                 "INSERT INTO tenants (id, name, type, region, config, is_active) "
                 f"VALUES (:id, :name, :type, :region, {config_ph}, :is_active)"
             ),
-            {"id": t["id"], "name": t["name"], "type": t["type"], "region": t["region"],
-             "config": _json.dumps(t["config"]), "is_active": True},
+            {**params, "is_active": True},
         )
         logger.info("tenant_seeded", tenant=t["id"])
 

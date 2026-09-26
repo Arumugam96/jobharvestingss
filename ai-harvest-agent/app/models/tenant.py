@@ -77,9 +77,11 @@ SEED_TENANTS = [
         "region": "US",
         "config": {
             "theme": {"accent": "#2563EB", "brand": "Northwind Talent"},
-            # US client: Harvested Jobs + Run History + the REDESIGNED Rule Engine.
+            # Both client workspaces get the full page set; the US client keeps
+            # the REDESIGNED Rule Engine variant.
             "features": {
-                "jobs": True, "history": True, "rules": True,
+                "jobs": True, "history": True, "sources": True, "leads": True,
+                "outreach": True, "rules": True, "analytics": True,
                 "ruleEngineRedesign": True,
             },
         },
@@ -91,8 +93,13 @@ SEED_TENANTS = [
         "region": "IN",
         "config": {
             "theme": {"accent": "#0D9488", "brand": "Meridian Staffing"},
-            # India client: Harvested Jobs + Run History only.
-            "features": {"jobs": True, "history": True},
+            # Full page set like the US client, with the classic Rule Engine
+            # (the redesign stays US-only).
+            "features": {
+                "jobs": True, "history": True, "sources": True, "leads": True,
+                "outreach": True, "rules": True, "analytics": True,
+                "ruleEngineRedesign": False,
+            },
         },
     },
 ]
