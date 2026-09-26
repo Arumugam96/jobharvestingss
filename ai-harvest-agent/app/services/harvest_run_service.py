@@ -29,7 +29,8 @@ from app.core.company_size import (
 from app.core.contact_normalize import normalize_email, normalize_phone
 from app.core.dependencies import get_session_factory
 from app.core.location import parse_location
-from app.core.text_formatting import html_description_to_text, normalize_job_title
+from app.core.tenant_context import apply_tenant, bind_session_tenant, get_current_tenant_id
+from app.core.text_formatting import html_description_to_text
 from app.models.harvest_run import (
     HarvestRunORM,
     LlmCallORM,
@@ -121,6 +122,7 @@ async def db_write(coro_fn: Callable[[AsyncSession], Awaitable[_T]]) -> _T | Non
     try:
         session_factory = get_session_factory(get_settings())
         async with session_factory() as db:
+            await bind_session_tenant(db)  # RLS scope for this write session (Postgres)
             try:
                 result = await coro_fn(db)
                 await db.commit()
@@ -140,6 +142,7 @@ async def db_read(coro_fn: Callable[[AsyncSession], Awaitable[_T]]) -> _T | None
     try:
         session_factory = get_session_factory(get_settings())
         async with session_factory() as db:
+            await bind_session_tenant(db)  # RLS scope for this read session (Postgres)
             return await coro_fn(db)
     except Exception as exc:
         logger.warning("harvest_db_read_failed", error=str(exc))
@@ -174,6 +177,7 @@ class HarvestRunService:
             sources=sources if sources is not None else ([source] if source else []),
             filters_snapshot=filters_snapshot,
             started_at=started_at,
+            tenant_id=get_current_tenant_id(),  # own this run to the current tenant
         )
         self._db.add(run)
         await self._db.flush()
@@ -195,6 +199,7 @@ class HarvestRunService:
         share field names for recruiter/poster info)."""
         if not jobs:
             return
+        tid = get_current_tenant_id()  # own every inserted job to the current tenant
         # Company-level enrichment cache (app/services/company_service.py) — a
         # company's Apollo size/HQ-location, shared across ALL its jobs (recruiter
         # or not). Fetched once for the batch's companies.
@@ -243,6 +248,7 @@ class HarvestRunService:
                 ScrapedJobORM(
                     id=str(uuid.uuid4()),
                     run_id=run_pk,
+                    tenant_id=tid,
                     source=j.get("source", ""),
                     # Strip LinkedIn's "<Title> <Title> with verification" a11y artifact
                     # so new harvests store a clean title everywhere it's read.
@@ -361,12 +367,14 @@ class HarvestRunService:
         that source's standalone runs only — mirrors list_runs()'s filter."""
         stmt = select(HarvestRunORM).where(HarvestRunORM.run_id == run_id)
         stmt = stmt.where(HarvestRunORM.source.is_(None) if source is None else HarvestRunORM.source == source)
+        stmt = apply_tenant(stmt, HarvestRunORM.tenant_id)  # no cross-tenant lookup by run_id
         result = await self._db.execute(stmt.order_by(HarvestRunORM.created_at.desc()))
         return result.scalars().first()
 
     async def list_runs(self, source: str | None = None, limit: int = 50) -> list[HarvestRunORM]:
         stmt = select(HarvestRunORM)
         stmt = stmt.where(HarvestRunORM.source.is_(None) if source is None else HarvestRunORM.source == source)
+        stmt = apply_tenant(stmt, HarvestRunORM.tenant_id)
         stmt = stmt.order_by(HarvestRunORM.created_at.desc()).limit(limit)
         result = await self._db.execute(stmt)
         return list(result.scalars())
@@ -391,6 +399,7 @@ class HarvestRunService:
             .order_by(HarvestRunORM.created_at.desc())
             .limit(limit)
         )
+        stmt = apply_tenant(stmt, HarvestRunORM.tenant_id)
         result = await self._db.execute(stmt)
         return list(result.scalars())
 
@@ -494,6 +503,7 @@ class HarvestRunService:
         posted_date as a YYYY-MM-DD-prefixed string (true for LinkedIn's
         _format_posted(); not independently verified for Naukri/Dice)."""
         stmt = select(ScrapedJobORM)
+        stmt = apply_tenant(stmt, ScrapedJobORM.tenant_id)  # scope to the caller's tenant
         if keyword:
             # Matches everything the UI's free-text search used to cover
             # client-side (title/company/source/POC/email/phone), plus the
@@ -592,7 +602,7 @@ class HarvestRunService:
         table in one call (GET /jobs/facets). Distincts are global, not scoped
         to the active filters."""
         async def _distinct(col) -> list[str]:
-            result = await self._db.execute(select(col).distinct())
+            result = await self._db.execute(apply_tenant(select(col).distinct(), ScrapedJobORM.tenant_id))
             return sorted(v for v in result.scalars() if v)
 
         companies  = await _distinct(ScrapedJobORM.company)
@@ -606,24 +616,24 @@ class HarvestRunService:
         def _count_if(expr):
             return func.sum(case((expr, 1), else_=0))
 
-        row = (
-            await self._db.execute(
-                select(
-                    func.count().label("total"),
-                    # nullif drops empty-string companies — COUNT ignores NULLs.
-                    func.count(func.distinct(func.nullif(ScrapedJobORM.company, ""))).label("companies"),
-                    _count_if(func.coalesce(ScrapedJobORM.job_poster_name, "") != "").label("pocs"),
-                    # IS NOT FALSE mirrors the UI's `passed_filter !== false`.
-                    _count_if(ScrapedJobORM.passed_filter.isnot(False)).label("qualified"),
-                    _count_if(ScrapedJobORM.passed_filter.is_(False)).label("flagged"),
-                    _count_if(email_p).label("with_email"),
-                    _count_if(phone_p).label("with_phone"),
-                    _count_if(linkedin_p).label("with_linkedin"),
-                )
-                .select_from(ScrapedJobORM)
-                .outerjoin(RecruiterORM, ScrapedJobORM.recruiter_id == RecruiterORM.id)
+        stats_stmt = (
+            select(
+                func.count().label("total"),
+                # nullif drops empty-string companies — COUNT ignores NULLs.
+                func.count(func.distinct(func.nullif(ScrapedJobORM.company, ""))).label("companies"),
+                _count_if(func.coalesce(ScrapedJobORM.job_poster_name, "") != "").label("pocs"),
+                # IS NOT FALSE mirrors the UI's `passed_filter !== false`.
+                _count_if(ScrapedJobORM.passed_filter.isnot(False)).label("qualified"),
+                _count_if(ScrapedJobORM.passed_filter.is_(False)).label("flagged"),
+                _count_if(email_p).label("with_email"),
+                _count_if(phone_p).label("with_phone"),
+                _count_if(linkedin_p).label("with_linkedin"),
             )
-        ).one()
+            .select_from(ScrapedJobORM)
+            .outerjoin(RecruiterORM, ScrapedJobORM.recruiter_id == RecruiterORM.id)
+        )
+        stats_stmt = apply_tenant(stats_stmt, ScrapedJobORM.tenant_id)  # scope stats to the tenant
+        row = (await self._db.execute(stats_stmt)).one()
         stats = {
             key: int(getattr(row, key) or 0)
             for key in (
@@ -641,7 +651,8 @@ class HarvestRunService:
         }
 
     async def get_scraped_job_by_id(self, job_id: str) -> ScrapedJobORM | None:
-        result = await self._db.execute(select(ScrapedJobORM).where(ScrapedJobORM.id == job_id))
+        stmt = apply_tenant(select(ScrapedJobORM).where(ScrapedJobORM.id == job_id), ScrapedJobORM.tenant_id)
+        result = await self._db.execute(stmt)  # tenant predicate closes the by-id IDOR
         return result.scalar_one_or_none()
 
     async def list_jobs_for_run(self, run_pk: str) -> list[ScrapedJobORM]:
@@ -655,9 +666,11 @@ class HarvestRunService:
     async def list_all_jobs_for_report(self) -> list[ScrapedJobORM]:
         """Every scraped job on record, newest posting first — the dataset
         behind GET /download/{json,excel}, matching what GET /jobs lists."""
-        result = await self._db.execute(
-            select(ScrapedJobORM).order_by(ScrapedJobORM.posted_date.desc())
+        stmt = apply_tenant(
+            select(ScrapedJobORM).order_by(ScrapedJobORM.posted_date.desc()),
+            ScrapedJobORM.tenant_id,  # exports must not leak other tenants' jobs
         )
+        result = await self._db.execute(stmt)
         return list(result.scalars())
 
     async def list_pending_report_runs(self) -> list[HarvestRunORM]:

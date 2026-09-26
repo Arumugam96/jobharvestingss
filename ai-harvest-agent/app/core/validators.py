@@ -11,33 +11,29 @@ from __future__ import annotations
 import re
 from functools import lru_cache
 
-from app.config import get_settings
+from app.models.tenant import EMAIL_DOMAIN_TENANTS
 
 
 @lru_cache
-def _domain_pattern(domain: str) -> re.Pattern[str]:
-    # Accept the company's second-level label ("sightspectrum") under ANY
-    # single-label TLD — sightspectrum.com / .in / .org / .io …. The base label
-    # is derived from settings.allowed_email_domain. Restricting the TLD to a
-    # single dotless label ([a-z]{2,}) still blocks look-alikes whose
-    # registrable domain isn't sightspectrum.*: multi-label suffixes like
-    # "sightspectrum.co.in" and "sightspectrum.com.evil.com", and the
-    # subdomain-of-evil case "sightspectrum.evil.com", can never match.
-    base = re.escape(domain.split(".", 1)[0])
-    return re.compile(rf"^[^@\s]+@{base}\.[a-z]{{2,}}$", re.IGNORECASE)
+def _allowed_pattern(labels: tuple[str, ...]) -> re.Pattern[str]:
+    # Accept any allowed workspace second-level label (internal + each onboarded
+    # client, see EMAIL_DOMAIN_TENANTS) under ANY single-label TLD — .com / .in /
+    # .io …. Restricting the TLD to a single dotless label ([a-z]{2,}) still
+    # blocks look-alikes whose registrable domain isn't one of ours: multi-label
+    # suffixes ("...co.in", "...com.evil.com") and subdomain-of-evil
+    # ("...evil.com") can never match.
+    alt = "|".join(re.escape(label) for label in labels)
+    return re.compile(rf"^[^@\s]+@(?:{alt})\.[a-z]{{2,}}$", re.IGNORECASE)
 
 
 def validate_company_email(email: str) -> str:
-    """Return the (lightly normalized) email if it belongs to the company —
-    the ``sightspectrum`` second-level domain under any TLD — otherwise raise
-    ``ValueError``."""
-    settings = get_settings()
+    """Return the (lightly normalized) email if it belongs to an allowed
+    workspace domain (internal or an onboarded client), else raise
+    ``ValueError``. The set of allowed domains is EMAIL_DOMAIN_TENANTS."""
     email = email.strip()
-    pattern = _domain_pattern(settings.allowed_email_domain.lower())
-    if not pattern.fullmatch(email):
-        base = settings.allowed_email_domain.split(".", 1)[0]
+    labels = tuple(sorted(EMAIL_DOMAIN_TENANTS.keys()))
+    if not _allowed_pattern(labels).fullmatch(email):
         raise ValueError(
-            f"Email must be a valid @{base} company address "
-            f"(e.g. name@{settings.allowed_email_domain})"
+            "Email must be a valid company or client workspace address"
         )
     return email.lower()

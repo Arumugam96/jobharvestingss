@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import Settings
 from app.core.security import generate_otp, hash_otp, verify_otp_hash
 from app.models.auth import OTPPurpose, OTPVerificationORM, UserORM
+from app.models.tenant import INTERNAL_TENANT_ID, tenant_for_email
 from app.services.email_service import EmailSender
 
 logger = structlog.get_logger(__name__)
@@ -91,7 +92,13 @@ class AuthService:
 
     # ── Verify OTP ───────────────────────────────────────────────────────────────
 
-    async def verify_otp(self, email: str, otp: str, purpose: str = OTPPurpose.LOGIN) -> UserORM:
+    async def verify_otp(
+        self,
+        email: str,
+        otp: str,
+        purpose: str = OTPPurpose.LOGIN,
+        workspace: str | None = None,
+    ) -> UserORM:
         settings = self._settings
         now = datetime.now(timezone.utc)
 
@@ -134,8 +141,9 @@ class AuthService:
         if result.rowcount != 1:
             raise OTPVerifyError("Invalid or expired OTP")
 
-        user = await self._get_or_create_user(email)
-        logger.info("otp_verified", email=email, purpose=purpose, user_id=user.id)
+        user = await self._get_or_create_user(email, workspace=workspace)
+        logger.info("otp_verified", email=email, purpose=purpose, user_id=user.id,
+                    tenant=user.tenant_id)
         # Return the user; the route mints the access token and persistent session
         # (it owns the Response needed to set the session cookie).
         return user
@@ -151,13 +159,27 @@ class AuthService:
         )
         return result.scalar_one_or_none()
 
-    async def _get_or_create_user(self, email: str) -> UserORM:
+    async def _get_or_create_user(self, email: str, workspace: str | None = None) -> UserORM:
         result = await self._db.execute(select(UserORM).where(UserORM.email == email))
         user = result.scalar_one_or_none()
+        # FOR NOW: the login page's workspace switch decides the tenant — any
+        # allowed user may enter any workspace (each login can pick a different
+        # one). The email-domain map (northwindtalent -> client_us, …) is only
+        # the fallback when no workspace was sent (API clients / old frontends).
+        # To re-tighten per-domain assignment later, ignore `workspace` here.
+        from app.models.tenant import WORKSPACE_TENANTS
+
+        tenant_id = (
+            WORKSPACE_TENANTS.get(workspace)
+            or tenant_for_email(email)
+            or INTERNAL_TENANT_ID
+        )
         if user is None:
-            user = UserORM(email=email, is_active=True, is_verified=True)
+            user = UserORM(email=email, is_active=True, is_verified=True, tenant_id=tenant_id)
             self._db.add(user)
         else:
             user.is_verified = True
+            if user.tenant_id != tenant_id:
+                user.tenant_id = tenant_id
         await self._db.flush()
         return user

@@ -383,6 +383,34 @@ def _outreach_body_to_html(
         "</div></body></html>"
     )
 
+
+def render_outreach_email_html(
+    body: str,
+    job_title: str = "",
+    job_url: str = "",
+    *,
+    show_unsub: bool = True,
+    logo_available: bool | None = None,
+) -> str:
+    """The exact HTML part an outreach send builds from its plain-text body — the
+    single render source shared by send_email_with_attachments (as_html) and the
+    send-log writers, which persist it as EmailOutreachORM.body_html so the log
+    records the message as actually delivered (signature card included).
+
+    The signature's logo is an inline CID image (`cid:ss-logo`), attached with no
+    filename so mail clients render it in the card without listing it as an
+    attachment. `logo_available` defaults to whether the logo file exists (the same
+    condition under which the send attaches it); the send path passes the actual
+    attach state so the HTML never points at a missing image. The stored body_html
+    keeps the cid: reference — the image bytes are NOT persisted per row; the UI
+    swaps the cid for its bundled copy of the logo when displaying the log."""
+    if logo_available is None:
+        logo_available = LOGO_PATH.is_file()
+    return _outreach_body_to_html(
+        body, job_title, job_url, show_unsub=show_unsub, logo_available=logo_available
+    )
+
+
 # Inline logo shipped with the backend. Embedded into the HTML email as a CID
 # attachment (see EmailSender.send_otp) so it renders without being blocked as
 # a remote image. LOGO_CID is the Content-ID the HTML references via cid:.
@@ -510,8 +538,9 @@ def _load_logo_bytes() -> bytes | None:
 
 
 def _shared_identity_from(settings: Settings) -> dict:
-    """The shared harvest-agent From used by OTP + outreach, as a Mailjet
-    ``{"Email","Name"}`` object.
+    """The shared harvest-agent From used by outreach sends (and as the OTP
+    fallback when OTP_FROM_EMAIL is blank), as a Mailjet ``{"Email","Name"}``
+    object.
 
     Preferred: the explicit ``SMTP_SENDER_MAIL`` (the From address) + ``SMTP_ENVELOPE_NAME``
     (the display name, e.g. "JOB HARVEST AGENT"). This is required for Brevo, whose SMTP
@@ -538,6 +567,21 @@ def _shared_identity_from(settings: Settings) -> dict:
     # Bare display name (or empty) → send from the authenticated mailbox and show
     # the display name as the sender name.
     return {"Email": username , "Name": f"SS - {configured}"}
+
+
+def _otp_identity_from(settings: Settings) -> dict:
+    """The From identity for the OTP (login) email — a dedicated no-reply sender
+    ("Login OTP" <no-reply@sightspectrum.com> by default, OTP_FROM_EMAIL /
+    OTP_FROM_NAME to override) so the login mail no longer shares the outreach
+    identity. Falls back to the shared identity when OTP_FROM_EMAIL is blank."""
+    otp_mail = (settings.otp_from_email or "").strip()
+    if not otp_mail:
+        return _shared_identity_from(settings)
+    out = {"Email": otp_mail}
+    otp_name = (settings.otp_from_name or "").strip()
+    if otp_name:
+        out["Name"] = otp_name
+    return out
 
 
 def _parse_from(from_header: str, fallback_email: str) -> dict:
@@ -611,9 +655,10 @@ class EmailSender:
         logo_bytes = _load_logo_bytes()
 
         # multipart/alternative: TextPart is the plain-text fallback, HTMLPart the
-        # styled body. From is the shared "SS" identity (same as before).
+        # styled body. From is the dedicated login identity ("Login OTP"
+        # <no-reply@…>), not the shared outreach/report one.
         message: dict = {
-            "From": _shared_identity_from(settings),
+            "From": _otp_identity_from(settings),
             "To": [{"Email": recipient}],
             "Subject": OTP_EMAIL_SUBJECT,
             "TextPart": render_otp_email(otp, settings.otp_expiry_seconds),
@@ -761,11 +806,11 @@ class EmailSender:
         if html_body is not None:
             message["HTMLPart"] = html_body
         elif as_html:
-            # Embed the logo inline (CID) so the signature card renders it without a remote
-            # fetch (same technique as send_otp). has_logo reflects whether it's attached, so
-            # the card never points at a missing image.
+            # Embed the logo inline (CID) so the signature card renders it without a
+            # remote fetch. The SMTP converter attaches it WITHOUT a filename so mail
+            # clients render it in the card but don't list it under "Attachments".
             logo_bytes = _load_logo_bytes()
-            message["HTMLPart"] = _outreach_body_to_html(
+            message["HTMLPart"] = render_outreach_email_html(
                 body_for_render, job_title, job_url,
                 show_unsub=bool(custom_id), logo_available=logo_bytes is not None,
             )
@@ -1042,7 +1087,11 @@ def _mailjet_dict_to_email_message(message: dict, message_id: str) -> tuple[Emai
     if html:
         msg.add_alternative(html, subtype="html")
 
-    # Inline images (the OTP logo) → related to the HTML part so they render inline.
+    # Inline images (the logo) → related to the HTML part so they render inline.
+    # Deliberately NO filename: a named inline part is what makes mail clients list
+    # it under "Attachments" even though it renders in the body. Unnamed + cid +
+    # Content-Disposition: inline keeps it a pure body resource. (The Filename in
+    # the message dict is only for the Mailjet API path, which requires it.)
     inlined = message.get("InlinedAttachments") or []
     if inlined and html:
         html_part = msg.get_payload()[-1]
@@ -1050,10 +1099,7 @@ def _mailjet_dict_to_email_message(message: dict, message_id: str) -> tuple[Emai
             data = base64.b64decode(att.get("Base64Content") or "")
             maintype, subtype = _split_content_type(att.get("ContentType"))
             cid = att.get("ContentID") or ""
-            html_part.add_related(
-                data, maintype=maintype, subtype=subtype,
-                cid=f"<{cid}>", filename=att.get("Filename") or None,
-            )
+            html_part.add_related(data, maintype=maintype, subtype=subtype, cid=f"<{cid}>")
 
     # Regular file attachments (e.g. the harvest report) added after the alternative.
     for att in (message.get("Attachments") or []):

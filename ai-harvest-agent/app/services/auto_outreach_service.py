@@ -38,7 +38,7 @@ import structlog
 from app.config import get_settings
 from app.models.harvest_run import ScrapedJobORM
 from app.services.active_clients import classify_client
-from app.services.email_service import AUTOMATION_CONTACT_BLOCK, EmailSender
+from app.services.email_service import AUTOMATION_CONTACT_BLOCK, EmailSender, render_outreach_email_html
 from app.services.harvest_run_service import db_read, db_write, scraped_job_view
 from app.services.llm_service import LLMService
 from app.services.outreach_log_service import build_email_outreach_row, initial_email_sent
@@ -224,6 +224,9 @@ async def run_auto_outreach_after_harvest(
                     from_email=reply_to,
                     subject=draft.subject,
                     body=full_body,
+                    body_html=render_outreach_email_html(
+                        full_body, target["job_title"], target["job_url"]
+                    ),
                     fallback_used=draft.fallback_used,
                     status=send_status,
                     error_message=error_message,

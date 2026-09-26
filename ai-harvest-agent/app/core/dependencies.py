@@ -12,12 +12,19 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.config import Settings, get_settings
 from app.core.security import InvalidTokenError, decode_access_token
+from app.core.tenant_context import bind_session_tenant, set_current_tenant
 from app.models.auth import AuthenticatedUser, UserORM
+from app.models.tenant import INTERNAL_TENANT_ID, SEED_TENANTS
 from app.services.email_service import EmailSender
 from app.services.llm_service import LLMService
 from app.services.playwright_service import PlaywrightService
 
 logger = structlog.get_logger(__name__)
+
+# Tenant ids the dev bypass may impersonate via the X-Dev-Tenant header
+# (internal, client_us, client_in). Static set — no per-request DB hit; anything
+# else falls back to internal.
+_DEV_TENANT_IDS = {t["id"] for t in SEED_TENANTS}
 
 # ── Database ────────────────────────────────────────────────────────────────────
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -134,11 +141,21 @@ async def get_current_user(
     # Dev bypass: when login enforcement is off, every protected route (and
     # /auth/me) resolves to a synthetic user without needing a token.
     if not settings.auth_enabled:
+        # X-Dev-Tenant lets developers preview a client workspace (slip, feature
+        # gating, data scoping) without OTP. Only read here — with auth on this
+        # branch is unreachable, so the header is inert in production by
+        # construction. Missing/invalid header keeps the internal (all-access)
+        # tenant, today's behavior.
+        requested = (request.headers.get("x-dev-tenant") or "").strip()
+        dev_tenant = requested if requested in _DEV_TENANT_IDS else INTERNAL_TENANT_ID
+        set_current_tenant(dev_tenant)
+        await bind_session_tenant(db)
         return AuthenticatedUser(
             id="dev",
             email=f"dev@{settings.allowed_email_domain}",
             is_active=True,
             is_verified=True,
+            tenant_id=dev_tenant,
         )
 
     unauthorized = HTTPException(
@@ -157,6 +174,8 @@ async def get_current_user(
             result = await db.execute(select(UserORM).where(UserORM.id == session.user_id))
             user = result.scalar_one_or_none()
             if user is not None and user.is_active:
+                set_current_tenant(user.tenant_id)
+                await bind_session_tenant(db)
                 return AuthenticatedUser.model_validate(user)
         # Cookie present but stale/revoked — fall through to the bearer path
         # rather than 401 outright, so a client sending both still works.
@@ -177,4 +196,14 @@ async def get_current_user(
         unauthorized.detail = "User not found or inactive"
         raise unauthorized
 
+    set_current_tenant(user.tenant_id)
+    await bind_session_tenant(db)
     return AuthenticatedUser.model_validate(user)
+
+
+async def get_current_tenant(
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> str:
+    """The current request's tenant id (`internal` for the in-house team / dev
+    bypass). Content queries scope to it; `internal` is all-access."""
+    return current_user.tenant_id

@@ -28,6 +28,7 @@ import app.models.harvest_run  # noqa: F401 — registers harvest_runs / scraped
 import app.models.recruiter  # noqa: F401 — registers recruiters on Base.metadata
 import app.models.outreach  # noqa: F401 — registers email_outreach on Base.metadata
 import app.models.suppression  # noqa: F401 — registers email_suppressions on Base.metadata
+import app.models.tenant  # noqa: F401 — registers tenants on Base.metadata
 from app.models.harvest import Base
 from app.routes import harvest, agents, tasks, health, job_parser, linkedin_harvest
 from app.routes.auth_routes import router as auth_router
@@ -193,6 +194,9 @@ def _ensure_email_outreach_columns(sync_conn) -> None:
         # Full ordered event trail (JSON list). Postgres accepts JSON; SQLite gives
         # it TEXT affinity — both fine for a JSON-serialised list.
         ("events",              "ALTER TABLE email_outreach ADD COLUMN events JSON"),
+        # Rendered HTML part as actually delivered (signature card included);
+        # NULL for LinkedIn rows and pre-existing sends. Mirrored in alembic 0009.
+        ("body_html",           "ALTER TABLE email_outreach ADD COLUMN body_html TEXT"),
     ]
     for name, ddl in pending:
         if name not in existing_cols:
@@ -240,6 +244,99 @@ def _backfill_scraped_jobs_location(sync_conn) -> None:
         logger.info("scraped_jobs_location_backfilled", rows=updated)
 
 
+# ── Multi-tenancy (see app/models/tenant.py) ────────────────────────────────
+# Content tables that carry a tenant_id and get an RLS policy. `users` also gets
+# tenant_id (below) but NOT RLS (auth lookups must always resolve). `companies`
+# is a global public cache and stays untenanted.
+_TENANT_CONTENT_TABLES = [
+    "harvest_runs", "scraped_jobs", "llm_calls", "reenrichment_tasks",
+    "harvest_jobs", "harvest_results", "email_outreach",
+    "recruiters", "recruiter_discovery_runs", "email_suppressions",
+]
+
+
+def _ensure_tenant_columns(sync_conn) -> None:
+    """Idempotent ADD COLUMN tenant_id on the pre-existing content tables + users
+    (create_all never alters an existing table). The column DEFAULT 'internal'
+    backfills every existing row to the internal tenant; then index it."""
+    inspector = sa_inspect(sync_conn)
+    tables = set(inspector.get_table_names())
+    for table in _TENANT_CONTENT_TABLES + ["users"]:
+        if table not in tables:
+            continue  # brand-new DB — create_all already made it with tenant_id
+        cols = {c["name"] for c in inspector.get_columns(table)}
+        if "tenant_id" not in cols:
+            sync_conn.execute(sa_text(
+                f"ALTER TABLE {table} ADD COLUMN tenant_id VARCHAR(40) NOT NULL DEFAULT 'internal'"
+            ))
+            logger.info("tenant_id_column_added", table=table)
+        # Portable IF NOT EXISTS (PostgreSQL + SQLite >= 3.8). Matches the model's
+        # index name convention so create_all on a fresh DB is a no-op here.
+        sync_conn.execute(sa_text(
+            f"CREATE INDEX IF NOT EXISTS ix_{table}_tenant_id ON {table} (tenant_id)"
+        ))
+
+
+def _ensure_tenants_seeded(sync_conn) -> None:
+    """Upsert the seed tenants (internal / client_us / client_in). Idempotent via
+    a per-row existence check so it's portable (no ON CONFLICT needed)."""
+    import json as _json
+
+    from app.models.tenant import SEED_TENANTS
+
+    inspector = sa_inspect(sync_conn)
+    if "tenants" not in inspector.get_table_names():
+        return
+    # A JSON column needs an explicit cast from a text-bound param on PostgreSQL;
+    # SQLite stores JSON as TEXT so the plain param is fine.
+    config_ph = "CAST(:config AS JSON)" if sync_conn.dialect.name == "postgresql" else ":config"
+    for t in SEED_TENANTS:
+        exists = sync_conn.execute(
+            sa_text("SELECT 1 FROM tenants WHERE id = :id"), {"id": t["id"]}
+        ).first()
+        if exists:
+            continue
+        sync_conn.execute(
+            sa_text(
+                "INSERT INTO tenants (id, name, type, region, config, is_active) "
+                f"VALUES (:id, :name, :type, :region, {config_ph}, :is_active)"
+            ),
+            {"id": t["id"], "name": t["name"], "type": t["type"], "region": t["region"],
+             "config": _json.dumps(t["config"]), "is_active": True},
+        )
+        logger.info("tenant_seeded", tenant=t["id"])
+
+
+def _ensure_rls_policies(sync_conn) -> None:
+    """PostgreSQL-only: enable Row-Level Security on every content table so the DB
+    itself refuses cross-tenant rows. The policy is PERMISSIVE when app.tenant_id
+    is unset/'' (preserves current behaviour before Phase 1 binds it) and treats
+    the '__all__' sentinel as full access (internal/admin). Once a per-tenant
+    value is bound in get_db_session, reads/writes are auto-scoped.
+
+    NOTE: FORCE makes the table *owner* subject to policies, but a PostgreSQL
+    *superuser* still bypasses RLS entirely. If the app connects as the default
+    (superuser) `harvest` role, RLS stays dormant and the app-level scoping helper
+    is the effective guard; point the app at a non-superuser role to activate it."""
+    if sync_conn.dialect.name != "postgresql":
+        return
+    predicate = (
+        "current_setting('app.tenant_id', true) IS NULL "
+        "OR current_setting('app.tenant_id', true) = '' "
+        "OR current_setting('app.tenant_id', true) = '__all__' "
+        "OR tenant_id = current_setting('app.tenant_id', true)"
+    )
+    for table in _TENANT_CONTENT_TABLES:
+        sync_conn.execute(sa_text(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY"))
+        sync_conn.execute(sa_text(f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY"))
+        sync_conn.execute(sa_text(f"DROP POLICY IF EXISTS tenant_isolation ON {table}"))
+        sync_conn.execute(sa_text(
+            f"CREATE POLICY tenant_isolation ON {table} "
+            f"USING ({predicate}) WITH CHECK ({predicate})"
+        ))
+    logger.info("rls_policies_ensured", tables=len(_TENANT_CONTENT_TABLES))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Startup: launch browser pool + scheduler. Shutdown: clean up both."""
@@ -274,6 +371,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # Data backfill: re-parse country/state onto scraped_jobs rows harvested
         # before location parsing was wired (columns above exist but stayed empty).
         await conn.run_sync(_backfill_scraped_jobs_location)
+        # Multi-tenancy: add tenant_id to every content table + users (backfilled
+        # to 'internal'), seed the tenants, and install the RLS policies. Order
+        # matters — columns first, then seed, then policies.
+        await conn.run_sync(_ensure_tenant_columns)
+        await conn.run_sync(_ensure_tenants_seeded)
+        await conn.run_sync(_ensure_rls_policies)
 
     # Reconcile stale 'running' runs left by a previous process (a harvest runs
     # in a detached task that doesn't survive a restart). Without this, the

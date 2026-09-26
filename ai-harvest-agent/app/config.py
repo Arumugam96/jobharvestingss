@@ -219,6 +219,12 @@ class Settings(BaseSettings):
     smtp_timeout_seconds: int = 60
     smtp_sender_mail: str = ""
     smtp_envelope_name: str = ""
+    # OTP (login) email sender — its own From identity so the login mail doesn't
+    # share the outreach/report one. The address must be a provider-verified sender
+    # (any mailbox on the Brevo-authenticated sightspectrum.com domain works). A
+    # blank OTP_FROM_EMAIL falls back to the shared identity.
+    otp_from_email: str = "no-reply@sightspectrum.com"
+    otp_from_name: str = "SightSpectrum Login OTP"
     outreach_deck_url: str = ""
 
     # ── Mailjet (transactional email transport — replaces the SMTP send path) ─────

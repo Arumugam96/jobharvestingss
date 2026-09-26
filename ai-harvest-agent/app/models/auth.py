@@ -23,6 +23,9 @@ class UserORM(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     email: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
+    # Tenant this user belongs to (app/models/tenant.py). Backfilled to 'internal';
+    # resolved from the email domain on first OTP login (AuthService).
+    tenant_id: Mapped[str] = mapped_column(String(40), nullable=False, server_default="'internal'", index=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     is_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -86,6 +89,10 @@ class RequestOTPIn(BaseModel):
 class VerifyOTPIn(BaseModel):
     email: str
     otp: str
+    # Login-page workspace switch ("internal" | "us" | "in"). FOR NOW this decides
+    # the user's tenant — any allowed user may enter any workspace; omitted/None
+    # falls back to the email-domain map (see AuthService._get_or_create_user).
+    workspace: str | None = None
 
     @field_validator("email")
     @classmethod
@@ -97,6 +104,15 @@ class VerifyOTPIn(BaseModel):
     def _validate_otp_format(cls, v: str) -> str:
         if not v.isdigit():
             raise ValueError("OTP must be numeric")
+        return v
+
+    @field_validator("workspace")
+    @classmethod
+    def _validate_workspace(cls, v: str | None) -> str | None:
+        from app.models.tenant import WORKSPACE_TENANTS  # avoid import cycle
+
+        if v is not None and v not in WORKSPACE_TENANTS:
+            raise ValueError("Unknown workspace")
         return v
 
 
@@ -116,3 +132,4 @@ class AuthenticatedUser(BaseModel):
     email: str
     is_active: bool
     is_verified: bool
+    tenant_id: str = "internal"

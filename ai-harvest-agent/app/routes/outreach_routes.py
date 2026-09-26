@@ -34,7 +34,7 @@ from app.models.auth import AuthenticatedUser
 from app.models.harvest_run import LlmCallType
 from app.models.outreach import EmailOutreachORM
 from app.services.active_clients import classify_client
-from app.services.email_service import EmailSender
+from app.services.email_service import EmailSender, render_outreach_email_html
 from app.services.harvest_run_service import HarvestRunService, insert_llm_call, scraped_job_view
 from app.services.llm_service import LLMService
 from app.services.outreach_service import OutreachService
@@ -296,7 +296,8 @@ async def send_email(
 
     # Row shape (incl. the optimistic delivered-on-success seed) lives in
     # build_email_outreach_row, shared with the automated end-of-harvest sweep so the
-    # two writers can't drift.
+    # two writers can't drift. body_html is the same render the send built (signature
+    # card included) so the log records the message as actually delivered.
     row = build_email_outreach_row(
         id=outreach_id,
         job_id=body.job_id,
@@ -311,6 +312,7 @@ async def send_email(
         from_email=from_email,
         subject=body.subject,
         body=body.body,
+        body_html=render_outreach_email_html(body.body, job_title, job_url),
         fallback_used=body.fallback_used,
         status=send_status,
         error_message=error_message,

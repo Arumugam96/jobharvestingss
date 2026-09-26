@@ -67,11 +67,24 @@ function MessageBody({ m }) {
       {m.subject && (
         <div style={{ fontSize: 13.5, fontWeight: 600, color: "#1E293B", marginBottom: 4 }}>{m.subject}</div>
       )}
-      <div style={{ fontSize: 13, color: "#334155", whiteSpace: "pre-wrap", overflowWrap: "anywhere", lineHeight: 1.5, maxHeight: 220, overflowY: "auto" }}>
-        {m.body
-          ? linkifyOutreachBody(m.body)
-          : (m.channel === "linkedin" ? "(LinkedIn message)" : "—")}
-      </div>
+      {m.body_html ? (
+        /* body_html is the exact HTML part the backend rendered and delivered
+         * (signature card, unsubscribe line) — our own escaped render, so injecting
+         * it shows the email as the recipient saw it. Styles are all inline. The
+         * signature logo is stored as its cid: reference (the bytes are only in the
+         * email itself), so swap it for the same file shipped in public/. */
+        <div
+          style={{ fontSize: 13, color: "#334155", overflowWrap: "anywhere", lineHeight: 1.5, maxHeight: 220, overflowY: "auto" }}
+          dangerouslySetInnerHTML={{ __html: m.body_html.split("cid:ss-logo").join("/sight_spectrum_logo.jpg") }}
+        />
+      ) : (
+        /* Older rows and LinkedIn messages have no stored HTML — plain-text body. */
+        <div style={{ fontSize: 13, color: "#334155", whiteSpace: "pre-wrap", overflowWrap: "anywhere", lineHeight: 1.5, maxHeight: 220, overflowY: "auto" }}>
+          {m.body
+            ? linkifyOutreachBody(m.body)
+            : (m.channel === "linkedin" ? "(LinkedIn message)" : "—")}
+        </div>
+      )}
     </>
   );
 }

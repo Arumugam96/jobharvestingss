@@ -83,7 +83,7 @@ async def verify_otp(
 ) -> TokenResponse | JSONResponse:
     service = AuthService(db, settings, email_sender)
     try:
-        user = await service.verify_otp(payload.email, payload.otp)
+        user = await service.verify_otp(payload.email, payload.otp, workspace=payload.workspace)
     except OTPVerifyError:
         # Returned (not raised) so the failed-attempt increment the service
         # just recorded survives — see AuthService.verify_otp for why.
@@ -120,8 +120,31 @@ async def logout(
     return MessageResponse(message="Logged out")
 
 
-@router.get("/me", response_model=AuthenticatedUser, summary="Get the current authenticated user")
+@router.get("/me", summary="Get the current authenticated user + tenant slip")
 async def read_current_user(
     current_user: AuthenticatedUser = Depends(get_current_user),
-) -> AuthenticatedUser:
-    return current_user
+    db: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """The user plus their tenant's "slip" — branding + feature flags the frontend
+    renders from (theme accent, brand name, which nav items to show). The backend
+    still enforces data access independently via RLS + query scoping; this is
+    presentation only."""
+    from sqlalchemy import select
+
+    from app.models.tenant import TenantORM
+
+    tenant_row = (
+        await db.execute(select(TenantORM).where(TenantORM.id == current_user.tenant_id))
+    ).scalar_one_or_none()
+    cfg = (tenant_row.config or {}) if tenant_row is not None else {}
+    return {
+        **current_user.model_dump(),
+        "tenant": {
+            "id": current_user.tenant_id,
+            "name": tenant_row.name if tenant_row else "SightSpectrum",
+            "type": tenant_row.type if tenant_row else "internal",
+            "region": tenant_row.region if tenant_row else "",
+            "theme": cfg.get("theme", {}),
+            "features": cfg.get("features", {}),
+        },
+    }

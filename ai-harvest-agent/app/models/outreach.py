@@ -23,6 +23,7 @@ class EmailOutreachORM(Base):
     __tablename__ = "email_outreach"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    tenant_id: Mapped[str] = mapped_column(String(40), nullable=False, server_default="'internal'", index=True)  # owning tenant
     # Denormalized correlation keys, not hard FKs — the source job may be a
     # JSON-sourced row with a synthetic id, and recruiters aren't always linked
     # (mirrors LlmCallORM.job_url's rationale).
@@ -47,6 +48,10 @@ class EmailOutreachORM(Base):
     from_email: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     subject: Mapped[str] = mapped_column(Text, nullable=False, default="")
     body: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # The rendered HTML part as actually delivered (signature card, unsubscribe
+    # line, job-title link) — `body` is only the plain-text source it was built
+    # from. NULL on LinkedIn rows and rows sent before this column existed.
+    body_html: Mapped[str | None] = mapped_column(Text, nullable=True)
     attachment_name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     # True when the sent body came from the LLM; False when the static fallback
     # template was used (LLM generation failed). fallback_used is the inverse

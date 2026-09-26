@@ -20,6 +20,7 @@ class RecruiterORM(Base):
     __tablename__ = "recruiters"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    tenant_id: Mapped[str] = mapped_column(String(40), nullable=False, server_default="'internal'", index=True)  # owning tenant
     # linkedin_profile_url when known, else "nc:{slug(name)}|{slug(company)}" —
     # see app/services/recruiter_service.py::compute_dedup_key. Enforces
     # one identity per person at the DB level instead of per-caller dict merges.
@@ -114,6 +115,8 @@ class RecruiterDiscoveryRunORM(Base):
     instead of glob-scanning data/results/lead_intelligence/ on every call.
     """
     __tablename__ = "recruiter_discovery_runs"
+
+    tenant_id: Mapped[str] = mapped_column(String(40), nullable=False, server_default="'internal'", index=True)  # owning tenant
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     run_id: Mapped[str] = mapped_column(String(40), nullable=False, unique=True, index=True)
