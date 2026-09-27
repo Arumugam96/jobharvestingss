@@ -3,6 +3,7 @@ import DOMPurify from "dompurify";
 import EmailComposeModal from "./components/EmailComposeModal";
 import LinkedInMessageModal from "./components/LinkedInMessageModal";
 import { getOutreachStatus } from "./api";
+import { GLASS, GLASS_BTN, PAGE_BG, GLASS_FALLBACK } from "./theme";
 import {
   ArrowLeft,
   MapPin,
@@ -354,29 +355,29 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
 }
 
 const styles = `
-  .ha-page { min-height: 100vh; width: 100%; background: #F8FAFC; color: #1E293B;
+  .ha-page { min-height: 100vh; width: 100%; ${PAGE_BG} color: #1E293B;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
   .ha-container { max-width: 1280px; margin: 0 auto; padding: 22px 32px 48px; }
 
   .ha-topbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; }
   .ha-back { display: inline-flex; align-items: center; gap: 7px; cursor: pointer;
-    background: #fff; border: 1px solid #E2E8F0; color: #334155;
+    ${GLASS_BTN} color: #334155;
     font-size: 13px; font-weight: 600; padding: 8px 14px; border-radius: 8px; }
-  .ha-back:hover { background: #F1F5F9; border-color: #CBD5E1; }
+  .ha-back:hover { background: rgba(241,245,249,.92); border-color: #CBD5E1; }
   .ha-back:focus-visible { outline: 2px solid #2563EB; outline-offset: 1px; }
   .ha-edit-btn { display: inline-flex; align-items: center; gap: 7px; cursor: pointer;
     background: #2563EB; border: none; color: #fff;
     font-size: 13px; font-weight: 600; padding: 8px 16px; border-radius: 8px; }
   .ha-edit-btn:hover { background: #1E40AF; }
   .ha-viewbadge { display: inline-flex; align-items: center; gap: 5px;
-    font-size: 12px; font-weight: 600; color: #64748B; background: #fff;
-    border: 1px solid #E2E8F0; padding: 7px 12px; border-radius: 8px; }
+    font-size: 12px; font-weight: 600; color: #64748B; ${GLASS_BTN}
+    padding: 7px 12px; border-radius: 8px; }
 
-  .ha-hero { background: #fff; border: 1px solid #E2E8F0; border-radius: 14px;
+  .ha-hero { ${GLASS} border-radius: 14px;
     padding: 24px 28px; margin-bottom: 18px; }
   .ha-hero-meta { display: flex; align-items: center; gap: 14px; margin-bottom: 12px; }
   .ha-source { font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase;
-    color: #2563EB; background: #EFF4FF; border: 1px solid #DBE6FF;
+    color: #2563EB; background: rgba(239,244,255,.8); border: 1px solid #DBE6FF;
     padding: 4px 10px; border-radius: 6px; }
   .ha-hero-company { display: inline-flex; align-items: center; gap: 6px;
     color: #475569; font-size: 14px; font-weight: 500; }
@@ -384,8 +385,8 @@ const styles = `
 
   .ha-chips { display: flex; flex-wrap: wrap; gap: 9px; }
   .ha-chip { display: inline-flex; align-items: center; gap: 6px;
-    font-size: 13px; color: #334155; background: #F1F5F9;
-    border: 1px solid #E2E8F0; padding: 7px 13px; border-radius: 999px; }
+    font-size: 13px; color: #334155; background: rgba(248,250,252,.7);
+    border: 1px solid rgba(203,213,225,.6); padding: 7px 13px; border-radius: 999px; }
   .ha-chip svg { color: #64748B; }
   .ha-chip-accent { background: #FFF7EC; border-color: #FCE3BC; color: #92580B; }
   .ha-chip-accent svg { color: #F59E0B; }
@@ -400,7 +401,7 @@ const styles = `
     padding-right: 28px; border-right: 1px solid #F1F5F9; }
   .ha-poc .ha-actions { margin-top: 0; width: 320px; flex-shrink: 0; }
 
-  .ha-section { background: #fff; border: 1px solid #E2E8F0; border-radius: 14px; padding: 22px; }
+  .ha-section { ${GLASS} border-radius: 14px; padding: 22px; }
   .ha-label { display: flex; align-items: center; gap: 7px;
     font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase;
     color: #1E40AF; margin-bottom: 14px; }
@@ -469,9 +470,9 @@ const styles = `
     border-radius: 10px; border: 1px solid transparent; text-decoration: none; transition: .15s; }
   .ha-cbtn:focus-visible { outline: 2px solid #2563EB; outline-offset: 2px; }
   .ha-cbtn-off { background: #F1F5F9; border-color: #E7ECF2; color: #B9C2CC; cursor: not-allowed; }
-  .ha-cbtn-on-wa { background: #fff; border-color: #C8EFD7; color: #1A7F4B; cursor: pointer; }
+  .ha-cbtn-on-wa { background: rgba(255,255,255,.85); border-color: #C8EFD7; color: #1A7F4B; cursor: pointer; }
   .ha-cbtn-on-wa:hover { background: #ECFBF2; }
-  .ha-cbtn-on-mail { background: #fff; border-color: #93C5FD; color: #2563EB; cursor: pointer; }
+  .ha-cbtn-on-mail { background: rgba(255,255,255,.85); border-color: #93C5FD; color: #2563EB; cursor: pointer; }
   .ha-cbtn-on-mail:hover { background: #EFF4FF; }
   .ha-cbtn-on-li { background: #0A66C2; border-color: #0A66C2; color: #fff; cursor: pointer; }
   .ha-cbtn-on-li:hover { background: #084d92; }
@@ -492,6 +493,7 @@ const styles = `
     .ha-row { grid-template-columns: 1fr; gap: 2px; }
     .ha-actions { flex-direction: column; }
   }
+  ${GLASS_FALLBACK(".ha-hero,.ha-section")}
 `;
 
 export default JobDetailsView;

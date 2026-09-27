@@ -301,7 +301,7 @@ export default function OutreachHistoryPage() {
             <ChevronDown size={14} />
           </button>
           {dateOpen && (
-            <div style={{ position: "absolute", top: "calc(100% + 8px)", left: 0, background: "#fff", border: "1px solid #E2E8F0", borderRadius: 12, boxShadow: "0 20px 40px rgba(15,23,42,.16)", padding: 8, minWidth: 240, zIndex: 50 }}>
+            <div style={{ position: "absolute", top: "calc(100% + 8px)", left: 0, background: "linear-gradient(160deg, rgba(255,255,255,.97), rgba(255,255,255,.92))", backdropFilter: "blur(16px) saturate(160%)", WebkitBackdropFilter: "blur(16px) saturate(160%)", border: "1px solid rgba(255,255,255,.85)", borderRadius: 12, boxShadow: "0 18px 40px -12px rgba(15,23,42,.28), 0 4px 12px -6px rgba(15,23,42,.12)", padding: 8, minWidth: 240, zIndex: 50 }}>
               {RANGES.map((r) => (
                 <button key={r.key} onClick={() => { setRangeKey(r.key); setCustomFrom(""); setCustomTo(""); setDateOpen(false); }}
                   style={{ display: "flex", alignItems: "center", gap: 9, width: "100%", border: 0, background: "transparent", cursor: "pointer", padding: "9px 10px", borderRadius: 8, fontSize: 13.5, color: "#334155", fontFamily: "inherit", textAlign: "left" }}
@@ -315,24 +315,24 @@ export default function OutreachHistoryPage() {
               <div style={{ display: "flex", gap: 8, padding: "0 8px 6px" }}>
                 <label style={{ flex: 1, fontSize: 11, color: "#64748B" }}>From
                   <input type="date" value={customFrom} onChange={(e) => { setCustomFrom(e.target.value); setRangeKey("all"); }}
-                    style={{ width: "100%", marginTop: 3, border: "1px solid #CBD5E1", borderRadius: 7, padding: "6px 8px", fontSize: 12, fontFamily: "inherit" }} />
+                    style={{ width: "100%", marginTop: 3, background: "rgba(255,255,255,.85)", border: "1px solid rgba(148,163,184,.55)", borderRadius: 7, padding: "6px 8px", fontSize: 12, fontFamily: "inherit" }} />
                 </label>
                 <label style={{ flex: 1, fontSize: 11, color: "#64748B" }}>To
                   <input type="date" value={customTo} onChange={(e) => { setCustomTo(e.target.value); setRangeKey("all"); }}
-                    style={{ width: "100%", marginTop: 3, border: "1px solid #CBD5E1", borderRadius: 7, padding: "6px 8px", fontSize: 12, fontFamily: "inherit" }} />
+                    style={{ width: "100%", marginTop: 3, background: "rgba(255,255,255,.85)", border: "1px solid rgba(148,163,184,.55)", borderRadius: 7, padding: "6px 8px", fontSize: 12, fontFamily: "inherit" }} />
                 </label>
               </div>
             </div>
           )}
         </div>
 
-        <div style={{ display: "flex", alignItems: "center", gap: 8, border: "1px solid #CBD5E1", background: "#fff", borderRadius: 10, padding: "8px 12px", minWidth: 230, flex: "0 1 300px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, border: "1px solid rgba(148,163,184,.5)", background: "rgba(255,255,255,.72)", borderRadius: 10, padding: "8px 12px", minWidth: 230, flex: "0 1 300px" }}>
           <Search size={15} color="#94A3B8" />
           <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search by point of contact name…"
             style={{ border: 0, outline: "none", background: "transparent", fontSize: 13, width: "100%", fontFamily: "inherit", color: "#0F172A" }} />
         </div>
 
-        <div style={{ display: "flex", alignItems: "center", gap: 8, border: "1px solid #CBD5E1", background: "#fff", borderRadius: 10, padding: "8px 12px", minWidth: 200, flex: "0 1 260px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, border: "1px solid rgba(148,163,184,.5)", background: "rgba(255,255,255,.72)", borderRadius: 10, padding: "8px 12px", minWidth: 200, flex: "0 1 260px" }}>
           <Building2 size={15} color="#94A3B8" />
           <input value={companyQ} onChange={(e) => setCompanyQ(e.target.value)} placeholder="Search by company…"
             style={{ border: 0, outline: "none", background: "transparent", fontSize: 13, width: "100%", fontFamily: "inherit", color: "#0F172A" }} />

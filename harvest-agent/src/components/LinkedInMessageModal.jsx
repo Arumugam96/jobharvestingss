@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from "react";
 import { X, RefreshCw, Copy, Check, Sparkles, AlertCircle, Send } from "lucide-react";
 import { generateLinkedinMessage, logLinkedinSent, ApiError } from "../api";
 import OutreachBodyField from "./OutreachBodyField";
+import { GLASS_MODAL, GLASS_BTN, GLASS_INPUT, GLASS_INPUT_FOCUS } from "../theme";
 
 /* LinkedIn outreach message generator. Opens from the LinkedIn icon on a
  * Harvested Jobs row (only when that row has a LinkedIn URL). Generates a single
@@ -12,8 +13,8 @@ import OutreachBodyField from "./OutreachBodyField";
  * turns the row's LinkedIn icon green. Styling uses the `lmm-` prefix. */
 
 const styles = `
-.lmm-overlay { position: fixed; inset: 0; background: rgba(15,23,42,.45); display: flex; align-items: center; justify-content: center; padding: 24px; z-index: 1000; }
-.lmm-card { width: 100%; max-width: 560px; max-height: calc(100vh - 48px); background: #FFFFFF; border-radius: 12px; box-shadow: 0 24px 48px rgba(15,23,42,.18); display: flex; flex-direction: column; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #1E293B; }
+.lmm-overlay { position: fixed; inset: 0; background: rgba(15,23,42,.45); -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px); display: flex; align-items: center; justify-content: center; padding: 24px; z-index: 1000; }
+.lmm-card { width: 100%; max-width: 560px; max-height: calc(100vh - 48px); ${GLASS_MODAL} border-radius: 12px; display: flex; flex-direction: column; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #1E293B; }
 .lmm-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 22px; border-bottom: 1px solid #E2E8F0; }
 .lmm-title { font-size: 15px; font-weight: 600; letter-spacing: -0.01em; }
 .lmm-sub { font-size: 12.5px; color: #64748B; font-weight: 400; margin-left: 8px; }
@@ -22,17 +23,17 @@ const styles = `
 .lmm-body { padding: 18px 22px; overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 12px; }
 .lmm-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: #94A3B8; display: flex; align-items: center; gap: 8px; }
 .lmm-aitag { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 600; color: #B45309; background: #FEF3C7; border-radius: 999px; padding: 2px 8px; text-transform: none; letter-spacing: 0; }
-.lmm-textarea { width: 100%; min-height: 190px; border: 1px solid #E2E8F0; border-radius: 8px; padding: 12px; font-size: 14px; line-height: 1.6; color: #1E293B; font-family: inherit; resize: vertical; box-sizing: border-box; }
-.lmm-textarea:focus { outline: none; border-color: #2563EB; box-shadow: 0 0 0 3px rgba(37,99,235,.12); }
+.lmm-textarea { width: 100%; min-height: 190px; ${GLASS_INPUT} border-radius: 8px; padding: 12px; font-size: 14px; line-height: 1.6; color: #1E293B; font-family: inherit; resize: vertical; box-sizing: border-box; }
+.lmm-textarea:focus { outline: none; border-color: #2563EB; box-shadow: 0 0 0 3px rgba(37,99,235,.12); ${GLASS_INPUT_FOCUS} }
 .lmm-count { font-size: 12px; color: #94A3B8; text-align: right; }
 .lmm-note { display: flex; align-items: center; gap: 7px; font-size: 12.5px; border-radius: 8px; padding: 8px 11px; }
 .lmm-note-warn { background: #FFFBEB; border: 1px solid #FDE68A; color: #92400E; }
 .lmm-note-err { background: #FEF2F2; border: 1px solid #FCA5A5; color: #B91C1C; }
-.lmm-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 22px; border-top: 1px solid #E2E8F0; background: #F8FAFC; }
+.lmm-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 22px; border-top: 1px solid rgba(226,232,240,.9); background: rgba(248,250,252,.8); }
 .lmm-btn { display: inline-flex; align-items: center; gap: 6px; border-radius: 8px; font-size: 13px; font-weight: 600; padding: 9px 14px; cursor: pointer; font-family: inherit; border: 1px solid transparent; transition: background .12s, border-color .12s; }
 .lmm-btn:disabled { opacity: .5; cursor: not-allowed; }
-.lmm-btn-ghost { background: transparent; border-color: #E2E8F0; color: #475569; }
-.lmm-btn-ghost:hover:not(:disabled) { background: #FFFFFF; border-color: #CBD5E1; color: #1E293B; }
+.lmm-btn-ghost { ${GLASS_BTN} color: #475569; }
+.lmm-btn-ghost:hover:not(:disabled) { background: rgba(255,255,255,.95); border-color: #CBD5E1; color: #1E293B; }
 .lmm-btn-primary { background: #2563EB; color: #FFFFFF; }
 .lmm-btn-primary:hover:not(:disabled) { background: #1E40AF; }
 .lmm-spin { animation: lmm-rotate .8s linear infinite; }

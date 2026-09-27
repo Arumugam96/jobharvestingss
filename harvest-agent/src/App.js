@@ -6,6 +6,7 @@ import { AUTH_ENABLED } from "./auth";
 import { getMe, logout } from "./api";
 import { TenantProvider, INTERNAL_TENANT } from "./TenantContext";
 import DevTenantSwitcher from "./components/DevTenantSwitcher";
+import { PAGE_BG_STYLE } from "./theme";
 
 function App() {
   // "checking" while we validate the session cookie on startup, then "authed"
@@ -78,7 +79,7 @@ function App() {
     return (
       <div style={{
         minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center",
-        background: "#F8FAFC", color: "#64748B", fontFamily: 'ui-sans-serif,system-ui,"Segoe UI",Roboto,sans-serif',
+        ...PAGE_BG_STYLE, color: "#64748B", fontFamily: 'ui-sans-serif,system-ui,"Segoe UI",Roboto,sans-serif',
         fontSize: 14,
       }}>
         Restoring your session…

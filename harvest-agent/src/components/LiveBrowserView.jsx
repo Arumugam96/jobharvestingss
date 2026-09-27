@@ -78,7 +78,9 @@ const styles = `
     width: min(1600px, 96vw);
     height: 92vh;
     max-height: calc(100vh - 24px);
-    background: #0F172A; border-radius: 12px;
+    background: rgba(15,23,42,.96); border-radius: 12px;
+    -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
+    border: 1px solid rgba(148,163,184,.22);
     overflow: hidden; box-shadow: 0 20px 60px rgba(0,0,0,.45);
     display: flex; flex-direction: column;
   }

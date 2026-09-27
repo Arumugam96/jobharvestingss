@@ -10,6 +10,7 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import { requestOtp, verifyOtp, ApiError } from "./api";
+import { PAGE_BG, GLASS, GLASS_INPUT, GLASS_INPUT_FOCUS, GLASS_FALLBACK } from "./theme";
 
 /* ------------------------------------------------------------------ */
 /* config                                                              */
@@ -48,14 +49,14 @@ const CSS = `
 *{box-sizing:border-box}
 .auth-root{
   min-height:100vh;display:flex;align-items:center;justify-content:center;
-  padding:32px 20px;background:var(--bg);color:var(--text);
+  padding:32px 20px;${PAGE_BG}color:var(--text);
   font-family:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
   -webkit-font-smoothing:antialiased;
 }
 .auth-card{width:100%;max-width:392px}
 .auth-box{
-  background:var(--surface);border:1px solid var(--line);border-radius:14px;
-  padding:32px 30px;box-shadow:0 1px 2px rgba(15,23,42,.04);
+  ${GLASS}border-radius:14px;
+  padding:32px 30px;
 }
 
 /* ---------- wordmark ---------- */
@@ -91,11 +92,11 @@ const CSS = `
 }
 .input{
   width:100%;height:44px;padding:0 14px 0 40px;font-size:14px;color:var(--text);
-  background:var(--surface);border:1px solid var(--line);border-radius:9px;outline:none;
-  transition:border-color .15s,box-shadow .15s;font-family:inherit;
+  ${GLASS_INPUT}border-radius:9px;outline:none;
+  transition:border-color .15s,box-shadow .15s,background .15s;font-family:inherit;
 }
 .input::placeholder{color:#94A3B8}
-.input:focus{border-color:var(--primary);box-shadow:0 0 0 3px rgba(37,99,235,.13)}
+.input:focus{border-color:var(--primary);box-shadow:0 0 0 3px rgba(37,99,235,.13);${GLASS_INPUT_FOCUS}}
 .input.is-err{border-color:var(--err)}
 .input.is-err:focus{box-shadow:0 0 0 3px rgba(220,38,38,.12)}
 .field-hint{font-size:12px;color:var(--muted);margin-top:7px}
@@ -105,11 +106,11 @@ const CSS = `
 .otp-cell{
   flex:1;min-width:0;height:52px;text-align:center;
   font-size:20px;font-weight:600;font-variant-numeric:tabular-nums;color:var(--text);
-  background:var(--surface);border:1px solid var(--line);border-radius:9px;outline:none;
+  ${GLASS_INPUT}border-radius:9px;outline:none;
   transition:border-color .15s,box-shadow .15s,background .15s;font-family:inherit;
 }
-.otp-cell:focus{border-color:var(--primary);box-shadow:0 0 0 3px rgba(37,99,235,.13)}
-.otp-cell.filled{border-color:#BFD4FE;background:#F8FAFF}
+.otp-cell:focus{border-color:var(--primary);box-shadow:0 0 0 3px rgba(37,99,235,.13);${GLASS_INPUT_FOCUS}}
+.otp-cell.filled{border-color:#BFD4FE;background:rgba(239,246,255,.9)}
 .otp-cell.is-err{border-color:var(--err);background:#FEF2F2}
 .otp-shake{animation:shake .32s ease}
 @keyframes shake{
@@ -153,7 +154,7 @@ const CSS = `
 .ws-opt{
   flex:1;display:inline-flex;align-items:center;justify-content:center;gap:7px;
   height:40px;font-size:12.5px;font-weight:600;font-family:inherit;color:var(--muted);
-  background:var(--surface);border:1.5px solid var(--line);border-radius:9px;cursor:pointer;
+  background:rgba(255,255,255,.7);border:1.5px solid rgba(148,163,184,.45);border-radius:9px;cursor:pointer;
   transition:border-color .15s,color .15s,background .15s,box-shadow .15s;white-space:nowrap;
 }
 .ws-opt:hover{border-color:#CBD5E1;color:var(--text)}
@@ -169,6 +170,7 @@ const CSS = `
   .otp-row{gap:6px}
   .otp-cell{height:48px;font-size:18px}
 }
+${GLASS_FALLBACK(".auth-box")}
 `;
 
 /* ------------------------------------------------------------------ */

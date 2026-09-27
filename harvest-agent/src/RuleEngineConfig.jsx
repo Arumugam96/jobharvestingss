@@ -10,6 +10,11 @@ import {
 } from "./api";
 import LiveBrowserView from "./components/LiveBrowserView";
 import StopHarvestButton from "./components/StopHarvestModal";
+import { GLASS, GLASS_FALLBACK, GLASS_INPUT, GLASS_INPUT_FOCUS } from "./theme";
+import {
+  JOB_TYPES, WORK_MODES, DOMAINS, HIRING_ENTITIES, GCC_MODES, SEARCH_WINDOWS,
+  LINKEDIN_ACCOUNTS, TIMEZONES, CURRENCIES, fmtRunDate, nowLabel,
+} from "./lib/ruleEngineOptions";
 import useCountUp from "./useCountUp";
 import { makeStallWatch, STALL_WARN_MSG } from "./stallWatch";
 
@@ -43,43 +48,12 @@ const DiceIcon = () => (
   </svg>
 );
 
-/* ── Backend enum ↔ display-label maps (app/models/harvest_models.py) ───── */
-const JOB_TYPES      = ["Any", "Contract", "Permanent", "Part-time", "Freelance", "Full-time"];
-const WORK_MODES     = ["Any", "Remote", "Hybrid", "Onsite"];
-// Only values the classifier can actually assign (the domain_keywords.json
-// buckets + the coarse IT/Non-IT split). "Engineering"/"Finance"/"Operations"
-// were removed — the backend never labels a job with them, so selecting one
-// would extract zero jobs.
-const DOMAINS        = ["Any", "Data Engineering", "Data Science", "AI/ML", "SAP", "Cloud", "Digital", "UX/UI", "ERP", "Cyber Security", "Infrastructure", "IT", "Non-IT"];
-const HIRING_ENTITIES = ["Any", "Direct Client", "GCC", "Ambiguous", "Staffing Firm"];
-const GCC_MODES = [
-  { value: "include_gcc", label: "Include GCC" },
-  { value: "gcc_only", label: "GCC only" },
-  { value: "exclude_gcc", label: "Exclude GCC" },
-];
-const SEARCH_WINDOWS = [
-  { value: 24, label: "Last 24 hours" },
-  { value: 48, label: "Last 48 hours" },
-  { value: 72, label: "Last 72 hours" },
-  { value: 168, label: "Last 7 days" },
-  { value: 720, label: "Last 30 days" },
-];
+/* Option lists + label helpers now live in lib/ruleEngineOptions, shared with
+   RuleEngineRedesign so the two rule engine pages can't drift. Frequency stays
+   local: this page deliberately offers only daily/weekly. */
 const FREQUENCIES = [
   { value: "daily", label: "Daily" },
   { value: "weekly", label: "Weekly" },
-];
-// Two supported LinkedIn accounts. Each has its own saved session + Chrome
-// profile on the server (see app/services/session_manager.py account keying).
-const LINKEDIN_ACCOUNTS = [
-  { id: "1", label: "Account 1" },
-  { id: "2", label: "Account 2" },
-];
-const TIMEZONES = [
-  { value: "Asia/Kolkata", label: "IST (UTC+5:30)" },
-  { value: "UTC", label: "GMT (UTC+0)" },
-  { value: "America/New_York", label: "EST (UTC−5)" },
-  { value: "America/Los_Angeles", label: "PST (UTC−8)" },
-  { value: "Asia/Singapore", label: "SGT (UTC+8)" },
 ];
 
 function Toggle({ on, onChange, label }) {
@@ -112,9 +86,9 @@ function Select({ value, onChange, options, ariaLabel }) {
   );
 }
 
-function Card({ title, desc, required, invalid, error, children }) {
+function Card({ title, desc, required, invalid, error, span = false, children }) {
   return (
-    <div className={"rec-card" + (invalid ? " is-invalid" : "")}>
+    <div className={"rec-card" + (span ? " rec-span" : "") + (invalid ? " is-invalid" : "")}>
       <div className="rec-card-title">
         {title}
         {required && <span className="rec-req" aria-label="required">*</span>}
@@ -125,21 +99,6 @@ function Card({ title, desc, required, invalid, error, children }) {
     </div>
   );
 }
-
-const fmtRunDate = (iso) => {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
-};
-
-const nowLabel = () => {
-  const d = new Date();
-  let h = d.getHours();
-  const m = String(d.getMinutes()).padStart(2, "0");
-  const ap = h >= 12 ? "PM" : "AM";
-  h = h % 12 || 12;
-  return `Today ${String(h).padStart(2, "0")}:${m} ${ap}`;
-};
 
 const DEFAULT_CONFIG = {
   sources: { linkedin: true, naukri: false, dice: false, linkedin_account: "1" },
@@ -783,19 +742,14 @@ export default function RuleEngineConfig({
 
               <div className="rec-section-label">Filters — search terms (job type, domain, location) narrow what each source fetches; every scraped job is kept and labelled, then flagged if it doesn&rsquo;t match (nothing is dropped)</div>
 
+              {/* Even rows: Job type ↔ Hiring entity share a row, the tall
+                  Domain chip set spans full width, GCC ↔ Location pair up, and
+                  Salary spans full width (matches the approved mockup). */}
               <div className="rec-grid rec-grid--2">
                 <Card title="Job type" required invalid={showErr("jobType")} desc="Pushed into each source's search (e.g. LinkedIn f_JT). Non-matching jobs are flagged after scraping, not dropped.">
                   <div className="rec-chips">
                     {JOB_TYPES.map((t) => (
                       <Chip key={t} active={jobType === t} onClick={() => { setJobType(t); markDirty(); }}>{t}</Chip>
-                    ))}
-                  </div>
-                </Card>
-
-                <Card title="Domain" required invalid={showErr("domain")} desc='A specific domain (or "IT") adds keywords to the search so fewer irrelevant jobs are fetched. Every job is also labelled by title/JD keywords and flagged if it doesn&rsquo;t match. "Non-IT"/"Any" don&rsquo;t narrow the search.'>
-                  <div className="rec-chips">
-                    {DOMAINS.map((t) => (
-                      <Chip key={t} active={domain === t} onClick={() => { setDomain(t); markDirty(); }}>{t}</Chip>
                     ))}
                   </div>
                 </Card>
@@ -813,6 +767,14 @@ export default function RuleEngineConfig({
                           if (t !== "Any") setGccMode("include_gcc");
                           markDirty();
                         }}>{t}</Chip>
+                    ))}
+                  </div>
+                </Card>
+
+                <Card span title="Domain" required invalid={showErr("domain")} desc='A specific domain (or "IT") adds keywords to the search so fewer irrelevant jobs are fetched. Every job is also labelled by title/JD keywords and flagged if it doesn&rsquo;t match. "Non-IT"/"Any" don&rsquo;t narrow the search.'>
+                  <div className="rec-chips">
+                    {DOMAINS.map((t) => (
+                      <Chip key={t} active={domain === t} onClick={() => { setDomain(t); markDirty(); }}>{t}</Chip>
                     ))}
                   </div>
                 </Card>
@@ -838,7 +800,7 @@ export default function RuleEngineConfig({
                     onChange={(e) => { setLocation(e.target.value); markDirty(); }} />
                 </Card>
 
-                <Card title="Salary / Budget" desc="Checked after scraping against the posting's disclosed salary. Out-of-range jobs are flagged, not dropped.">
+                <Card span title="Salary / Budget" desc="Checked after scraping against the posting's disclosed salary. Out-of-range jobs are flagged, not dropped.">
                   <div className="rec-field-row">
                     <div className="rec-field">
                       <label>Min (₹ LPA)</label>
@@ -850,7 +812,7 @@ export default function RuleEngineConfig({
                     </div>
                     <div className="rec-field">
                       <label>Currency</label>
-                      <Select value={currency} onChange={(v) => { setCurrency(v); markDirty(); }} ariaLabel="Currency" options={["INR", "USD", "EUR", "GBP"]} />
+                      <Select value={currency} onChange={(v) => { setCurrency(v); markDirty(); }} ariaLabel="Currency" options={CURRENCIES} />
                     </div>
                   </div>
                   <div className="rec-inline-toggle">
@@ -899,11 +861,14 @@ const styles = `
     --green:#16A34A; --green-bg:#ECFDF5; --green-bd:#86EFAC;
     --sidebar:#0F172A;
     font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
-    color:var(--text); background:var(--bg);
+    color:var(--text); background:transparent; /* ha-root's PAGE_BG gradient shows through */
     font-size:14px; line-height:1.45; -webkit-font-smoothing:antialiased;
     flex:1; min-width:0; display:flex; flex-direction:column; overflow:hidden;
   }
-  .rec-header { display:flex; justify-content:space-between; align-items:flex-start; gap:18px; padding:15px 20px 16px; background:#fff; border-bottom:1px solid var(--line); }
+  .rec-header { display:flex; justify-content:space-between; align-items:flex-start; gap:18px; padding:15px 20px 16px;
+    background:linear-gradient(160deg, rgba(255,255,255,.88), rgba(255,255,255,.58) 72%);
+    -webkit-backdrop-filter:blur(12px) saturate(150%); backdrop-filter:blur(12px) saturate(150%);
+    border-bottom:1px solid rgba(255,255,255,.75); box-shadow:inset 0 1px 0 rgba(255,255,255,.7); }
   .rec-header h1 { font-size:21px; font-weight:700; margin:0; letter-spacing:-0.3px; }
   .rec-meta { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-top:7px; font-size:12.5px; color:var(--muted); }
   .rec-dot { color:#CBD5E1; }
@@ -921,8 +886,8 @@ const styles = `
   .rec-btn--busy, .rec-btn--busy:hover { background:#94A3B8; box-shadow:none; }
   .rec-btn--save { background:var(--primary); color:#fff; box-shadow:0 1px 2px rgba(37,99,235,.35); }
   .rec-btn--save:hover { background:var(--secondary); }
-  .rec-btn--watch { background:#fff; color:var(--primary); border:1px solid var(--primary); }
-  .rec-btn--watch:hover { background:#EFF6FF; }
+  .rec-btn--watch { background:linear-gradient(160deg, rgba(255,255,255,.9), rgba(255,255,255,.65)); color:var(--primary); border:1px solid var(--primary); box-shadow:inset 0 1px 0 rgba(255,255,255,.75); }
+  .rec-btn--watch:hover { background:rgba(239,246,255,.92); }
   .rec-btn--watch-attention {
     background:#F59E0B; color:#1E293B; border:1px solid #F59E0B;
     animation: rec-pulse 1.4s ease-in-out infinite;
@@ -938,7 +903,7 @@ const styles = `
      room at the left/right of the page. */
   /* Full-width white band flush with the header/tabs gutters (28px) so the
      stats read as part of the page, not a boxed cluster on a grey strip. */
-  .rec-prog { margin:0; padding:18px 28px; background:#fff; display:grid; gap:16px; grid-template-columns:repeat(3,minmax(0,1fr)); }
+  .rec-prog { margin:0; padding:18px 28px; background:rgba(255,255,255,.55); display:grid; gap:16px; grid-template-columns:repeat(3,minmax(0,1fr)); }
   @media (max-width:640px) { .rec-prog { grid-template-columns:1fr; } }
   .rec-prog-card {
     position:relative; overflow:hidden; text-align:center;
@@ -987,7 +952,10 @@ const styles = `
   }
 
   /* Tabs */
-  .rec-tabs { display:flex; gap:26px; padding:0 28px; background:#fff; border-bottom:1px solid var(--line); }
+  .rec-tabs { display:flex; gap:26px; padding:0 28px;
+    background:linear-gradient(160deg, rgba(255,255,255,.7), rgba(255,255,255,.45));
+    -webkit-backdrop-filter:blur(12px) saturate(150%); backdrop-filter:blur(12px) saturate(150%);
+    border-bottom:1px solid rgba(255,255,255,.7); }
   .rec-tab { background:none; border:none; cursor:pointer; padding:13px 2px 12px; font-size:14px; font-weight:600; color:var(--muted); border-bottom:2.5px solid transparent; margin-bottom:-1px; transition:color .15s; }
   .rec-tab:hover { color:var(--text); }
   .rec-tab.is-active { color:var(--primary); border-bottom-color:var(--primary); }
@@ -996,14 +964,16 @@ const styles = `
   .rec-content { padding:24px 28px 40px; overflow-y:auto; flex:1; }
   .rec-grid { display:grid; gap:18px; }
   .rec-grid--2 { grid-template-columns:1fr 1fr; }
-  .rec-panel, .rec-card { background:#fff; border:1px solid var(--line); border-radius:14px; padding:20px; }
+  .rec-span { grid-column:1/-1; }
+  .rec-panel, .rec-card { ${GLASS} border-radius:14px; padding:20px; }
   .rec-panel.is-invalid, .rec-card.is-invalid { border-color:#FCA5A5; box-shadow:0 0 0 3px rgba(220,38,38,.08); }
   .rec-panel-head { font-size:11px; letter-spacing:1.2px; font-weight:700; text-transform:uppercase; color:var(--muted); padding-bottom:14px; margin-bottom:14px; border-bottom:1px solid var(--line); }
 
   /* Sources */
   .rec-sources { display:flex; flex-direction:column; }
-  .rec-source { display:flex; align-items:center; gap:13px; padding:12px 0; border-bottom:1px solid #F1F5F9; }
-  .rec-source:last-child { border-bottom:none; }
+  /* Source rows as bordered tiles — mirrors the US page's rr-src look. */
+  .rec-source { display:flex; align-items:center; gap:13px; padding:12px 13px; border:1px solid rgba(203,213,225,.7); border-radius:11px; background:rgba(255,255,255,.6); margin-bottom:10px; }
+  .rec-source:last-child { margin-bottom:0; }
   .rec-source-text { flex:1; min-width:0; }
   .rec-source-name { font-weight:600; font-size:14.5px; }
   .rec-source-sub { font-size:12.5px; color:var(--muted); margin-top:2px; }
@@ -1028,19 +998,19 @@ const styles = `
   .rec-field { flex:1; min-width:0; display:flex; flex-direction:column; }
   .rec-field--full { display:flex; flex-direction:column; margin-top:18px; }
   .rec-field label, .rec-field--full label { font-size:12.5px; font-weight:600; color:#475569; margin-bottom:6px; }
-  .rec-input { width:100%; height:40px; padding:0 12px; border:1px solid var(--line); border-radius:9px; font-size:14px; color:var(--text); background:#fff; outline:none; transition:border-color .15s,box-shadow .15s; }
-  .rec-input:focus { border-color:var(--primary); box-shadow:0 0 0 3px rgba(37,99,235,.12); }
+  .rec-input { width:100%; height:40px; padding:0 12px; ${GLASS_INPUT} border-radius:9px; font-size:14px; color:var(--text); outline:none; transition:border-color .15s,box-shadow .15s,background .15s; }
+  .rec-input:focus { border-color:var(--primary); box-shadow:0 0 0 3px rgba(37,99,235,.12); ${GLASS_INPUT_FOCUS} }
 
   /* Select */
   .rec-select { position:relative; }
-  .rec-select select { width:100%; height:40px; padding:0 36px 0 12px; border:1px solid var(--line); border-radius:9px; font-size:14px; color:var(--text); background:#fff; appearance:none; -webkit-appearance:none; cursor:pointer; outline:none; transition:border-color .15s,box-shadow .15s; }
-  .rec-select select:focus { border-color:var(--primary); box-shadow:0 0 0 3px rgba(37,99,235,.12); }
+  .rec-select select { width:100%; height:40px; padding:0 36px 0 12px; ${GLASS_INPUT} border-radius:9px; font-size:14px; color:var(--text); appearance:none; -webkit-appearance:none; cursor:pointer; outline:none; transition:border-color .15s,box-shadow .15s,background .15s; }
+  .rec-select select:focus { border-color:var(--primary); box-shadow:0 0 0 3px rgba(37,99,235,.12); ${GLASS_INPUT_FOCUS} }
   .rec-select-caret { position:absolute; right:11px; top:50%; transform:translateY(-50%); color:#94A3B8; pointer-events:none; }
 
   /* Time */
   .rec-time { position:relative; }
-  .rec-time input { width:100%; height:40px; padding:0 36px 0 12px; border:1px solid var(--line); border-radius:9px; font-size:14px; color:var(--text); background:#fff; outline:none; transition:border-color .15s,box-shadow .15s; }
-  .rec-time input:focus { border-color:var(--primary); box-shadow:0 0 0 3px rgba(37,99,235,.12); }
+  .rec-time input { width:100%; height:40px; padding:0 36px 0 12px; ${GLASS_INPUT} border-radius:9px; font-size:14px; color:var(--text); outline:none; transition:border-color .15s,box-shadow .15s,background .15s; }
+  .rec-time input:focus { border-color:var(--primary); box-shadow:0 0 0 3px rgba(37,99,235,.12); ${GLASS_INPUT_FOCUS} }
   .rec-time-icon { position:absolute; right:11px; top:50%; transform:translateY(-50%); color:#94A3B8; pointer-events:none; }
 
   /* Cards */
@@ -1052,8 +1022,8 @@ const styles = `
 
   /* Chips */
   .rec-chips { display:flex; flex-wrap:wrap; gap:9px; }
-  .rec-chip { border:1px solid var(--line); background:#fff; color:#475569; padding:8px 15px; border-radius:999px; font-size:13px; font-weight:600; cursor:pointer; transition:all .14s; }
-  .rec-chip:hover { border-color:#CBD5E1; background:#F8FAFC; }
+  .rec-chip { border:1px solid rgba(148,163,184,.45); background:rgba(255,255,255,.75); color:#475569; padding:8px 15px; border-radius:999px; font-size:13px; font-weight:600; cursor:pointer; transition:all .14s; }
+  .rec-chip:hover { border-color:#CBD5E1; background:rgba(248,250,252,.95); }
   .rec-chip.is-active.rec-chip--green { background:var(--green-bg); border-color:var(--green-bd); color:#047857; }
   .rec-chip.is-active.rec-chip--amber { background:#FFFBEB; border-color:#FCD34D; color:#B45309; }
 
@@ -1064,7 +1034,7 @@ const styles = `
   .rec-section-label { font-size:11px; letter-spacing:1.3px; font-weight:700; text-transform:uppercase; color:var(--muted); margin:30px 0 16px; }
 
   /* Placeholder */
-  .rec-placeholder { text-align:center; padding:70px 24px; color:var(--muted); border:1px dashed var(--line); border-radius:14px; background:#fff; }
+  .rec-placeholder { text-align:center; padding:70px 24px; color:var(--muted); border:1px dashed var(--line); border-radius:14px; background:rgba(255,255,255,.6); }
   .rec-placeholder svg { color:#94A3B8; margin-bottom:12px; }
   .rec-placeholder h3 { margin:0 0 8px; color:var(--text); font-size:17px; }
   .rec-placeholder p { max-width:440px; margin:0 auto; font-size:13.5px; line-height:1.6; }
@@ -1077,4 +1047,5 @@ const styles = `
     .rec-grid--2 { grid-template-columns:1fr; }
     .rec-header { flex-direction:column; }
   }
+  ${GLASS_FALLBACK(".rec-panel,.rec-card")}
 `;

@@ -58,8 +58,18 @@ export function fmtDate(iso) {
 // a running Run History row; finished rows have a stable value so it stays put).
 export const AnimatedNumber = ({ value }) => useCountUp(Number(value) || 0);
 
+// Tint alphas for the .ha-statcard glass treatment (Mail-logs .ha-stat look):
+// the card's accent color feeds --tint/--tint2; unparseable → blue defaults.
+const hexToTint = (hex, a) => {
+  const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex || "");
+  return m ? `rgba(${parseInt(m[1], 16)},${parseInt(m[2], 16)},${parseInt(m[3], 16)},${a})` : undefined;
+};
+
 export const StatCard = ({ value, label, color }) => (
-  <div className="ha-card" style={{ flex: 1, minWidth: 160, padding: "16px 20px" }}>
+  <div
+    className="ha-card ha-statcard"
+    style={{ flex: 1, minWidth: 160, padding: "16px 20px", "--tint": hexToTint(color, 0.13), "--tint2": hexToTint(color, 0.04) }}
+  >
     <div className="ha-statnum" style={{ color }}>{value}</div>
     <div className="ha-statlbl">{label}</div>
   </div>

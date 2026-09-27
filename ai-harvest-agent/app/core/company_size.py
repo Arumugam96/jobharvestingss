@@ -6,8 +6,6 @@ the same vocabulary already scraped in app/agents/prospect_intelligence_agent.py
 it is centralised here so the LinkedIn job harvest can capture a per-job size band
 and so the API can expose a friendly Small/Medium/Large/Enterprise tier over it.
 
-Nothing here filters or drops jobs — parsing/classification only. The band is
-captured at harvest time (LLM extraction, regex fallback) and stored on the job;
 the UI filters by tier purely as a display concern.
 """
 from __future__ import annotations

@@ -50,15 +50,20 @@ export default function StopHarvestButton({ harvestRunning, onStopped, className
 
   const overlay = {
     position: "fixed", inset: 0, background: "rgba(15,23,42,.45)",
+    backdropFilter: "blur(4px)", WebkitBackdropFilter: "blur(4px)",
     display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 16,
   };
   const card = {
-    background: "#fff", borderRadius: 14, maxWidth: 460, width: "100%",
+    background: "linear-gradient(165deg, rgba(255,255,255,.97), rgba(255,255,255,.9))",
+    backdropFilter: "blur(20px) saturate(150%)", WebkitBackdropFilter: "blur(20px) saturate(150%)",
+    border: "1px solid rgba(255,255,255,.85)",
+    borderRadius: 14, maxWidth: 460, width: "100%",
     padding: 24, boxShadow: "0 20px 50px rgba(0,0,0,.25)",
   };
   const inputStyle = {
     width: "100%", boxSizing: "border-box", padding: "10px 12px", fontSize: 14,
-    border: "1px solid #CBD5E1", borderRadius: 8, outline: "none",
+    background: "rgba(255,255,255,.75)",
+    border: "1px solid rgba(148,163,184,.55)", borderRadius: 8, outline: "none",
   };
   const btnBase = {
     display: "inline-flex", alignItems: "center", gap: 7, cursor: "pointer",
@@ -111,7 +116,7 @@ export default function StopHarvestButton({ harvestRunning, onStopped, className
             )}
             <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
               <button type="button" onClick={close} disabled={busy}
-                style={{ ...btnBase, background: "#fff", borderColor: "#E2E8F0", color: "#334155", cursor: busy ? "not-allowed" : "pointer" }}>
+                style={{ ...btnBase, background: "rgba(255,255,255,.8)", borderColor: "rgba(148,163,184,.45)", color: "#334155", cursor: busy ? "not-allowed" : "pointer" }}>
                 Cancel
               </button>
               <button type="button" onClick={confirm} disabled={!canConfirm}

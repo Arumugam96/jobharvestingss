@@ -192,21 +192,21 @@ def _insert_after_greeting(body: str, intro: str) -> str:
     return f"{intro}\n\n{body}" if body else intro
 
 
-def _ensure_greeting(body: str, greeting: str) -> str:
-    """Force `greeting` to be the single opening line of `body`, replacing any greeting the
-    model emitted. `body` has already been through _greeting_on_own_line, so a model greeting
-    is isolated as the first paragraph — drop it and prepend the deterministic one, so the
-    email always opens with a recipient greeting rather than the sender's self-introduction.
-    No-op when `greeting` is empty."""
-    if not greeting:
-        return body
-    text = (body or "").lstrip()
-    parts = text.split("\n\n", 1)
-    if parts and _GREETING_RE.match(parts[0].strip()):
-        rest = parts[1].lstrip() if len(parts) == 2 else ""
-    else:
-        rest = text
-    return f"{greeting}\n\n{rest}" if rest else greeting
+# def _ensure_greeting(body: str, greeting: str) -> str:
+#     """Force `greeting` to be the single opening line of `body`, replacing any greeting the
+#     model emitted. `body` has already been through _greeting_on_own_line, so a model greeting
+#     is isolated as the first paragraph — drop it and prepend the deterministic one, so the
+#     email always opens with a recipient greeting rather than the sender's self-introduction.
+#     No-op when `greeting` is empty."""
+#     if not greeting:
+#         return body
+#     text = (body or "").lstrip()
+#     parts = text.split("\n\n", 1)
+#     if parts and _GREETING_RE.match(parts[0].strip()):
+#         rest = parts[1].lstrip() if len(parts) == 2 else ""
+#     else:
+#         rest = text
+#     return f"{greeting}\n\n{rest}" if rest else greeting
 
 
 def append_closing(

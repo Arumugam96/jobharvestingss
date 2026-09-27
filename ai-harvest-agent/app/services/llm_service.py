@@ -427,12 +427,10 @@ class LLMService:
         log_calls: bool = True,
         validate: "Callable[[str], None] | None" = None,
     ) -> tuple[str, str, str, int | None, int | None]:
-        """Reusable provider-failover core shared by extract_json (extraction) and
-        generate_text (outreach email/LinkedIn generation).
+        """Reusable provider-failover core shared by extract_json (extraction) and generate_text (outreach email/LinkedIn generation).
 
-        Tries the two-provider chain (local first, then the single configured
-        fallback) until one returns text; only LLMUnavailableError (provider down)
-        triggers failover — any other error propagates immediately. Raises
+        Tries the two-provider chain (local first, then the single configured fallback) until one returns text; 
+        only LLMUnavailableError (provider down) triggers failover — any other error propagates immediately. Raises
         LLMUnavailableError only when EVERY provider in the chain is unavailable.
 
         When log_calls=True (extraction) a call-log entry is appended for EVERY
@@ -554,14 +552,8 @@ class LLMService:
                 self._local_llm_unavailable_msg(model, url, "already unavailable this run")
             )
 
-        # num_ctx pins the context window so a large extraction prompt isn't silently
-        # truncated by a smaller Ollama server default. For structured output we also
-        # force temperature 0 — deterministic sampling adheres to the JSON grammar far
-        # more reliably (fewer malformed responses to fail over on). Free-text
-        # generation keeps the model's default sampling so outreach copy stays varied.
+        # num_ctx pins the context window so a large extraction prompt 
         options: dict[str, Any] = {"num_ctx": _LOCAL_NUM_CTX}
-        if json_mode:
-            options["temperature"] = 0
         payload: dict[str, Any] = {
             "model": model,
             "prompt": prompt,
@@ -570,6 +562,7 @@ class LLMService:
         }
         if json_mode:
             payload["format"] = "json"
+            options["temperature"] = 0
         if system:
             payload["system"] = system
 
@@ -758,18 +751,12 @@ class LLMService:
         # the extraction — a reachable-but-garbage response is no longer terminal.
         def _clean_and_parse(raw: str) -> dict[str, Any]:
             cleaned = (raw or "").strip()
+            logger.debug(f"raw response from the LLM before cleaning = {cleaned}")
             if cleaned.startswith("```"):
                 cleaned = cleaned.split("\n", 1)[1].rsplit("```", 1)[0]
             try:
                 return json.loads(cleaned)
             except json.JSONDecodeError as exc:
-                # No provider fallback is guaranteed (e.g. OpenRouter unavailable), so
-                # try to salvage a near-valid response from a flaky local model instead
-                # of discarding the whole extraction. json_repair fixes the common LLM
-                # defects — missing commas/quotes, trailing text, unclosed braces — that
-                # raise errors like "Expecting ',' delimiter". Accept only a non-empty
-                # object; otherwise re-raise so the response is treated as invalid (and,
-                # when another provider exists, fails over).
                 repaired = repair_json(cleaned, return_objects=True)
                 if isinstance(repaired, dict) and repaired:
                     logger.warning(

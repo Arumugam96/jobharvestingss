@@ -182,9 +182,9 @@ export default function SourceRunsPage({ harvestRunning, setHarvestRunning }) {
         <div style={{ display: "flex", gap: 8 }}>
           {SOURCE_TABS.map((t) => (
             <button key={t.key} className="ha-btn" style={{
-              background: tab === t.key ? C.primary : "#fff",
+              background: tab === t.key ? C.primary : "rgba(255,255,255,.75)",
               color: tab === t.key ? "#fff" : C.textSoft,
-              border: "1px solid " + (tab === t.key ? C.primary : C.border),
+              border: "1px solid " + (tab === t.key ? C.primary : "rgba(148,163,184,.5)"),
             }} onClick={() => setTab(t.key)}>{t.label}</button>
           ))}
         </div>

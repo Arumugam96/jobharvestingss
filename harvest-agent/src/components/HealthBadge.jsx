@@ -37,6 +37,7 @@ export default function HealthBadge({ dark = true }) {
   return (
     <div
       title={title}
+      className="ha-health"
       style={{
         display: "flex", alignItems: "center", gap: 7, fontSize: 11.5, fontWeight: 600,
         padding: "7px 10px", borderRadius: 8,
@@ -44,8 +45,8 @@ export default function HealthBadge({ dark = true }) {
         background: dark ? "rgba(255,255,255,.05)" : "#F1F5F9",
       }}
     >
-      <Circle size={8} fill={tone} color={tone} />
-      Backend: {label}
+      <Circle size={8} fill={tone} color={tone} style={{ flex: "none" }} />
+      <span className="ha-health-label">Backend: {label}</span>
     </div>
   );
 }
