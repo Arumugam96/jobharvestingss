@@ -30,8 +30,8 @@ const MAX_ATTEMPTS = 5; // matches backend otp_max_attempts
 // To re-tighten later: pair each workspace with its own domain regex again and
 // stop sending `workspace` (the backend then falls back to its domain map).
 const WORKSPACES = [
-  { key: "us", label: "US Staffing", flag: "🇺🇸", name: "Northwind Talent" },
-  { key: "in", label: "India Staffing", flag: "🇮🇳", name: "Meridian Staffing" },
+  { key: "us", label: "US Staffing", name: "Northwind Talent" },
+  { key: "in", label: "India Staffing", name: "Meridian Staffing" },
 ];
 // Any allowed login domain, regardless of the selected workspace.
 const EMAIL_RE = /^[^\s@]+@(?:sightspectrum|northwindtalent|meridianstaffing)\.[a-z]{2,}$/i;
@@ -159,7 +159,6 @@ const CSS = `
 }
 .ws-opt:hover{border-color:#CBD5E1;color:var(--text)}
 .ws-opt.on{border-color:var(--primary);color:var(--primary);background:#EFF6FF;box-shadow:0 0 0 3px rgba(37,99,235,.10)}
-.ws-flag{font-size:14px;line-height:1}
 @media (max-width:420px){.ws-opt{font-size:11.5px;gap:5px;padding:0 4px}}
 .spin{animation:spin .9s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
@@ -412,7 +411,6 @@ export default function LoginPage({ onAuthenticated }) {
                     className={"ws-opt" + (workspace === w.key ? " on" : "")}
                     onClick={() => { setWorkspace(w.key); setError(""); }}
                   >
-                    <span className="ws-flag">{w.flag}</span>
                     <span>{w.label}</span>
                   </button>
                 ))}

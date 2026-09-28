@@ -19,6 +19,7 @@ from typing import Any
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.tenant_context import apply_tenant, get_current_tenant_id
 from app.models.harvest_run import ScrapedJobORM
 from app.models.outreach import EmailOutreachORM
 from app.models.recruiter import RecruiterORM
@@ -74,7 +75,11 @@ async def contact_names_for_rows(
     if not job_ids:
         return {}
     jobs = (
-        await db.execute(select(ScrapedJobORM).where(ScrapedJobORM.id.in_(job_ids)))
+        await db.execute(
+            apply_tenant(select(ScrapedJobORM), ScrapedJobORM.tenant_id).where(
+                ScrapedJobORM.id.in_(job_ids)
+            )
+        )
     ).scalars().all()
     names: dict[str, str] = {}
     for job in jobs:
@@ -268,7 +273,7 @@ async def sent_status_for_jobs(db: AsyncSession, job_ids: list[str]) -> dict[str
         return {}
     rows = (
         await db.execute(
-            select(EmailOutreachORM)
+            apply_tenant(select(EmailOutreachORM), EmailOutreachORM.tenant_id)
             .where(
                 EmailOutreachORM.job_id.in_(ids),
                 EmailOutreachORM.status == "sent",
@@ -310,7 +315,7 @@ async def thread_messages(
     the outreach thread/history for that contact."""
     if not job_id and not recruiter_id:
         return []
-    stmt = select(EmailOutreachORM)
+    stmt = apply_tenant(select(EmailOutreachORM), EmailOutreachORM.tenant_id)
     if job_id:
         stmt = stmt.where(EmailOutreachORM.job_id == job_id)
     if recruiter_id:
@@ -353,7 +358,10 @@ def _apply_list_filters(stmt, *, search=None, company=None, date_from=None, date
       * `company` → EmailOutreachORM.company (real column)
       * `date_from`/`date_to` → created_at range (end is inclusive)
       * `engagement` → one engagement-card bucket (opened/clicked/unsubscribed/blocked/bounced)
-    Outerjoins to scraped_jobs/recruiters are 1:1 on the PK, so no row multiplication."""
+    Outerjoins to scraped_jobs/recruiters are 1:1 on the PK, so no row multiplication.
+    Tenant-scoped first (belt-and-suspenders alongside RLS) so both the list and the
+    stat counts that share this base only ever see the caller's tenant's rows."""
+    stmt = apply_tenant(stmt, EmailOutreachORM.tenant_id)
     if search:
         like = f"%{search.strip()}%"
         stmt = (
@@ -464,7 +472,7 @@ async def latest_sent_email(
     message a follow-up draft is built from."""
     if not job_id and not recruiter_id:
         return None
-    stmt = select(EmailOutreachORM).where(
+    stmt = apply_tenant(select(EmailOutreachORM), EmailOutreachORM.tenant_id).where(
         EmailOutreachORM.channel == "email",
         EmailOutreachORM.status == "sent",
     )
@@ -486,7 +494,7 @@ async def initial_email_sent(
     the duplicate-send guard for initial outreach."""
     if not job_id and not recruiter_id:
         return None
-    stmt = select(EmailOutreachORM).where(
+    stmt = apply_tenant(select(EmailOutreachORM), EmailOutreachORM.tenant_id).where(
         EmailOutreachORM.channel == "email",
         EmailOutreachORM.outreach_kind == "initial",
         EmailOutreachORM.status == "sent",
@@ -542,6 +550,7 @@ def build_email_outreach_row(
     when = sent_at or datetime.now(timezone.utc)
     return EmailOutreachORM(
         id=id,
+        tenant_id=get_current_tenant_id(),
         job_id=job_id,
         recruiter_id=recruiter_id,
         channel="email",

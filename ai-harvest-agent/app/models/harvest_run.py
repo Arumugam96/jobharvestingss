@@ -98,11 +98,6 @@ class ScrapedJobORM(Base):
     # models) but not on UnifiedJob — kept here so /linkedin-results and
     # /dice-results don't lose data relative to the file-based responses.
     company_url: Mapped[str] = mapped_column(String(500), nullable=False, default="")
-    # LinkedIn employee-range band captured per job (e.g. "1,001-5,000 employees"),
-    # LLM-extracted with a regex fallback over the scraped job-insights text. Empty
-    # ("Unknown") for jobs where the band wasn't shown and for non-LinkedIn sources.
-    # Used only to power a display-time company-size filter in the UI — never to
-    # drop jobs at harvest time. See app/core/company_size.py.
     company_size: Mapped[str] = mapped_column(String(100), nullable=False, default="")
     # Company HQ location (country/state) from Apollo organization enrichment —
     # NOT derived from the job's own `location`. Powers a separate "Company

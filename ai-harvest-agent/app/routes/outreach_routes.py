@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.core.dependencies import get_current_user, get_db_session, get_email_sender, get_llm_service
+from app.core.tenant_context import get_current_tenant_id
 from app.core.text_formatting import normalize_job_title
 from app.models.auth import AuthenticatedUser
 from app.models.harvest_run import LlmCallType
@@ -414,6 +415,7 @@ async def log_linkedin_sent(
 
     company = job.company or ""
     row = EmailOutreachORM(
+        tenant_id=get_current_tenant_id(),
         job_id=body.job_id,
         recruiter_id=job.recruiter_id,
         channel="linkedin",

@@ -18,43 +18,17 @@ import {
 import useCountUp from "./useCountUp";
 import { makeStallWatch, STALL_WARN_MSG } from "./stallWatch";
 
-const NaukriIcon = () => (
-  <svg width="34" height="34" viewBox="0 0 34 34" aria-hidden="true">
-    <rect width="34" height="34" rx="8" fill="#EF4444" />
-    <path d="M11 22V12.5c0-.6.5-1 1.1-.9l4.4.9c.4.1.7.5.7.9V22" fill="none" stroke="#fff" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-    <path d="M17.2 13.4l4.4-.9c.6-.1 1.1.3 1.1.9V22" fill="none" stroke="#fff" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-    <circle cx="17" cy="22.5" r="1.1" fill="#fff" />
-  </svg>
-);
-
-const LinkedInIcon = () => (
-  <svg width="34" height="34" viewBox="0 0 34 34" aria-hidden="true">
-    <rect width="34" height="34" rx="8" fill="#0A66C2" />
-    <circle cx="11.6" cy="11.4" r="1.7" fill="#fff" />
-    <rect x="10.1" y="14.6" width="3" height="9" rx="0.6" fill="#fff" />
-    <path d="M16 14.6h2.9v1.3c.5-.9 1.5-1.6 3-1.6 2.4 0 3.6 1.5 3.6 4.2v5.1h-3v-4.6c0-1.2-.5-2-1.6-2-1 0-1.6.7-1.6 2v4.6h-3z" fill="#fff" />
-  </svg>
-);
-
-const DiceIcon = () => (
-  <svg width="34" height="34" viewBox="0 0 34 34" aria-hidden="true">
-    <rect width="34" height="34" rx="8" fill="#0EA5A4" />
-    <rect x="9" y="9" width="16" height="16" rx="4" fill="#fff" />
-    <circle cx="13.2" cy="13.2" r="1.5" fill="#0EA5A4" />
-    <circle cx="20.8" cy="13.2" r="1.5" fill="#0EA5A4" />
-    <circle cx="17" cy="17" r="1.5" fill="#0EA5A4" />
-    <circle cx="13.2" cy="20.8" r="1.5" fill="#0EA5A4" />
-    <circle cx="20.8" cy="20.8" r="1.5" fill="#0EA5A4" />
-  </svg>
-);
+/* Glyph badge for a source/account tile — identical to the US redesign's
+   rr-src-ic (colored rounded square with a short glyph), replacing the old
+   per-source SVG logos so both clients render the same. */
+function SourceBadge({ glyph, tint }) {
+  return <span className="rec-src-ic" style={{ background: tint }} aria-hidden="true">{glyph}</span>;
+}
 
 /* Option lists + label helpers now live in lib/ruleEngineOptions, shared with
-   RuleEngineRedesign so the two rule engine pages can't drift. Frequency stays
-   local: this page deliberately offers only daily/weekly. */
-const FREQUENCIES = [
-  { value: "daily", label: "Daily" },
-  { value: "weekly", label: "Weekly" },
-];
+   RuleEngineRedesign so the two rule engine pages can't drift. Frequency is a
+   local segmented control mirroring the US redesign (hourly/daily/weekly). */
+const FREQUENCIES = ["hourly", "daily", "weekly"];
 
 function Toggle({ on, onChange, label }) {
   return (
@@ -136,6 +110,7 @@ export default function RuleEngineConfig({
   const [frequency, setFrequency] = useState(DEFAULT_CONFIG.schedule.frequency);
   const [runTime, setRunTime] = useState(DEFAULT_CONFIG.schedule.run_time);
   const [timezone, setTimezone] = useState(DEFAULT_CONFIG.schedule.timezone);
+  const [scheduleEnabled, setScheduleEnabled] = useState(DEFAULT_CONFIG.schedule.enabled);
   const [searchWindow, setSearchWindow] = useState(DEFAULT_CONFIG.filters.search_window_hours);
   const [domain, setDomain] = useState(DEFAULT_CONFIG.filters.domain);
   const [hiringEntity, setHiringEntity] = useState(DEFAULT_CONFIG.filters.hiring_entity);
@@ -233,6 +208,7 @@ export default function RuleEngineConfig({
     setFrequency(config.schedule.frequency || "daily");
     setRunTime(config.schedule.run_time || "09:00");
     setTimezone(config.schedule.timezone || "Asia/Kolkata");
+    setScheduleEnabled(!!config.schedule.enabled);
     setDirty(false);
   }
 
@@ -267,7 +243,7 @@ export default function RuleEngineConfig({
         salary_currency: currency,
         include_undisclosed_salary: includeUndisclosed,
       },
-      schedule: { ...loadedConfig.schedule, frequency, run_time: runTime, timezone },
+      schedule: { ...loadedConfig.schedule, frequency, run_time: runTime, timezone, enabled: scheduleEnabled },
     };
   }
 
@@ -463,16 +439,23 @@ export default function RuleEngineConfig({
     }
   };
 
+  // Glyph + tint per source — mirrors the US redesign's SOURCES exactly.
+  // Priorities stay India-first (Naukri #1); only the visual treatment matches.
   const sourceList = [
-    { key: "naukri",   name: "Naukri.com",    priority: 1, Icon: NaukriIcon },
-    { key: "linkedin", name: "LinkedIn Jobs",  priority: 2, Icon: LinkedInIcon },
-    { key: "dice",     name: "Dice.com",       priority: 3, Icon: DiceIcon },
+    { key: "naukri",   name: "Naukri.com",   priority: 1, glyph: "N",  tint: "#6D28D9" },
+    { key: "linkedin", name: "LinkedIn Jobs", priority: 2, glyph: "in", tint: "#2563EB" },
+    { key: "dice",     name: "Dice.com",      priority: 3, glyph: "⬢",  tint: "#0EA5A4" },
   ];
+  const activeCount = sourceList.filter((s) => sources[s.key]).length;
 
   // The backend pauses a running harvest and waits for manual LinkedIn login
   // (see LinkedInAgent._wait_for_manual_login) — surface that clearly so the
   // user knows to click "Watch Live Browser" instead of just waiting.
   const needsLogin = runState === "running" && /log ?in/i.test(runMessage || "");
+
+  // Labels for the compact schedule summary banner (mirrors the US redesign).
+  const tzLabel = TIMEZONES.find((t) => t.value === timezone)?.label || timezone;
+  const windowLabel = SEARCH_WINDOWS.find((w) => w.value === Number(searchWindow))?.label || `${searchWindow}h`;
 
   return (
     // Rendered inside the shared AppLayout (ha-root → Sidebar → Outlet), so this
@@ -605,21 +588,25 @@ export default function RuleEngineConfig({
           {activeTab === "sources" && (
             <>
               <div className="rec-grid rec-grid--2">
-                {/* Job Sources */}
+                {/* Job Sources — styled to match the US redesign exactly:
+                    "N of N active" count, gradient active tile, glyph badge,
+                    priority chip + Active/Paused pill. */}
                 <div className={"rec-panel" + (showErr("jobSource") ? " is-invalid" : "")}>
                   <div className="rec-panel-head">
-                    Job Sources <span className="rec-req">*</span>
+                    <span>Job Sources <span className="rec-req">*</span></span>
+                    <small>{activeCount} of {sourceList.length} active</small>
                   </div>
                   <div className="rec-sources">
-                    {sourceList.map(({ key, name, priority, Icon }) => {
+                    {sourceList.map(({ key, name, priority, glyph, tint }) => {
                       const on = sources[key];
                       return (
-                        <div className="rec-source" key={key}>
-                          <Icon />
+                        <div className={"rec-source" + (on ? " is-on" : "")} key={key}>
+                          <SourceBadge glyph={glyph} tint={tint} />
                           <div className="rec-source-text">
                             <div className="rec-source-name">{name}</div>
                             <div className="rec-source-sub">
-                              Priority {priority} · <span className={on ? "rec-on" : "rec-off"}>{on ? "Active" : "Not active"}</span>
+                              <span className="rec-prio">Priority {priority}</span>
+                              <span className={"rec-statuschip " + (on ? "is-on" : "is-off")}>{on ? "Active" : "Paused"}</span>
                             </div>
                           </div>
                           <Toggle on={on} onChange={(v) => setSource(key, v)} label={name} />
@@ -630,16 +617,27 @@ export default function RuleEngineConfig({
                   {showErr("jobSource") && <div className="rec-error">Enable at least one job source.</div>}
                 </div>
 
-                {/* Run Schedule */}
+                {/* Run Schedule — compact summary banner + segmented frequency +
+                    automatic-runs toggle, matching the US redesign. */}
                 <div className="rec-panel">
                   <div className="rec-panel-head">Run Schedule</div>
-                  <div className="rec-field-row">
-                    <div className="rec-field">
-                      <label>Frequency</label>
-                      <Select value={FREQUENCIES.find((f) => f.value === frequency)?.label || "Daily"}
-                        onChange={(label) => { setFrequency(FREQUENCIES.find((f) => f.label === label).value); markDirty(); }}
-                        ariaLabel="Frequency" options={FREQUENCIES.map((f) => f.label)} />
+                  <div className="rec-banner">
+                    <span className="rec-banner-ic"><Clock size={17} /></span>
+                    <span>Runs <b>{frequency} at {runTime || "—"}</b> ({tzLabel}) · looks back <b>{windowLabel.toLowerCase()}</b></span>
+                  </div>
+                  <div className="rec-field rec-field--full" style={{ marginTop: 0 }}>
+                    <label>Frequency</label>
+                    <div className="rec-seg" role="group" aria-label="Frequency">
+                      {FREQUENCIES.map((f) => (
+                        <button key={f} type="button" className={frequency === f ? "is-on" : ""}
+                          aria-pressed={frequency === f}
+                          onClick={() => { setFrequency(f); markDirty(); }}>
+                          {f[0].toUpperCase() + f.slice(1)}
+                        </button>
+                      ))}
                     </div>
+                  </div>
+                  <div className="rec-field-row" style={{ marginTop: 14 }}>
                     <div className="rec-field">
                       <label>Run time</label>
                       <div className="rec-time">
@@ -654,7 +652,14 @@ export default function RuleEngineConfig({
                         ariaLabel="Timezone" options={TIMEZONES.map((t) => t.label)} />
                     </div>
                   </div>
-                  <div className="rec-field-row" style={{ marginTop: 14 }}>
+                  <div className="rec-tglrow">
+                    <span className="rec-tglrow-tx">
+                      <b>Automatic scheduled runs</b>
+                      <small>Run the harvest automatically on the schedule above.</small>
+                    </span>
+                    <Toggle on={scheduleEnabled} onChange={(v) => { setScheduleEnabled(v); markDirty(); }} label="Automatic scheduled runs" />
+                  </div>
+                  {/* <div className="rec-field-row" style={{ marginTop: 14 }}>
                     <div className="rec-field">
                       <label>Keyword</label>
                       <input className="rec-input" type="text" placeholder="e.g. AI Engineer" value={keyword}
@@ -674,7 +679,7 @@ export default function RuleEngineConfig({
                   <div className="rec-note rec-note--info">
                     <Info size={16} />
                     <span>Rule stored in <code>harvest_config.search_window_hours</code>. Agent skips any posting older than now − N hours.</span>
-                  </div>
+                  </div> */}
                 </div>
               </div>
 
@@ -707,7 +712,7 @@ export default function RuleEngineConfig({
                         style={{ flex: 1, border: isActive ? "1px solid #0A66C2" : "1px solid var(--line)",
                                  background: isActive ? "rgba(10,102,194,0.06)" : undefined,
                                  borderRadius: 10, padding: "12px 14px" }}>
-                        <LinkedInIcon />
+                        <SourceBadge glyph="in" tint="#2563EB" />
                         <div className="rec-source-text">
                           <div className="rec-source-name">
                             LinkedIn · {a.label}{isActive && <span className="rec-on"> · active</span>}
@@ -727,7 +732,7 @@ export default function RuleEngineConfig({
                 {/* Naukri (single account) */}
                 <div className="rec-field-row" style={{ marginTop: 12 }}>
                   <div className="rec-source" style={{ flex: 1, border: "1px solid var(--line)", borderRadius: 10, padding: "12px 14px" }}>
-                    <NaukriIcon />
+                    <SourceBadge glyph="N" tint="#6D28D9" />
                     <div className="rec-source-text">
                       <div className="rec-source-name">Naukri</div>
                       <div className="rec-source-sub">{naukriSetup.message || "Not connected in this session"}</div>
@@ -962,29 +967,44 @@ const styles = `
 
   /* Content */
   .rec-content { padding:24px 28px 40px; overflow-y:auto; flex:1; }
-  .rec-grid { display:grid; gap:18px; }
+  .rec-grid { display:grid; gap:14px; }
   .rec-grid--2 { grid-template-columns:1fr 1fr; }
   .rec-span { grid-column:1/-1; }
-  .rec-panel, .rec-card { ${GLASS} border-radius:14px; padding:20px; }
+  /* Compact, tight-fitting cards — matches the tightened US redesign spacing. */
+  .rec-panel, .rec-card { ${GLASS} border-radius:14px; padding:16px 18px; }
   .rec-panel.is-invalid, .rec-card.is-invalid { border-color:#FCA5A5; box-shadow:0 0 0 3px rgba(220,38,38,.08); }
-  .rec-panel-head { font-size:11px; letter-spacing:1.2px; font-weight:700; text-transform:uppercase; color:var(--muted); padding-bottom:14px; margin-bottom:14px; border-bottom:1px solid var(--line); }
+  /* Card header mirrors the US rr-card-h: uppercase label left, optional count
+     right, no divider rule. */
+  .rec-panel-head { display:flex; align-items:center; justify-content:space-between; gap:10px; font-size:12px; letter-spacing:.1em; font-weight:700; text-transform:uppercase; color:var(--muted); margin-bottom:14px; }
+  .rec-panel-head small { font-size:11.5px; letter-spacing:0; text-transform:none; font-weight:600; color:#94A3B8; }
 
-  /* Sources */
+  /* Sources — matched to the US redesign exactly: glyph badge, gradient active
+     tile, priority chip + Active/Paused pill. */
   .rec-sources { display:flex; flex-direction:column; }
-  /* Source rows as bordered tiles — mirrors the US page's rr-src look. */
-  .rec-source { display:flex; align-items:center; gap:13px; padding:12px 13px; border:1px solid rgba(203,213,225,.7); border-radius:11px; background:rgba(255,255,255,.6); margin-bottom:10px; }
+  .rec-source { display:flex; align-items:center; gap:13px; padding:10px 12px; border:1px solid rgba(203,213,225,.7); border-radius:11px; background:rgba(255,255,255,.65); margin-bottom:8px; transition:border-color .18s, box-shadow .18s, background .18s; }
   .rec-source:last-child { margin-bottom:0; }
+  /* Side-by-side cards use the row's gap for spacing; drop the stacking margin so
+     align-items:stretch gives both cards equal height (the non-last card would
+     otherwise stretch 8px shorter). */
+  .rec-field-row .rec-source { margin-bottom:0; }
+  .rec-source:hover { border-color:#CBD5E1; box-shadow:0 1px 2px rgba(15,23,42,.05); }
+  .rec-source.is-on { border-color:#86EFAC; background:linear-gradient(90deg,rgba(236,253,245,.9),rgba(255,255,255,.5) 60%); }
+  .rec-src-ic { width:38px; height:38px; border-radius:10px; display:grid; place-items:center; color:#fff; font-weight:800; font-size:15px; flex:none; }
   .rec-source-text { flex:1; min-width:0; }
   .rec-source-name { font-weight:600; font-size:14.5px; }
-  .rec-source-sub { font-size:12.5px; color:var(--muted); margin-top:2px; }
+  .rec-source-sub { display:flex; align-items:center; gap:8px; margin-top:3px; }
+  .rec-prio { font-size:10.5px; font-weight:700; color:var(--muted); background:rgba(241,245,249,.9); border-radius:999px; padding:1px 8px; }
+  .rec-statuschip { font-size:11px; font-weight:700; padding:1px 9px; border-radius:999px; }
+  .rec-statuschip.is-on { background:#ECFDF5; color:#047857; }
+  .rec-statuschip.is-off { background:#F1F5F9; color:#64748B; }
   .rec-on { color:var(--green); font-weight:600; }
   .rec-off { color:#94A3B8; }
 
-  /* Toggle */
-  .rec-toggle { width:42px; height:24px; border-radius:999px; border:none; background:#CBD5E1; position:relative; cursor:pointer; flex:0 0 auto; transition:background .18s; padding:0; }
+  /* Toggle — same dimensions as the US rr-toggle. */
+  .rec-toggle { width:44px; height:25px; border-radius:999px; border:none; background:#CBD5E1; position:relative; cursor:pointer; flex:0 0 auto; transition:background .2s; padding:0; }
   .rec-toggle.is-on { background:var(--green); }
-  .rec-toggle-knob { position:absolute; top:3px; left:3px; width:18px; height:18px; border-radius:50%; background:#fff; box-shadow:0 1px 2px rgba(0,0,0,.25); transition:left .18s; }
-  .rec-toggle.is-on .rec-toggle-knob { left:21px; }
+  .rec-toggle-knob { position:absolute; top:2.5px; left:2.5px; width:20px; height:20px; border-radius:50%; background:#fff; box-shadow:0 1px 3px rgba(0,0,0,.3); transition:transform .22s cubic-bezier(.34,1.56,.64,1); }
+  .rec-toggle.is-on .rec-toggle-knob { transform:translateX(19px); }
 
   /* Notes */
   .rec-note { display:flex; gap:9px; align-items:flex-start; padding:12px 14px; border-radius:10px; font-size:12.8px; line-height:1.5; margin-top:16px; }
@@ -1012,6 +1032,22 @@ const styles = `
   .rec-time input { width:100%; height:40px; padding:0 36px 0 12px; ${GLASS_INPUT} border-radius:9px; font-size:14px; color:var(--text); outline:none; transition:border-color .15s,box-shadow .15s,background .15s; }
   .rec-time input:focus { border-color:var(--primary); box-shadow:0 0 0 3px rgba(37,99,235,.12); ${GLASS_INPUT_FOCUS} }
   .rec-time-icon { position:absolute; right:11px; top:50%; transform:translateY(-50%); color:#94A3B8; pointer-events:none; }
+
+  /* Compact schedule summary banner (mirrors the US redesign's rr-banner) */
+  .rec-banner { display:flex; align-items:center; gap:12px; background:rgba(239,246,255,.85); border:1px solid #BFDBFE; border-radius:12px; padding:13px 15px; margin-bottom:18px; font-size:13.5px; color:#1E40AF; }
+  .rec-banner b { font-weight:800; text-transform:capitalize; }
+  .rec-banner-ic { width:34px; height:34px; border-radius:10px; background:#fff; border:1px solid #BFDBFE; display:grid; place-items:center; color:var(--primary); flex:none; }
+
+  /* Segmented frequency control */
+  .rec-seg { display:flex; background:rgba(241,245,249,.9); border-radius:9px; padding:3px; }
+  .rec-seg button { flex:1; border:none; background:none; font-family:inherit; font-size:13px; font-weight:600; color:var(--muted); padding:8px; border-radius:7px; cursor:pointer; transition:.15s; }
+  .rec-seg button.is-on { background:#fff; color:var(--primary); box-shadow:0 1px 2px rgba(15,23,42,.08); }
+
+  /* Automatic-runs toggle row */
+  .rec-tglrow { display:flex; align-items:center; gap:12px; padding:12px 0 2px; border-top:1px solid rgba(226,232,240,.8); margin-top:16px; }
+  .rec-tglrow-tx { flex:1; min-width:0; }
+  .rec-tglrow-tx b { display:block; font-size:13.5px; }
+  .rec-tglrow-tx small { color:var(--muted); font-size:12px; }
 
   /* Cards */
   .rec-card-title { font-size:15.5px; font-weight:700; margin-bottom:4px; }

@@ -82,15 +82,16 @@ export default function LeadIntelligencePage() {
 
   return (
     <main className="ha-main">
-      <div style={{ padding: "24px 24px 0" }}>
-        <h1 style={{ margin: 0, fontSize: 24, fontWeight: 700, color: C.text }}>Lead Intelligence</h1>
-        <p style={{ margin: "4px 0 0", fontSize: 14, color: C.textSoft }}>
-          Two separate enrichment pipelines — prospect list enrichment and automatic recruiter discovery from harvested jobs.
-        </p>
+      <div className="ha-pagehead">
+        <div className="ha-pagehead-titles">
+          <h1>Lead Intelligence</h1>
+          <p className="ha-sub">
+            Two separate enrichment pipelines — prospect list enrichment and automatic recruiter discovery from harvested jobs.
+          </p>
+        </div>
       </div>
-      <div style={{ marginTop: 20, borderBottom: "1px solid " + C.border }} />
 
-      <div style={{ display: "flex", flexDirection: "column", gap: 24, padding: 24 }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 24, padding: "0 24px 24px" }}>
         {/* Prospect Intelligence */}
         <div className="ha-card" style={{ padding: 20 }}>
           <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 4 }}>Prospect Intelligence</div>

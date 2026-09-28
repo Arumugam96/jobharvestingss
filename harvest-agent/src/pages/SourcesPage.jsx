@@ -157,15 +157,15 @@ export default function SourceRunsPage({ harvestRunning, setHarvestRunning }) {
 
   return (
     <main className="ha-main">
-      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "flex-start", justifyContent: "space-between", gap: 16, padding: "24px 24px 0" }}>
-        <div>
-          <h1 style={{ margin: 0, fontSize: 24, fontWeight: 700, color: C.text }}>Source Runs</h1>
-          <p style={{ margin: "4px 0 0", fontSize: 14, color: C.textSoft }}>
+      <div className="ha-pagehead">
+        <div className="ha-pagehead-titles">
+          <h1>Source Runs</h1>
+          <p className="ha-sub">
             Trigger a single-source harvest and browse its saved results. "LinkedIn Feed" scrolls the
             authenticated Home Feed and extracts genuine IT hiring leads.
           </p>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+        <div className="ha-pagehead-actions">
           <StopHarvestButton harvestRunning={harvestRunning}
             onStopped={() => setRunMessage("Stop requested — the run will halt shortly and save its jobs. The report email is deferred to the next successful run.")} />
           <button className="ha-btn ha-btn-primary" onClick={handleRun} disabled={running || harvestRunning}
@@ -176,9 +176,8 @@ export default function SourceRunsPage({ harvestRunning, setHarvestRunning }) {
           </button>
         </div>
       </div>
-      <div style={{ marginTop: 20, borderBottom: "1px solid " + C.border }} />
 
-      <div style={{ display: "flex", flexDirection: "column", gap: 16, padding: 24 }}>
+      <div className="ha-pagebody">
         <div style={{ display: "flex", gap: 8 }}>
           {SOURCE_TABS.map((t) => (
             <button key={t.key} className="ha-btn" style={{

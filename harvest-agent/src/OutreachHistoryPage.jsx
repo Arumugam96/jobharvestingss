@@ -2,7 +2,11 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useSearchParams } from "react-router-dom";
 import { RefreshCw, Send, X, Download, Search, Calendar, ChevronDown, Check, Building2 } from "lucide-react";
 import { getOutreachHistory, getOutreachStats, ApiError } from "./api";
-import { fmtAbs, fmtRel, initials, avatarColor, engagement, EngagementStack } from "./components/outreachUi";
+// `engagement` (the delivery-status → label helper) is imported as `engagementOf`
+// because this component also has an `engagement` state var (the active filter key)
+// that would otherwise shadow the import — calling the shadowed string in exportCsv
+// threw. See exportCsv below.
+import { fmtAbs, fmtRel, initials, avatarColor, engagement as engagementOf, EngagementStack } from "./components/outreachUi";
 
 /* Mail logs (route /outreach) — the log of every outreach email sent from
  * HarvestAgent, read from the backend (GET /outreach/history). It's the DB source
@@ -35,10 +39,10 @@ const STAT_EVENTS = [
 
 // Frosted glass cards for the panel — self-contained, injected once with the panel.
 const STATS_CSS = `
-.ha-stats { border:1px solid #E2E8F0; border-radius:18px; padding:18px 18px 20px; margin:18px 0 16px;
+.ha-stats { border:1px solid #E2E8F0; border-radius:16px; padding:14px 16px 16px; margin:0;
   background:linear-gradient(135deg,#eef2fb 0%,#f6f8fc 46%,#eef6f2 100%); box-shadow:0 1px 2px rgba(15,23,42,.04); }
-.ha-stats-head { display:flex; align-items:baseline; gap:9px; margin-bottom:16px; }
-.ha-stats-head .big { font-size:34px; font-weight:800; letter-spacing:-.03em; color:#0F172A; line-height:1; font-variant-numeric:tabular-nums; }
+.ha-stats-head { display:flex; align-items:baseline; gap:9px; margin-bottom:12px; }
+.ha-stats-head .big { font-size:28px; font-weight:800; letter-spacing:-.03em; color:#0F172A; line-height:1; font-variant-numeric:tabular-nums; }
 .ha-stats-head .cap { font-size:14px; color:#64748B; font-weight:500; }
 .ha-stats-grid { display:grid; grid-template-columns:repeat(5, minmax(0,1fr)); gap:13px; }
 .ha-stat { position:relative; overflow:hidden; border-radius:14px; padding:14px 15px 20px;
@@ -247,7 +251,7 @@ export default function OutreachHistoryPage() {
       const rows = all.map((it) => [
         it.contact_name || "", it.to_email || "", it.company || "", it.client_type || "",
         it.subject || "", it.tone || "", it.outreach_kind || "", it.status || "",
-        engagement(it).label, it.created_at || "",
+        engagementOf(it).label, it.created_at || "",
       ].map(esc).join(","));
       const blob = new Blob([[head.map(esc).join(","), ...rows].join("\r\n")], { type: "text/csv;charset=utf-8;" });
       const url = URL.createObjectURL(blob);
@@ -266,15 +270,15 @@ export default function OutreachHistoryPage() {
   };
 
   return (
-    <main className="ha-main" style={{ padding: "15px 15px 24px" }}>
-      <div className="ha-page-head" style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 8 }}>
-        <div>
-          <h1 style={{ fontSize: 24, fontWeight: 800, margin: 0, letterSpacing: "-.02em" }}>Mail logs</h1>
-          <div style={{ color: "#64748B", fontSize: 13, marginTop: 3, maxWidth: "56ch" }}>
+    <main className="ha-main">
+      <div className="ha-pagehead">
+        <div className="ha-pagehead-titles">
+          <h1>Mail logs</h1>
+          <div className="ha-sub" style={{ maxWidth: "56ch" }}>
             Every outreach email sent using HarvestAgent, with delivery status and engagement per point of contact. Open a row to read the message and follow up.
           </div>
         </div>
-        <div style={{ display: "flex", gap: 9 }}>
+        <div className="ha-pagehead-actions">
           <button className="ha-btn ha-btn-secondary" onClick={exportCsv} disabled={exporting || loading || !total}>
             <Download size={15} className={exporting ? "ha-spin" : undefined} /> {exporting ? "Exporting…" : "Export CSV"}
           </button>
@@ -284,13 +288,15 @@ export default function OutreachHistoryPage() {
         </div>
       </div>
 
-      {/* Engagement stats — counts are over the whole date+search filtered set (not just
-          this page); each event is a % of the delivered total. The event cards are also
-          clickable single-select filters that narrow the list below. */}
-      <StatsPanel stats={stats} engagement={engagement} onToggle={toggleEngagement} />
+      <div className="ha-pagebody">
+        {/* Engagement stats — counts are over the whole date+search filtered set (not just
+            this page); each event is a % of the delivered total. The event cards are also
+            clickable single-select filters that narrow the list below. */}
+        <StatsPanel stats={stats} engagement={engagement} onToggle={toggleEngagement} />
 
-      {/* Filter bar */}
-      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
+        {/* Filter bar — lifted into its own stacking context (position+z-index) so the
+            date popover paints above the sibling table card (same fix as .ha-filterbar). */}
+        <div style={{ position: "relative", zIndex: 30, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
         <div ref={dateRef} style={{ position: "relative" }}>
           <button
             className="ha-btn ha-btn-secondary"
@@ -440,6 +446,7 @@ export default function OutreachHistoryPage() {
           </div>
         </div>
       )}
+      </div>
     </main>
   );
 }

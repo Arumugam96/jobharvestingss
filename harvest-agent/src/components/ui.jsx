@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
-  ArrowUpDown, ArrowUp, ArrowDown, CheckCircle2, AlertTriangle, ChevronDown, MapPin,
+  ArrowUpDown, ArrowUp, ArrowDown, CheckCircle2, AlertTriangle, ChevronDown, MapPin, X,
 } from "lucide-react";
 import useCountUp from "../useCountUp";
 import { C, SRC_TONES, STATUS_TONES, SIZE_TIER_STYLE } from "../theme";
@@ -68,7 +68,7 @@ const hexToTint = (hex, a) => {
 export const StatCard = ({ value, label, color }) => (
   <div
     className="ha-card ha-statcard"
-    style={{ flex: 1, minWidth: 160, padding: "16px 20px", "--tint": hexToTint(color, 0.13), "--tint2": hexToTint(color, 0.04) }}
+    style={{ flex: 1, minWidth: 150, padding: "9px 16px", "--tint": hexToTint(color, 0.13), "--tint2": hexToTint(color, 0.04) }}
   >
     <div className="ha-statnum" style={{ color }}>{value}</div>
     <div className="ha-statlbl">{label}</div>
@@ -100,6 +100,139 @@ export function Select({ label, value, onChange, options, variant }) {
         {options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
       </select>
     </label>
+  );
+}
+
+// Searchable single-select — a drop-in replacement for <Select> with the SAME
+// contract (value / onChange(value) / options:[{value,label}]). The field is a
+// typeable input; focus opens a floating panel of options filtered by the typed
+// text (case-insensitive, startsWith ranked above includes). Selecting an option
+// calls onChange(option.value); the "×" clears back to the first option's value
+// (the "all" sentinel). Keyboard: ↑/↓ move, Enter select, Esc close; click-outside
+// closes (same mousedown pattern as MultiSelect). The panel reuses GLASS_PANEL and
+// sits at a high z-index above the table card (see .ha-combo-panel / .ha-filterbar).
+export function SearchableSelect({ label, value, onChange, options, variant, placeholder, loading = false }) {
+  const isLoc = variant === "location";
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [highlight, setHighlight] = useState(0);
+  const rootRef = useRef(null);
+  const inputRef = useRef(null);
+  const listRef = useRef(null);
+  const listboxId = useId();
+
+  const selected = options.find((o) => o.value === value);
+  const selectedLabel = selected ? selected.label : "";
+  // The first option is the "all"/cleared sentinel; only show the clear button
+  // when a real (non-first) value is selected.
+  const clearValue = options[0] ? options[0].value : "all";
+  const canClear = value !== clearValue;
+
+  // Filter by the typed query — prefix match only: the label must START with what
+  // the user typed. Substring hits (e.g. "i" matching "Austral[i]a") are excluded.
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return options;
+    return options.filter((o) => (o.label || "").toLowerCase().startsWith(q));
+  }, [options, query]);
+
+  useEffect(() => {
+    if (!open) return;
+    function onDocMouseDown(e) {
+      if (rootRef.current && !rootRef.current.contains(e.target)) { setOpen(false); setQuery(""); }
+    }
+    document.addEventListener("mousedown", onDocMouseDown);
+    return () => document.removeEventListener("mousedown", onDocMouseDown);
+  }, [open]);
+
+  // Keep the highlighted row in view as it moves.
+  useEffect(() => {
+    if (!open || !listRef.current) return;
+    const el = listRef.current.querySelector('[data-idx="' + highlight + '"]');
+    if (el) el.scrollIntoView({ block: "nearest" });
+  }, [highlight, open]);
+
+  function openPanel() {
+    if (open) return;
+    setOpen(true);
+    setQuery("");
+    const idx = options.findIndex((o) => o.value === value);
+    setHighlight(idx >= 0 ? idx : 0);
+  }
+  function choose(opt) {
+    onChange(opt.value);
+    setOpen(false);
+    setQuery("");
+    if (inputRef.current) inputRef.current.blur();
+  }
+  function onKeyDown(e) {
+    if (!open) {
+      if (e.key === "ArrowDown" || e.key === "Enter") { e.preventDefault(); openPanel(); }
+      return;
+    }
+    if (e.key === "ArrowDown") { e.preventDefault(); setHighlight((h) => Math.min(filtered.length - 1, h + 1)); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); setHighlight((h) => Math.max(0, h - 1)); }
+    else if (e.key === "Enter") { e.preventDefault(); if (filtered[highlight]) choose(filtered[highlight]); }
+    else if (e.key === "Escape") { e.preventDefault(); setOpen(false); setQuery(""); }
+  }
+
+  return (
+    <div className={"ha-filter-field ha-combo" + (isLoc ? " ha-filter-loc" : "")} ref={rootRef}>
+      <span>{isLoc && <MapPin size={13} />}{label}</span>
+      <div className="ha-combo-control">
+        <input
+          ref={inputRef}
+          className="ha-input ha-combo-input"
+          type="text"
+          role="combobox"
+          aria-expanded={open}
+          aria-controls={listboxId}
+          aria-autocomplete="list"
+          autoComplete="off"
+          placeholder={placeholder || selectedLabel || "All"}
+          value={open ? query : selectedLabel}
+          onChange={(e) => { openPanel(); setQuery(e.target.value); setHighlight(0); }}
+          onFocus={openPanel}
+          onMouseDown={openPanel}
+          onKeyDown={onKeyDown}
+        />
+        {canClear && !open && (
+          <button
+            type="button"
+            className="ha-combo-clear"
+            title="Clear"
+            aria-label="Clear selection"
+            onMouseDown={(e) => { e.preventDefault(); onChange(clearValue); }}
+          >
+            <X size={13} />
+          </button>
+        )}
+        <ChevronDown size={14} className="ha-combo-caret" />
+      </div>
+      {open && (
+        <div className="ha-combo-panel" id={listboxId} role="listbox" ref={listRef}>
+          {loading ? (
+            <div className="ha-combo-empty">Loading…</div>
+          ) : filtered.length === 0 ? (
+            <div className="ha-combo-empty">No matches</div>
+          ) : (
+            filtered.map((o, i) => (
+              <div
+                key={o.value}
+                data-idx={i}
+                role="option"
+                aria-selected={o.value === value}
+                className={"ha-combo-opt" + (i === highlight ? " is-active" : "") + (o.value === value ? " is-selected" : "")}
+                onMouseEnter={() => setHighlight(i)}
+                onMouseDown={(e) => { e.preventDefault(); choose(o); }}
+              >
+                {o.label}
+              </div>
+            ))
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 

@@ -9,12 +9,14 @@ import { useTenant } from "../TenantContext";
 /*
  * App sidebar — the single source of truth for the left navigation.
  *
- * Collapsible rail: rests at 72px (icons only) and expands to 240px on hover,
- * keyboard focus, or when pinned via the chevron button (persisted in
- * localStorage under "ha.sidebar.pinned"). Expansion is IN-FLOW — the
- * `ha-sb-slot` wrapper's width animates, so the main page slides with the
- * sidebar rather than being overlaid. The aside itself is sticky inside the
- * slot and simply fills it.
+ * Collapsible rail: rests at 72px (icons only). Hovering (or keyboard focus) PEEKS
+ * it open to 240px; that peek collapses again when the pointer/focus leaves. Clicking
+ * a NAV OPTION commits it open, so it then stays open while you work in the main page
+ * — main-page clicks never close it — persisted in localStorage under
+ * "ha.sidebar.pinned" so it survives a reload. When open, the top chevron points left
+ * ("«") and closes the rail. Expansion is IN-FLOW — the `ha-sb-slot` wrapper's width
+ * animates, so the main page slides with the sidebar rather than being overlaid. The
+ * aside itself is sticky inside the slot and simply fills it.
  *
  * Every top-level page (Rule Engine, Harvested Jobs, Run History, Source Runs,
  * Lead Intelligence) renders this one component, so a change here shows up on
@@ -72,18 +74,25 @@ const LS_PINNED = "ha.sidebar.pinned";
 export default function Sidebar({ activePage, onNavigate = () => {}, jobsCount, runsCount, onLogout }) {
   const { tenant, theme, isClient, hasFeature } = useTenant();
 
-  const [pinned, setPinned] = useState(() => {
+  // `committed` = the persisted "keep the rail open" choice. Turned ON when the
+  // user clicks a nav option (or the open button), OFF by the close button — so
+  // navigating keeps the rail open, while a plain hover does NOT latch it. Persisted
+  // under the same localStorage key so the choice survives a reload.
+  const [committed, setCommitted] = useState(() => {
     try { return localStorage.getItem(LS_PINNED) === "1"; } catch { return false; }
   });
   useEffect(() => {
-    try { localStorage.setItem(LS_PINNED, pinned ? "1" : "0"); } catch { /* storage unavailable */ }
-  }, [pinned]);
+    try { localStorage.setItem(LS_PINNED, committed ? "1" : "0"); } catch { /* storage unavailable */ }
+  }, [committed]);
 
-  // Set when the user unpins while the cursor/focus is still on the pin button —
-  // without it, :hover/:focus-within immediately re-expand the rail and the
-  // unpin click looks like it did nothing. Cleared when the pointer leaves the
-  // rail or focus re-enters it (keyboard users tab back in).
-  const [snoozed, setSnoozed] = useState(false);
+  // `peeking` = transient hover/focus peek. The rail is open when either is set; a
+  // peek collapses when the pointer/focus leaves, but a committed rail does not — so
+  // a click anywhere in the main page never closes it.
+  const [peeking, setPeeking] = useState(false);
+  const open = committed || peeking;
+
+  // Clicking a nav option commits the rail open, then navigates.
+  const go = (key) => { setCommitted(true); onNavigate(key); };
 
   const tintVars = sidebarVars(theme.accent, isClient);
   // Workspace label reads best as a lightened accent on the dark glass.
@@ -97,28 +106,33 @@ export default function Sidebar({ activePage, onNavigate = () => {}, jobsCount, 
 
   return (
     <div
-      className={"ha-sb-slot" + (pinned ? " is-pinned" : "") + (snoozed ? " is-snoozed" : "")}
+      className={"ha-sb-slot" + (open ? " is-open" : "")}
       style={tintVars}
-      onMouseLeave={() => setSnoozed(false)}
-      onFocus={() => setSnoozed(false)}
+      onMouseEnter={() => setPeeking(true)}
+      onMouseLeave={() => setPeeking(false)}
+      onFocus={() => setPeeking(true)}
+      onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setPeeking(false); }}
     >
       <aside className="ha-sidebar">
         <style>{styles}</style>
         <button
           className="ha-sb-pin"
           onClick={(e) => {
-            if (pinned) {
-              // Unpinning: blur + snooze so the rail visibly collapses now
-              // instead of being held open by the click's hover/focus.
+            if (open) {
+              // Open → the chevron points left ("«") and this closes the rail: blur so
+              // a lingering focus can't re-open it, and drop both the latch and the peek.
               e.currentTarget.blur();
-              setSnoozed(true);
+              setCommitted(false);
+              setPeeking(false);
+            } else {
+              // Collapsed (keyboard fallback — the button is hidden in the rail): open + keep.
+              setCommitted(true);
             }
-            setPinned((p) => !p);
           }}
-          title={pinned ? "Unpin sidebar" : "Pin sidebar open"}
-          aria-pressed={pinned}
+          title={open ? "Close sidebar" : "Open sidebar"}
+          aria-pressed={open}
         >
-          {pinned ? <ChevronsLeft size={15} /> : <ChevronsRight size={15} />}
+          {open ? <ChevronsLeft size={15} /> : <ChevronsRight size={15} />}
         </button>
         <div className="ha-sb-brand">
           <img className="ha-logo-img" src={`${process.env.PUBLIC_URL}/sight_spectrum_logo.jpg`} alt="SS jobharvesting Agent" width="150" height="150" />
@@ -133,25 +147,25 @@ export default function Sidebar({ activePage, onNavigate = () => {}, jobsCount, 
           {showConfiguration && (
             <div>
               <div className="ha-navhead"><span>Configuration</span></div>
-              <NavItem glyph={SlidersHorizontal} active={activePage === "rules"} onClick={() => onNavigate("rules")}>Rule Engine</NavItem>
+              <NavItem glyph={SlidersHorizontal} active={activePage === "rules"} onClick={() => go("rules")}>Rule Engine</NavItem>
             </div>
           )}
           <div>
             <div className="ha-navhead"><span>Operations</span></div>
             {hasFeature("jobs") && (
-              <NavItem glyph={LayoutList} active={activePage === "jobs"} badge={jobsCount} onClick={() => onNavigate("jobs")}>Harvested Jobs</NavItem>
+              <NavItem glyph={LayoutList} active={activePage === "jobs"} badge={jobsCount} onClick={() => go("jobs")}>Harvested Jobs</NavItem>
             )}
             {hasFeature("history") && (
-              <NavItem glyph={History} active={activePage === "history"} badge={runsCount} onClick={() => onNavigate("history")}>Run History</NavItem>
+              <NavItem glyph={History} active={activePage === "history"} badge={runsCount} onClick={() => go("history")}>Run History</NavItem>
             )}
             {hasFeature("sources") && (
-              <NavItem glyph={Radar} active={activePage === "sources"} onClick={() => onNavigate("sources")}>Source Runs</NavItem>
+              <NavItem glyph={Radar} active={activePage === "sources"} onClick={() => go("sources")}>Source Runs</NavItem>
             )}
             {hasFeature("leads") && (
-              <NavItem glyph={UserSearch} active={activePage === "leads"} onClick={() => onNavigate("leads")}>Lead Intelligence</NavItem>
+              <NavItem glyph={UserSearch} active={activePage === "leads"} onClick={() => go("leads")}>Lead Intelligence</NavItem>
             )}
             {hasFeature("outreach") && (
-              <NavItem glyph={Send} active={activePage === "outreach"} onClick={() => onNavigate("outreach")}>Mail logs</NavItem>
+              <NavItem glyph={Send} active={activePage === "outreach"} onClick={() => go("outreach")}>Mail logs</NavItem>
             )}
           </div>
           {showReports && (
@@ -175,16 +189,17 @@ export default function Sidebar({ activePage, onNavigate = () => {}, jobsCount, 
   );
 }
 
-/* Sidebar-only styles. Expand-state selectors key off the SLOT (hover /
-   focus-within / pinned) since the sticky aside simply fills it. */
+/* Sidebar-only styles. Expand-state selectors key off the SLOT's `.is-open`
+   class (JS-driven: hover/focus peek OR committed) since the sticky aside fills it. */
 const styles = `
   /* In-flow slot: its width is the only thing the page layout sees, so both
      hover and pin push the main content (no overlay mode). */
   .ha-sb-slot{display:none;flex-shrink:0;width:72px;transition:width .25s ease;}
   @media(min-width:768px){.ha-sb-slot{display:block;}}
-  /* .is-snoozed suppresses hover/focus expansion right after an unpin click so
-     the rail visibly collapses; cleared on mouseleave / focus re-entry. */
-  .ha-sb-slot:not(.is-snoozed):hover,.ha-sb-slot:not(.is-snoozed):focus-within,.ha-sb-slot.is-pinned{width:240px;}
+  /* Open state is JS-driven (.is-open = hover/focus peek OR committed-via-nav-click)
+     so a committed rail stays open while the user clicks around the page instead of
+     collapsing the moment the pointer leaves, the way a pure :hover rule would. */
+  .ha-sb-slot.is-open{width:240px;}
 
   .ha-sidebar{position:sticky;top:0;height:100vh;width:100%;z-index:50;box-sizing:border-box;
     display:flex;flex-direction:column;padding:10px;overflow-x:hidden;overflow-y:auto;scrollbar-width:none;
@@ -199,19 +214,18 @@ const styles = `
   .ha-sb-pin{position:absolute;top:10px;right:10px;z-index:2;display:grid;place-items:center;
     width:26px;height:26px;border-radius:8px;border:1px solid rgba(255,255,255,.14);
     background:rgba(255,255,255,.08);color:#CBD5E1;cursor:pointer;opacity:0;transition:.18s;padding:0;}
-  .ha-sb-slot:not(.is-snoozed):hover .ha-sb-pin,.ha-sb-slot:not(.is-snoozed):focus-within .ha-sb-pin,.ha-sb-slot.is-pinned .ha-sb-pin{opacity:1;}
+  .ha-sb-slot.is-open .ha-sb-pin{opacity:1;}
   .ha-sb-pin:hover{background:rgba(255,255,255,.16);color:#fff;}
 
   .ha-sb-brand{display:flex;flex-direction:column;align-items:center;padding:6px 0 0;}
   .ha-logo-img{width:44px;height:44px;max-width:100%;object-fit:cover;display:block;border-radius:50%;
     transition:width .25s ease,height .25s ease;}
-  .ha-sb-slot:not(.is-snoozed):hover .ha-logo-img,.ha-sb-slot:not(.is-snoozed):focus-within .ha-logo-img,.ha-sb-slot.is-pinned .ha-logo-img{width:96px;height:96px;}
+  .ha-sb-slot.is-open .ha-logo-img{width:96px;height:96px;}
   /* Near-white on the dark tenant glass — the old #94A3B8 was unreadable. */
   .ha-tagline{margin-top:8px;font-size:10.5px;text-transform:uppercase;letter-spacing:.14em;color:#E2E8F0;text-shadow:0 1px 2px rgba(2,6,23,.45);white-space:nowrap;}
   .ha-workspace{margin-top:5px;font-size:12px;font-weight:700;letter-spacing:.02em;text-shadow:0 1px 2px rgba(2,6,23,.35);white-space:nowrap;}
   .ha-tagline,.ha-workspace{opacity:0;height:0;overflow:hidden;transition:opacity .18s ease .05s;}
-  .ha-sb-slot:not(.is-snoozed):hover .ha-tagline,.ha-sb-slot:not(.is-snoozed):focus-within .ha-tagline,.ha-sb-slot.is-pinned .ha-tagline,
-  .ha-sb-slot:not(.is-snoozed):hover .ha-workspace,.ha-sb-slot:not(.is-snoozed):focus-within .ha-workspace,.ha-sb-slot.is-pinned .ha-workspace{opacity:1;height:auto;}
+  .ha-sb-slot.is-open .ha-tagline,.ha-sb-slot.is-open .ha-workspace{opacity:1;height:auto;}
 
   /* Section headers read as hairline dividers in rail mode. */
   .ha-navhead{position:relative;height:18px;padding:0 12px 8px;font-size:10px;font-weight:600;
@@ -219,8 +233,8 @@ const styles = `
   .ha-navhead span{opacity:0;transition:opacity .18s ease .05s;}
   .ha-navhead::before{content:"";position:absolute;left:8px;right:8px;top:5px;height:1px;
     background:rgba(255,255,255,.12);transition:opacity .18s;}
-  .ha-sb-slot:not(.is-snoozed):hover .ha-navhead span,.ha-sb-slot:not(.is-snoozed):focus-within .ha-navhead span,.ha-sb-slot.is-pinned .ha-navhead span{opacity:1;}
-  .ha-sb-slot:not(.is-snoozed):hover .ha-navhead::before,.ha-sb-slot:not(.is-snoozed):focus-within .ha-navhead::before,.ha-sb-slot.is-pinned .ha-navhead::before{opacity:0;}
+  .ha-sb-slot.is-open .ha-navhead span{opacity:1;}
+  .ha-sb-slot.is-open .ha-navhead::before{opacity:0;}
 
   /* Nav item — fixed icon column so glyphs don't shift while expanding.
      Hover: gently illuminates and drifts 2px toward the content. */
@@ -229,7 +243,7 @@ const styles = `
     transition:background .18s ease-out,color .18s ease-out,transform .18s ease-out;text-align:left;font-family:inherit;}
   .ha-nav svg{flex:none;}
   .ha-nav-label{flex:1;text-align:left;white-space:nowrap;opacity:0;transition:opacity .18s ease .05s;}
-  .ha-sb-slot:not(.is-snoozed):hover .ha-nav-label,.ha-sb-slot:not(.is-snoozed):focus-within .ha-nav-label,.ha-sb-slot.is-pinned .ha-nav-label{opacity:1;}
+  .ha-sb-slot.is-open .ha-nav-label{opacity:1;}
 
   /* Active item AND hover: the "attached tab" — full-bleed to the sidebar's
      right edge with concave fillets, icon/label in the tenant colour. #F3F6FC
@@ -248,8 +262,7 @@ const styles = `
   /* Count badge: docks to the icon's corner as a mini bubble in rail mode. */
   .ha-badge{background:#F59E0B;color:#1E293B;border-radius:999px;padding:2px 8px;font-size:12px;font-weight:700;
     font-variant-numeric:tabular-nums;transition:all .18s ease;}
-  .ha-sb-slot:not(:hover):not(:focus-within):not(.is-pinned) .ha-badge,
-  .ha-sb-slot.is-snoozed:not(.is-pinned) .ha-badge{
+  .ha-sb-slot:not(.is-open) .ha-badge{
     position:absolute;top:2px;left:28px;font-size:9px;padding:1px 5px;min-width:10px;text-align:center;}
 
   .ha-logout:hover{background:rgba(239,68,68,.14);color:#FCA5A5;}
@@ -257,7 +270,7 @@ const styles = `
   /* HealthBadge: dot always visible, text clipped in rail mode. */
   .ha-health{overflow:hidden;white-space:nowrap;}
   .ha-health-label{opacity:0;transition:opacity .18s ease .05s;}
-  .ha-sb-slot:not(.is-snoozed):hover .ha-health-label,.ha-sb-slot:not(.is-snoozed):focus-within .ha-health-label,.ha-sb-slot.is-pinned .ha-health-label{opacity:1;}
+  .ha-sb-slot.is-open .ha-health-label{opacity:1;}
 
   @media (prefers-reduced-motion: reduce){
     .ha-sb-slot,.ha-sidebar,.ha-nav,.ha-nav-label,.ha-logo-img,.ha-badge,.ha-tagline,.ha-workspace,

@@ -11,8 +11,20 @@ const ThemeStyles = () => (
     /* Cards are frosted glass over the ha-root gradient; the near-opaque
        variant keeps table/form text fully legible. */
     .ha-card{${GLASS_SOLID}border-radius:12px;}
-    .ha-input{box-sizing:border-box;height:38px;padding:0 12px;${GLASS_INPUT}color:${C.text};border-radius:8px;font-size:14px;}
-    .ha-input:focus{outline:none;border-color:${C.primary};box-shadow:0 0 0 2px rgba(37,99,235,.25);${GLASS_INPUT_FOCUS}}
+    /* Inputs align to the Rule Engine scale (rr-inp): 40px tall, radius 9, 13.5px,
+       and the same soft focus ring, so every field across the app reads the same. */
+    .ha-input{box-sizing:border-box;height:34px;padding:0 12px;${GLASS_INPUT}color:${C.text};border-radius:9px;font-size:13.5px;}
+    .ha-input:focus{outline:none;border-color:${C.primary};box-shadow:0 0 0 3px rgba(37,99,235,.12);${GLASS_INPUT_FOCUS}}
+    /* Shared compact page header (Jobs / Mail logs / Run History / Sources / Leads),
+       modeled on the Rule Engine's rr-head so the app reads as one system and the
+       table claims more of the viewport (requirement: reduce header/filter height). */
+    .ha-pagehead{display:flex;flex-wrap:wrap;align-items:flex-start;justify-content:space-between;gap:8px 16px;padding:12px 24px 8px;}
+    .ha-pagehead-titles{min-width:0;}
+    .ha-pagehead h1{margin:0;font-size:18px;font-weight:800;letter-spacing:-.02em;color:${C.text};line-height:1.15;}
+    .ha-pagehead h1 .ha-h1-soft{color:${C.textSoft};font-weight:600;}
+    .ha-pagehead .ha-sub{margin:2px 0 0;font-size:12.5px;color:${C.textSoft};}
+    .ha-pagehead-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
+    .ha-pagebody{display:flex;flex-direction:column;gap:10px;padding:0 24px 18px;}
     .ha-btn{display:inline-flex;align-items:center;gap:8px;border-radius:8px;padding:8px 16px;font-size:14px;cursor:pointer;transition:.15s;}
     .ha-btn-primary{border:0;font-weight:600;background:${C.primary};color:#fff;box-shadow:0 2px 6px rgba(37,99,235,.35);}
     .ha-btn-primary:hover{background:${C.secondary};}
@@ -20,7 +32,10 @@ const ThemeStyles = () => (
     .ha-btn-secondary:hover{background:rgba(239,246,255,.92);border-color:#BFDBFE;}
     .ha-btn-secondary:disabled{opacity:.6;cursor:default;}
     .ha-table{width:100%;min-width:1080px;border-collapse:collapse;font-size:14px;table-layout:fixed;}
-    .ha-table-scroll{overflow-x:auto;overflow-y:auto;max-height:400px;scrollbar-width:thin;scrollbar-color:#CBD5E1 transparent;}
+    /* Table fills the viewport: the scroll area grows to (100vh − chrome) so the
+       table claims the space reclaimed by the compact header/filter, capped only
+       by the window. min-height keeps it usable on short viewports. */
+    .ha-table-scroll{overflow-x:auto;overflow-y:auto;max-height:calc(100vh - 250px);min-height:460px;scrollbar-width:thin;scrollbar-color:#CBD5E1 transparent;}
     .ha-table-scroll::-webkit-scrollbar{height:9px;width:9px;}
     .ha-table-scroll::-webkit-scrollbar-track{background:transparent;}
     .ha-table-scroll::-webkit-scrollbar-thumb{background:#CBD5E1;border-radius:99px;}
@@ -35,22 +50,42 @@ const ThemeStyles = () => (
     .ha-row{border-top:1px solid #EEF2F7;}
     .ha-row:hover{background:rgba(226,236,254,.5);}
     .ha-link{color:${C.primary};font-weight:600;background:none;border:0;padding:0;cursor:pointer;font-size:inherit;font-family:inherit;text-align:left;}
-    .ha-statnum{font-size:30px;font-weight:700;line-height:1;}
-    .ha-statlbl{margin-top:8px;font-size:14px;color:${C.textSoft};}
+    .ha-statnum{font-size:26px;font-weight:800;line-height:1;letter-spacing:-.02em;}
+    .ha-statlbl{margin-top:3px;font-size:13px;color:${C.textSoft};}
     .ha-select{cursor:pointer;flex:1 1 auto;min-width:0;box-sizing:border-box;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
     .ha-multiselect-btn{display:flex;align-items:center;justify-content:space-between;gap:8px;font:inherit;color:inherit;text-align:left;}
     .ha-multiselect-btn svg{flex-shrink:0;color:#94A3B8;}
     .ha-multiselect-summary{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-    .ha-multiselect-panel{position:absolute;top:calc(100% + 6px);left:0;z-index:10;min-width:100%;width:max-content;max-width:260px;max-height:240px;overflow-y:auto;${GLASS_PANEL}border-radius:8px;padding:6px;}
+    .ha-multiselect-panel{position:absolute;top:calc(100% + 6px);left:0;z-index:50;min-width:100%;width:max-content;max-width:260px;max-height:240px;overflow-y:auto;${GLASS_PANEL}border-radius:8px;padding:6px;}
     .ha-multiselect-opt{display:flex;align-items:center;gap:8px;padding:7px 8px;border-radius:6px;font-size:14px;color:${C.text};cursor:pointer;white-space:nowrap;}
     .ha-multiselect-opt:hover{background:rgba(239,246,255,.8);}
     .ha-multiselect-opt input{cursor:pointer;}
-    .ha-filterbar{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:14px 16px;align-items:end;width:100%;max-width:100%;box-sizing:border-box;}
-    .ha-daterow{display:flex;flex-wrap:wrap;align-items:center;gap:12px;max-width:100%;box-sizing:border-box;}
-    .ha-filter-field{display:flex;flex-direction:column;align-items:stretch;gap:6px;width:100%;min-width:0;box-sizing:border-box;}
+    /* Searchable single-select (SearchableSelect). Typeable input + floating panel;
+       the panel sits above the sibling table card via its z-index plus the
+       .ha-filterbar stacking-context lift below. */
+    .ha-combo{position:relative;}
+    .ha-combo-control{position:relative;display:flex;align-items:center;width:100%;min-width:0;}
+    .ha-combo-input{width:100%;min-width:0;box-sizing:border-box;padding-right:48px;cursor:text;text-overflow:ellipsis;}
+    .ha-combo-caret{position:absolute;right:10px;top:50%;transform:translateY(-50%);color:#94A3B8;pointer-events:none;flex-shrink:0;}
+    .ha-combo-clear{position:absolute;right:29px;top:50%;transform:translateY(-50%);display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;padding:0;border:0;border-radius:5px;background:transparent;color:#94A3B8;cursor:pointer;}
+    .ha-combo-clear:hover{background:rgba(148,163,184,.18);color:#475569;}
+    .ha-combo-panel{position:absolute;top:calc(100% + 6px);left:0;z-index:50;min-width:100%;width:max-content;max-width:340px;max-height:264px;overflow-y:auto;${GLASS_PANEL}border-radius:8px;padding:6px;scrollbar-width:thin;scrollbar-color:#CBD5E1 transparent;}
+    .ha-combo-panel::-webkit-scrollbar{width:9px;}
+    .ha-combo-panel::-webkit-scrollbar-thumb{background:#CBD5E1;border-radius:99px;}
+    .ha-combo-opt{padding:8px 10px;border-radius:6px;font-size:14px;color:${C.text};cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+    .ha-combo-opt.is-active{background:rgba(239,246,255,.9);}
+    .ha-combo-opt.is-selected{font-weight:600;color:${C.primary};}
+    .ha-combo-empty{padding:12px 10px;font-size:13px;color:#94A3B8;text-align:center;}
+    /* Lift the whole filter card (and every dropdown panel inside it) above the
+       sibling table card. Both are .ha-card → backdrop-filter → separate stacking
+       contexts; without this the later-in-DOM table paints over open panels. */
+    .ha-filterbar{position:relative;z-index:30;display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px 12px;align-items:end;width:100%;max-width:100%;box-sizing:border-box;}
+    .ha-daterow{display:flex;flex-wrap:wrap;align-items:center;gap:10px;max-width:100%;box-sizing:border-box;}
+    .ha-filter-field{display:flex;flex-direction:column;align-items:stretch;gap:4px;width:100%;min-width:0;box-sizing:border-box;}
     .ha-filter-field>span{font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:${C.textSoft};white-space:nowrap;display:flex;align-items:center;gap:5px;}
-    .ha-filter-loc>span{color:${C.primary};}
-    .ha-filter-loc .ha-select{background:#F4F8FF;border-color:#BFDBFE;}
+    /* Location fields (Job/Company Location) keep a grey MapPin affordance but
+       drop the old blue label/field tint so they match every other grey field. */
+    .ha-filter-loc>span{color:${C.textSoft};}
     .ha-filter-search{position:relative;min-width:0;box-sizing:border-box;grid-column:1/-1;}
     .ha-filter-search .ha-input{width:100%;min-width:0;max-width:100%;padding-left:34px;box-sizing:border-box;}
     .ha-filter-search svg{position:absolute;left:10px;top:50%;transform:translateY(-50%);color:#94A3B8;pointer-events:none;}

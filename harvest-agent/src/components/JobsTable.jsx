@@ -7,7 +7,7 @@ import { getOutreachStatus } from "../api";
 import { C } from "../theme";
 import {
   WhatsAppIcon, LinkedInIcon, SourceChip, SortHeader, PlainHeader,
-  Select, MultiSelect, ContactActionBtn, DualContact, CompanySizeCell,
+  Select, SearchableSelect, MultiSelect, ContactActionBtn, DualContact, CompanySizeCell,
 } from "./ui";
 import { mapJobToDetail } from "../lib/jobsData";
 
@@ -32,14 +32,14 @@ const COMPANY_SIZE_FILTER_OPTIONS = [
 
 const CONTACT_FILTER_OPTIONS = [
   { group: "With contact" },
-  { value: "email",    label: "Email",    summaryLabel: "Has email" },
-  { value: "mobile",   label: "Phone",    summaryLabel: "Has phone" },
-  { value: "linkedin", label: "LinkedIn", summaryLabel: "Has LinkedIn" },
+  { value: "email",    label: "Email",    summaryLabel: "Email" },
+  { value: "mobile",   label: "Phone",    summaryLabel: "Phone" },
+  { value: "linkedin", label: "LinkedIn", summaryLabel: "LinkedIn" },
   { group: "Without contact" },
-  { value: "no_email",    label: "Email",    summaryLabel: "No email" },
-  { value: "no_mobile",   label: "Phone",    summaryLabel: "No phone" },
-  { value: "no_linkedin", label: "LinkedIn", summaryLabel: "No LinkedIn" },
-  { value: "none", label: "None on file", summaryLabel: "No contact" },
+  { value: "no_email",    label: "No Email",    summaryLabel: "No Email" },
+  { value: "no_mobile",   label: "No Phone",    summaryLabel: "No Phone" },
+  { value: "no_linkedin", label: "No LinkedIn", summaryLabel: "No LinkedIn" },
+  { value: "none", label: "No contact on file", summaryLabel: "No contact" },
 ];
 
 // Positive tokens match rows that HAVE that channel; "no_*" tokens match rows
@@ -317,28 +317,33 @@ export default function JobsTable({
 
   return (
     <>
-      <div className="ha-card ha-filterbar" style={{ padding: "16px 20px", gridTemplateColumns: "repeat(4, minmax(0, 1fr))" }}>
-        <Select label="Company" value={filters.company} onChange={(v) => setFilters((f) => ({ ...f, company: v }))}
-          options={[{ value: "all", label: "All" }, ...companies.map((c) => ({ value: c, label: c }))]} />
+      <div className="ha-card ha-filterbar" style={{ padding: "11px 14px", gridTemplateColumns: "repeat(4, minmax(0, 1fr))" }}>
+        <SearchableSelect label="Company" value={filters.company} onChange={(v) => setFilters((f) => ({ ...f, company: v }))}
+          options={[{ value: "all", label: "All" }, ...companies.map((c) => ({ value: c, label: c }))]}
+          loading={serverMode && !facets} />
         <Select label="Company size" value={filters.size || "all"} onChange={(v) => setFilters((f) => ({ ...f, size: v }))}
           options={COMPANY_SIZE_FILTER_OPTIONS} />
-        <Select label="Company country" variant="location" value={filters.companyCountry} onChange={(v) => setFilters((f) => ({ ...f, companyCountry: v }))}
-          options={[{ value: "all", label: "All" }, ...companyCountries.map((c) => ({ value: c, label: c }))]} />
-        <Select label="Job country" variant="location" value={filters.country} onChange={(v) => setFilters((f) => ({ ...f, country: v }))}
-          options={[{ value: "all", label: "All" }, ...countries.map((c) => ({ value: c, label: c }))]} />
-        <Select label="Job" value={filters.job} onChange={(v) => setFilters((f) => ({ ...f, job: v }))}
-          options={[{ value: "all", label: "All" }, ...jobTitles.map((t) => ({ value: t, label: t }))]} />
+        <SearchableSelect label="Company Location" variant="location" value={filters.companyCountry} onChange={(v) => setFilters((f) => ({ ...f, companyCountry: v }))}
+          options={[{ value: "all", label: "All" }, ...companyCountries.map((c) => ({ value: c, label: c }))]}
+          loading={serverMode && !facets} />
+        <SearchableSelect label="Job Location" variant="location" value={filters.country} onChange={(v) => setFilters((f) => ({ ...f, country: v }))}
+          options={[{ value: "all", label: "All" }, ...countries.map((c) => ({ value: c, label: c }))]}
+          loading={serverMode && !facets} />
+        <SearchableSelect label="Job" value={filters.job} onChange={(v) => setFilters((f) => ({ ...f, job: v }))}
+          options={[{ value: "all", label: "All" }, ...jobTitles.map((t) => ({ value: t, label: t }))]}
+          loading={serverMode && !facets} />
         <MultiSelect label="Contact" selected={filters.contact} onChange={(v) => setFilters((f) => ({ ...f, contact: v }))}
           options={CONTACT_FILTER_OPTIONS} />
-        <Select label="POC" value={filters.poc} onChange={(v) => setFilters((f) => ({ ...f, poc: v }))}
-          options={[{ value: "all", label: "All" }, ...pocNames.map((p) => ({ value: p, label: p }))]} />
+        <SearchableSelect label="POC" value={filters.poc} onChange={(v) => setFilters((f) => ({ ...f, poc: v }))}
+          options={[{ value: "all", label: "All" }, ...pocNames.map((p) => ({ value: p, label: p }))]}
+          loading={serverMode && !facets} />
         <div className="ha-filter-search">
           <Search size={16} />
           <input className="ha-input" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search…" />
         </div>
       </div>
 
-      <div className="ha-card" style={{ overflow: "hidden", marginTop: 14 }}>
+      <div className="ha-card" style={{ overflow: "hidden", marginTop: 10 }}>
         <div className="ha-table-scroll">
           <table className="ha-table" style={{ minWidth }}>
             <thead className="ha-thead">

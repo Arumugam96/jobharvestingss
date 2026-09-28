@@ -9,7 +9,7 @@ from sqlalchemy import Boolean, DateTime, Index, Integer, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.validators import validate_company_email
-from app.models.harvest import Base  # shared metadata — one Base.metadata.create_all() for all tables
+from app.models.harvest import Base
 
 
 class OTPPurpose:
@@ -23,8 +23,6 @@ class UserORM(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     email: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
-    # Tenant this user belongs to (app/models/tenant.py). Backfilled to 'internal';
-    # resolved from the email domain on first OTP login (AuthService).
     tenant_id: Mapped[str] = mapped_column(String(40), nullable=False, server_default="'internal'", index=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     is_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

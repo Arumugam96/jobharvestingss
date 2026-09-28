@@ -142,14 +142,14 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
 
   return (
     <main className="ha-main">
-      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "flex-start", justifyContent: "space-between", gap: 16, padding: "24px 24px 0" }}>
-        <div>
-          <h1 style={{ margin: 0, fontSize: 24, fontWeight: 700, color: C.text }}>Harvested Jobs</h1>
-          <p style={{ margin: "4px 0 0", fontSize: 14, color: C.textSoft }}>
+      <div className="ha-pagehead">
+        <div className="ha-pagehead-titles">
+          <h1>Harvested Jobs</h1>
+          <p className="ha-sub">
             {pageLoading && !facets ? "Loading…" : `${stats.total || 0} harvested posting${(stats.total || 0) === 1 ? "" : "s"} · ${stats.qualified || 0} qualified · ${stats.flagged || 0} flagged`}
           </p>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+        <div className="ha-pagehead-actions">
           <button className="ha-btn ha-btn-secondary" onClick={refresh} disabled={pageLoading} title="Refresh">
             <RefreshCw size={16} className={pageLoading ? "ha-spin" : ""} /> Refresh
           </button>
@@ -167,24 +167,23 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
           </button>
         </div>
       </div>
-      <div style={{ marginTop: 20, borderBottom: "1px solid " + C.border }} />
 
-      <div style={{ display: "flex", flexDirection: "column", gap: 16, padding: 24 }}>
+      <div className="ha-pagebody">
         {pageError && <div className="ha-errbanner">{pageError}</div>}
 
         <div className="ha-daterow">
-          <span style={{ fontSize: 14, fontWeight: 600, color: C.text }}>Posted between</span>
+          <span style={{ fontSize: 13, fontWeight: 600, color: C.text }}>Posted between</span>
           <input type="date" className="ha-input" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
           <span style={{ color: C.textSoft }}>to</span>
           <input type="date" className="ha-input" value={endDate} onChange={(e) => setEndDate(e.target.value)} />
           {(startDate || endDate) && (
-            <button className="ha-btn ha-btn-secondary" style={{ height: 38, boxSizing: "border-box", padding: "0 14px" }} onClick={() => { setStartDate(""); setEndDate(""); }}>Clear dates</button>
+            <button className="ha-btn ha-btn-secondary" style={{ height: 34, boxSizing: "border-box", padding: "0 14px" }} onClick={() => { setStartDate(""); setEndDate(""); }}>Clear dates</button>
           )}
           <div style={{ marginLeft: "auto" }}>
             <Select label="Rows per page" value={pageSizeSel} onChange={onPageSizeChange} options={PAGE_SIZE_OPTIONS} />
           </div>
         </div>
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 16 }}>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
           <StatCard value={stats.total || 0} label="Total harvested" color={C.accent} />
           <StatCard value={stats.companies || 0} label="Companies sourced" color={C.primary} />
           <StatCard value={stats.pocs || 0} label="POCs identified" color={C.primary} />
