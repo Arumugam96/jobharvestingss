@@ -37,6 +37,57 @@ const WORKSPACES = [
 const EMAIL_RE = /^[^\s@]+@(?:sightspectrum|northwindtalent|meridianstaffing)\.[a-z]{2,}$/i;
 
 /* ------------------------------------------------------------------ */
+/* workspace flags                                                     */
+/* ------------------------------------------------------------------ */
+// Inline SVG flags (NOT emoji) for the workspace switch — Windows/Chrome renders
+// regional-indicator flag emoji as bare "US"/"IN" letters, which would defeat the
+// purpose, so these draw identically on every platform. The SVG box is rounded +
+// clipped by CSS (.ws-flag), so the rectangular bands can be drawn square here.
+function WorkspaceFlag({ code }) {
+  if (code === "in") {
+    return (
+      <svg className="ws-flag" viewBox="0 0 20 14" width="20" height="14" role="img" aria-label="India">
+        <rect width="20" height="14" fill="#fff" />
+        <rect width="20" height="4.667" fill="#FF9933" />
+        <rect y="9.333" width="20" height="4.667" fill="#138808" />
+        <circle cx="10" cy="7" r="1.9" fill="none" stroke="#000080" strokeWidth="0.4" />
+        <circle cx="10" cy="7" r="0.4" fill="#000080" />
+        {Array.from({ length: 12 }).map((_, i) => {
+          const a = (Math.PI / 6) * i;
+          return (
+            <line
+              key={i}
+              x1="10"
+              y1="7"
+              x2={10 + 1.9 * Math.cos(a)}
+              y2={7 + 1.9 * Math.sin(a)}
+              stroke="#000080"
+              strokeWidth="0.22"
+            />
+          );
+        })}
+      </svg>
+    );
+  }
+  // US — 13 stripes + blue canton drawn over them, with a simplified star grid.
+  const stripeH = 14 / 13;
+  return (
+    <svg className="ws-flag" viewBox="0 0 20 14" width="20" height="14" role="img" aria-label="United States">
+      <rect width="20" height="14" fill="#fff" />
+      {Array.from({ length: 7 }).map((_, i) => (
+        <rect key={i} y={i * 2 * stripeH} width="20" height={stripeH} fill="#B22234" />
+      ))}
+      <rect width="8.4" height={stripeH * 7} fill="#3C3B6E" />
+      {Array.from({ length: 4 }).map((_, r) =>
+        Array.from({ length: 5 }).map((_, c) => (
+          <circle key={`${r}-${c}`} cx={0.9 + c * 1.55} cy={1.0 + r * 1.7} r="0.32" fill="#fff" />
+        ))
+      )}
+    </svg>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /* styles                                                              */
 /* ------------------------------------------------------------------ */
 const CSS = `
@@ -159,6 +210,7 @@ const CSS = `
 }
 .ws-opt:hover{border-color:#CBD5E1;color:var(--text)}
 .ws-opt.on{border-color:var(--primary);color:var(--primary);background:#EFF6FF;box-shadow:0 0 0 3px rgba(37,99,235,.10)}
+.ws-flag{width:20px;height:14px;flex:none;border-radius:2px;overflow:hidden;box-shadow:0 0 0 1px rgba(15,23,42,.12)}
 @media (max-width:420px){.ws-opt{font-size:11.5px;gap:5px;padding:0 4px}}
 .spin{animation:spin .9s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
@@ -411,6 +463,7 @@ export default function LoginPage({ onAuthenticated }) {
                     className={"ws-opt" + (workspace === w.key ? " on" : "")}
                     onClick={() => { setWorkspace(w.key); setError(""); }}
                   >
+                    <WorkspaceFlag code={w.key} />
                     <span>{w.label}</span>
                   </button>
                 ))}

@@ -139,7 +139,7 @@ export default function Sidebar({ activePage, onNavigate = () => {}, jobsCount, 
           <div className="ha-tagline">Contract Sourcing Automation</div>
           {isClient && (
             <div className="ha-workspace" style={{ color: workspaceColor }}>
-              {tenant.name}{tenant.region ? ` · ${tenant.region}` : ""}
+              {tenant.name}
             </div>
           )}
         </div>
