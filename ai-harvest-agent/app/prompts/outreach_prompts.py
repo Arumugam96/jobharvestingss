@@ -192,21 +192,21 @@ def _insert_after_greeting(body: str, intro: str) -> str:
     return f"{intro}\n\n{body}" if body else intro
 
 
-# def _ensure_greeting(body: str, greeting: str) -> str:
-#     """Force `greeting` to be the single opening line of `body`, replacing any greeting the
-#     model emitted. `body` has already been through _greeting_on_own_line, so a model greeting
-#     is isolated as the first paragraph — drop it and prepend the deterministic one, so the
-#     email always opens with a recipient greeting rather than the sender's self-introduction.
-#     No-op when `greeting` is empty."""
-#     if not greeting:
-#         return body
-#     text = (body or "").lstrip()
-#     parts = text.split("\n\n", 1)
-#     if parts and _GREETING_RE.match(parts[0].strip()):
-#         rest = parts[1].lstrip() if len(parts) == 2 else ""
-#     else:
-#         rest = text
-#     return f"{greeting}\n\n{rest}" if rest else greeting
+def _ensure_greeting(body: str, greeting: str) -> str:
+    """Force `greeting` to be the single opening line of `body`, replacing any greeting the
+    model emitted. `body` has already been through _greeting_on_own_line, so a model greeting
+    is isolated as the first paragraph — drop it and prepend the deterministic one, so the
+    email always opens with a recipient greeting rather than the sender's self-introduction.
+    No-op when `greeting` is empty."""
+    if not greeting:
+        return body
+    text = (body or "").lstrip()
+    parts = text.split("\n\n", 1)
+    if parts and _GREETING_RE.match(parts[0].strip()):
+        rest = parts[1].lstrip() if len(parts) == 2 else ""
+    else:
+        rest = text
+    return f"{greeting}\n\n{rest}" if rest else greeting
 
 
 def append_closing(
@@ -233,7 +233,10 @@ def append_closing(
         <Role Title>, SightSpectrum
         <sender_email>
     """
-    body = _insert_after_greeting(_greeting_on_own_line(_strip_trailing_closing(pitch)), intro)
+    body = _ensure_greeting(
+        _insert_after_greeting(_greeting_on_own_line(_strip_trailing_closing(pitch)), intro),
+        greeting,
+    )
     url = (deck_url or "").strip()
     contact = (contact_block or "").strip()
     blocks = [body] if body else []
@@ -353,12 +356,18 @@ def sender_display_name(sender_email: str) -> str:
 # back to a first-name-only identity with the default role and no phone (resolve_identity),
 # so an unlisted sender still gets a valid signature, just without a bespoke full name.
 SENDER_IDENTITIES: dict[str, dict[str, str]] = {
-    "sanjeetha@sightspectrum.com": {
+    "sanjeeta@sightspectrum.com": {
         "first": "Sanjeeta",
         "full": "Sanjeeta Mohanty",
         "title": "Business Development Executive",
         "phone": "", 
     },
+    "ananyamehta@sightspectrum.com": {
+        "first": "Ananya",
+        "full": "Ananya Mehta",
+        "title": "Business Development Executive",
+        "phone": "", 
+    }
 }
 
 

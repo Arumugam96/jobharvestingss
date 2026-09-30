@@ -42,8 +42,7 @@ from app.routes.frontend_routes import router as frontend_router
 from app.routes.prospect_routes import router as prospect_intelligence_router
 from app.routes.recruiter_routes import router as recruiter_discovery_router
 from app.routes.lead_intelligence_routes import router as lead_intelligence_router
-from app.routes.outreach_routes import router as outreach_router
-from app.routes.outreach_routes import webhook_router as outreach_webhook_router
+from app.routes.outreach_routes import router as outreach_router, webhook_router as outreach_webhook_router
 from app.services.job_tracker import JobTracker
 from app.services.playwright_service import PlaywrightService
 from app.services.scheduler_service import SchedulerService

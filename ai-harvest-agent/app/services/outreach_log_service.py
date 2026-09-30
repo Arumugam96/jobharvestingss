@@ -98,6 +98,21 @@ async def contact_names_for_rows(
 _NEG_STATUS = {"bounce": "bounced", "blocked": "blocked", "spam": "spam"}
 _POS_RANK = {"delivered": 1, "opened": 2, "clicked": 3}
 
+
+def _is_undeliverable(ev_name: str, ev: dict) -> bool:
+    """True when a delivery event means the address is permanently undeliverable and
+    must never be retried: an ESP block, or a HARD bounce. Soft bounces are transient
+    (recoverable) and spam complaints do not suppress (product decision) — neither
+    returns True here. Feeds suppress_bounced() in record_delivery_events."""
+    if ev_name == "blocked":
+        return True
+    if ev_name == "bounce":
+        # Mailjet flags hard bounces with hard_bounce=true on the bounce event. The
+        # Brevo path sets the same flag for hard_bounce/invalid_email (soft_bounce
+        # leaves it false), since BREVO_EVENT_MAP collapses every bounce to "bounce".
+        return bool(ev.get("hard_bounce"))
+    return False
+
 # Brevo (transactional webhook) event names → the internal vocab _apply_delivery_event
 # understands (which was modelled on Mailjet's). Brevo's "delivered" maps to our "sent"
 # (both mean "accepted by the recipient server"); proxy opens (Apple Mail Privacy et al.)
@@ -202,7 +217,7 @@ async def record_delivery_events(db: AsyncSession, events: list[dict], source: s
     every other event advances the matched row's delivery state + event trail."""
     # Imported lazily to avoid an import cycle (suppression_service → models only,
     # but this keeps the module graph clean since the webhook path is the only user).
-    from app.services.suppression_service import add_suppression
+    from app.services.suppression_service import add_suppression, suppress_bounced
 
     updated = 0
     for ev in events or []:
@@ -220,6 +235,22 @@ async def record_delivery_events(db: AsyncSession, events: list[dict], source: s
                 await add_suppression(db, email=email, source=source, raw_payload=ev)
                 updated += 1
             continue  # add_suppression already stamps the row(s); skip the generic path
+
+        # Terminal delivery failure (hard bounce / ESP block) → do-not-contact, so no
+        # future send retries a dead address. Suppress by the event's email (like unsub,
+        # even if the send row can't be matched); then fall through to still stamp the
+        # matched row's "bounced"/"blocked" delivery status below.
+        if _is_undeliverable(ev_name, ev):
+            email = ev.get("email")
+            if not email and custom_id:
+                matched = await get_by_id(db, str(custom_id))
+                email = matched.to_email if matched else None
+            if email:
+                await suppress_bounced(
+                    db, email=email,
+                    reason="blocked" if ev_name == "blocked" else "hard_bounce",
+                    source=source, raw_payload=ev,
+                )
 
         if not custom_id:
             continue
@@ -244,7 +275,8 @@ async def record_brevo_events(db: AsyncSession, events: list[dict]) -> int:
     for ev in events or []:
         if not isinstance(ev, dict):
             continue
-        internal = BREVO_EVENT_MAP.get((ev.get("event") or "").strip().lower())
+        orig = (ev.get("event") or "").strip().lower()
+        internal = BREVO_EVENT_MAP.get(orig)
         if internal is None:
             continue  # unmapped Brevo event (request/deferred/error/…) — nothing to record
         normalized.append({
@@ -255,6 +287,10 @@ async def record_brevo_events(db: AsyncSession, events: list[dict]) -> int:
             # Brevo puts the clicked target on the "link" field (Mailjet uses "url");
             # carry it through so a click entry records exactly what was clicked.
             "url": ev.get("link") or ev.get("URL") or ev.get("url"),
+            # BREVO_EVENT_MAP collapses hard_bounce/soft_bounce/invalid_email all to
+            # "bounce", but only HARD failures suppress. Preserve that here (Mailjet
+            # sends hard_bounce=true natively) so _is_undeliverable can tell them apart.
+            "hard_bounce": orig in ("hard_bounce", "invalid_email"),
         })
     if not normalized:
         return 0

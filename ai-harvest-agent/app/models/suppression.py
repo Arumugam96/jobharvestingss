@@ -28,11 +28,14 @@ class EmailSuppressionORM(Base):
     tenant_id: Mapped[str] = mapped_column(String(40), nullable=False, server_default="'internal'", index=True)
     # Normalized (lowercased, trimmed) recipient email — the do-not-contact key.
     email: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
-    # Why the address was suppressed. Only "unsubscribe" today (spam is recorded on
-    # the outreach row's event trail but does not suppress, per product decision).
+    # Why the address was suppressed: "unsubscribe" (opt-out), or a TERMINAL delivery
+    # failure — "hard_bounce" / "blocked" — added by suppression_service.suppress_bounced
+    # so a dead address is never retried. (Soft bounces and spam are recorded on the
+    # outreach row's event trail but do NOT suppress, per product decision.)
     reason: Mapped[str] = mapped_column(String(30), nullable=False, default="unsubscribe")
     # How it was captured: "self_link" (footer link) | "list_unsubscribe" (one-click)
-    # | "mailjet_webhook" (Mailjet unsub event) | "manual".
+    # | "mailjet_webhook" / "brevo_webhook" (provider unsub or hard-bounce/block event)
+    # | "manual".
     source: Mapped[str] = mapped_column(String(30), nullable=False, default="")
     # The recruiter this email resolved to, when one was linked (mirror only).
     recruiter_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)

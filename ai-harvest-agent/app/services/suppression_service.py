@@ -8,6 +8,12 @@ When a suppressed email resolves to a recruiter, a mirror flag is set for CRM
 visibility, and the recent outreach rows to that address are stamped
 `delivery_status="unsubscribed"` so the Mail logs UI shows it.
 
+A TERMINAL delivery failure (hard bounce / ESP block, from the delivery-event
+webhook) also lands here — via suppress_bounced() with reason "hard_bounce"/"blocked"
+— so a dead address is never retried. That path is intentionally leaner than an
+unsubscribe: it only adds the do-not-contact row, leaving the recruiter flag and the
+"bounced"/"blocked" delivery status untouched. Soft bounces and spam do not suppress.
+
 Unsubscribe links carry a stateless HMAC token of the email (no per-send storage);
 this module signs and verifies them.
 """
@@ -83,6 +89,44 @@ async def is_suppressed(db: AsyncSession, email: str | None) -> bool:
         await db.execute(select(EmailSuppressionORM.id).where(EmailSuppressionORM.email == e))
     ).first()
     return row is not None
+
+
+async def suppress_bounced(
+    db: AsyncSession,
+    *,
+    email: str,
+    reason: str = "hard_bounce",
+    source: str = "",
+    recruiter_id: str | None = None,
+    raw_payload: dict[str, Any] | None = None,
+) -> bool:
+    """Idempotently add an email to the do-not-contact list after a TERMINAL delivery
+    failure — a hard bounce or an ESP block — so no future send (manual route,
+    end-of-harvest auto-outreach, or the resend script) ever retries a dead address.
+    All of those already gate on is_suppressed(), so this one write covers every path.
+
+    Unlike add_suppression (an explicit opt-out) this deliberately does NOT flip
+    RecruiterORM.unsubscribed and does NOT rewrite the outreach rows' delivery_status:
+    the "bounced"/"blocked" headline set by _apply_delivery_event is the accurate
+    outcome and must stand. Soft bounces (transient) and spam complaints are NOT routed
+    here — see outreach_log_service._is_undeliverable. Returns True if a NEW row was
+    created (False if the address was already suppressed, e.g. a prior unsubscribe)."""
+    e = _norm(email)
+    if not e:
+        return False
+    existing = (
+        await db.execute(select(EmailSuppressionORM.id).where(EmailSuppressionORM.email == e))
+    ).first()
+    if existing is not None:
+        return False
+    db.add(EmailSuppressionORM(
+        email=e,
+        reason=(reason or "hard_bounce")[:30],
+        source=source or "",
+        recruiter_id=recruiter_id,
+        raw_payload=raw_payload,
+    ))
+    return True
 
 
 async def add_suppression(
