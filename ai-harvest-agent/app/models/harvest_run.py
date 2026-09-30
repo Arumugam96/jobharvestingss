@@ -146,6 +146,10 @@ class ScrapedJobORM(Base):
     # it NULL, so it never affects their reads.
     lead_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # Real scrape/collection instant (app-set in the orchestrator converters);
+    # distinct from created_at, which is the batch-insert time. Nullable — NULL on
+    # rows written before this column or where the source didn't stamp it.
+    scraped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     run: Mapped[HarvestRunORM] = relationship(back_populates="jobs")
     # lazy="selectin": the recruiter must be loaded eagerly — read paths merge

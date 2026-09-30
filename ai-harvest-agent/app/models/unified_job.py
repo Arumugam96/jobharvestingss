@@ -9,6 +9,7 @@ from UnifiedJob at the route layer.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 
@@ -59,6 +60,12 @@ class UnifiedJob:
     # for sources/jobs where it wasn't captured.
     company_size:    str  = ""
 
+    # Wall-clock instant this job was scraped/collected (stamped in the
+    # orchestrator converters). Persisted to ScrapedJobORM.scraped_at so a row
+    # carries when it was actually harvested, not just the batch-insert time
+    # (created_at). None until stamped.
+    scraped_at:      datetime | None = None
+
     # ── BusinessFilterService fills these ─────────────────────────────────────
     job_type:       str  = ""           # "contract" | "permanent" | … | "not_specified" (inferred)
     domain:         str  = "Any"        # "IT" | "Finance" | "Engineering" | …
@@ -104,6 +111,7 @@ class UnifiedJob:
             "source":                 self.source,
             "company_url":            self.company_url,
             "company_size":           self.company_size,
+            "scraped_at":             self.scraped_at,
             "employment_type":        self.employment_type,
             "job_type":               self.job_type,
             "domain":                 self.domain,

@@ -267,6 +267,10 @@ class HarvestRunService:
                     skills=j.get("skills") or [],
                     work_mode=j.get("work_mode", "not_specified"),
                     company_url=j.get("company_url", ""),
+                    # Real scrape time stamped by the orchestrator converters;
+                    # fall back to now() so the column is always app-populated
+                    # rather than reflecting the batch-insert (created_at).
+                    scraped_at=j.get("scraped_at") or datetime.now(timezone.utc),
                     company_size=j.get("company_size") or rec_company_size or cache_company_size,
                     company_country=j.get("company_country") or rec_company_country or cache_company_country,
                     company_state=j.get("company_state") or rec_company_state or cache_company_state,
@@ -347,6 +351,12 @@ class HarvestRunService:
                     input_tokens=c.get("input_tokens"),
                     output_tokens=c.get("output_tokens"),
                     latency_ms=c.get("latency_ms"),
+                    # Real wall-clock call time captured by LLMService at call time
+                    # (see llm_service._complete_text_with_failover). Fall back to
+                    # now() for any legacy entry that predates that field so the
+                    # NOT-NULL column is always populated by the app, not the
+                    # end-of-run INSERT's server_default.
+                    called_at=c.get("called_at") or datetime.now(timezone.utc),
                     success=c.get("success", True),
                     error_message=c.get("error_message"),
                     retry_count=c.get("retry_count", 0),
@@ -862,12 +872,17 @@ async def insert_llm_call(
     error_message: str | None = None,
     job_url: str | None = None,
     run_id: str | None = None,
+    called_at: datetime | None = None,
 ) -> None:
     """Record one LLM call in the shared `llm_calls` table. Unlike
     HarvestRunService.bulk_insert_llm_calls (harvest-run-scoped), this takes any
     session and defaults run_id=None, so the outreach flow (email/linkedin
     generation) can audit its calls without a harvest run. prompt/response char
-    counts are derived so callers only pass the text."""
+    counts are derived so callers only pass the text.
+
+    called_at is the real wall-clock time of the call; callers that captured it
+    just before invoking the LLM should pass it. Defaults to now() — acceptable
+    here because this row is inserted immediately after the call (no batch skew)."""
     db.add(
         LlmCallORM(
             id=str(uuid.uuid4()),
@@ -883,6 +898,7 @@ async def insert_llm_call(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             latency_ms=latency_ms,
+            called_at=called_at or datetime.now(timezone.utc),
             success=success,
             error_message=error_message,
         )

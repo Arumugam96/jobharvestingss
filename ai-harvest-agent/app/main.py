@@ -59,6 +59,9 @@ def _ensure_scraped_jobs_columns(sync_conn) -> None:
     if "scraped_jobs" not in inspector.get_table_names():
         return  # brand-new DB — create_all above already made this table with the columns
     existing_cols = {c["name"] for c in inspector.get_columns("scraped_jobs")}
+    # Postgres wants TIMESTAMPTZ to match DateTime(timezone=True); SQLite ignores
+    # the affinity, so a plain TIMESTAMP is fine there.
+    ts_type = "TIMESTAMPTZ" if sync_conn.dialect.name == "postgresql" else "TIMESTAMP"
     # (column name, ADD COLUMN DDL) — constant DEFAULTs, portable SQL only.
     # TRUE works as a boolean default on both PostgreSQL and SQLite (>=3.23).
     pending = [
@@ -83,6 +86,10 @@ def _ensure_scraped_jobs_columns(sync_conn) -> None:
         # country" filter/facet (distinct from the job-location country above).
         ("company_country", "ALTER TABLE scraped_jobs ADD COLUMN company_country VARCHAR(100) NOT NULL DEFAULT ''"),
         ("company_state",   "ALTER TABLE scraped_jobs ADD COLUMN company_state VARCHAR(100) NOT NULL DEFAULT ''"),
+        # Real scrape/collection time (app-set in the orchestrator converters);
+        # nullable so existing rows stay NULL rather than needing a constant
+        # default. Mirrored in alembic 0012.
+        ("scraped_at",      f"ALTER TABLE scraped_jobs ADD COLUMN scraped_at {ts_type}"),
     ]
     for name, ddl in pending:
         if name not in existing_cols:
@@ -196,6 +203,9 @@ def _ensure_email_outreach_columns(sync_conn) -> None:
         # Rendered HTML part as actually delivered (signature card included);
         # NULL for LinkedIn rows and pre-existing sends. Mirrored in alembic 0009.
         ("body_html",           "ALTER TABLE email_outreach ADD COLUMN body_html TEXT"),
+        # Real send-attempt time (app-set for sent AND failed rows), distinct from
+        # created_at (insert time) and delivered_at (success-only). Alembic 0012.
+        ("sent_at",             f"ALTER TABLE email_outreach ADD COLUMN sent_at {ts_type}"),
     ]
     for name, ddl in pending:
         if name not in existing_cols:

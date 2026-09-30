@@ -99,6 +99,7 @@ async def suppress_bounced(
     source: str = "",
     recruiter_id: str | None = None,
     raw_payload: dict[str, Any] | None = None,
+    event_time: datetime | None = None,
 ) -> bool:
     """Idempotently add an email to the do-not-contact list after a TERMINAL delivery
     failure — a hard bounce or an ESP block — so no future send (manual route,
@@ -125,6 +126,9 @@ async def suppress_bounced(
         source=source or "",
         recruiter_id=recruiter_id,
         raw_payload=raw_payload,
+        # The provider event's own time (webhook bounce/block), so the row reflects
+        # when the terminal failure occurred, not when we processed it. Defaults now().
+        unsubscribed_at=event_time or datetime.now(timezone.utc),
     ))
     return True
 
@@ -136,15 +140,21 @@ async def add_suppression(
     source: str,
     raw_payload: dict[str, Any] | None = None,
     recruiter_id: str | None = None,
+    event_time: datetime | None = None,
 ) -> bool:
     """Idempotently suppress an email. Also mirrors the flag onto any recruiter whose
     official/secondary address matches, and stamps the recent outreach rows to that
     address as ``delivery_status="unsubscribed"`` (with an ``unsub`` event) so Mail
-    logs reflects it. Returns True if a NEW suppression row was created."""
+    logs reflects it. Returns True if a NEW suppression row was created.
+
+    event_time is the provider event's own timestamp (webhook unsub) — passed so the
+    recorded opt-out time reflects when the recruiter actually unsubscribed, not when
+    we processed the webhook. Non-webhook callers (footer link, one-click) omit it →
+    now(), the accurate click time."""
     e = _norm(email)
     if not e:
         return False
-    now = datetime.now(timezone.utc)
+    when = event_time or datetime.now(timezone.utc)
 
     existing = (
         await db.execute(select(EmailSuppressionORM).where(EmailSuppressionORM.email == e))
@@ -154,6 +164,7 @@ async def add_suppression(
         db.add(EmailSuppressionORM(
             email=e, reason="unsubscribe", source=source or "",
             recruiter_id=recruiter_id, raw_payload=raw_payload,
+            unsubscribed_at=when,
         ))
 
     # Mirror onto matching recruiters (idempotent — sets the same values).
@@ -163,7 +174,7 @@ async def add_suppression(
             func.lower(RecruiterORM.official_email_id) == e,
             func.lower(RecruiterORM.secondary_email) == e,
         ))
-        .values(unsubscribed=True, unsubscribed_at=now)
+        .values(unsubscribed=True, unsubscribed_at=when)
     )
 
     # Stamp the outreach rows to this address (skip any already unsubscribed so
@@ -175,6 +186,6 @@ async def add_suppression(
         if row.delivery_status == "unsubscribed":
             continue
         row.delivery_status = "unsubscribed"
-        row.events = [*(row.events or []), {"event": "unsub", "at": now.isoformat()}]
+        row.events = [*(row.events or []), {"event": "unsub", "at": when.isoformat()}]
 
     return created

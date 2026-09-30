@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { Loader2, Square, AlertTriangle } from "lucide-react";
 import { stopHarvest, ApiError } from "../api";
 
@@ -84,7 +85,7 @@ export default function StopHarvestButton({ harvestRunning, onStopped, className
         {stopping ? "Stopping…" : "Stop harvest"}
       </button>
 
-      {open && (
+      {open && createPortal(
         <div role="dialog" aria-modal="true" onMouseDown={close} style={overlay}>
           <div onMouseDown={(e) => e.stopPropagation()} style={card}>
             <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
@@ -126,7 +127,8 @@ export default function StopHarvestButton({ harvestRunning, onStopped, className
               </button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </>
   );

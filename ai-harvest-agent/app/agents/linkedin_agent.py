@@ -2119,30 +2119,70 @@ class LinkedInAgent:
 
     # ── Search URL builder ─────────────────────────────────────────────────────
 
+    # Category labels that are catch-all buckets ("Other IT categories"), not real
+    # search terms — dropped when composing the keyword query so they aren't
+    # searched literally.
+    _CATEGORY_CATCHALL_RE = re.compile(r"^\s*other\b", re.IGNORECASE)
+
     @staticmethod
-    def _compose_keyword_query(keyword: str, domain: str) -> str:
+    def _or_join(terms: list[str] | None, cap: int = 10) -> str:
+        """Build a LinkedIn `keywords=` boolean-OR query from selected category /
+        custom-title terms: each term quoted (so multi-word and slash forms like
+        "AI / ML" search as a phrase), joined with OR, capped so the URL stays
+        sane. Catch-all buckets are dropped. Returns "" when nothing usable."""
+        cleaned = [
+            t.strip() for t in (terms or [])
+            if t and t.strip() and not LinkedInAgent._CATEGORY_CATCHALL_RE.match(t)
+        ]
+        if not cleaned:
+            return ""
+        return " OR ".join(f'"{t}"' for t in cleaned[:cap])
+
+    @staticmethod
+    def _compose_keyword_query(
+        keyword: str,
+        domain: str,
+        job_categories: list[str] | None = None,
+        custom_job_titles: list[str] | None = None,
+    ) -> str:
         """The LinkedIn `keywords=` value.
 
-        A user-typed keyword always wins. Otherwise the chosen domain label is
-        placed into the search box exactly as-is — e.g. "Data Engineering",
-        "AI/ML", "Cyber Security", "IT" — so LinkedIn searches for that role
-        directly (no boolean OR-set, no native function filter). This makes
-        LinkedIn's own filtered results the source of truth. "Any" and "Non-IT"
-        have no meaningful search term, so they contribute nothing (LinkedIn
-        returns its unfiltered result set)."""
+        Priority:
+          1. A user-typed keyword always wins.
+          2. Otherwise, when specific sub-categories or custom "Others" titles were
+             chosen in the Rule Engine, OR-join them into the search box so LinkedIn
+             returns those roles directly (custom titles first, then IT/Non-IT
+             sub-categories). An empty list means "all selected", which falls
+             through to the coarse domain below.
+          3. Otherwise the chosen domain label is placed into the search box as-is
+             — e.g. "Data Engineering", "AI/ML", "Cyber Security", "IT". "Any" and
+             "Non-IT" have no meaningful search term, so they contribute nothing
+             (LinkedIn returns its unfiltered result set).
+
+        LinkedIn's own filtered results stay the source of truth; post-scrape
+        domain classification is unaffected (still driven by the coarse `domain`)."""
         keyword = (keyword or "").strip()
         if keyword:
             return keyword
+        titles_query = LinkedInAgent._or_join(custom_job_titles)
+        if titles_query:
+            return titles_query
+        categories_query = LinkedInAgent._or_join(job_categories)
+        if categories_query:
+            return categories_query
         if domain in ("", "Any", "Non-IT"):
             return ""
         return domain
 
     @staticmethod
     def _build_search_url(f: FiltersConfig, start: int = 0) -> str:
-        # The domain is placed into the `keywords=` search box as-is (see
-        # _compose_keyword_query) — no boolean OR-set, no native function filter.
-        # LinkedIn's own filtered results are the source of truth.
-        keyword_query = LinkedInAgent._compose_keyword_query(f.keyword, f.domain)
+        # The keywords= box carries a typed keyword, else the OR-joined selected
+        # sub-categories / custom titles, else the coarse domain label as-is (see
+        # _compose_keyword_query). LinkedIn's own filtered results are the source
+        # of truth.
+        keyword_query = LinkedInAgent._compose_keyword_query(
+            f.keyword, f.domain, f.job_categories, f.custom_job_titles,
+        )
         params: list[str] = [
             f"keywords={quote_plus(keyword_query)}",
         ]

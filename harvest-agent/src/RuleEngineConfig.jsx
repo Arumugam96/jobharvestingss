@@ -238,6 +238,9 @@ export default function RuleEngineConfig({
     setItCategories(loadedJobDomain === "IT" && loadedCategories.length ? loadedCategories : IT_JOB_CATEGORIES);
     setNonItCategories(loadedJobDomain === "Non-IT" && loadedCategories.length ? loadedCategories : NON_IT_JOB_CATEGORIES);
     setCustomJobTitles(config.filters.custom_job_titles || []);
+    // Company Size is now persisted (minimum-size floor for the outreach gate);
+    // an empty saved list means "All Sizes".
+    setCompanySizes(config.filters.company_sizes?.length ? config.filters.company_sizes : ["ALL"]);
     const loadedEntity = config.filters.hiring_entity || "Any";
     setHiringEntity(loadedEntity);
     // A specific hiring entity determines GCC-ness — neutralize any stale/
@@ -283,8 +286,20 @@ export default function RuleEngineConfig({
         work_mode: workMode,
         search_window_hours: Number(searchWindow),
         domain: jobDomain === "IT" ? "IT" : jobDomain === "Non-IT" ? "Non-IT" : "Any",
-        job_categories: jobDomain === "IT" ? itCategories : jobDomain === "Non-IT" ? nonItCategories : [],
+        // Send [] when EVERY category is selected ("all") so the backend keeps the
+        // coarse domain search; a subset is forwarded to refine the LinkedIn query
+        // (see LinkedInAgent._compose_keyword_query). Round-trips: applyConfig maps
+        // an empty list back to "all selected".
+        job_categories:
+          jobDomain === "IT"
+            ? (itCategories.length === IT_JOB_CATEGORIES.length ? [] : itCategories)
+            : jobDomain === "Non-IT"
+            ? (nonItCategories.length === NON_IT_JOB_CATEGORIES.length ? [] : nonItCategories)
+            : [],
         custom_job_titles: jobDomain === "Others" ? customJobTitles : [],
+        // Minimum company-size floor for the email outreach gate; ["ALL"] ⇒ [] ⇒
+        // no gate. Under-floor jobs are still scraped and stored, just not emailed.
+        company_sizes: companySizes.includes("ALL") ? [] : companySizes,
         hiring_entity: hiringEntity,
         gcc_mode: gccMode,
         salary_min: salaryMin === "" ? null : Number(salaryMin),
@@ -880,7 +895,7 @@ export default function RuleEngineConfig({
 
                   <div className="rec-note rec-note--info" style={{ marginTop: 16 }}>
                     <Info size={16} />
-                    <span>Categories/titles are saved for reference; only the IT / Non-IT / Any selection above narrows the live search today.</span>
+                    <span>Selecting <b>all</b> categories searches the whole IT / Non-IT domain. Selecting specific categories (or entering Others titles) narrows the LinkedIn search to those terms; post-scrape domain classification is unchanged.</span>
                   </div>
                 </Card>
 

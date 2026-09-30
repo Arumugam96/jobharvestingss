@@ -573,7 +573,9 @@ async def _run_harvest_background_impl(
         outreach_rows = await db_read(
             lambda db: HarvestRunService(db).list_jobs_for_run(run_pk)
         ) or []
-    await run_auto_outreach_after_harvest(outreach_rows or [], run_id=run_id)
+    await run_auto_outreach_after_harvest(
+        outreach_rows or [], run_id=run_id, company_sizes=config.filters.company_sizes,
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════

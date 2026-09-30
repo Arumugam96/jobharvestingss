@@ -87,12 +87,21 @@ class FiltersConfig(BaseModel):
         "IT", "Engineering", "Finance", "Operations", "Non-IT", "Any"
     ] = "Any"
     # Granular sub-categories selected under the IT/Non-IT Rule Engine UI, and
-    # free-text custom titles entered under "Others" — persisted alongside
-    # `domain` for round-tripping only. Not yet consumed by domain_matches/
-    # infer_domain/_compose_keyword_query; `domain` above still drives all
-    # real search-narrowing and post-scrape classification.
+    # free-text custom titles entered under "Others". When a SUBSET of categories
+    # is chosen these refine the LinkedIn `keywords=` search (OR-joined) — see
+    # LinkedInAgent._compose_keyword_query; an empty list means "all selected",
+    # which falls back to the coarse `domain` label above. `domain` still drives
+    # post-scrape classification (domain_matches/infer_domain) either way.
     job_categories:    list[str] = Field(default_factory=list)
     custom_job_titles: list[str] = Field(default_factory=list)
+
+    # Company-size pills selected in the Rule Engine UI (band tokens, e.g.
+    # "501-1000"; "10001+"). Used ONLY as a minimum-size floor for the automated
+    # email outreach gate (the lowest selected band's lower bound) — see
+    # app.core.company_size.minimum_floor and auto_outreach_service. Never affects
+    # scraping, search, storage, or the post-scrape flag pipeline: under-floor jobs
+    # are still scraped and stored, they are only not emailed. Empty ⇒ no gate.
+    company_sizes:     list[str] = Field(default_factory=list)
 
     # ── Hiring entity + GCC ───────────────────────────────────────────────────
     hiring_entity: Literal["Direct Client", "GCC", "Ambiguous", "Staffing Firm", "Any"]             = "Any"

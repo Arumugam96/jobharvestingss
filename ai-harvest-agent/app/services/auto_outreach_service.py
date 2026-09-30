@@ -36,6 +36,7 @@ from uuid import uuid4
 import structlog
 
 from app.config import get_settings
+from app.core.company_size import minimum_floor, size_meets_floor
 from app.models.harvest_run import ScrapedJobORM
 from app.services.active_clients import classify_client
 from app.services.email_service import AUTOMATION_CONTACT_BLOCK, EmailSender, render_outreach_email_html
@@ -60,23 +61,34 @@ _SEND_DELAY_SECONDS = 2.0
 _AUTO_TONE = "Formal"
 
 
-def _dedupe_targets(job_rows: list[ScrapedJobORM]) -> tuple[list[dict], int]:
+def _dedupe_targets(
+    job_rows: list[ScrapedJobORM], floor: int | None = None
+) -> tuple[list[dict], int, int]:
     """Reduce this run's job rows to one send target per recruiter.
 
     Multiple harvested jobs can map to the same recruiter — email them once. Keeps
     the first row seen per recruiter (keyed by recruiter_id, else the lowercased
     email). Rows with no resolvable email are dropped. Reads only attributes eagerly
     loaded on the ORM rows (recruiter is lazy="selectin"), so it's safe on the
-    detached rows handed in from the harvest-completion scope. Returns
-    (targets, skipped_no_email)."""
+    detached rows handed in from the harvest-completion scope.
+
+    `floor` is the minimum company-size lower bound (from the Rule Engine size
+    pills); a recruiter whose company is KNOWN to be below it is dropped from
+    outreach — the job itself stays scraped and stored, only its email is
+    suppressed. Unknown/unparseable sizes are still emailed (size_meets_floor →
+    None). Returns (targets, skipped_no_email, skipped_below_size)."""
     seen: set[str] = set()
     targets: list[dict] = []
     no_email = 0
+    below_size = 0
     for job in job_rows:
         view = scraped_job_view(job)
         email = (view.get("email_id") or "").strip()
         if not email:
             no_email += 1
+            continue
+        if size_meets_floor(view.get("company_size", ""), floor) is False:
+            below_size += 1
             continue
         recruiter_id = job.recruiter_id
         key = recruiter_id or email.lower()
@@ -94,21 +106,26 @@ def _dedupe_targets(job_rows: list[ScrapedJobORM]) -> tuple[list[dict], int]:
             "job_url": view.get("job_url") or "",
             "unsubscribed": bool(getattr(recruiter, "unsubscribed", False)) if recruiter else False,
         })
-    return targets, no_email
+    return targets, no_email, below_size
 
 
 async def run_auto_outreach_after_harvest(
-    job_rows: list[ScrapedJobORM], *, run_id: str
+    job_rows: list[ScrapedJobORM], *, run_id: str, company_sizes: list[str] | None = None
 ) -> dict:
     """Send an initial outreach email to every eligible recruiter in `job_rows`.
 
     Gated by settings.outreach_auto_send_on_harvest. Never raises — returns a summary
     dict of counts (also logged). `job_rows` are the harvest run's ScrapedJobORM rows
-    with their recruiter eager-loaded."""
+    with their recruiter eager-loaded.
+
+    `company_sizes` are the Rule Engine size pills (e.g. ["501-1000"]); their lowest
+    band lower-bound is a minimum-size floor below which a KNOWN-size company is not
+    emailed (its jobs are still stored). Empty/None ⇒ no size gate."""
     counts = {
         "sent": 0, "failed": 0,
         "skipped_suppressed": 0, "skipped_already": 0,
-        "skipped_unsubscribed": 0, "skipped_no_email": 0, "skipped_error": 0,
+        "skipped_unsubscribed": 0, "skipped_no_email": 0,
+        "skipped_below_size": 0, "skipped_error": 0,
     }
     try:
         settings = get_settings()
@@ -116,10 +133,16 @@ async def run_auto_outreach_after_harvest(
             logger.info("auto_outreach_disabled", run_id=run_id)
             return {"enabled": False, **counts}
 
-        targets, no_email = _dedupe_targets(job_rows or [])
+        floor = minimum_floor(company_sizes or [])
+        targets, no_email, below_size = _dedupe_targets(job_rows or [], floor)
         counts["skipped_no_email"] = no_email
+        counts["skipped_below_size"] = below_size
         if not targets:
-            logger.info("auto_outreach_no_targets", run_id=run_id, skipped_no_email=no_email)
+            logger.info(
+                "auto_outreach_no_targets", run_id=run_id,
+                skipped_no_email=no_email, skipped_below_size=below_size,
+                min_company_size_floor=floor,
+            )
             return {"enabled": True, "eligible": 0, **counts}
 
         # Unattended send identity: shared From (resolved inside EmailSender), the
@@ -253,7 +276,10 @@ async def run_auto_outreach_after_harvest(
                 await asyncio.sleep(_SEND_DELAY_SECONDS)
 
         await asyncio.gather(*(_process(t) for t in targets), return_exceptions=True)
-        logger.info("auto_outreach_complete", run_id=run_id, eligible=len(targets), **counts)
+        logger.info(
+            "auto_outreach_complete", run_id=run_id, eligible=len(targets),
+            min_company_size_floor=floor, **counts,
+        )
         return {"enabled": True, "eligible": len(targets), **counts}
     except Exception as exc:  # never let outreach break the harvest completion path
         logger.warning("auto_outreach_failed", run_id=run_id, error=str(exc))

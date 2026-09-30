@@ -129,6 +129,44 @@ def band_to_tier(value: str) -> str:
     return BAND_TO_TIER.get(normalize_company_size(value), "")
 
 
+def band_lower_bound(value: str) -> int | None:
+    """Lower employee-count bound of a company-size band, in any accepted format
+    (canonical token, comma-less Rule Engine pill form, "<band> employees",
+    "N+"), or None when no recognisable band is present. E.g. "501-1,000" and
+    "501-1000 employees" → 501; "10001+" → 10001; "1-10" → 2 (snaps up to the
+    smallest band). Used to turn a size pill into a numeric floor and to test a
+    scraped job's band against that floor."""
+    token = normalize_company_size(value)
+    for blo, _bhi, tok in _TIER_BANDS:
+        if tok == token:
+            return blo
+    return None
+
+
+def minimum_floor(size_values: list[str]) -> int | None:
+    """Lowest lower-bound across the selected size bands — the minimum-size floor
+    for the outreach gate. None when the list is empty or holds no recognisable
+    band (⇒ no gate)."""
+    bounds = [b for v in (size_values or []) if (b := band_lower_bound(v)) is not None]
+    return min(bounds) if bounds else None
+
+
+def size_meets_floor(job_size: str, floor: int | None) -> bool | None:
+    """Whether a scraped job's company-size band clears the minimum floor:
+      True  — floor is None (no gate) OR the band's lower bound ≥ floor,
+      False — the band is known and its lower bound < floor,
+      None  — the job size is unknown / unparseable (caller decides — today the
+              outreach gate still emails these).
+    Compares lower bounds, so a band clears the floor when it starts at or above
+    the selected size."""
+    if floor is None:
+        return True
+    lb = band_lower_bound(job_size)
+    if lb is None:
+        return None
+    return lb >= floor
+
+
 def band_from_employee_count(count: object) -> str:
     """Map a raw headcount (Apollo's ``estimated_num_employees`` integer) to the
     canonical ``"<band> employees"`` string used on scraped_jobs.company_size /

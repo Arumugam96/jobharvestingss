@@ -1,4 +1,5 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Search, ChevronDown, Check, Minus } from "lucide-react";
 
 /*
@@ -10,19 +11,58 @@ import { Search, ChevronDown, Check, Minus } from "lucide-react";
  * `selected`/`onChange` are lifted state — this component holds no selection
  * state of its own, only the open/closed flag and the search text, so
  * selections survive a search-text change untouched.
+ *
+ * The open panel is rendered through a portal to document.body and positioned
+ * `fixed` from the trigger's bounding rect. The host cards use a glassmorphism
+ * `backdrop-filter`, which creates a stacking context + containing block that
+ * otherwise trapped an absolutely-positioned panel behind sibling cards and let
+ * `.rec-content`/`.rec-main` overflow clip it. Portaling escapes both. Because
+ * the panel then lives outside the page's token-scoped root (.rec-main), its CSS
+ * re-declares the few design tokens it needs so its colors survive anywhere.
  */
 export default function SearchableMultiSelect({
   options, selected, onChange, allLabel, selectAllLabel, searchPlaceholder, ariaLabel,
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
+  const [pos, setPos] = useState({ top: 0, left: 0, width: 0 });
   const rootRef = useRef(null);
+  const triggerRef = useRef(null);
+  const panelRef = useRef(null);
   const searchRef = useRef(null);
   const selectAllRef = useRef(null);
 
+  const computePos = useCallback(() => {
+    const el = triggerRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    setPos({ top: r.bottom + 6, left: r.left, width: r.width });
+  }, []);
+
+  // Position the portaled panel under the trigger, and keep it there while the
+  // page scrolls / resizes (capture=true catches scrolls in any ancestor).
+  useLayoutEffect(() => {
+    if (!open) return;
+    computePos();
+    const onMove = () => computePos();
+    window.addEventListener("scroll", onMove, true);
+    window.addEventListener("resize", onMove);
+    return () => {
+      window.removeEventListener("scroll", onMove, true);
+      window.removeEventListener("resize", onMove);
+    };
+  }, [open, computePos]);
+
+  // Outside-click / Escape. The panel is portaled outside rootRef, so a click
+  // inside it must count as "inside" (check panelRef too) or the panel would
+  // close on its own controls.
   useEffect(() => {
     if (!open) return;
-    const onDown = (e) => { if (rootRef.current && !rootRef.current.contains(e.target)) setOpen(false); };
+    const onDown = (e) => {
+      if (rootRef.current && rootRef.current.contains(e.target)) return;
+      if (panelRef.current && panelRef.current.contains(e.target)) return;
+      setOpen(false);
+    };
     const onKey = (e) => { if (e.key === "Escape") setOpen(false); };
     document.addEventListener("mousedown", onDown);
     document.addEventListener("keydown", onKey);
@@ -65,14 +105,15 @@ export default function SearchableMultiSelect({
 
   return (
     <div className="sms-root" ref={rootRef}>
-      <button type="button" className="sms-trigger" aria-haspopup="listbox" aria-expanded={open}
+      <button type="button" ref={triggerRef} className="sms-trigger" aria-haspopup="listbox" aria-expanded={open}
         aria-label={ariaLabel} onClick={() => setOpen((v) => !v)}>
         <span className="sms-trigger-label">{summary}</span>
         <ChevronDown size={16} className={"sms-caret" + (open ? " is-open" : "")} />
       </button>
 
-      {open && (
-        <div className="sms-panel" role="listbox" aria-label={ariaLabel}>
+      {open && createPortal(
+        <div className="sms-panel" role="listbox" aria-label={ariaLabel} ref={panelRef}
+          style={{ position: "fixed", top: pos.top, left: pos.left, width: pos.width }}>
           <div className="sms-search">
             <Search size={14} />
             <input ref={searchRef} type="text" value={query} placeholder={searchPlaceholder}
@@ -97,7 +138,8 @@ export default function SearchableMultiSelect({
           </div>
 
           <div className="sms-footer">{selected.length} of {options.length} selected</div>
-        </div>
+        </div>,
+        document.body
       )}
       <style>{styles}</style>
     </div>
@@ -118,7 +160,11 @@ const styles = `
   .sms-caret.is-open { transform:rotate(180deg); }
 
   .sms-panel {
-    position:absolute; top:calc(100% + 6px); left:0; right:0; z-index:30;
+    /* Portaled to document.body; position/top/left/width are set inline from the
+       trigger rect. Re-declare the tokens the panel uses since it renders outside
+       .rec-main (the page's token-scoped root). */
+    --text:#1E293B; --muted:#64748B; --line:#E2E8F0; --green:#16A34A;
+    z-index:1000;
     background:rgba(255,255,255,.98); border:1px solid rgba(148,163,184,.5); border-radius:11px;
     box-shadow:0 14px 34px -12px rgba(15,23,42,.28); overflow:hidden;
     -webkit-backdrop-filter:blur(10px); backdrop-filter:blur(10px);

@@ -232,7 +232,10 @@ async def record_delivery_events(db: AsyncSession, events: list[dict], source: s
                 row = await get_by_id(db, str(custom_id))
                 email = row.to_email if row else None
             if email:
-                await add_suppression(db, email=email, source=source, raw_payload=ev)
+                await add_suppression(
+                    db, email=email, source=source, raw_payload=ev,
+                    event_time=_event_time(ev.get("time")),
+                )
                 updated += 1
             continue  # add_suppression already stamps the row(s); skip the generic path
 
@@ -250,6 +253,7 @@ async def record_delivery_events(db: AsyncSession, events: list[dict], source: s
                     db, email=email,
                     reason="blocked" if ev_name == "blocked" else "hard_bounce",
                     source=source, raw_payload=ev,
+                    event_time=_event_time(ev.get("time")),
                 )
 
         if not custom_id:
@@ -606,6 +610,10 @@ def build_email_outreach_row(
         fallback_used=fallback_used,
         status=status,
         error_message=error_message,
+        # The real send-attempt instant, recorded for BOTH sent and failed rows
+        # (unlike delivered_at, which is success-only). `when` is the caller's
+        # captured send time, else now().
+        sent_at=when,
         delivery_status="delivered" if delivered else None,
         delivered_at=when if delivered else None,
         sent_by=sent_by,

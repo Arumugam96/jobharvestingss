@@ -65,6 +65,10 @@ class EmailOutreachORM(Base):
     # The logged-in user who triggered the send (AuthenticatedUser.email).
     sent_by: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # The real send-attempt instant (app-set at row build, for BOTH sent and
+    # failed rows) — distinct from created_at (row-insert time) and delivered_at
+    # (set only on a successful send). NULL only on rows written before this column.
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # ── Delivery engagement (updated by Mailjet event webhooks) ─────────────────
     delivery_status: Mapped[str | None] = mapped_column(String(20), nullable=True)

@@ -30,6 +30,7 @@ from app.config import get_settings
 from app.models.harvest_run import ScrapedJobORM
 from app.models.recruiter import RecruiterORM
 from app.services.auto_outreach_service import run_auto_outreach_after_harvest
+from app.services.config_service import ConfigService
 from app.services.harvest_run_service import db_read
 
 logger = structlog.get_logger(__name__)
@@ -85,7 +86,12 @@ async def run_outreach_sweep(limit: int | None = None) -> dict:
         return {"enabled": True, "candidates": 0, "eligible": 0}
 
     logger.debug("outreach_sweep_start", candidates=len(rows))
-    summary = await run_auto_outreach_after_harvest(rows, run_id=_SWEEP_RUN_ID)
+    # Same minimum company-size floor the end-of-harvest send applies, from the
+    # current Rule Engine config (empty ⇒ no gate).
+    company_sizes = ConfigService().load().filters.company_sizes
+    summary = await run_auto_outreach_after_harvest(
+        rows, run_id=_SWEEP_RUN_ID, company_sizes=company_sizes,
+    )
     summary["candidates"] = len(rows)
     logger.info("outreach_sweep_done", **summary)
     return summary

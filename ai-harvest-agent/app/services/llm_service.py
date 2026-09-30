@@ -6,6 +6,7 @@ import json
 import time
 from contextvars import ContextVar
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -445,6 +446,11 @@ class LLMService:
                 model = claude_model
             retry_token = _retry_attempts.set(0)
             start = time.monotonic()
+            # Wall-clock instant this provider attempt began — recorded on the
+            # call-log entry so llm_calls.called_at reflects when the call actually
+            # happened, not when the end-of-run batch INSERT wrote the row.
+            # (start/latency use time.monotonic(), which is not a wall clock.)
+            called_at = datetime.now(timezone.utc)
             text: str | None = None
             input_tokens: int | None = None
             output_tokens: int | None = None
@@ -506,6 +512,7 @@ class LLMService:
                         "input_tokens": input_tokens,
                         "output_tokens": output_tokens,
                         "latency_ms": int((time.monotonic() - start) * 1000),
+                        "called_at": called_at,
                         "success": success,
                         "error_message": error_message,
                         "retry_count": max(0, _retry_attempts.get() - 1),
