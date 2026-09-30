@@ -86,6 +86,13 @@ class FiltersConfig(BaseModel):
         "Digital", "UX/UI", "ERP", "Cyber Security", "Infrastructure",
         "IT", "Engineering", "Finance", "Operations", "Non-IT", "Any"
     ] = "Any"
+    # Granular sub-categories selected under the IT/Non-IT Rule Engine UI, and
+    # free-text custom titles entered under "Others" — persisted alongside
+    # `domain` for round-tripping only. Not yet consumed by domain_matches/
+    # infer_domain/_compose_keyword_query; `domain` above still drives all
+    # real search-narrowing and post-scrape classification.
+    job_categories:    list[str] = Field(default_factory=list)
+    custom_job_titles: list[str] = Field(default_factory=list)
 
     # ── Hiring entity + GCC ───────────────────────────────────────────────────
     hiring_entity: Literal["Direct Client", "GCC", "Ambiguous", "Staffing Firm", "Any"]             = "Any"

@@ -20,6 +20,36 @@ export const DOMAINS = ["Any", "Data Engineering", "Data Science", "AI/ML", "SAP
 
 export const HIRING_ENTITIES = ["Any", "Direct Client", "GCC", "Ambiguous", "Staffing Firm"];
 
+// Job Domain redesign (RuleEngineConfig only) — primary selector + its two
+// category lists, and the standalone (UI-only, unpersisted) Company Size
+// ranges. See RuleEngineConfig's "Job Domain" / "Company Size" cards.
+export const IT_JOB_CATEGORIES = [
+  "Software Development", "Frontend Development", "Backend Development", "Full Stack Development",
+  "Mobile Development", "DevOps", "Cloud Engineering", "Infrastructure", "System Administration",
+  "Network Engineering", "Cyber Security", "Data Engineering", "Data Science", "AI / ML",
+  "Database Administration", "QA / Testing", "Automation Testing", "SAP", "ERP", "UI / UX",
+  "Technical Support", "Solution Architecture", "Business Intelligence", "Other IT categories",
+];
+
+export const NON_IT_JOB_CATEGORIES = [
+  "Human Resources", "Recruitment / Talent Acquisition", "Finance", "Accounting", "Sales", "Marketing",
+  "Digital Marketing", "Operations", "Administration", "Customer Support", "Business Development",
+  "Legal", "Procurement", "Supply Chain", "Logistics", "Healthcare", "Education", "Banking",
+  "Insurance", "Retail", "Manufacturing", "Construction", "Real Estate", "Hospitality",
+  "Media / Content", "Other Non-IT categories",
+];
+
+export const COMPANY_SIZE_RANGES = [
+  { value: "1-10", label: "1–10" },
+  { value: "11-50", label: "11–50" },
+  { value: "51-200", label: "51–200" },
+  { value: "201-500", label: "201–500" },
+  { value: "501-1000", label: "501–1K" },
+  { value: "1001-5000", label: "1K–5K" },
+  { value: "5001-10000", label: "5K–10K" },
+  { value: "10001+", label: "10K+" },
+];
+
 export const GCC_MODES = [
   { value: "include_gcc", label: "Include GCC" },
   { value: "gcc_only", label: "GCC only" },

@@ -12,9 +12,11 @@ import LiveBrowserView from "./components/LiveBrowserView";
 import StopHarvestButton from "./components/StopHarvestModal";
 import { GLASS, GLASS_FALLBACK, GLASS_INPUT, GLASS_INPUT_FOCUS } from "./theme";
 import {
-  JOB_TYPES, WORK_MODES, DOMAINS, HIRING_ENTITIES, GCC_MODES, SEARCH_WINDOWS,
+  JOB_TYPES, WORK_MODES, HIRING_ENTITIES, GCC_MODES, SEARCH_WINDOWS,
   LINKEDIN_ACCOUNTS, TIMEZONES, CURRENCIES, fmtRunDate, nowLabel,
+  IT_JOB_CATEGORIES, NON_IT_JOB_CATEGORIES, COMPANY_SIZE_RANGES,
 } from "./lib/ruleEngineOptions";
+import SearchableMultiSelect from "./components/SearchableMultiSelect";
 import useCountUp from "./useCountUp";
 import { makeStallWatch, STALL_WARN_MSG } from "./stallWatch";
 
@@ -46,6 +48,34 @@ function Chip({ active, onClick, children, variant = "green", disabled = false, 
       style={disabled ? { opacity: 0.4, cursor: "not-allowed" } : undefined}>
       {children}
     </button>
+  );
+}
+
+// Enter-to-add removable-chip text input, used by the Job Domain card's
+// "Others" custom job title/search-term field.
+function TagInput({ tags, onChange, placeholder }) {
+  const [text, setText] = useState("");
+  const commit = () => {
+    const v = text.trim();
+    if (v && !tags.includes(v)) onChange([...tags, v]);
+    setText("");
+  };
+  return (
+    <div className="rec-tags">
+      {tags.map((t) => (
+        <span className="rec-tag" key={t}>
+          {t}
+          <button type="button" aria-label={`Remove ${t}`} onClick={() => onChange(tags.filter((x) => x !== t))}>×</button>
+        </span>
+      ))}
+      <input className="rec-tag-input" type="text" value={text} placeholder={tags.length ? "" : placeholder}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") { e.preventDefault(); commit(); }
+          else if (e.key === "Backspace" && !text && tags.length) onChange(tags.slice(0, -1));
+        }}
+        onBlur={commit} />
+    </div>
   );
 }
 
@@ -112,7 +142,15 @@ export default function RuleEngineConfig({
   const [timezone, setTimezone] = useState(DEFAULT_CONFIG.schedule.timezone);
   const [scheduleEnabled, setScheduleEnabled] = useState(DEFAULT_CONFIG.schedule.enabled);
   const [searchWindow, setSearchWindow] = useState(DEFAULT_CONFIG.filters.search_window_hours);
-  const [domain, setDomain] = useState(DEFAULT_CONFIG.filters.domain);
+  // Job Domain redesign — primary selector + its two independent category
+  // lists (switching back and forth keeps each one's in-progress edits) +
+  // custom titles for "Others". Company Size is local-only (never persisted;
+  // see the RuleEngineConfig redesign plan) so it isn't loaded/saved at all.
+  const [jobDomain, setJobDomain] = useState("IT"); // "IT" | "Non-IT" | "Others"
+  const [itCategories, setItCategories] = useState(IT_JOB_CATEGORIES);
+  const [nonItCategories, setNonItCategories] = useState(NON_IT_JOB_CATEGORIES);
+  const [customJobTitles, setCustomJobTitles] = useState([]);
+  const [companySizes, setCompanySizes] = useState(["ALL"]);
   const [hiringEntity, setHiringEntity] = useState(DEFAULT_CONFIG.filters.hiring_entity);
   const [gccMode, setGccMode] = useState(DEFAULT_CONFIG.filters.gcc_mode);
   const [salaryMin, setSalaryMin] = useState("");
@@ -193,7 +231,13 @@ export default function RuleEngineConfig({
     setLocation(config.filters.location || "");
     setJobType(config.filters.job_type || "Any");
     setWorkMode(config.filters.work_mode || "Any");
-    setDomain(config.filters.domain || "Any");
+    const loadedDomain = config.filters.domain;
+    const loadedJobDomain = loadedDomain === "IT" ? "IT" : loadedDomain === "Non-IT" ? "Non-IT" : "Others";
+    setJobDomain(loadedJobDomain);
+    const loadedCategories = config.filters.job_categories || [];
+    setItCategories(loadedJobDomain === "IT" && loadedCategories.length ? loadedCategories : IT_JOB_CATEGORIES);
+    setNonItCategories(loadedJobDomain === "Non-IT" && loadedCategories.length ? loadedCategories : NON_IT_JOB_CATEGORIES);
+    setCustomJobTitles(config.filters.custom_job_titles || []);
     const loadedEntity = config.filters.hiring_entity || "Any";
     setHiringEntity(loadedEntity);
     // A specific hiring entity determines GCC-ness — neutralize any stale/
@@ -215,7 +259,10 @@ export default function RuleEngineConfig({
   const errors = {
     jobSource: !(sources.linkedin || sources.naukri || sources.dice),
     jobType: !jobType,
-    domain: !domain,
+    jobDomainCategory:
+      jobDomain === "IT" ? itCategories.length === 0
+      : jobDomain === "Non-IT" ? nonItCategories.length === 0
+      : customJobTitles.length === 0,
     hiring: !hiringEntity,
     gccFlag: !gccMode,
   };
@@ -235,7 +282,9 @@ export default function RuleEngineConfig({
         job_type: jobType,
         work_mode: workMode,
         search_window_hours: Number(searchWindow),
-        domain,
+        domain: jobDomain === "IT" ? "IT" : jobDomain === "Non-IT" ? "Non-IT" : "Any",
+        job_categories: jobDomain === "IT" ? itCategories : jobDomain === "Non-IT" ? nonItCategories : [],
+        custom_job_titles: jobDomain === "Others" ? customJobTitles : [],
         hiring_entity: hiringEntity,
         gcc_mode: gccMode,
         salary_min: salaryMin === "" ? null : Number(salaryMin),
@@ -776,10 +825,79 @@ export default function RuleEngineConfig({
                   </div>
                 </Card>
 
-                <Card span title="Domain" required invalid={showErr("domain")} desc='A specific domain (or "IT") adds keywords to the search so fewer irrelevant jobs are fetched. Every job is also labelled by title/JD keywords and flagged if it doesn&rsquo;t match. "Non-IT"/"Any" don&rsquo;t narrow the search.'>
+                <Card title="Job Domain" required invalid={showErr("jobDomainCategory")}
+                  desc="Select the job domain and specific job categories to include in harvesting."
+                  error={
+                    jobDomain === "IT" ? "Select at least one IT job category."
+                    : jobDomain === "Non-IT" ? "Select at least one Non-IT job category."
+                    : "Enter at least one job title or search term."
+                  }>
+                  <div className="rec-chips" style={{ marginBottom: 14 }}>
+                    {["IT", "Non-IT", "Others"].map((t) => (
+                      <Chip key={t} active={jobDomain === t} onClick={() => { setJobDomain(t); markDirty(); }}>{t}</Chip>
+                    ))}
+                  </div>
+
+                  {jobDomain === "IT" && (
+                    <div className="rec-field">
+                      <label>IT Job Categories</label>
+                      <SearchableMultiSelect
+                        options={IT_JOB_CATEGORIES}
+                        selected={itCategories}
+                        onChange={(next) => { setItCategories(next); markDirty(); }}
+                        allLabel="All IT Jobs"
+                        selectAllLabel="Select All IT Jobs"
+                        searchPlaceholder="Search IT job categories..."
+                        ariaLabel="IT Job Categories"
+                      />
+                    </div>
+                  )}
+                  {jobDomain === "Non-IT" && (
+                    <div className="rec-field">
+                      <label>Non-IT Job Categories</label>
+                      <SearchableMultiSelect
+                        options={NON_IT_JOB_CATEGORIES}
+                        selected={nonItCategories}
+                        onChange={(next) => { setNonItCategories(next); markDirty(); }}
+                        allLabel="All Non-IT Jobs"
+                        selectAllLabel="Select All Non-IT Jobs"
+                        searchPlaceholder="Search Non-IT job categories..."
+                        ariaLabel="Non-IT Job Categories"
+                      />
+                    </div>
+                  )}
+                  {jobDomain === "Others" && (
+                    <div className="rec-field">
+                      <label>Job Title / Search Term</label>
+                      <TagInput tags={customJobTitles}
+                        onChange={(next) => { setCustomJobTitles(next); markDirty(); }}
+                        placeholder="e.g. Marine Engineer, Geologist, Fashion Designer" />
+                      <p className="rec-card-desc" style={{ marginTop: 8, marginBottom: 0 }}>
+                        Enter the specific job title or search term you want to harvest.
+                      </p>
+                    </div>
+                  )}
+
+                  <div className="rec-note rec-note--info" style={{ marginTop: 16 }}>
+                    <Info size={16} />
+                    <span>Categories/titles are saved for reference; only the IT / Non-IT / Any selection above narrows the live search today.</span>
+                  </div>
+                </Card>
+
+                <Card title="Company Size" desc="Filter jobs based on the hiring company&rsquo;s approximate employee count.">
                   <div className="rec-chips">
-                    {DOMAINS.map((t) => (
-                      <Chip key={t} active={domain === t} onClick={() => { setDomain(t); markDirty(); }}>{t}</Chip>
+                    <Chip active={companySizes.includes("ALL")} onClick={() => setCompanySizes(["ALL"])}>All Sizes</Chip>
+                    {COMPANY_SIZE_RANGES.map((r) => (
+                      <Chip key={r.value} active={companySizes.includes(r.value)}
+                        onClick={() => {
+                          setCompanySizes((prev) => {
+                            const withoutAll = prev.filter((s) => s !== "ALL");
+                            const next = withoutAll.includes(r.value)
+                              ? withoutAll.filter((s) => s !== r.value)
+                              : [...withoutAll, r.value];
+                            return next.length === 0 ? ["ALL"] : next;
+                          });
+                        }}>{r.label}</Chip>
                     ))}
                   </div>
                 </Card>
@@ -1065,6 +1183,13 @@ const styles = `
 
   /* Inline toggle */
   .rec-inline-toggle { display:flex; align-items:center; gap:11px; margin-top:18px; font-size:13.5px; color:#475569; }
+
+  /* Tag input — Others custom job title chips, mirrors .rec-chip's pill look */
+  .rec-tags { display:flex; flex-wrap:wrap; align-items:center; gap:8px; min-height:40px; padding:6px 10px; ${GLASS_INPUT} border-radius:9px; }
+  .rec-tags:focus-within { border-color:var(--primary); box-shadow:0 0 0 3px rgba(37,99,235,.12); ${GLASS_INPUT_FOCUS} }
+  .rec-tag { display:inline-flex; align-items:center; gap:6px; background:var(--green-bg); border:1px solid var(--green-bd); color:#047857; padding:4px 6px 4px 12px; border-radius:999px; font-size:12.8px; font-weight:600; }
+  .rec-tag button { border:none; background:none; color:#047857; cursor:pointer; font-size:15px; line-height:1; padding:0 4px; }
+  .rec-tag-input { flex:1; min-width:120px; border:none; outline:none; background:none; font-size:14px; color:var(--text); }
 
   /* Section label */
   .rec-section-label { font-size:11px; letter-spacing:1.3px; font-weight:700; text-transform:uppercase; color:var(--muted); margin:30px 0 16px; }
