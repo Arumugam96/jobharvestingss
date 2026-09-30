@@ -137,13 +137,13 @@ export default function Sidebar({ activePage, onNavigate = () => {}, jobsCount, 
         <div className="ha-sb-brand">
           <img className="ha-logo-img" src={`${process.env.PUBLIC_URL}/sight_spectrum_logo.jpg`} alt="SS jobharvesting Agent" width="150" height="150" />
           <div className="ha-tagline">Contract Sourcing Automation</div>
-          {isClient && (
+          {/* {isClient && (
             <div className="ha-workspace" style={{ color: workspaceColor }}>
               {tenant.name}
             </div>
-          )}
+          )} */}
         </div>
-        <nav style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 22, flex: 1 }}>
+        <nav style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 10, flex: 1 }}>
           {showConfiguration && (
             <div>
               <div className="ha-navhead"><span>Configuration</span></div>
@@ -228,7 +228,7 @@ const styles = `
   .ha-sb-slot.is-open .ha-tagline,.ha-sb-slot.is-open .ha-workspace{opacity:1;height:auto;}
 
   /* Section headers read as hairline dividers in rail mode. */
-  .ha-navhead{position:relative;height:18px;padding:0 12px 8px;font-size:10px;font-weight:600;
+  .ha-navhead{position:relative;height:18px;padding:0 5px 8px;font-size:10px;font-weight:600;
     text-transform:uppercase;letter-spacing:.14em;color:#94A3B8;white-space:nowrap;}
   .ha-navhead span{opacity:0;transition:opacity .18s ease .05s;}
   .ha-navhead::before{content:"";position:absolute;left:8px;right:8px;top:5px;height:1px;
@@ -239,7 +239,7 @@ const styles = `
   /* Nav item — fixed icon column so glyphs don't shift while expanding.
      Hover: gently illuminates and drifts 2px toward the content. */
   .ha-nav{position:relative;display:flex;width:100%;align-items:center;gap:12px;border:0;background:transparent;
-    cursor:pointer;border-radius:10px;padding:10px 12px 10px 17px;font-size:14px;color:#CBD5E1;
+    cursor:pointer;border-radius:10px;padding:8px 12px 8px 17px;font-size:14px;color:#CBD5E1;
     transition:background .18s ease-out,color .18s ease-out,transform .18s ease-out;text-align:left;font-family:inherit;}
   .ha-nav svg{flex:none;}
   .ha-nav-label{flex:1;text-align:left;white-space:nowrap;opacity:0;transition:opacity .18s ease .05s;}

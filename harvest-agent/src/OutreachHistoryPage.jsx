@@ -17,12 +17,45 @@ import { fmtAbs, fmtRel, initials, avatarColor, engagement as engagementOf, Enga
  * Renders inside the shared layout (ha-root → Sidebar → this <main>), reusing the
  * app's ha-* container styles. */
 
+// Date-filter presets. Each resolves to an INCLUSIVE local-date range via
+// rangeBounds() below ("" = open end); "all" (and any unknown key) means no
+// bounds. Local calendar dates — not UTC — so "Today" / "This month" track the
+// user's own calendar instead of shifting across midnight.
 const RANGES = [
-  { key: "24h", label: "Last 24 hours", ms: 24 * 3600e3 },
-  { key: "7d", label: "Last 7 days", ms: 7 * 24 * 3600e3 },
-  { key: "30d", label: "Last 30 days", ms: 30 * 24 * 3600e3 },
-  { key: "all", label: "All time", ms: null },
+  { key: "today", label: "Today" },
+  { key: "yesterday", label: "Yesterday" },
+  { key: "7d", label: "Last 7 days" },
+  { key: "30d", label: "Last 30 days" },
+  { key: "month", label: "This month" },
+  { key: "lastmonth", label: "Last month" },
+  { key: "all", label: "All time" },
 ];
+
+// Format a Date as local YYYY-MM-DD (matches the <input type="date"> custom range).
+const ymd = (d) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
+// Resolve a preset key to an inclusive {from, to} local-date range. Unknown /
+// "all" → both empty (no date bounds). "Last N days" is the N days ending today
+// (inclusive); "This month" runs from the 1st through today; "Last month" is the
+// whole previous calendar month.
+function rangeBounds(key) {
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const addDays = (base, n) => { const x = new Date(base); x.setDate(x.getDate() + n); return x; };
+  switch (key) {
+    case "today":     return { from: ymd(today), to: ymd(today) };
+    case "yesterday": { const y = addDays(today, -1); return { from: ymd(y), to: ymd(y) }; }
+    case "7d":        return { from: ymd(addDays(today, -6)), to: ymd(today) };
+    case "30d":       return { from: ymd(addDays(today, -29)), to: ymd(today) };
+    case "month":     return { from: ymd(new Date(now.getFullYear(), now.getMonth(), 1)), to: ymd(today) };
+    case "lastmonth": return {
+      from: ymd(new Date(now.getFullYear(), now.getMonth() - 1, 1)),
+      to:   ymd(new Date(now.getFullYear(), now.getMonth(), 0)), // day 0 → last day of previous month
+    };
+    default:          return { from: "", to: "" };
+  }
+}
 
 // ── Engagement stats panel ───────────────────────────────────────────────────
 
@@ -155,9 +188,8 @@ export default function OutreachHistoryPage() {
   // Date filter → backend YYYY-MM-DD params (a custom range wins over the presets).
   const dateParams = useMemo(() => {
     if (customFrom || customTo) return { date_from: customFrom, date_to: customTo };
-    const range = RANGES.find((r) => r.key === rangeKey);
-    if (range && range.ms) return { date_from: new Date(Date.now() - range.ms).toISOString().slice(0, 10), date_to: "" };
-    return { date_from: "", date_to: "" };
+    const { from, to } = rangeBounds(rangeKey);
+    return { date_from: from, date_to: to };
   }, [rangeKey, customFrom, customTo]);
 
   // Any filter change resets to page 1 — but not on the initial mount, so a page
@@ -319,13 +351,13 @@ export default function OutreachHistoryPage() {
               <div style={{ height: 1, background: "#E2E8F0", margin: "8px 4px" }} />
               <div style={{ fontSize: 11, letterSpacing: ".1em", textTransform: "uppercase", color: "#94A3B8", fontWeight: 700, padding: "2px 10px 6px" }}>Custom range</div>
               <div style={{ display: "flex", gap: 8, padding: "0 8px 6px" }}>
-                <label style={{ flex: 1, fontSize: 11, color: "#64748B" }}>From
+                <label style={{ flex: 1, minWidth: 0, fontSize: 11, color: "#64748B" }}>From
                   <input type="date" value={customFrom} onChange={(e) => { setCustomFrom(e.target.value); setRangeKey("all"); }}
-                    style={{ width: "100%", marginTop: 3, background: "rgba(255,255,255,.85)", border: "1px solid rgba(148,163,184,.55)", borderRadius: 7, padding: "6px 8px", fontSize: 12, fontFamily: "inherit" }} />
+                    style={{ width: "100%", boxSizing: "border-box", minWidth: 0, marginTop: 3, background: "rgba(255,255,255,.85)", border: "1px solid rgba(148,163,184,.55)", borderRadius: 7, padding: "6px 8px", fontSize: 12, fontFamily: "inherit" }} />
                 </label>
-                <label style={{ flex: 1, fontSize: 11, color: "#64748B" }}>To
+                <label style={{ flex: 1, minWidth: 0, fontSize: 11, color: "#64748B" }}>To
                   <input type="date" value={customTo} onChange={(e) => { setCustomTo(e.target.value); setRangeKey("all"); }}
-                    style={{ width: "100%", marginTop: 3, background: "rgba(255,255,255,.85)", border: "1px solid rgba(148,163,184,.55)", borderRadius: 7, padding: "6px 8px", fontSize: 12, fontFamily: "inherit" }} />
+                    style={{ width: "100%", boxSizing: "border-box", minWidth: 0, marginTop: 3, background: "rgba(255,255,255,.85)", border: "1px solid rgba(148,163,184,.55)", borderRadius: 7, padding: "6px 8px", fontSize: 12, fontFamily: "inherit" }} />
                 </label>
               </div>
             </div>

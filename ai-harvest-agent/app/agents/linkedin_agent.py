@@ -119,6 +119,36 @@ _DATE_MAP: dict[int, str] = {
     720: "r2592000",
 }
 
+# Canonical Rule Engine sub-category lists per coarse domain — MIRRORS
+# harvest-agent/src/lib/ruleEngineOptions.js (IT_JOB_CATEGORIES /
+# NON_IT_JOB_CATEGORIES), minus each list's "Other …" catch-all. Used ONLY to
+# detect "All <domain> Jobs": when the selected job_categories cover the whole
+# list, the LinkedIn search uses the coarse domain ("IT"/"Non-IT") instead of
+# OR-ing every category (see _compose_keyword_query). This keeps all-vs-subset
+# correct even against a stale saved config that still holds the full list (the
+# frontend also sends [] for "all"). Keep in sync with the frontend — a drift
+# only affects this detection, never filtering/classification.
+_IT_CATEGORY_SET: frozenset[str] = frozenset(c.lower() for c in (
+    "Software Development", "Frontend Development", "Backend Development",
+    "Full Stack Development", "Mobile Development", "DevOps", "Cloud Engineering",
+    "Infrastructure", "System Administration", "Network Engineering",
+    "Cyber Security", "Data Engineering", "Data Science", "AI / ML",
+    "Database Administration", "QA / Testing", "Automation Testing", "SAP", "ERP",
+    "UI / UX", "Technical Support", "Solution Architecture", "Business Intelligence",
+))
+_NON_IT_CATEGORY_SET: frozenset[str] = frozenset(c.lower() for c in (
+    "Human Resources", "Recruitment / Talent Acquisition", "Finance", "Accounting",
+    "Sales", "Marketing", "Digital Marketing", "Operations", "Administration",
+    "Customer Support", "Business Development", "Legal", "Procurement",
+    "Supply Chain", "Logistics", "Healthcare", "Education", "Banking", "Insurance",
+    "Retail", "Manufacturing", "Construction", "Real Estate", "Hospitality",
+    "Media / Content",
+))
+_CANONICAL_CATEGORY_SETS: dict[str, frozenset[str]] = {
+    "IT": _IT_CATEGORY_SET,
+    "Non-IT": _NON_IT_CATEGORY_SET,
+}
+
 # ── Scraped job dataclass ─────────────────────────────────────────────────────
   
 @dataclass
@@ -2139,6 +2169,23 @@ class LinkedInAgent:
         return " OR ".join(f'"{t}"' for t in cleaned[:cap])
 
     @staticmethod
+    def _categories_cover_domain(domain: str, job_categories: list[str] | None) -> bool:
+        """True when the selected job_categories include EVERY canonical category
+        for the coarse domain (ignoring the "Other …" catch-all) — i.e. the user
+        chose "All IT Jobs" / "All Non-IT Jobs". In that case the search must use
+        the coarse domain, not an OR of every category. This makes the all-vs-subset
+        decision robust even when a stale saved config still holds the full list
+        (the frontend also sends [] for "all"). See _CANONICAL_CATEGORY_SETS."""
+        canonical = _CANONICAL_CATEGORY_SETS.get(domain)
+        if not canonical or not job_categories:
+            return False
+        selected = {
+            c.strip().lower() for c in job_categories
+            if c and c.strip() and not LinkedInAgent._CATEGORY_CATCHALL_RE.match(c)
+        }
+        return selected >= canonical
+
+    @staticmethod
     def _compose_keyword_query(
         keyword: str,
         domain: str,
@@ -2149,11 +2196,12 @@ class LinkedInAgent:
 
         Priority:
           1. A user-typed keyword always wins.
-          2. Otherwise, when specific sub-categories or custom "Others" titles were
-             chosen in the Rule Engine, OR-join them into the search box so LinkedIn
-             returns those roles directly (custom titles first, then IT/Non-IT
-             sub-categories). An empty list means "all selected", which falls
-             through to the coarse domain below.
+          2. Otherwise, when a SUBSET of sub-categories or custom "Others" titles
+             were chosen in the Rule Engine, OR-join them into the search box so
+             LinkedIn returns those roles directly (custom titles first, then
+             IT/Non-IT sub-categories). "All <domain> Jobs" — an empty list OR a
+             selection covering the whole canonical category set — is NOT treated
+             as a subset; it falls through to the coarse domain below.
           3. Otherwise the chosen domain label is placed into the search box as-is
              — e.g. "Data Engineering", "AI/ML", "Cyber Security", "IT". "Any" and
              "Non-IT" have no meaningful search term, so they contribute nothing
@@ -2167,9 +2215,12 @@ class LinkedInAgent:
         titles_query = LinkedInAgent._or_join(custom_job_titles)
         if titles_query:
             return titles_query
-        categories_query = LinkedInAgent._or_join(job_categories)
-        if categories_query:
-            return categories_query
+        # A full-coverage selection ("All IT/Non-IT Jobs") uses the coarse domain,
+        # not an OR of every category — only a genuine subset refines the search.
+        if not LinkedInAgent._categories_cover_domain(domain, job_categories):
+            categories_query = LinkedInAgent._or_join(job_categories)
+            if categories_query:
+                return categories_query
         if domain in ("", "Any", "Non-IT"):
             return ""
         return domain

@@ -157,7 +157,7 @@ def parse_location(text: str) -> tuple[str, str, str]:
     # "· On-site", "(On-site)".
     geo = re.split(r"[;·(]", text, maxsplit=1)[0]
 
-    tokens = [t.strip() for t in geo.split(",") if t.strip()]
+    tokens = [t for t in geo.split(",") if t.strip()]
     # Drop pure work-mode / "anywhere" tokens ("Chennai, India, Remote").
     tokens = [t for t in tokens if t.lower() not in _WORK_MODE_TOKENS]
     if not tokens:
