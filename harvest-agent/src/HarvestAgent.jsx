@@ -9,6 +9,7 @@ import OutreachThreadPage from "./OutreachThreadPage";
 import Sidebar from "./components/Sidebar";
 import ThemeStyles from "./components/ThemeStyles";
 import IntroSplash from "./components/IntroSplash";
+import NotificationBell from "./components/NotificationBell";
 import { getJob } from "./api";
 import { mapApiJob, mapJobToDetail } from "./lib/jobsData";
 import { HarvestDataProvider, useHarvestData } from "./HarvestDataContext";
@@ -45,6 +46,7 @@ function activeKeyFromPath(pathname) {
  * and sit OUTSIDE this layout, exactly as before. */
 function AppLayout({ onLogout }) {
   const { jobsTotal, runs } = useHarvestData();
+  const { hasFeature } = useTenant();
   const location = useLocation();
   const navigate = useNavigate();
   return (
@@ -58,6 +60,9 @@ function AppLayout({ onLogout }) {
         onLogout={onLogout}
       />
       <Outlet />
+      {/* App-wide inbound-reply notifications (bell + toast), gated to tenants with
+          the outreach feature — it only polls the outreach endpoints. */}
+      {hasFeature("outreach") && <NotificationBell />}
     </div>
   );
 }

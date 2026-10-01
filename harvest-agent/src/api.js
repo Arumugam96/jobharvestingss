@@ -360,8 +360,8 @@ export function checkSuppressed(email) {
   return request(`/outreach/suppressed?email=${encodeURIComponent(email || "")}`);
 }
 
-/** GET /outreach/stats — whole-dataset {sent, failed} over the filtered Mail-logs
- * set, so the stat tiles stay accurate under pagination. */
+/** GET /outreach/stats — whole-dataset engagement counts (incl. `replied`) over the
+ * filtered Mail-logs set, so the stat tiles stay accurate under pagination. */
 export function getOutreachStats({ search, company, date_from, date_to } = {}) {
   const qs = new URLSearchParams();
   if (search) qs.set("search", search);
@@ -370,6 +370,27 @@ export function getOutreachStats({ search, company, date_from, date_to } = {}) {
   if (date_to) qs.set("date_to", date_to);
   const q = qs.toString();
   return request(`/outreach/stats${q ? `?${q}` : ""}`);
+}
+
+// ── Inbound replies + notifications ─────────────────────────────────────────────
+
+/** GET /outreach/notifications — unread inbound replies (newest first) + total unread
+ * count, for the reply bell + toast. Returns { unread, items:[{id, outreach_id, job_id,
+ * recruiter_id, from_name, from_email, company, subject, preview, received_at}] }. */
+export function getOutreachNotifications({ limit } = {}) {
+  const q = limit ? `?limit=${encodeURIComponent(limit)}` : "";
+  return request(`/outreach/notifications${q}`);
+}
+
+/** POST /outreach/replies/{id}/read — mark one reply read (clears it from the bell);
+ * pass read=false to restore unread. Returns { status, unread }. */
+export function markReplyRead(replyId, read = true) {
+  return request(`/outreach/replies/${encodeURIComponent(replyId)}/read?read=${read ? "true" : "false"}`, { method: "POST" });
+}
+
+/** POST /outreach/replies/read-all — mark every unread reply read. Returns { status, marked, unread }. */
+export function markAllRepliesRead() {
+  return request("/outreach/replies/read-all", { method: "POST" });
 }
 
 // ── Downloads ────────────────────────────────────────────────────────────────

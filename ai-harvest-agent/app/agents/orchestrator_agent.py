@@ -333,8 +333,12 @@ class OrchestratorAgent:
         jobs, src  = await orch.run()   # list[HarvestJob], str
     """
 
-    def __init__(self, config: HarvestConfig) -> None:
+    def __init__(self, config: HarvestConfig, already_harvested: set[str] | None = None) -> None:
         self._config = config
+        # Normalized job_urls to skip at the source (LinkedIn only) — loaded from
+        # the DB by the route for cross-run dedup, so a posting harvested within
+        # the lookback window isn't re-scraped/re-emailed. Empty ⇒ no source skip.
+        self._already_harvested: set[str] = already_harvested or set()
 
     # ── Full pipeline (POST /run-harvest-agent) ───────────────────────────────
 
@@ -709,7 +713,7 @@ class OrchestratorAgent:
                 logger.info("orchestrator_dispatching", source="linkedin")
                 logger.info("linkedin_agent_started")
                 try:
-                    agent   = LinkedInAgent()
+                    agent   = LinkedInAgent(already_harvested=self._already_harvested)
                     linkedin_agent_holder["agent"] = agent
 
                     # Per-page incremental persist: the agent hands us each page's

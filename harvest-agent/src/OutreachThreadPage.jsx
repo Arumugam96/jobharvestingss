@@ -1,11 +1,12 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { useParams, useLocation, useNavigate, useSearchParams } from "react-router-dom";
-import { Copy, Check, CornerUpRight, Link2 } from "lucide-react";
+import { Copy, Check, CornerUpRight, Link2, Reply } from "lucide-react";
 import { getOutreachHistory } from "./api";
 import OutreachThread from "./components/OutreachThread";
 import EmailComposeModal from "./components/EmailComposeModal";
 import {
-  fmtAbs, engagement, deliveryTimeline, clickedLinks, EVENT_COLOR, StatusBadge, ToneChip, CLIENT_LABEL,
+  fmtAbs, fmtRel, engagement, deliveryTimeline, clickedLinks, EVENT_COLOR, StatusBadge, ToneChip, CLIENT_LABEL,
+  ReplyBadge, REPLY_COLOR,
 } from "./components/outreachUi";
 
 /* Standalone, full-page view of one sent outreach + its full thread (route
@@ -101,6 +102,10 @@ export default function OutreachThreadPage() {
   const timeline = detail ? deliveryTimeline(detail) : [];
   const links = detail ? clickedLinks(detail) : []; // the links the recipient clicked
   const clientLabel = (detail && CLIENT_LABEL[detail.client_type]) || "";
+  // Inbound replies merged into the thread (oldest-first) — the newest is pinned as a
+  // "Latest reply" callout at the top of the side column for quick action.
+  const replies = thread.filter((m) => m.direction === "inbound");
+  const latestReply = replies.length ? replies[replies.length - 1] : null;
 
   // Copy + Follow up — rendered at the top-right of the Thread box (see below).
   const actionButtons = (
@@ -127,6 +132,7 @@ export default function OutreachThreadPage() {
         </h1>
         <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap", marginTop: 11 }}>
           {detail && <StatusBadge label={engagement(detail).label} />}
+          {detail && <ReplyBadge it={detail} />}
           {detail && <ToneChip it={detail} />}
           {detail && <span style={{ color: "#94A3B8", fontSize: 12.5 }}>{fmtAbs(detail.created_at)}</span>}
         </div>
@@ -144,6 +150,26 @@ export default function OutreachThreadPage() {
         </div>
 
         <div style={{ flex: "0 1 300px", minWidth: 260, display: "flex", flexDirection: "column", gap: 18 }}>
+          {latestReply && (
+            <div style={{ border: "1px solid #C7C9F5", borderRadius: 14, background: "linear-gradient(160deg,#F3F3FF,#FAFAFF)", padding: "15px 16px" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, ...LABEL, color: REPLY_COLOR, marginBottom: 10 }}>
+                <Reply size={13} strokeWidth={2.5} /> Latest reply
+              </div>
+              <div style={{ fontSize: 13, color: "#1E293B", lineHeight: 1.55, whiteSpace: "pre-wrap", maxHeight: 150, overflowY: "auto" }}>
+                {latestReply.body || "(no message body)"}
+              </div>
+              <div style={{ fontSize: 12, color: "#64748B", marginTop: 9 }}>
+                — {latestReply.contact_name || latestReply.from_email || "Reply"}
+                {latestReply.created_at ? ` · ${fmtRel(latestReply.created_at)}` : ""}
+              </div>
+              {canFollowUp && (
+                <button className="ha-btn" onClick={startFollowUp}
+                  style={{ marginTop: 12, width: "100%", justifyContent: "center", background: REPLY_COLOR, color: "#fff", border: `1px solid ${REPLY_COLOR}` }}>
+                  <CornerUpRight size={15} /> Reply back
+                </button>
+              )}
+            </div>
+          )}
           <div className="ha-card" style={{ padding: "16px 16px" }}>
             <div style={{ ...LABEL, marginBottom: 14 }}>Delivery</div>
             {timeline.map((e, i) => (

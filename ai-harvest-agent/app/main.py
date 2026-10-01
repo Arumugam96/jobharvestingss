@@ -27,6 +27,7 @@ import app.models.auth  # noqa: F401 — registers users / otp_verifications on 
 import app.models.harvest_run  # noqa: F401 — registers harvest_runs / scraped_jobs / llm_calls on Base.metadata
 import app.models.recruiter  # noqa: F401 — registers recruiters on Base.metadata
 import app.models.outreach  # noqa: F401 — registers email_outreach on Base.metadata
+import app.models.outreach_reply  # noqa: F401 — registers outreach_replies on Base.metadata
 import app.models.suppression  # noqa: F401 — registers email_suppressions on Base.metadata
 import app.models.tenant  # noqa: F401 — registers tenants on Base.metadata
 from app.models.harvest import Base
@@ -206,11 +207,19 @@ def _ensure_email_outreach_columns(sync_conn) -> None:
         # Real send-attempt time (app-set for sent AND failed rows), distinct from
         # created_at (insert time) and delivered_at (success-only). Alembic 0012.
         ("sent_at",             f"ALTER TABLE email_outreach ADD COLUMN sent_at {ts_type}"),
+        # Normalized source posting URL — cross-run posting-dedup backstop.
+        # Alembic 0013. Indexed below (for the posting_already_emailed lookup).
+        ("job_url",             "ALTER TABLE email_outreach ADD COLUMN job_url VARCHAR(500)"),
     ]
     for name, ddl in pending:
         if name not in existing_cols:
             sync_conn.execute(sa_text(ddl))
             logger.info("email_outreach_column_added", column=name)
+    # Index the posting-dedup key on pre-existing tables (create_all makes it on a
+    # fresh DB). IF NOT EXISTS is portable on PostgreSQL and SQLite.
+    sync_conn.execute(sa_text(
+        "CREATE INDEX IF NOT EXISTS ix_email_outreach_job_url ON email_outreach (job_url)"
+    ))
 
 
 def _backfill_scraped_jobs_location(sync_conn) -> None:
@@ -259,7 +268,7 @@ def _backfill_scraped_jobs_location(sync_conn) -> None:
 # is a global public cache and stays untenanted.
 _TENANT_CONTENT_TABLES = [
     "harvest_runs", "scraped_jobs", "llm_calls", "reenrichment_tasks",
-    "harvest_jobs", "harvest_results", "email_outreach",
+    "harvest_jobs", "harvest_results", "email_outreach", "outreach_replies",
     "recruiters", "recruiter_discovery_runs", "email_suppressions",
 ]
 

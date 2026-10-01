@@ -1,7 +1,13 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
-  Send, CheckCircle2, MailOpen, MousePointerClick, Ban, CornerUpLeft, ShieldAlert, BellOff,
+  Send, CheckCircle2, MailOpen, MousePointerClick, Ban, CornerUpLeft, ShieldAlert, BellOff, Reply,
 } from "lucide-react";
+
+// Reply accent — indigo. Distinct from every delivery colour (blue=delivered,
+// greens=opened/clicked, purple=unsubscribed, reds/orange=negatives); a reply is
+// the highest-value, act-on-this outcome, so it owns its own hue.
+export const REPLY_COLOR = "#4F46E5";
+export const REPLY_SOFT = "#EEF0FF";
 
 /* Shared outreach formatting + badges, used by both the Mail logs list
  * (OutreachHistoryPage) and the standalone thread page (OutreachThreadPage) so a
@@ -85,6 +91,7 @@ export function engagement(it) {
 export const EVENT_COLOR = {
   Delivered: "#1E40AF", Opened: "#0E7C5A", Clicked: "#0D9488",
   Bounced: "#B91C1C", Blocked: "#B91C1C", Spam: "#B91C1C", Unsubscribed: "#6D28D9",
+  Replied: REPLY_COLOR,
 };
 
 // The ordered delivery lifecycle for the detail timeline, built from the row's scalar
@@ -106,6 +113,10 @@ export function deliveryTimeline(it) {
     const un = (it.events || []).find((e) => (e.event || "").toLowerCase() === "unsub");
     add("Unsubscribed", (un && un.at) || it.created_at);
   }
+  // A reply is the terminal positive outcome — appended last, from the send row's
+  // replied_at (stamped by the inbound-reply webhook). Independent of delivery state,
+  // so it can follow Opened/Clicked or even stand alone on an untracked send.
+  add("Replied", it.replied_at);
   return steps;
 }
 
@@ -147,6 +158,7 @@ export const STATUS_META = {
   Blocked:      { Icon: Ban,               color: "#DC2626", bg: "#FDECEC" },
   Spam:         { Icon: ShieldAlert,       color: "#DC2626", bg: "#FDECEC" },
   Unsubscribed: { Icon: BellOff,           color: "#6D28D9", bg: "#F1EBFD" },
+  Replied:      { Icon: Reply,             color: REPLY_COLOR, bg: REPLY_SOFT },
 };
 
 // The delivery states a mail has reached, as labels — one icon badge is rendered per
@@ -205,7 +217,28 @@ export function TimelineStep({ on, label, time, color = "#0E7C5A" }) {
 const STAGE_FILL = {
   Sent: "#94A3B8", Delivered: "#2563EB", Opened: "#0E7C5A", Clicked: "#0D9488",
   Bounced: "#DC2626", Blocked: "#DC2626", Spam: "#DC2626", Failed: "#DC2626", Unsubscribed: "#6D28D9",
+  Replied: REPLY_COLOR,
 };
+
+// Indigo "Replied" pill — rendered beside the delivery engagement wherever a send
+// got a reply (Mail-logs row, thread header). `it.replied_at` is the trigger.
+export function ReplyBadge({ it, size = "md" }) {
+  if (!it || !it.replied_at) return null;
+  const sm = size === "sm";
+  return (
+    <span
+      title="This recipient replied"
+      style={{
+        display: "inline-flex", alignItems: "center", gap: 5, flex: "none",
+        background: REPLY_SOFT, color: REPLY_COLOR, borderRadius: 999,
+        padding: sm ? "2px 8px 2px 6px" : "3px 10px 3px 8px",
+        fontSize: sm ? 11 : 11.5, fontWeight: 800, whiteSpace: "nowrap",
+      }}
+    >
+      <Reply size={sm ? 11 : 13} strokeWidth={2.5} /> Replied
+    </span>
+  );
+}
 
 /* Compact engagement for the Mail-logs list: the delivery stages a mail reached,
  * rendered as overlapping colored icon circles (Sent → Delivered → Opened →

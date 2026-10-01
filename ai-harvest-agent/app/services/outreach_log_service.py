@@ -19,6 +19,7 @@ from typing import Any
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.job_url import normalize_job_url
 from app.core.tenant_context import apply_tenant, get_current_tenant_id
 from app.models.harvest_run import ScrapedJobORM
 from app.models.outreach import EmailOutreachORM
@@ -34,6 +35,10 @@ def outreach_to_dict(row: EmailOutreachORM, contact_name: str | None = None) -> 
     event state; they are None until a webhook advances them (or for LinkedIn rows)."""
     return {
         "id": row.id,
+        # Marks this as a mail we SENT (vs. an inbound reply, direction="inbound",
+        # which the reply service merges into the same thread). The frontend thread
+        # renders the two sides distinctly.
+        "direction": "outbound",
         "job_id": row.job_id,
         "recruiter_id": row.recruiter_id,
         "channel": row.channel,
@@ -387,6 +392,10 @@ def _engagement_predicate(engagement: str | None):
     key = engagement.strip().lower()
     if key == "opened":
         return EmailOutreachORM.opened_at.isnot(None)
+    if key == "replied":
+        # Mirrors the "replied" count below: a send is "replied" once the inbound
+        # reply webhook stamps its replied_at (denormalized from outreach_replies).
+        return EmailOutreachORM.replied_at.isnot(None)
     if key in ("clicked", "unsubscribed", "blocked", "bounced"):
         return EmailOutreachORM.delivery_status == key
     return None
@@ -496,6 +505,9 @@ async def outreach_list_stats(
         "failed": await _count(base.where(EmailOutreachORM.status == "failed")),
         "opened": await _count(base.where(EmailOutreachORM.opened_at.isnot(None))),
         "clicked": await _status("clicked"),
+        # Replies received — a send whose replied_at was stamped by the inbound-reply
+        # webhook. Scoped to the same filtered set as every other count.
+        "replied": await _count(base.where(EmailOutreachORM.replied_at.isnot(None))),
         "unsubscribed": await _status("unsubscribed"),
         "blocked": await _status("blocked"),
         "bounced": await _status("bounced"),
@@ -547,6 +559,30 @@ async def initial_email_sent(
     return (await db.execute(stmt)).scalar_one_or_none()
 
 
+async def posting_already_emailed(db: AsyncSession, job_url: str | None) -> EmailOutreachORM | None:
+    """The first successfully-sent INITIAL email for a given source posting
+    (keyed by normalized job_url), if any — the cross-run posting-dedup backstop.
+
+    Source-level harvest dedup is the primary guard (a re-seen posting isn't even
+    re-scraped); this covers the gaps it can't: the manual sweep and within-run
+    cross-source overlap. Returns None when no job_url is given (nothing to match)."""
+    key = normalize_job_url(job_url)
+    if not key:
+        return None
+    stmt = (
+        apply_tenant(select(EmailOutreachORM), EmailOutreachORM.tenant_id)
+        .where(
+            EmailOutreachORM.channel == "email",
+            EmailOutreachORM.outreach_kind == "initial",
+            EmailOutreachORM.status == "sent",
+            EmailOutreachORM.job_url == key,
+        )
+        .order_by(EmailOutreachORM.created_at.asc())
+        .limit(1)
+    )
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
 async def get_by_id(db: AsyncSession, outreach_id: str) -> EmailOutreachORM | None:
     return (
         await db.execute(select(EmailOutreachORM).where(EmailOutreachORM.id == outreach_id))
@@ -574,6 +610,7 @@ def build_email_outreach_row(
     parent_outreach_id: str | None = None,
     sent_at: datetime | None = None,
     body_html: str | None = None,
+    job_url: str | None = None,
 ) -> EmailOutreachORM:
     """Construct an EmailOutreachORM send-log row for an EMAIL outreach send — the
     single source of truth for the row shape shared by the manual send route
@@ -614,6 +651,9 @@ def build_email_outreach_row(
         # (unlike delivered_at, which is success-only). `when` is the caller's
         # captured send time, else now().
         sent_at=when,
+        # Normalized source posting key — the cross-run posting-dedup backstop
+        # (posting_already_emailed matches on it). "" collapses to NULL.
+        job_url=normalize_job_url(job_url) or None,
         delivery_status="delivered" if delivered else None,
         delivered_at=when if delivered else None,
         sent_by=sent_by,

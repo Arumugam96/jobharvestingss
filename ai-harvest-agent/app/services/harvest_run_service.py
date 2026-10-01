@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import math
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, TypeVar
 
 import structlog
@@ -29,6 +29,7 @@ from app.core.company_size import (
 )
 from app.core.contact_normalize import normalize_email, normalize_phone
 from app.core.dependencies import get_session_factory
+from app.core.job_url import normalize_job_url
 from app.core.location import parse_location
 from app.core.tenant_context import apply_tenant, bind_session_tenant, get_current_tenant_id
 from app.core.text_formatting import html_description_to_text, normalize_job_title
@@ -673,6 +674,19 @@ class HarvestRunService:
             select(ScrapedJobORM).where(ScrapedJobORM.run_id == run_pk)
         )
         return list(result.scalars())
+
+    async def recent_harvested_job_urls(self, within_days: int) -> set[str]:
+        """Normalized job_urls already harvested within the last `within_days`
+        days (tenant-scoped), for SOURCE-LEVEL dedup — the LinkedIn agent skips
+        re-scraping any posting whose URL is in this set, so it never re-enters
+        the pipeline (no re-extract, no re-email). `within_days <= 0` = all-time.
+        Keys are normalized with the same helper the agent uses, so they match."""
+        stmt = apply_tenant(select(ScrapedJobORM.job_url), ScrapedJobORM.tenant_id)
+        if within_days and within_days > 0:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=within_days)
+            stmt = stmt.where(ScrapedJobORM.created_at >= cutoff)
+        rows = (await self._db.execute(stmt)).scalars().all()
+        return {k for u in rows if (k := normalize_job_url(u))}
 
     async def list_all_jobs_for_report(self) -> list[ScrapedJobORM]:
         """Every scraped job on record, newest posting first — the dataset

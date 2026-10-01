@@ -69,6 +69,12 @@ class EmailOutreachORM(Base):
     # failed rows) — distinct from created_at (row-insert time) and delivered_at
     # (set only on a successful send). NULL only on rows written before this column.
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Normalized source job_url (app.core.job_url.normalize_job_url) — the
+    # cross-run posting-dedup BACKSTOP: auto-outreach skips sending when a prior
+    # 'sent' initial email carries the same key (source-level harvest dedup is the
+    # primary guard; this covers manual sweeps / within-run cross-source overlap).
+    # NULL on rows written before this column and on sends with no job_url.
+    job_url: Mapped[str | None] = mapped_column(String(500), nullable=True, index=True)
 
     # ── Delivery engagement (updated by Mailjet event webhooks) ─────────────────
     delivery_status: Mapped[str | None] = mapped_column(String(20), nullable=True)

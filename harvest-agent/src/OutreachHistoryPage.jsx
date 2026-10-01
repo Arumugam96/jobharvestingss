@@ -6,7 +6,7 @@ import { getOutreachHistory, getOutreachStats, ApiError } from "./api";
 // because this component also has an `engagement` state var (the active filter key)
 // that would otherwise shadow the import — calling the shadowed string in exportCsv
 // threw. See exportCsv below.
-import { fmtAbs, fmtRel, initials, avatarColor, engagement as engagementOf, EngagementStack } from "./components/outreachUi";
+import { fmtAbs, fmtRel, initials, avatarColor, engagement as engagementOf, EngagementStack, ReplyBadge } from "./components/outreachUi";
 
 /* Mail logs (route /outreach) — the log of every outreach email sent from
  * HarvestAgent, read from the backend (GET /outreach/history). It's the DB source
@@ -63,6 +63,9 @@ function rangeBounds(key) {
 // engagement() in components/outreachUi.jsx. `key` is the field on the /stats response.
 // "bounced" is labelled "Undelivered" (only soft bounces are enabled upstream).
 const STAT_EVENTS = [
+  // Replied sits first (leftmost) — a reply is the highest-value outcome and owns
+  // its own indigo accent, distinct from every delivery colour.
+  { key: "replied",      label: "Replied",      c: "#4F46E5", tint: "rgba(79,70,229,.14)",  tint2: "rgba(79,70,229,.04)" },
   { key: "opened",       label: "Opened",       c: "#0E7C5A", tint: "rgba(14,124,90,.14)",  tint2: "rgba(14,124,90,.04)" },
   { key: "clicked",      label: "Clicked",      c: "#0D9488", tint: "rgba(13,148,136,.14)", tint2: "rgba(13,148,136,.04)" },
   { key: "unsubscribed", label: "Unsubscribed", c: "#7C3AED", tint: "rgba(124,58,237,.14)", tint2: "rgba(124,58,237,.04)" },
@@ -77,7 +80,9 @@ const STATS_CSS = `
 .ha-stats-head { display:flex; align-items:baseline; gap:9px; margin-bottom:12px; }
 .ha-stats-head .big { font-size:28px; font-weight:800; letter-spacing:-.03em; color:#0F172A; line-height:1; font-variant-numeric:tabular-nums; }
 .ha-stats-head .cap { font-size:14px; color:#64748B; font-weight:500; }
-.ha-stats-grid { display:grid; grid-template-columns:repeat(5, minmax(0,1fr)); gap:13px; }
+.ha-stats-grid { display:grid; grid-template-columns:repeat(6, minmax(0,1fr)); gap:13px; }
+.ha-stats-head .sep { width:1px; align-self:stretch; background:#D9E1EE; margin:0 2px; }
+.ha-stats-head .big.rep { color:#4F46E5; }
 .ha-stat { position:relative; overflow:hidden; border-radius:14px; padding:14px 15px 20px;
   background:linear-gradient(150deg, var(--tint), var(--tint2) 52%, rgba(255,255,255,0) 78%), linear-gradient(160deg, rgba(255,255,255,.92), rgba(255,255,255,.6));
   -webkit-backdrop-filter:blur(10px) saturate(140%); backdrop-filter:blur(10px) saturate(140%);
@@ -96,7 +101,7 @@ const STATS_CSS = `
 .ha-stat .pct { font-size:13px; font-weight:700; color:#0F172A; font-variant-numeric:tabular-nums; }
 .ha-stat .track { position:absolute; left:0; right:0; bottom:0; height:6px; background:rgba(15,23,42,.06); }
 .ha-stat .fill { height:100%; background:var(--c); box-shadow:0 0 10px -1px var(--tint); }
-@media (max-width:1100px){ .ha-stats-grid{ grid-template-columns:repeat(3,1fr); } }
+@media (max-width:1240px){ .ha-stats-grid{ grid-template-columns:repeat(3,1fr); } }
 @media (max-width:680px){ .ha-stats-grid{ grid-template-columns:repeat(2,1fr); } }
 @media (prefers-reduced-motion: reduce){ .ha-stat{ transition:none; } .ha-stat:hover{ transform:none; } }
 `;
@@ -111,12 +116,16 @@ const STATS_CSS = `
 // stable legend you can switch between.
 function StatsPanel({ stats, engagement, onToggle }) {
   const base = stats.sent || 0;
+  const replies = stats.replied || 0;
   return (
     <div className="ha-stats">
       <style>{STATS_CSS}</style>
       <div className="ha-stats-head">
         <span className="big">{base}</span>
         <span className="cap">emails delivered</span>
+        <span className="sep" />
+        <span className="big rep">{replies}</span>
+        <span className="cap">replies received</span>
       </div>
       <div className="ha-stats-grid">
         {STAT_EVENTS.map((e) => {
@@ -178,7 +187,7 @@ export default function OutreachHistoryPage() {
   const [page, setPage] = useState(() => Math.max(1, parseInt(searchParams.get("page") || "1", 10) || 1));
   const [total, setTotal] = useState(0);
   const [totalPages, setTotalPages] = useState(1);
-  const [stats, setStats] = useState({ sent: 0, failed: 0, opened: 0, clicked: 0, unsubscribed: 0, blocked: 0, bounced: 0 });
+  const [stats, setStats] = useState({ sent: 0, failed: 0, replied: 0, opened: 0, clicked: 0, unsubscribed: 0, blocked: 0, bounced: 0 });
   const [exporting, setExporting] = useState(false);
   const seqRef = useRef(0);
 
@@ -231,11 +240,11 @@ export default function OutreachHistoryPage() {
       setItems(res.items || []);
       setTotal(res.total || 0);
       setTotalPages(res.total_pages || 1);
-      setStats(st || { sent: 0, failed: 0, opened: 0, clicked: 0, unsubscribed: 0, blocked: 0, bounced: 0 });
+      setStats(st || { sent: 0, failed: 0, replied: 0, opened: 0, clicked: 0, unsubscribed: 0, blocked: 0, bounced: 0 });
     } catch (err) {
       if (seq !== seqRef.current) return;
       setError(err instanceof ApiError ? `Could not load mail logs: ${err.message}` : "Could not reach the harvest backend.");
-      setItems([]); setTotal(0); setTotalPages(1); setStats({ sent: 0, failed: 0, opened: 0, clicked: 0, unsubscribed: 0, blocked: 0, bounced: 0 });
+      setItems([]); setTotal(0); setTotalPages(1); setStats({ sent: 0, failed: 0, replied: 0, opened: 0, clicked: 0, unsubscribed: 0, blocked: 0, bounced: 0 });
     } finally {
       if (seq === seqRef.current) setLoading(false);
     }
@@ -412,7 +421,7 @@ export default function OutreachHistoryPage() {
                   : { color: "#64748B", background: "#F1F5F9" };
                 return (
                   <tr key={it.id} onClick={() => openDetail(it)} title="Open message + thread in a new tab"
-                    style={{ cursor: "pointer", borderBottom: "1px solid #EDF1F6" }}
+                    style={{ cursor: "pointer", borderBottom: "1px solid #EDF1F6", boxShadow: it.replied_at ? "inset 3px 0 0 #4F46E5" : undefined }}
                     onMouseEnter={(e) => { e.currentTarget.style.background = "#F8FAFC"; }}
                     onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}>
                     {/* To — avatar + name · email, one line */}
@@ -449,9 +458,13 @@ export default function OutreachHistoryPage() {
                         {it.subject || (it.channel === "linkedin" ? "(LinkedIn message)" : "—")}
                       </div>
                     </td>
-                    {/* Engagement — overlapping status icons + hover timeline */}
+                    {/* Engagement — overlapping status icons + hover timeline, with an
+                        indigo Replied pill when this recipient wrote back */}
                     <td style={{ padding: "9px 16px" }}>
-                      <EngagementStack it={it} />
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                        <EngagementStack it={it} />
+                        <ReplyBadge it={it} size="sm" />
+                      </div>
                     </td>
                     {/* Sent */}
                     <td style={{ padding: "9px 16px", whiteSpace: "nowrap" }}>

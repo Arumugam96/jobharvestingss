@@ -228,7 +228,28 @@ async def _run_harvest_background_impl(
 
     JobTracker.update(job_id, progress=10, message="Starting orchestrator")
 
-    orch = OrchestratorAgent(config)
+    # Source-level cross-run dedup (LinkedIn): load the set of job_urls already
+    # harvested within the lookback window so the agent skips re-scraping them —
+    # they never re-enter the pipeline (no re-extract, no re-email). Best-effort:
+    # a load failure must not block the run (falls back to no skip).
+    _settings = get_settings()
+    already_harvested: set[str] = set()
+    if _settings.harvest_dedup_at_source:
+        try:
+            already_harvested = await db_read(
+                lambda db: HarvestRunService(db).recent_harvested_job_urls(
+                    _settings.harvest_skip_already_harvested_days
+                )
+            ) or set()
+            log.info(
+                "harvest_source_dedup_loaded",
+                known_urls=len(already_harvested),
+                within_days=_settings.harvest_skip_already_harvested_days,
+            )
+        except Exception as exc:
+            log.warning("harvest_source_dedup_load_failed", error=str(exc))
+
+    orch = OrchestratorAgent(config, already_harvested=already_harvested)
 
     async def _on_status(msg: str) -> None:
         # Surfaces live progress (e.g. "waiting for LinkedIn login…") to

@@ -41,6 +41,7 @@ from playwright.async_api import ElementHandle, Page
 
 from app.core.company_size import normalize_company_size, parse_company_size_band
 from app.core.contact_normalize import normalize_email, normalize_phone
+from app.core.job_url import normalize_job_url
 from app.core.exceptions import LLMUnavailableError
 from app.core.text_formatting import (
     description_text_to_html,
@@ -1063,10 +1064,21 @@ class LinkedInAgent:
     # comes from settings.linkedin_recruiter_visit_cap (read in __init__).
     _RECRUITER_CONTACT_SCRAPE_CAP = 25
 
-    def __init__(self, llm_service: "LLMService | None" = None) -> None:
+    def __init__(
+        self,
+        llm_service: "LLMService | None" = None,
+        already_harvested: set[str] | None = None,
+    ) -> None:
         _settings                = get_settings()
         self._llm_service        = llm_service or get_llm_service(_settings)
         self._llm_fallback_calls = 0
+        # Source-level cross-run dedup: normalized job_urls harvested within the
+        # configured lookback window (loaded from scraped_jobs by the route). Any
+        # card whose URL is in here is skipped in Phase A — BEFORE the expensive
+        # detail fetch + LLM extraction — so the posting never re-enters the
+        # pipeline (no re-extract, no re-email). Empty ⇒ no source dedup.
+        self._already_harvested: set[str] = already_harvested or set()
+        self._skipped_already_harvested  = 0
         # Anti-detection knobs for the recruiter profile-visit pass — a per-run
         # cap on NEW /in/ visits and a human-like randomized gap between them.
         # See _enrich_recruiters (the account was restricted for "high volume of
@@ -1552,7 +1564,7 @@ class LinkedInAgent:
                 empty_pages = 0
                 new_jobs: list[LinkedInScrapedJob] = []
                 for j in page_jobs:
-                    url = (j.job_url or "").split("?")[0].rstrip("/").lower()
+                    url = normalize_job_url(j.job_url)
                     if url and url not in seen_urls:
                         seen_urls.add(url)
                         all_jobs.append(j)
@@ -1566,7 +1578,10 @@ class LinkedInAgent:
             await _delay(page, 1_500, 2_500)   # polite inter-page delay
 
         logger.info("pagination_completed", source="linkedin", pages=page_num, total=len(all_jobs))
-        logger.info("linkedin_pagination_complete", pages=page_num, total=len(all_jobs))
+        logger.info(
+            "linkedin_pagination_complete", pages=page_num, total=len(all_jobs),
+            skipped_already_harvested=self._skipped_already_harvested,
+        )
 
         # ── Checkpoint 1: cumulative raw jobs ─────────────────────────────────
         logger.info("linkedin_jobs_extracted", count=len(all_jobs), pages_scraped=page_num)
@@ -2456,8 +2471,16 @@ class LinkedInAgent:
                 continue
             if not list_data or not list_data.get("url"):
                 continue
-            norm_url = list_data["url"].split("?")[0].rstrip("/").lower()
+            norm_url = normalize_job_url(list_data["url"])
             if norm_url and (norm_url in seen_urls or norm_url in page_seen):
+                continue
+            # Source-level cross-run dedup: skip a posting already harvested within
+            # the lookback window, BEFORE the expensive Phase B detail fetch + LLM
+            # extraction, so it never re-enters the pipeline (no re-extract, no
+            # re-email). Skipped here (before enumerated.append) so it also doesn't
+            # consume the max_jobs budget — the cap fills with genuinely new jobs.
+            if norm_url and norm_url in self._already_harvested:
+                self._skipped_already_harvested += 1
                 continue
             if norm_url:
                 page_seen.add(norm_url)

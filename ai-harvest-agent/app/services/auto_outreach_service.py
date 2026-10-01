@@ -42,7 +42,11 @@ from app.services.active_clients import classify_client
 from app.services.email_service import AUTOMATION_CONTACT_BLOCK, EmailSender, render_outreach_email_html
 from app.services.harvest_run_service import db_read, db_write, scraped_job_view
 from app.services.llm_service import LLMService
-from app.services.outreach_log_service import build_email_outreach_row, initial_email_sent
+from app.services.outreach_log_service import (
+    build_email_outreach_row,
+    initial_email_sent,
+    posting_already_emailed,
+)
 from app.services.outreach_service import OutreachService
 from app.services.reply_to_rotation import rotation_index
 from app.services.suppression_service import is_suppressed
@@ -125,7 +129,7 @@ async def run_auto_outreach_after_harvest(
         "sent": 0, "failed": 0,
         "skipped_suppressed": 0, "skipped_already": 0,
         "skipped_unsubscribed": 0, "skipped_no_email": 0,
-        "skipped_below_size": 0, "skipped_error": 0,
+        "skipped_below_size": 0, "skipped_duplicate_posting": 0, "skipped_error": 0,
     }
     try:
         settings = get_settings()
@@ -180,17 +184,23 @@ async def run_auto_outreach_after_harvest(
                 email = target["email"]
                 job_id = target["job_id"]
                 recruiter_id = target["recruiter_id"]
+                job_url = target["job_url"]
 
                 if target["unsubscribed"]:
                     counts["skipped_unsubscribed"] += 1
                     return
 
-                # One read for both do-not-contact + already-contacted guards.
+                # One read for do-not-contact + already-contacted + duplicate-posting.
                 async def _checks(db):
                     if await is_suppressed(db, email):
                         return "suppressed"
                     if await initial_email_sent(db, job_id=job_id, recruiter_id=recruiter_id):
                         return "already"
+                    # Backstop to the source-level harvest dedup: don't re-email a
+                    # posting (same job_url) a prior run already emailed — covers
+                    # the manual sweep + within-run cross-source overlap.
+                    if await posting_already_emailed(db, job_url):
+                        return "duplicate_posting"
                     return "ok"
 
                 verdict = await db_read(_checks)
@@ -202,6 +212,9 @@ async def run_auto_outreach_after_harvest(
                     return
                 if verdict == "already":
                     counts["skipped_already"] += 1
+                    return
+                if verdict == "duplicate_posting":
+                    counts["skipped_duplicate_posting"] += 1
                     return
 
                 client_type = classify_client(target["company"])
@@ -254,6 +267,7 @@ async def run_auto_outreach_after_harvest(
                     status=send_status,
                     error_message=error_message,
                     sent_by=sent_by,
+                    job_url=job_url,   # normalized + stored for the posting-dedup backstop
                 )
 
                 # db_write awaits the callback, so it must return an awaitable —

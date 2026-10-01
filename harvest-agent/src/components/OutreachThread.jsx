@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Mail, ChevronDown } from "lucide-react";
+import { Mail, ChevronDown, Reply } from "lucide-react";
 import { linkifyOutreachBody } from "./OutreachBodyField";
 
 /* Read-only view of a recruiter-outreach thread — the messages already sent for
@@ -50,6 +50,15 @@ function KindChip({ kind }) {
   );
 }
 
+// Inbound-reply marker — indigo, matching the Replied accent used across the app.
+function ReplyChip() {
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, fontWeight: 700, color: "#4F46E5", background: "#EEF0FF", borderRadius: 999, padding: "2px 9px 2px 7px" }}>
+      <Reply size={11} strokeWidth={2.6} /> Reply
+    </span>
+  );
+}
+
 function FailedChip() {
   return (
     <span style={{ fontSize: 11, fontWeight: 700, color: "#B91C1C", background: "#FEF2F2", borderRadius: 999, padding: "2px 8px" }}>Failed</span>
@@ -57,12 +66,21 @@ function FailedChip() {
 }
 
 function MessageBody({ m }) {
+  const inbound = m.direction === "inbound";
   return (
     <>
-      {m.to_email && (
-        <div style={{ fontSize: 12, color: "#64748B", marginBottom: 4 }}>
-          <span style={{ fontWeight: 600 }}>To:</span> {m.to_email}
-        </div>
+      {inbound ? (
+        (m.from_email || m.contact_name) && (
+          <div style={{ fontSize: 12, color: "#64748B", marginBottom: 4 }}>
+            <span style={{ fontWeight: 600 }}>From:</span> {m.from_email || m.contact_name}
+          </div>
+        )
+      ) : (
+        m.to_email && (
+          <div style={{ fontSize: 12, color: "#64748B", marginBottom: 4 }}>
+            <span style={{ fontWeight: 600 }}>To:</span> {m.to_email}
+          </div>
+        )
       )}
       {m.subject && (
         <div style={{ fontSize: 13.5, fontWeight: 600, color: "#1E293B", marginBottom: 4 }}>{m.subject}</div>
@@ -120,11 +138,16 @@ export default function OutreachThread({
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {ordered.map((m) => {
-          const failed = m.status && m.status !== "sent";
+          const inbound = m.direction === "inbound";
+          const failed = !inbound && m.status && m.status !== "sent";
           return (
-            <div key={m.id} style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: "10px 12px", background: "#FFFFFF" }}>
+            <div key={m.id} style={{
+              border: `1px solid ${inbound ? "#C7C9F5" : "#E2E8F0"}`, borderRadius: 10, padding: "10px 12px",
+              background: inbound ? "linear-gradient(170deg,#F5F5FF,#FBFBFF 70%)" : "#FFFFFF",
+              marginLeft: inbound ? 22 : 0,
+            }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
-                <KindChip kind={m.outreach_kind} />
+                {inbound ? <ReplyChip /> : <KindChip kind={m.outreach_kind} />}
                 <ChannelChip channel={m.channel} />
                 {failed && <FailedChip />}
                 <span style={{ marginLeft: "auto", fontSize: 12, color: "#64748B" }}>{fmtDate(m.created_at)}</span>
@@ -141,18 +164,21 @@ export default function OutreachThread({
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
       {ordered.map((m) => {
-        const failed = m.status && m.status !== "sent";
+        const inbound = m.direction === "inbound";
+        const failed = !inbound && m.status && m.status !== "sent";
         const open = openId === m.id && !forceCollapsed;
+        const accent = inbound ? "#4F46E5" : "#2563EB";
         return (
           <div
             key={m.id}
             style={{
-              border: `1px solid ${open ? "#2563EB" : "#E2E8F0"}`,
+              border: `1px solid ${open ? accent : (inbound ? "#C7C9F5" : "#E2E8F0")}`,
               borderRadius: 10,
-              background: "#FFFFFF",
+              background: inbound ? "linear-gradient(170deg,#F5F5FF,#FBFBFF 70%)" : "#FFFFFF",
+              marginLeft: inbound ? 22 : 0,
               overflow: "hidden",
               opacity: forceCollapsed ? 0.6 : 1,
-              boxShadow: open ? "0 0 0 2px rgba(37,99,235,.12)" : "none",
+              boxShadow: open ? `0 0 0 2px ${inbound ? "rgba(79,70,229,.14)" : "rgba(37,99,235,.12)"}` : "none",
               transition: "border-color .15s, box-shadow .15s, opacity .2s",
             }}
           >
@@ -166,11 +192,11 @@ export default function OutreachThread({
                 fontFamily: "inherit", cursor: forceCollapsed ? "default" : "pointer",
               }}
             >
-              <KindChip kind={m.outreach_kind} />
+              {inbound ? <ReplyChip /> : <KindChip kind={m.outreach_kind} />}
               <ChannelChip channel={m.channel} />
               {failed && <FailedChip />}
               <span style={{ flex: 1, minWidth: 120, fontSize: 13, fontWeight: 600, color: "#1E293B", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {m.subject || (m.channel === "linkedin" ? "(LinkedIn message)" : "—")}
+                {m.subject || (inbound ? "(reply)" : m.channel === "linkedin" ? "(LinkedIn message)" : "—")}
               </span>
               <span style={{ fontSize: 11.5, color: "#94A3B8", whiteSpace: "nowrap" }}>{fmtDate(m.created_at)}</span>
               <ChevronDown size={16} style={{ color: "#64748B", flex: "none", transform: open ? "rotate(180deg)" : "none", transition: "transform .2s" }} />

@@ -53,6 +53,16 @@ from app.services.outreach_log_service import (
     sent_status_for_jobs,
     thread_messages,
 )
+from app.services.outreach_reply_service import (
+    mark_all_replies_read,
+    mark_reply_read,
+    notification_dict,
+    recent_replies,
+    record_inbound_replies,
+    replies_for_thread,
+    reply_to_dict,
+    unread_reply_count,
+)
 from app.services.suppression_service import (
     add_suppression,
     is_suppressed,
@@ -469,7 +479,7 @@ async def outreach_history(
     company: str = Query(default="", description="List branch: company name (partial)."),
     date_from: str = Query(default="", description="List branch: sent on/after (YYYY-MM-DD)."),
     date_to: str = Query(default="", description="List branch: sent on/before (YYYY-MM-DD)."),
-    engagement: str = Query(default="", description="List branch: one engagement-card bucket (opened/clicked/unsubscribed/blocked/bounced)."),
+    engagement: str = Query(default="", description="List branch: one engagement-card bucket (replied/opened/clicked/unsubscribed/blocked/bounced)."),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=100, ge=1, le=500),
     current_user: AuthenticatedUser = Depends(get_current_user),
@@ -482,7 +492,15 @@ async def outreach_history(
     if job_id or recruiter_id:
         rows = await thread_messages(db, job_id=job_id, recruiter_id=recruiter_id, limit=limit)
         names = await contact_names_for_rows(db, rows)
-        return {"items": [outreach_to_dict(r, contact_name=names.get(r.job_id)) for r in rows]}
+        sends = [outreach_to_dict(r, contact_name=names.get(r.job_id)) for r in rows]
+        # Merge inbound replies into the same thread so the conversation reads two-sided
+        # (sends + received replies), ordered oldest-first by time like the sends.
+        replies = await replies_for_thread(
+            db, job_id=job_id, recruiter_id=recruiter_id, outreach_ids=[r.id for r in rows]
+        )
+        items = sends + [reply_to_dict(rp) for rp in replies]
+        items.sort(key=lambda m: m.get("created_at") or "")
+        return {"items": items}
 
     rows, total = await recent_outreach(
         db, search=search or None, company=company or None,
@@ -518,6 +536,56 @@ async def outreach_stats(
         db, search=search or None, company=company or None,
         date_from=date_from or None, date_to=date_to or None,
     )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# GET /outreach/notifications  — unread inbound replies (bell + toast feed)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/notifications", status_code=status.HTTP_200_OK)
+async def outreach_notifications(
+    limit: int = Query(default=20, ge=1, le=100, description="Max unread replies to return."),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """Unread inbound replies for the current tenant, newest first, plus the total
+    unread count — polled by the in-app reply notification (bell badge + toast). Each
+    item deep-links to its thread (/mail/{outreach_id})."""
+    rows = await recent_replies(db, limit=limit, unread_only=True)
+    return {
+        "unread": await unread_reply_count(db),
+        "items": [notification_dict(r) for r in rows],
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# POST /outreach/replies/{reply_id}/read  — mark one reply read / unread
+# POST /outreach/replies/read-all         — clear the whole unread badge
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.post("/replies/{reply_id}/read", status_code=status.HTTP_200_OK)
+async def mark_reply_read_route(
+    reply_id: str,
+    read: bool = Query(default=True, description="Set read=false to restore unread."),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """Mark a single reply read (the user opened its thread) — clears it from the
+    bell. Tenant-scoped; a 404 means the reply isn't visible to this tenant."""
+    changed = await mark_reply_read(db, reply_id, read=read)
+    if not changed:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Reply not found")
+    return {"status": "ok", "unread": await unread_reply_count(db)}
+
+
+@router.post("/replies/read-all", status_code=status.HTTP_200_OK)
+async def mark_all_replies_read_route(
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """Mark every unread reply read (the bell's "Mark all read")."""
+    count = await mark_all_replies_read(db)
+    return {"status": "ok", "marked": count, "unread": 0}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -584,6 +652,28 @@ async def brevo_events(
     updated = await record_brevo_events(db, events)
     logger.info("brevo_events_received", count=len(events), updated=updated)
     return {"received": len(events), "updated": updated}
+
+
+@webhook_router.post("/inbound-reply", status_code=status.HTTP_200_OK)
+async def brevo_inbound_reply(
+    payload: dict | list | None = Body(default=None),
+    token: str | None = Query(default=None, description="Shared webhook secret (BREVO_INBOUND_TOKEN, falls back to BREVO_WEBHOOK_TOKEN)."),
+    db: AsyncSession = Depends(get_db_session),
+    email_sender: EmailSender = Depends(get_email_sender),
+) -> dict:
+    """Receive Brevo inbound-parse callbacks (prospect replies to our outreach) and
+    capture each as an OutreachReplyORM row: matched to the send it answers (In-Reply-To
+    / References → provider_message_id, with a sender-email fallback), the matched send's
+    replied_at stamped, and the reply forwarded to the tenant's alert mailbox. Unauthenticated
+    (Brevo carries no login cookie) — guarded by a shared token in the URL query, same as the
+    event webhooks. Always 200 so Brevo doesn't retry on a benign no-match."""
+    settings = get_settings()
+    expected = (settings.brevo_inbound_token or settings.brevo_webhook_token or "").strip()
+    if expected and (token or "") != expected:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid webhook token")
+    result = await record_inbound_replies(db, payload, email_sender)
+    return {"received": result["received"], "stored": result["stored"],
+            "matched": result["matched"], "forwarded": result["forwarded"]}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

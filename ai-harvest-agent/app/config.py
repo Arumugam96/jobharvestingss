@@ -46,6 +46,12 @@ class Settings(BaseSettings):
     data_source: Literal["auto", "database", "json"] = "database"
     max_jobs_per_day: int = 0
     harvest_persist_batch_size: int = 10
+    # Source-level cross-run dedup (LinkedIn): skip re-scraping a posting whose
+    # job_url was already harvested within this many days, so it never re-enters
+    # the pipeline (no re-extract, no re-email). 0 = all-time. Disabled entirely
+    # when harvest_dedup_at_source is False.
+    harvest_dedup_at_source: bool = True
+    harvest_skip_already_harvested_days: int = 30
 
     # ── Sales Navigator (standalone experimental script) ─────────────────────────
     sales_navigator_max_jobs_per_day: int = 0
@@ -235,6 +241,16 @@ class Settings(BaseSettings):
     mailjet_retry_backoff_seconds: float = 0.5
     mailjet_webhook_token: str = ""
     brevo_webhook_token: str = ""
+    # Shared secret guarding the Brevo INBOUND-parse webhook (prospect replies), in the
+    # URL query like the event webhooks. Falls back to brevo_webhook_token when unset.
+    brevo_inbound_token: str = ""
+    # Per-tenant mailbox each captured reply is forwarded to (the email "alarm").
+    # Comma-separated "tenant_id:address" pairs, e.g.
+    #   "internal:replies@sightspectrum.com,client_us:us-replies@…,client_in:in-replies@…"
+    # A tenant with no entry falls back to OUTREACH_REPLY_FORWARD_DEFAULT; with neither,
+    # forwarding is skipped (the reply is still captured + shown in-app).
+    outreach_reply_forward_map: str = ""
+    outreach_reply_forward_default: str = ""
     # Brevo v3 API key (header "api-key"). Used ONLY by scripts/register_brevo_events.py to
     # create/update the transactional event webhook — NOT the SMTP key used to send mail.
     brevo_api_key: str = ""
@@ -272,6 +288,21 @@ class Settings(BaseSettings):
         flow rotates the *primary* Reply-To through this list one address per
         calendar day (day 1 → index 0, day 2 → index 1, …). Empty list when unset."""
         return _split_email_csv(self.outreach_auto_reply_to)
+
+    def reply_forward_address(self, tenant_id: str | None) -> str:
+        """The mailbox a captured reply should be forwarded to for ``tenant_id``.
+
+        Parses OUTREACH_REPLY_FORWARD_MAP ("tenant_id:address" pairs) and returns
+        the tenant's address, else OUTREACH_REPLY_FORWARD_DEFAULT, else "" (no
+        forward). Robust to spaces around pairs/colons and empty entries."""
+        tid = (tenant_id or "").strip()
+        for pair in (self.outreach_reply_forward_map or "").split(","):
+            if ":" not in pair:
+                continue
+            key, _, addr = pair.partition(":")
+            if key.strip() == tid and addr.strip():
+                return addr.strip()
+        return (self.outreach_reply_forward_default or "").strip()
 
     @property
     def is_production(self) -> bool:
