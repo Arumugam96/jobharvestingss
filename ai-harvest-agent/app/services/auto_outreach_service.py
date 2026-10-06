@@ -68,34 +68,42 @@ _AUTO_TONE = "Formal"
 def _dedupe_targets(
     job_rows: list[ScrapedJobORM], floor: int | None = None
 ) -> tuple[list[dict], int, int]:
-    """Reduce this run's job rows to one send target per recruiter.
+    """Reduce this run's job rows to one send target per contact.
 
-    Multiple harvested jobs can map to the same recruiter — email them once. Keeps
-    the first row seen per recruiter (keyed by recruiter_id, else the lowercased
-    email). Rows with no resolvable email are dropped. Reads only attributes eagerly
-    loaded on the ORM rows (recruiter is lazy="selectin"), so it's safe on the
-    detached rows handed in from the harvest-completion scope.
+    The recipient is scraped_job_view's resolved `outreach_to_email` — the scraped/
+    recruiter email, falling back to the company+location Apollo HR contact when the
+    job had none (see company_location_contact_service). Multiple jobs can map to the
+    same contact — email them once:
+      * recruiter/poster email → keyed by recruiter_id (else the lowercased email),
+      * company HR contact      → keyed by "cc:"+email (the contact isn't the poster,
+        so distinct postings sharing one company+location contact collapse to one send).
+    Rows with no resolvable email are dropped. Reads only attributes eagerly loaded on
+    the ORM rows (recruiter is lazy="selectin"), so it's safe on the detached rows
+    handed in from the harvest-completion scope.
 
     `floor` is the minimum company-size lower bound (from the Rule Engine size
-    pills); a recruiter whose company is KNOWN to be below it is dropped from
-    outreach — the job itself stays scraped and stored, only its email is
-    suppressed. Unknown/unparseable sizes are still emailed (size_meets_floor →
-    None). Returns (targets, skipped_no_email, skipped_below_size)."""
+    pills); a contact whose company is KNOWN to be below it is dropped from outreach —
+    the job itself stays scraped and stored, only its email is suppressed.
+    Unknown/unparseable sizes are still emailed (size_meets_floor → None). Returns
+    (targets, skipped_no_email, skipped_below_size)."""
     seen: set[str] = set()
     targets: list[dict] = []
     no_email = 0
     below_size = 0
     for job in job_rows:
         view = scraped_job_view(job)
-        email = (view.get("email_id") or "").strip()
+        email = (view.get("outreach_to_email") or "").strip()
         if not email:
             no_email += 1
             continue
         if size_meets_floor(view.get("company_size", ""), floor) is False:
             below_size += 1
             continue
+        # The outreach email came from the company HR contact when no scraped/recruiter
+        # email (email_id) was present — that contact is NOT the job's poster.
+        is_company = not (view.get("email_id") or "").strip()
         recruiter_id = job.recruiter_id
-        key = recruiter_id or email.lower()
+        key = ("cc:" + email.lower()) if is_company else (recruiter_id or email.lower())
         if key in seen:
             continue
         seen.add(key)
@@ -103,12 +111,20 @@ def _dedupe_targets(
         targets.append({
             "view": view,
             "job_id": job.id,
-            "recruiter_id": recruiter_id,
+            # A company HR contact is not the poster recruiter — don't attribute the
+            # send to that recruiter_id (keeps the dedup/already-sent check per job).
+            "recruiter_id": None if is_company else recruiter_id,
             "email": email,
+            "contact_kind": "company" if is_company else "recruiter",
             "company": view.get("company") or "",
             "job_title": view.get("job_title") or "",
             "job_url": view.get("job_url") or "",
-            "unsubscribed": bool(getattr(recruiter, "unsubscribed", False)) if recruiter else False,
+            # Recruiter unsubscribe only applies to a real poster; a company contact's
+            # opt-out is enforced via the suppression list (is_suppressed) in _process.
+            "unsubscribed": (
+                bool(getattr(recruiter, "unsubscribed", False))
+                if (recruiter and not is_company) else False
+            ),
         })
     return targets, no_email, below_size
 

@@ -105,6 +105,20 @@ class Settings(BaseSettings):
     # POST /organizations/enrich. On by default; the per-company
     # 30-day recheck cooldown (apollo_recheck_days) prevents re-billing.
     apollo_enrich_company: bool = True
+    # Hard global ceiling on Apollo credit-spending calls per UTC day, enforced
+    # atomically in the DB (app/services/apollo_budget.py) at the ApolloClient
+    # chokepoint across ALL runs/processes — a safety backstop so credits can never
+    # be overspent regardless of how many harvests/sweeps fire. 0 = unlimited.
+    apollo_daily_cap: int = 100
+    # Company+location HR-contact fallback: when a harvested job has no resolvable
+    # recruiter email, discover the best location-specific HR/recruiting contact for
+    # the job's company + location via Apollo (company → org → HR people → email) and
+    # reach out to them. Gated here AND on apollo_api_key. See
+    # app/services/company_location_contact_service.py.
+    company_contact_fallback: bool = True
+    # Per (company, location): how many title-ranked HR people to reveal an email for
+    # before giving up on finding one (credit conservation — reveals cost credits).
+    company_contact_reveal_cap: int = 5
 
     # ── Playwright ───────────────────────────────────────────────────────────────
     playwright_browser: Literal["chromium", "firefox", "webkit"] = "chromium"

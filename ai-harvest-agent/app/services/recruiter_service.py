@@ -12,7 +12,7 @@ import re
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -248,6 +248,23 @@ async def link_recruiter_jobs_by_url(db: AsyncSession, recruiter_id: str, linked
     if updated:
         await db.flush()
     return updated
+
+
+async def official_emails_by_name_company_keys(db: AsyncSession, keys: set[str]) -> set[str]:
+    """Of the given recruiter name+company keys, return the subset whose recruiter row
+    already holds a real official_email_id. Lets the company+location contact-discovery
+    pass (company_location_contact_service) decide which harvested jobs are "email-less"
+    — a job whose poster's recruiter already has an email is NOT a fallback candidate —
+    in one query instead of a per-job lookup. Keys are compute_name_company_key(...)."""
+    keys = {k for k in keys if k}
+    if not keys:
+        return set()
+    stmt = select(RecruiterORM.name_company_key).where(
+        RecruiterORM.name_company_key.in_(keys),
+        func.coalesce(RecruiterORM.official_email_id, "") != "",
+    )
+    result = await db.execute(stmt)
+    return {k for (k,) in result.all() if k}
 
 
 async def list_recruiters_missing_email(db: AsyncSession, *, limit: int) -> list[dict]:

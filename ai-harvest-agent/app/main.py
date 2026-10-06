@@ -91,6 +91,15 @@ def _ensure_scraped_jobs_columns(sync_conn) -> None:
         # nullable so existing rows stay NULL rather than needing a constant
         # default. Mirrored in alembic 0012.
         ("scraped_at",      f"ALTER TABLE scraped_jobs ADD COLUMN scraped_at {ts_type}"),
+        # Company+location HR contact discovered via Apollo when the job had no
+        # recruiter/poster email — stored SEPARATELY from the poster fields so they're
+        # never overwritten (outreach uses company_contact_email as last resort).
+        ("company_contact_name",     "ALTER TABLE scraped_jobs ADD COLUMN company_contact_name TEXT NOT NULL DEFAULT ''"),
+        ("company_contact_title",    "ALTER TABLE scraped_jobs ADD COLUMN company_contact_title TEXT NOT NULL DEFAULT ''"),
+        ("company_contact_email",    "ALTER TABLE scraped_jobs ADD COLUMN company_contact_email TEXT NOT NULL DEFAULT ''"),
+        ("company_contact_phone",    "ALTER TABLE scraped_jobs ADD COLUMN company_contact_phone VARCHAR(50) NOT NULL DEFAULT ''"),
+        ("company_contact_location", "ALTER TABLE scraped_jobs ADD COLUMN company_contact_location TEXT NOT NULL DEFAULT ''"),
+        ("company_contact_source",   "ALTER TABLE scraped_jobs ADD COLUMN company_contact_source VARCHAR(30) NOT NULL DEFAULT ''"),
     ]
     for name, ddl in pending:
         if name not in existing_cols:

@@ -9,7 +9,20 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, func
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    Date,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.harvest import Base  # shared metadata — one Base.metadata.create_all() for all tables
@@ -133,6 +146,20 @@ class ScrapedJobORM(Base):
     current_company: Mapped[str | None] = mapped_column(Text, nullable=True)
     email_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     contact_number: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # ── Company+location HR contact (Apollo fallback) ────────────────────────────
+    # A location-specific HR/recruiting contact discovered via Apollo for this job's
+    # (company, job-location) when NO recruiter/poster email could be resolved. Kept
+    # SEPARATE from the poster fields above (job_poster_name/email_id/
+    # linkedin_profile_url are never overwritten) and attached at insert time from the
+    # company_location_contacts cache (see bulk_insert_scraped_jobs). Outreach uses
+    # company_contact_email as the last-resort recipient (scraped_job_view →
+    # outreach_to_email). "" when none was found / the job already had an email.
+    company_contact_name: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    company_contact_title: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    company_contact_email: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    company_contact_phone: Mapped[str] = mapped_column(String(50), nullable=False, default="")
+    company_contact_location: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    company_contact_source: Mapped[str] = mapped_column(String(30), nullable=False, default="")
     # Canonical recruiter identity (app/models/recruiter.py), resolved at
     # insert time by app/services/recruiter_service.py::upsert_recruiter.
     # job_poster_name/linkedin_profile_url above stay as-is — the raw
@@ -268,6 +295,73 @@ class CompanyORM(Base):
     apollo_attempted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     apollo_enriched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class CompanyLocationContactORM(Base):
+    """Location-aware HR-contact cache — one row per (company, job-location).
+
+    A company can post from multiple locations with different recruiters, so the HR
+    outreach contact is cached by BOTH the normalized company name and a normalized
+    location key (app/core/location.py::normalize_location_key), never by company
+    alone. Populated by the discovery pass
+    (app/services/company_location_contact_service.py) via Apollo
+    (company → org → HR people filtered by person_locations → revealed email) and
+    attached to each email-less job of that (company, location) at insert time
+    (bulk_insert_scraped_jobs), analogous to how CompanyORM feeds size/HQ location.
+
+    Caches both hits and negatives: hr_contact_attempted_at stamps every real search
+    so the apollo_recheck_days cooldown prevents re-billing a (company, location) that
+    recently returned nothing. A cap-deferred search (daily budget exhausted) writes
+    NO row, so it is retried the next day. Global (not tenant-scoped), mirroring
+    CompanyORM — the contact is a public fact about a company location and the Apollo
+    API key is account-wide.
+    """
+    __tablename__ = "company_location_contacts"
+    __table_args__ = (
+        UniqueConstraint("company_key", "location_key", name="uq_company_location_contacts_keys"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    # Normalized company name (company_service.normalize_company_key) + normalized
+    # job location (location.normalize_location_key) — together the dedup key.
+    company_key: Mapped[str] = mapped_column(String(600), nullable=False, index=True)
+    location_key: Mapped[str] = mapped_column(String(300), nullable=False, index=True)
+    company_name: Mapped[str] = mapped_column(String(500), nullable=False, default="")
+    location: Mapped[str] = mapped_column(String(500), nullable=False, default="")
+    domain: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    hr_contact_name: Mapped[str] = mapped_column(String(300), nullable=False, default="")
+    hr_contact_title: Mapped[str] = mapped_column(String(300), nullable=False, default="")
+    hr_contact_email: Mapped[str] = mapped_column(String(320), nullable=False, default="")
+    hr_contact_phone: Mapped[str] = mapped_column(String(50), nullable=False, default="")
+    # True once Apollo was actually searched for this (company, location) — with
+    # hr_contact_attempted_at, powers the recheck cooldown so negatives aren't
+    # re-searched every run.
+    apollo_attempted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    hr_contact_attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class ApolloUsageORM(Base):
+    """Global per-UTC-day Apollo credit-call counter — the hard daily cap backstop
+    (app/services/apollo_budget.py).
+
+    Apollo credits are account-wide (one API key), the harvest runs in a detached
+    task / proactor thread, and scheduled runs are separate triggers, so the counter
+    must be DB-backed (not in-memory) to hold across runs/processes. One row per
+    usage_date; `count` is bumped atomically before each credit-spending ApolloClient
+    call, and the bump is refused once it would exceed settings.apollo_daily_cap.
+    Global (not tenant-scoped) — the cap protects one shared API key.
+    """
+    __tablename__ = "apollo_daily_usage"
+
+    usage_date: Mapped[datetime] = mapped_column(Date, primary_key=True)
+    count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )

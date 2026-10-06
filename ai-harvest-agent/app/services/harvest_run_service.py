@@ -30,10 +30,11 @@ from app.core.company_size import (
 from app.core.contact_normalize import normalize_email, normalize_phone
 from app.core.dependencies import get_session_factory
 from app.core.job_url import normalize_job_url
-from app.core.location import parse_location
+from app.core.location import normalize_location_key, parse_location
 from app.core.tenant_context import apply_tenant, bind_session_tenant, get_current_tenant_id
 from app.core.text_formatting import html_description_to_text, normalize_job_title
 from app.models.harvest_run import (
+    CompanyLocationContactORM,
     HarvestRunORM,
     LlmCallORM,
     LlmCallType,
@@ -208,6 +209,26 @@ class HarvestRunService:
         company_cache = await get_companies_by_keys(
             self._db, {normalize_company_key(j.get("company", "")) for j in jobs}
         )
+        # Company+location HR-contact cache (app/services/company_location_contact_service.py)
+        # — a location-specific contact discovered via Apollo for an email-less job's
+        # (company, job-location). Attached below ONLY to jobs with no scraped/recruiter
+        # email, so the real poster always wins. Fetched once for the batch's pairs.
+        _loc_pairs = {
+            (normalize_company_key(j.get("company", "")), normalize_location_key(j.get("location", "")))
+            for j in jobs
+        }
+        _loc_pairs = {p for p in _loc_pairs if p[0] and p[1]}
+        loc_contact_cache: dict[tuple[str, str], CompanyLocationContactORM] = {}
+        if _loc_pairs:
+            _lc_res = await self._db.execute(
+                select(CompanyLocationContactORM).where(
+                    CompanyLocationContactORM.company_key.in_({c for c, _ in _loc_pairs})
+                )
+            )
+            for _lc in _lc_res.scalars():
+                _lk = (_lc.company_key, _lc.location_key)
+                if _lk in _loc_pairs:
+                    loc_contact_cache[_lk] = _lc
         rows: list[ScrapedJobORM] = []
         for j in jobs:
             recruiter_id = None
@@ -246,6 +267,23 @@ class HarvestRunService:
             # filter/facet works without an LLM/Apollo call. Prefer any value the
             # caller already provided (e.g. a future source that supplies it).
             loc_city, loc_state, loc_country = parse_location(j.get("location", ""))
+            # Company+location HR contact (Apollo fallback) — attach ONLY when the job
+            # has NO scraped email and NO linked-recruiter email, so the real poster's
+            # contact always wins and job_poster_*/email_id below are never overwritten.
+            cc_name = cc_title = cc_email = cc_phone = cc_location = cc_source = ""
+            _job_email = (j.get("email_id") or "").strip()
+            _rec_email = (recruiter.official_email_id or "").strip() if recruiter is not None else ""
+            if not _job_email and not _rec_email:
+                _lc_row = loc_contact_cache.get(
+                    (normalize_company_key(j.get("company", "")), normalize_location_key(j.get("location", "")))
+                )
+                if _lc_row and (_lc_row.hr_contact_email or "").strip():
+                    cc_name = _lc_row.hr_contact_name or ""
+                    cc_title = _lc_row.hr_contact_title or ""
+                    cc_email = _lc_row.hr_contact_email or ""
+                    cc_phone = _lc_row.hr_contact_phone or ""
+                    cc_location = _lc_row.location or ""
+                    cc_source = "apollo"
             rows.append(
                 ScrapedJobORM(
                     id=str(uuid.uuid4()),
@@ -289,6 +327,15 @@ class HarvestRunService:
                     current_company=j.get("current_company"),
                     email_id=j.get("email_id"),
                     contact_number=j.get("contact_number"),
+                    # Company+location Apollo HR contact — stored SEPARATELY from the
+                    # poster fields above (never overwritten); outreach uses
+                    # company_contact_email as the last-resort recipient.
+                    company_contact_name=cc_name,
+                    company_contact_title=cc_title,
+                    company_contact_email=cc_email,
+                    company_contact_phone=cc_phone,
+                    company_contact_location=cc_location,
+                    company_contact_source=cc_source,
                     recruiter_id=recruiter_id,
                     lead_confidence=j.get("lead_confidence"),
                 )
@@ -970,6 +1017,19 @@ def scraped_job_view(job: ScrapedJobORM) -> dict[str, Any]:
     phone_recruiter = (recruiter.contact_number if recruiter else "") or None
     email = email_scraped or email_recruiter
     phone = phone_scraped or phone_recruiter
+    # Company+location Apollo HR contact (attached at insert time only when the job
+    # had no scraped/recruiter email). Kept separate from the poster above; it is the
+    # LAST-resort outreach recipient. See bulk_insert_scraped_jobs / company_
+    # location_contact_service. outreach_to_name tracks whoever we'd actually email so
+    # the greeting matches the recipient (poster's name for a scraped/recruiter email,
+    # the company contact's name otherwise).
+    company_contact_email = (getattr(job, "company_contact_email", "") or "") or None
+    company_contact_name = (getattr(job, "company_contact_name", "") or "") or None
+    outreach_to_email = email or company_contact_email
+    if email:
+        outreach_to_name = job.job_poster_name or (recruiter.person_name if recruiter else None)
+    else:
+        outreach_to_name = company_contact_name
     # Plain-text description: use the stored text, else derive it from the stored
     # HTML at read time. LinkedIn jobs whose description was captured as HTML skip
     # the LLM's verbatim plain-text copy, so job_description is empty for them —
@@ -1030,6 +1090,18 @@ def scraped_job_view(job: ScrapedJobORM) -> dict[str, Any]:
         "email_recruiter":        email_recruiter,
         "phone_scraped":          phone_scraped,
         "phone_recruiter":        phone_recruiter,
+        # Company+location Apollo HR contact (separate from the poster above) and the
+        # resolved outreach recipient. email_id above stays scraped-or-recruiter only
+        # (UI/reports unchanged); auto-outreach uses outreach_to_email/outreach_to_name,
+        # which additionally fall back to this company contact.
+        "company_contact_name":     company_contact_name,
+        "company_contact_title":    (getattr(job, "company_contact_title", "") or "") or None,
+        "company_contact_email":    company_contact_email,
+        "company_contact_phone":    (getattr(job, "company_contact_phone", "") or "") or None,
+        "company_contact_location": (getattr(job, "company_contact_location", "") or "") or None,
+        "company_contact_source":   (getattr(job, "company_contact_source", "") or "") or None,
+        "outreach_to_email":        outreach_to_email,
+        "outreach_to_name":         outreach_to_name,
         # LinkedIn Home Feed leads carry an LLM lead-quality score; NULL for every
         # other source, so the UI shows a confidence badge only on feed leads.
         "lead_confidence":        lead_confidence,

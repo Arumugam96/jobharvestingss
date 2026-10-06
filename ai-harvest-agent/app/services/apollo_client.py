@@ -69,6 +69,10 @@ class _ApolloRetryable(Exception):
 # ── Response models ───────────────────────────────────────────────────────────
 
 class ApolloOrgResult(BaseModel):
+    # Apollo organization id — needed to search a company's people
+    # (mixed_people/api_search takes organization_ids). Present on both the
+    # organizations/enrich response and the mixed_companies/search results.
+    id: str | None = None
     name: str | None = None
     domain: str | None = None
     website: str | None = None
@@ -87,6 +91,7 @@ class ApolloOrgResult(BaseModel):
         if not org:
             return None
         return cls(
+            id=_clean_str(org.get("id")),
             name=org.get("name"),
             domain=org.get("primary_domain") or org.get("domain"),
             website=org.get("website_url"),
@@ -254,10 +259,133 @@ class ApolloClient:
         if domain:
             params["domain"] = domain
 
+        if not await self._reserve_credit("people/match"):
+            return ApolloPersonResult.no_match()
+
         data = await self._request("/people/match", params=params)
         result = ApolloPersonResult.from_person(data.get("person"))
         self._log_result("people/match", linkedin_url, result)
         return result
+
+    async def match_person_by_id(
+        self,
+        person_id: str,
+        *,
+        reveal_email: bool = True,
+        reveal_phone: bool = False,
+    ) -> ApolloPersonResult:
+        """POST /people/match keyed on an Apollo person **id** (not a LinkedIn URL) —
+        used to reveal the email of a person returned by search_people. Mirrors the
+        standalone script's enrich_person_email: reveal flags go in the query params,
+        the id in the JSON body. Returns a no-match result when Apollo finds nobody or
+        the daily cap is reached."""
+        if not self.enabled:
+            raise ApolloAPIError("Apollo is not configured (APOLLO_API_KEY is empty)")
+        if not person_id:
+            return ApolloPersonResult.no_match()
+
+        want_phone = reveal_phone and self._phone_reveal_allowed("people/match-by-id")
+        params: dict[str, Any] = {
+            "reveal_personal_emails": _bool(reveal_email),
+            "reveal_phone_number": _bool(want_phone),
+        }
+        if want_phone:
+            params["webhook_url"] = self._webhook_url
+
+        if not await self._reserve_credit("people/match"):
+            return ApolloPersonResult.no_match()
+
+        data = await self._request("/people/match", params=params, json={"id": person_id})
+        result = ApolloPersonResult.from_person(data.get("person"))
+        self._log_result("people/match", person_id, result)
+        return result
+
+    async def search_organization(
+        self, company_name: str, domain: str = "", per_page: int = 5
+    ) -> ApolloOrgResult | None:
+        """POST /mixed_companies/search — resolve a company NAME to an Apollo
+        organization (id + size/HQ/industry), the fallback when a domain-based
+        organizations/enrich yields no id. When a ``domain`` is given, prefer the
+        result whose primary_domain matches it; otherwise take the first. Returns None
+        when Apollo finds no organization or the daily cap is reached."""
+        if not self.enabled:
+            raise ApolloAPIError("Apollo is not configured (APOLLO_API_KEY is empty)")
+        company_name = (company_name or "").strip()
+        if not company_name:
+            return None
+
+        if not await self._reserve_credit("mixed_companies/search"):
+            return None
+
+        data = await self._request(
+            "/mixed_companies/search",
+            json={"q_organization_name": company_name, "page": 1, "per_page": per_page},
+        )
+        orgs = data.get("organizations") or data.get("accounts") or []
+        if not isinstance(orgs, list) or not orgs:
+            logger.info("apollo_org_search_no_match", company=company_name)
+            return None
+
+        want_domain = (domain or "").strip().lower()
+        chosen = orgs[0]
+        if want_domain:
+            for org in orgs:
+                od = (org.get("primary_domain") or org.get("domain") or "").strip().lower()
+                if od and od == want_domain:
+                    chosen = org
+                    break
+        result = ApolloOrgResult.from_dict(chosen)
+        logger.info(
+            "apollo_org_search", company=company_name,
+            matched=bool(result), org_id=result.id if result else None,
+        )
+        return result
+
+    async def search_people(
+        self,
+        organization_ids: list[str],
+        titles: list[str],
+        *,
+        person_locations: list[str] | None = None,
+        per_page: int = 10,
+    ) -> list[ApolloPersonResult]:
+        """POST /mixed_people/api_search — list a company's people filtered by title
+        and (crucially) ``person_locations``, so the result is LOCATION-SPECIFIC. The
+        returned people carry id/name/title but usually a LOCKED email (reveal via
+        match_person_by_id). Returns [] when nobody matches or the daily cap is
+        reached."""
+        if not self.enabled:
+            raise ApolloAPIError("Apollo is not configured (APOLLO_API_KEY is empty)")
+        organization_ids = [o for o in (organization_ids or []) if o]
+        if not organization_ids or not titles:
+            return []
+
+        if not await self._reserve_credit("mixed_people/api_search"):
+            return []
+
+        payload: dict[str, Any] = {
+            "organization_ids": organization_ids,
+            "person_titles": titles,
+            "include_similar_titles": True,
+            "contact_email_status": ["verified", "likely to engage", "unverified"],
+            "page": 1,
+            "per_page": per_page,
+        }
+        locations = [p for p in (person_locations or []) if p]
+        if locations:
+            payload["person_locations"] = locations
+
+        data = await self._request("/mixed_people/api_search", json=payload)
+        people = data.get("people")
+        if not isinstance(people, list):
+            people = []
+        results = [ApolloPersonResult.from_person(p) for p in people]
+        logger.info(
+            "apollo_people_search",
+            org_ids=organization_ids, titles=len(titles),
+            person_locations=locations, found=len(results),
+        )
+        return results
 
     async def enrich_organization(self, domain: str) -> ApolloOrgResult | None:
         """GET-style POST /organizations/enrich — company-level enrichment keyed
@@ -271,6 +399,8 @@ class ApolloClient:
             raise ApolloAPIError("Apollo is not configured (APOLLO_API_KEY is empty)")
         domain = (domain or "").strip()
         if not domain:
+            return None
+        if not await self._reserve_credit("organizations/enrich"):
             return None
         data = await self._request("/organizations/enrich", params={"domain": domain})
         org = data.get("organization") or data.get("org")
@@ -301,6 +431,11 @@ class ApolloClient:
         results: list[ApolloPersonResult] = []
         for start in range(0, len(items), _BULK_MAX):
             chunk = items[start:start + _BULK_MAX]
+            # A bulk_match reveals up to len(chunk) people, so it costs that many
+            # credits — reserve them together; stop early (return what we have) once
+            # the daily cap can't cover this chunk.
+            if not await self._reserve_credit("people/bulk_match", cost=len(chunk)):
+                break
             payload: dict[str, Any] = {
                 "details": chunk,
                 "reveal_personal_emails": reveal_email,
@@ -320,6 +455,19 @@ class ApolloClient:
         return results
 
     # ── Internals ──────────────────────────────────────────────────────────────
+
+    async def _reserve_credit(self, endpoint: str, cost: int = 1) -> bool:
+        """Reserve ``cost`` credit-calls against the global per-UTC-day Apollo cap
+        BEFORE issuing a credit-spending request. Returns False when the day's budget
+        is exhausted (caller short-circuits to its empty value). Best-effort (fails
+        open on DB error) — see app/services/apollo_budget.py. Imported lazily to keep
+        the client importable without a DB session."""
+        from app.services import apollo_budget
+
+        allowed = await apollo_budget.try_consume(cost)
+        if not allowed:
+            logger.info("apollo_daily_cap_reached", endpoint=endpoint, cost=cost)
+        return allowed
 
     def _phone_reveal_allowed(self, context: str) -> bool:
         """Phone reveal is only sent to Apollo when a webhook_url is configured;

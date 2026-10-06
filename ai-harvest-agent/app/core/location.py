@@ -192,3 +192,29 @@ def parse_location(text: str) -> tuple[str, str, str]:
 def country_of(text: str) -> str:
     """Convenience: just the normalized country from a free-text location."""
     return parse_location(text)[2]
+
+
+def normalize_location_key(text: str) -> str:
+    """Stable dedup key for a job location — the company+location HR-contact cache
+    keys on this alongside the normalized company name (never on company alone).
+
+    Built from ``parse_location`` → ``(city, state, country)``, lower-cased, whitespace
+    collapsed, non-empty parts joined by "|" (e.g. ``"bengaluru|karnataka|india"``).
+    Returns "" when nothing is derivable (blank / bare "Remote"), which the discovery
+    pass treats as "no location-specific search possible" → the job is skipped (no
+    company-wide fallback). Uses the full tuple rather than a single token so distinct
+    real locations are never merged (a city alone vs a city+state+country produce
+    different keys — a harmless re-search, never a wrong-location contact)."""
+    city, state, country = parse_location(text)
+    parts = [re.sub(r"\s+", " ", p).strip().lower() for p in (city, state, country) if p and p.strip()]
+    return "|".join(parts)
+
+
+def location_search_terms(text: str) -> str:
+    """Apollo ``person_locations`` filter string for a job location — the human-form
+    "City, State, Country" at the finest available granularity (empty parts dropped),
+    e.g. ``"Bengaluru, Karnataka, India"`` → else ``"Karnataka, India"`` → else
+    ``"India"``. "" when nothing is derivable (caller then skips — never an
+    unconstrained, company-wide people search)."""
+    city, state, country = parse_location(text)
+    return ", ".join(p.strip() for p in (city, state, country) if p and p.strip())

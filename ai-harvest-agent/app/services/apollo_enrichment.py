@@ -24,6 +24,7 @@ import structlog
 
 from app.config import Settings
 from app.core.company_size import band_from_employee_count
+from app.core.hr_titles import HR_TITLES
 from app.services.apollo_client import ApolloAPIError, ApolloClient
 
 logger = structlog.get_logger(__name__)
@@ -160,3 +161,155 @@ async def apollo_contact_fallback(
         attempted=True,
         source="apollo" if email else "",
     )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Company + location HR-contact fallback
+# ══════════════════════════════════════════════════════════════════════════════
+# Used when a harvested job has NO resolvable recruiter email: find the best
+# location-specific HR/recruiting contact for the job's (company, location) via
+# Apollo — company → organization → HR people filtered by person_locations → reveal
+# the first available email. ALWAYS location-constrained; there is NO company-wide
+# fallback. Credit discipline (recheck cooldown + the global daily cap) lives here,
+# same as apollo_contact_fallback above.
+
+
+@dataclass
+class CompanyContactResult:
+    name: str = ""
+    title: str = ""
+    email: str = ""
+    phone: str = ""
+    company_domain: str = ""
+    matched: bool = False            # True when Apollo resolved the organization
+    attempted: bool = False          # True once a real Apollo search was issued (hit or miss)
+    cap_reached: bool = False        # True when the daily budget blocked the search (retry later)
+
+
+_COMPANY_CONTACT_SKIP = CompanyContactResult()  # attempted=False, nothing searched
+
+
+async def apollo_company_contact_fallback(
+    *,
+    settings: Settings,
+    company_name: str,
+    location_terms: str,
+    domain: str = "",
+    attempted_at: datetime | None = None,
+    reveal_cap: int | None = None,
+    titles: list[str] | None = None,
+    client: ApolloClient | None = None,
+) -> CompanyContactResult:
+    """Find the best location-specific HR/recruiting contact for a (company, location).
+
+    ``location_terms`` is REQUIRED (the Apollo person_locations filter) — an empty value
+    returns a skip rather than running an unconstrained, company-wide search. Honors the
+    ``apollo_recheck_days`` cooldown vs ``attempted_at`` and the global daily credit cap.
+    When the cap blocks the search, returns ``cap_reached=True, attempted=False`` so the
+    caller caches NOTHING and retries the next day (a cap denial is not a negative). A
+    clean search that finds no email returns ``attempted=True`` (a cacheable negative).
+    Never raises."""
+    if not settings.apollo_api_key or not company_name.strip() or not location_terms.strip():
+        return _COMPANY_CONTACT_SKIP
+
+    titles = titles or HR_TITLES
+    reveal_cap = settings.company_contact_reveal_cap if reveal_cap is None else reveal_cap
+
+    # Recheck cooldown — don't re-search a (company, location) tried recently. The
+    # caller normally gates on this too (via the cache row), but enforce it here so the
+    # helper is safe to call directly.
+    last = _aware_utc(attempted_at)
+    if last is not None and (datetime.now(timezone.utc) - last) < timedelta(days=settings.apollo_recheck_days):
+        logger.info("apollo_company_contact_skip_cooldown", company=company_name, age_days=(datetime.now(timezone.utc) - last).days)
+        return _COMPANY_CONTACT_SKIP
+
+    from app.services import apollo_budget
+
+    async def _budget_ok() -> bool:
+        # Front-run the ApolloClient's own gate so we can distinguish "cap reached"
+        # (defer, no negative) from "searched, found nothing" (cacheable negative).
+        remaining = await apollo_budget.remaining_today()
+        return remaining is None or remaining > 0
+
+    if not await _budget_ok():
+        return CompanyContactResult(cap_reached=True)
+
+    logger.info(
+        "apollo_company_contact_triggered",
+        company=company_name, location=location_terms, domain=domain,
+    )
+
+    client = client or ApolloClient(settings)
+    dom = (domain or "").strip()
+
+    # ── Resolve the Apollo organization (need its id for the people search) ──
+    org = None
+    try:
+        if dom:
+            org = await client.enrich_organization(dom)
+        if org is None or not org.id:
+            if not await _budget_ok():
+                return CompanyContactResult(cap_reached=True)
+            org = await client.search_organization(company_name, domain=dom)
+    except ApolloAPIError as exc:
+        logger.warning("apollo_company_contact_org_failed", company=company_name, error=str(exc))
+        return CompanyContactResult(attempted=True)
+
+    if org is None or not org.id:
+        # Could be a genuine no-match, or the daily cap blocking the resolve — only
+        # record a negative when budget is actually available.
+        if not await _budget_ok():
+            return CompanyContactResult(cap_reached=True)
+        return CompanyContactResult(attempted=True, company_domain=(dom or ""))
+
+    resolved_domain = (org.domain or dom or "")
+
+    # ── Search the org's HR people, LOCATION-FILTERED ──
+    if not await _budget_ok():
+        return CompanyContactResult(cap_reached=True)
+    try:
+        people = await client.search_people(
+            [org.id], titles, person_locations=[location_terms],
+        )
+    except ApolloAPIError as exc:
+        logger.warning("apollo_company_contact_people_failed", company=company_name, error=str(exc))
+        return CompanyContactResult(attempted=True, company_domain=resolved_domain)
+
+    # ── Reveal emails until the first hit, bounded by reveal_cap ──
+    revealed = 0
+    for person in people:
+        if revealed >= reveal_cap:
+            break
+        pid = getattr(person, "id", None)
+        if not pid:
+            continue
+        if not await _budget_ok():
+            # Out of budget mid-reveal — defer this (company, location), cache nothing.
+            return CompanyContactResult(cap_reached=True)
+        revealed += 1
+        try:
+            match = await client.match_person_by_id(pid, reveal_email=True)
+        except ApolloAPIError as exc:
+            logger.debug("apollo_company_contact_reveal_failed", person_id=pid, error=str(exc))
+            continue
+        if match.email:
+            logger.info(
+                "apollo_company_contact_found",
+                company=company_name, location=location_terms, email_found=True,
+            )
+            return CompanyContactResult(
+                name=(match.name or getattr(person, "name", "") or ""),
+                title=(match.title or getattr(person, "title", "") or ""),
+                email=match.email,
+                phone=match.phone or "",
+                company_domain=resolved_domain,
+                matched=True,
+                attempted=True,
+            )
+
+    # Searched (org matched) but no revealable email in that location — cacheable negative.
+    logger.info(
+        "apollo_company_contact_no_email",
+        company=company_name, location=location_terms, people=len(people), revealed=revealed,
+    )
+    return CompanyContactResult(attempted=True, company_domain=resolved_domain, matched=True)

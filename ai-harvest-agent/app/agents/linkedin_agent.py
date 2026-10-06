@@ -1301,6 +1301,22 @@ class LinkedInAgent:
         except Exception as exc:
             logger.warning("company_enrichment_pass_failed", error=str(exc))
 
+        # Company+location HR-contact fallback — for jobs that STILL have no resolvable
+        # recruiter email, discover the best location-specific HR contact for the job's
+        # (company, job-location) via Apollo and cache it (company_location_contacts);
+        # it's attached to those jobs at insert time (bulk_insert_scraped_jobs) WITHOUT
+        # touching the original poster fields. Runs after the recruiter/company passes
+        # so their emails are already known. Best-effort; bounded by the global Apollo
+        # daily cap. See app/services/company_location_contact_service.py.
+        try:
+            from app.config import get_settings
+            from app.services.company_location_contact_service import (
+                discover_company_location_contacts,
+            )
+            await discover_company_location_contacts(jobs, get_settings())
+        except Exception as exc:
+            logger.warning("company_location_contact_pass_failed", error=str(exc))
+
         return jobs
 
     async def _ensure_authenticated(

@@ -437,11 +437,16 @@ def _article(word: str) -> str:
 
 def build_greeting(job: dict) -> str:
     """Deterministic recipient greeting placed at the very top of the email: 'Hi <First>,'
-    when a job_poster_name is known, else a neutral 'Hello,'. Used by both the LLM path
+    when a recipient name is known, else a neutral 'Hello,'. Used by both the LLM path
     (prepended via append_closing) and the deterministic fallbacks, so every outreach email
-    opens with a greeting to the RECIPIENT rather than the sender's self-introduction."""
-    poster = (job.get("job_poster_name") or "").strip()
-    return f"Hi {poster.split()[0]}," if poster else "Hello,"
+    opens with a greeting to the RECIPIENT rather than the sender's self-introduction.
+
+    Prefers `outreach_to_name` (the resolved recipient — the poster for a scraped/recruiter
+    email, else the company+location HR contact we're actually emailing) so the greeting
+    always matches the recipient; falls back to `job_poster_name` for callers/views that
+    don't carry the resolved name."""
+    name = (job.get("outreach_to_name") or job.get("job_poster_name") or "").strip()
+    return f"Hi {name.split()[0]}," if name else "Hello,"
 
 
 def build_intro(sender_email: str, job: dict) -> str:
