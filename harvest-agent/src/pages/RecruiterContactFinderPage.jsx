@@ -148,9 +148,7 @@ export default function RecruiterContactFinderPage() {
 
         <div className="pagehead">
           <div>
-            <h1>Recruiter Contact Finder</h1>
-            <p className="sub">Pull verified recruiter &amp; B2B contacts from Apollo — look one up, or upload a CSV/Excel
-              to enrich in bulk with live progress. Runs on a separate per-workspace daily budget.</p>
+            <h1><b>Recruiter Contact Finder</b></h1>
           </div>
         </div>
 

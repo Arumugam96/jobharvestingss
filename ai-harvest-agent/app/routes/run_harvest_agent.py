@@ -836,7 +836,10 @@ async def get_run_history() -> Any:
     )
     if source == "database":
         entries = [_run_to_history_entry(r) for r in runs] if runs else []
-        return {"total_runs": len(entries), "runs": entries}
+        # `runs` is capped at 50 by list_run_history; report the real count
+        # separately so the sidebar badge isn't stuck at the list's cap.
+        total = await db_read(lambda db: HarvestRunService(db).count_run_history())
+        return {"total_runs": total if total is not None else len(entries), "runs": entries}
 
     return {"total_runs": len(runs), "runs": runs}
 

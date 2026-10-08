@@ -462,6 +462,18 @@ class HarvestRunService:
         result = await self._db.execute(stmt)
         return list(result.scalars())
 
+    async def count_run_history(self) -> int:
+        """Total run-history entries (same scope as list_run_history), UNCAPPED —
+        so the UI badge reflects the real count rather than the list's 50-row cap."""
+        stmt = select(func.count()).select_from(HarvestRunORM).where(
+            or_(
+                HarvestRunORM.source.is_(None),
+                HarvestRunORM.source == "LinkedIn Feed",
+            )
+        )
+        stmt = apply_tenant(stmt, HarvestRunORM.tenant_id)
+        return (await self._db.execute(stmt)).scalar_one()
+
     async def fail_stale_running(self, message: str = "Interrupted by a server restart") -> int:
         """Mark every still-'running' run as 'failed'. A harvest executes in a
         detached asyncio task that does NOT survive a process restart, so any

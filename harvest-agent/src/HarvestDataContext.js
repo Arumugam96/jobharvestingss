@@ -37,6 +37,9 @@ export function HarvestDataProvider({ children }) {
   const runHistoryViewRef = useRef(null);
 
   const [runs, setRuns] = useState([]);
+  // Real run count for the Sidebar badge — `runs` is capped at 50 by the
+  // backend, so its length can't back the badge (it would stick at 50).
+  const [runsTotal, setRunsTotal] = useState(0);
   const [runsLoading, setRunsLoading] = useState(true);
   const [runsError, setRunsError] = useState("");
 
@@ -58,6 +61,9 @@ export function HarvestDataProvider({ children }) {
     try {
       const res = await getRunHistory();
       setRuns((res.runs || []).map(mapRun));
+      // total_runs is the uncapped count; fall back to the (capped) list length
+      // if an older backend didn't send it.
+      setRunsTotal(res.total_runs ?? (res.runs || []).length);
     } catch (err) {
       setRunsError(
         err instanceof ApiError
@@ -65,6 +71,7 @@ export function HarvestDataProvider({ children }) {
           : "Could not reach the harvest backend. Is it running on the configured API URL?"
       );
       setRuns([]);
+      setRunsTotal(0);
     } finally {
       setRunsLoading(false);
     }
@@ -105,13 +112,13 @@ export function HarvestDataProvider({ children }) {
 
   const ctx = useMemo(() => ({
     jobsTotal, fetchJobs,
-    runs, runsLoading, runsError, fetchRuns,
+    runs, runsTotal, runsLoading, runsError, fetchRuns,
     refreshAll, harvestRunning, setHarvestRunning,
     pageSizeSel, setPageSizeSel,
     jobsViewRef, runHistoryViewRef,   // stable refs — a persistent view cache
   }), [
     jobsTotal, fetchJobs,
-    runs, runsLoading, runsError, fetchRuns,
+    runs, runsTotal, runsLoading, runsError, fetchRuns,
     refreshAll, harvestRunning, pageSizeSel,
   ]);
 

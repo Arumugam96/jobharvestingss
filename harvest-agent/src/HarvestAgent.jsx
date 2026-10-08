@@ -47,7 +47,7 @@ function activeKeyFromPath(pathname) {
  * full-page detail views (JobDetailsView, RunDetailView) render their own root
  * and sit OUTSIDE this layout, exactly as before. */
 function AppLayout({ onLogout }) {
-  const { jobsTotal, runs } = useHarvestData();
+  const { jobsTotal, runsTotal } = useHarvestData();
   const { hasFeature } = useTenant();
   const location = useLocation();
   const navigate = useNavigate();
@@ -59,7 +59,7 @@ function AppLayout({ onLogout }) {
         activePage={activeKey}
         onNavigate={(key) => navigate(`/${key}`)}
         jobsCount={jobsTotal}
-        runsCount={runs.length}
+        runsCount={runsTotal}
         onLogout={onLogout}
         // Recruiter Contacts is a full-bleed console — keep the nav rail collapsed
         // (hover to peek) so the page gets the width.
@@ -178,7 +178,7 @@ function SourcesRoute() {
 }
 
 function RulesRoute() {
-  const { jobsTotal, runs, refreshAll, harvestRunning, setHarvestRunning } = useHarvestData();
+  const { jobsTotal, runsTotal, refreshAll, harvestRunning, setHarvestRunning } = useHarvestData();
   const { features } = useTenant();
   const navigate = useNavigate();
   // US client gets the redesigned Rule Engine (features.ruleEngineRedesign);
@@ -186,7 +186,7 @@ function RulesRoute() {
   if (features.ruleEngineRedesign === true) return <RuleEngineRedesign />;
   return (
     <RuleEngineConfig
-      onNavigate={(key) => navigate(`/${key}`)} jobsCount={jobsTotal} runsCount={runs.length}
+      onNavigate={(key) => navigate(`/${key}`)} jobsCount={jobsTotal} runsCount={runsTotal}
       onRunComplete={refreshAll} harvestRunning={harvestRunning} setHarvestRunning={setHarvestRunning}
     />
   );
