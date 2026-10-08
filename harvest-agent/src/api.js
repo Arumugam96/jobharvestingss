@@ -280,6 +280,83 @@ export function runRecruiterDiscovery({ source_filter, run_ids, max_files, concu
   return request("/run-recruiter-discovery", { method: "POST", body: JSON.stringify(body) });
 }
 
+// ── Recruiter Contact Finder (on-demand Apollo enrichment — /contacts page) ─────
+
+/* Multipart upload helper. The shared request() always sets Content-Type: application/json,
+ * which breaks a file upload — here we send FormData with NO Content-Type so the browser
+ * sets the multipart boundary itself, while keeping the session cookie + dev-tenant header. */
+async function uploadRequest(path, formData) {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "X-Dev-Tenant": getDevTenant() },
+    body: formData,
+  });
+  let body = null;
+  try { body = await res.json(); } catch { /* no JSON body */ }
+  if (!res.ok) {
+    if (res.status === 401 && !path.startsWith("/auth/")) window.dispatchEvent(new Event("auth:logout"));
+    const message =
+      (body && (body.detail || body.message || (body.error && body.error.message))) ||
+      `Request to ${path} failed with status ${res.status}`;
+    throw new ApiError(typeof message === "string" ? message : JSON.stringify(message), res.status, body);
+  }
+  return body;
+}
+
+/** POST /recruiter-finder/validate — parse + column-map + validate an upload (no credits). */
+export function finderValidate(file) {
+  const fd = new FormData();
+  fd.append("file", file);
+  return uploadRequest("/recruiter-finder/validate", fd);
+}
+
+/** POST /recruiter-finder/upload — start a bulk enrichment job; returns {job_id, summary}. */
+export function finderUpload(file, { persona, reveal } = {}) {
+  const fd = new FormData();
+  fd.append("file", file);
+  fd.append("persona", persona || "");
+  fd.append("reveal", reveal || "email");
+  return uploadRequest("/recruiter-finder/upload", fd);
+}
+
+/** POST /recruiter-finder/search — one synchronous lookup (company→recruiter or known person). */
+export function finderSearch(body) {
+  return request("/recruiter-finder/search", { method: "POST", body: JSON.stringify(body) });
+}
+
+/** GET /recruiter-finder/jobs/{jobId} — job status + live counters (poll target). */
+export function getFinderJob(jobId) {
+  return request(`/recruiter-finder/jobs/${jobId}`);
+}
+
+/** GET /recruiter-finder/jobs/{jobId}/items — paginated per-row states.
+ * bucket: all | successful | ambiguous | unsuccessful | queued. */
+export function getFinderJobItems(jobId, { bucket = "all", page = 1, pageSize = 25 } = {}) {
+  const qs = new URLSearchParams({ bucket, page: String(page), page_size: String(pageSize) });
+  return request(`/recruiter-finder/jobs/${jobId}/items?${qs.toString()}`);
+}
+
+/** POST /recruiter-finder/jobs/{jobId}/retry — re-queue unsuccessful/deferred rows. */
+export function retryFinderJob(jobId) {
+  return request(`/recruiter-finder/jobs/${jobId}/retry`, { method: "POST" });
+}
+
+/** GET /recruiter-finder/usage — per-tenant daily credit gauge + 14-day history. */
+export function getFinderUsage() {
+  return request("/recruiter-finder/usage");
+}
+
+/** GET /recruiter-finder/history — recent enrichment jobs for this workspace. */
+export function getFinderHistory() {
+  return request("/recruiter-finder/history");
+}
+
+/** GET /recruiter-finder/recent-contacts — recent Finder-sourced contacts (DB-backed). */
+export function getFinderRecentContacts() {
+  return request("/recruiter-finder/recent-contacts");
+}
+
 // ── Outreach (LLM email / LinkedIn generation + send) ──────────────────────────
 
 /** POST /outreach/generate-email — draft a recruiter email; returns {subject, body, from_email, to_email, client_type, tone, fallback_used, attachment_name}. */

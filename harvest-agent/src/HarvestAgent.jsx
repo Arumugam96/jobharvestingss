@@ -19,6 +19,7 @@ import RunHistoryPage from "./pages/RunHistoryPage";
 import RunDetailView from "./pages/RunDetailView";
 import SourceRunsPage from "./pages/SourcesPage";
 import LeadIntelligencePage from "./pages/LeadIntelligencePage";
+import RecruiterContactFinderPage from "./pages/RecruiterContactFinderPage";
 import RuleEngineRedesign from "./pages/RuleEngineRedesign";
 
 /* Per-tenant route guard: a page whose feature flag is off for the current
@@ -36,6 +37,7 @@ function activeKeyFromPath(pathname) {
   if (pathname.startsWith("/history")) return "history";
   if (pathname.startsWith("/sources")) return "sources";
   if (pathname.startsWith("/leads")) return "leads";
+  if (pathname.startsWith("/contacts")) return "contacts";
   if (pathname.startsWith("/outreach") || pathname.startsWith("/mail")) return "outreach";
   return "jobs"; // "/", "/jobs", "/jobs/:id"
 }
@@ -49,15 +51,19 @@ function AppLayout({ onLogout }) {
   const { hasFeature } = useTenant();
   const location = useLocation();
   const navigate = useNavigate();
+  const activeKey = activeKeyFromPath(location.pathname);
   return (
     <div className="ha-root">
       <ThemeStyles />
       <Sidebar
-        activePage={activeKeyFromPath(location.pathname)}
+        activePage={activeKey}
         onNavigate={(key) => navigate(`/${key}`)}
         jobsCount={jobsTotal}
         runsCount={runs.length}
         onLogout={onLogout}
+        // Recruiter Contacts is a full-bleed console — keep the nav rail collapsed
+        // (hover to peek) so the page gets the width.
+        railCollapsed={activeKey === "contacts"}
       />
       <Outlet />
       {/* App-wide inbound-reply notifications (bell + toast), gated to tenants with
@@ -222,6 +228,7 @@ export default function HarvestAgent({ onLogout }) {
           <Route path="/history" element={<FeatureGate feature="history"><HistoryRoute /></FeatureGate>} />
           <Route path="/sources" element={<FeatureGate feature="sources"><SourcesRoute /></FeatureGate>} />
           <Route path="/leads" element={<FeatureGate feature="leads"><LeadIntelligencePage /></FeatureGate>} />
+          <Route path="/contacts" element={<FeatureGate feature="contacts"><RecruiterContactFinderPage /></FeatureGate>} />
           <Route path="/rules" element={<FeatureGate feature="rules"><RulesRoute /></FeatureGate>} />
           <Route path="/outreach" element={<FeatureGate feature="outreach"><OutreachHistoryPage /></FeatureGate>} />
           <Route path="/mail/:id" element={<FeatureGate feature="outreach"><OutreachThreadPage /></FeatureGate>} />

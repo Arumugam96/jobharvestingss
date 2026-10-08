@@ -20,6 +20,16 @@ _OWNER_TOPCARD = (".pv-top-card", "section.artdeco-card.pv-top-card", ".pv-text-
 _LEAK_SELECTORS = ("main", "main .scaffold-layout__main", "body")
 
 
+@pytest.fixture(autouse=True)
+def _enable_linkedin_scraping(monkeypatch):
+    """LinkedIn profile scraping is OFF by default (settings.linkedin_contact_scraping);
+    these tests exercise the scraper itself, so enable it on the cached settings
+    instance the extractor reads."""
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "linkedin_contact_scraping", True)
+
+
 class _El:
     def __init__(self, text: str = "") -> None:
         self._text = text

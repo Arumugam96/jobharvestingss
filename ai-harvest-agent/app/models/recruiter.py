@@ -84,6 +84,12 @@ class RecruiterORM(Base):
     # Provenance of the last contact hit: "" (scraped) | "apollo" | future sources.
     # Lets us distinguish Apollo-sourced contacts and audit credit spend.
     enrichment_source: Mapped[str] = mapped_column(String(50), nullable=False, default="")
+    # ── Recruiter Contact Finder provenance (app/services/recruiter_finder_service.py) ──
+    # Marks a row the on-demand Contact Finder created/touched ("contact_finder"),
+    # kept SEPARATE from harvest_source so a recruiter first seen via a harvest keeps
+    # its original provenance; and `requested_by` records which user asked for it.
+    source_label: Mapped[str] = mapped_column(String(60), nullable=False, default="")
+    requested_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
     # Timestamp of the last Apollo lookup *attempt* (hit or miss) — the recheck
     # cooldown (settings.apollo_recheck_days) reads this to avoid re-billing the
     # same profile every run. Stays null until Apollo is first tried.

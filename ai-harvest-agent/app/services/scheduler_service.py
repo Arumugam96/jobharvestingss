@@ -43,6 +43,7 @@ _TZ_MAP: dict[str, str] = {
 }
 
 _JOB_ID = "harvest_auto_run"
+_REPLY_POLL_JOB_ID = "reply_poll"
 
 
 class SchedulerService:
@@ -134,6 +135,41 @@ class SchedulerService:
             timezone  = tz,
             next_run  = next_str,
         )
+
+    def schedule_reply_poll(
+        self,
+        job_fn:           Callable[[], Coroutine[Any, Any, None]],
+        interval_seconds: int,
+        enabled:          bool,
+        name:             str = "Reply Poller",
+    ) -> None:
+        """Register (or remove) the recurring inbound-reply poll job (IMAP or Graph —
+        they're mutually exclusive, so they share one job slot).
+
+        Separate from the harvest job (own id) so the two coexist. Called from the
+        FastAPI lifespan when REPLY_TRACKING_MODE is "imap" or "graph". enabled=False
+        removes it.
+        """
+        if self._scheduler.get_job(_REPLY_POLL_JOB_ID):
+            self._scheduler.remove_job(_REPLY_POLL_JOB_ID)
+
+        if not enabled:
+            logger.info("reply_poll_disabled")
+            return
+
+        seconds = max(30, int(interval_seconds))
+        self._scheduler.add_job(
+            func    = job_fn,
+            trigger = IntervalTrigger(seconds=seconds),
+            id      = _REPLY_POLL_JOB_ID,
+            name    = name,
+            replace_existing = True,
+            misfire_grace_time = 60,
+            # Collapse any backlog of missed ticks into one, and never overlap polls.
+            coalesce = True,
+            max_instances = 1,
+        )
+        logger.info("reply_poll_registered", poller=name, interval_seconds=seconds)
 
     def get_next_run(self) -> str | None:
         """Return ISO string of next scheduled run, or None."""

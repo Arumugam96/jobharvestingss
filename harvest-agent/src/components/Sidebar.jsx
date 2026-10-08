@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import {
   SlidersHorizontal, LayoutList, History, Send, BarChart3, Radar, UserSearch, LogOut,
-  ChevronsLeft, ChevronsRight,
+  ChevronsLeft, ChevronsRight, Contact,
 } from "lucide-react";
 import HealthBadge from "./HealthBadge";
 import { useTenant } from "../TenantContext";
@@ -71,7 +71,7 @@ function sidebarVars(accent, isClient) {
 
 const LS_PINNED = "ha.sidebar.pinned";
 
-export default function Sidebar({ activePage, onNavigate = () => {}, jobsCount, runsCount, onLogout }) {
+export default function Sidebar({ activePage, onNavigate = () => {}, jobsCount, runsCount, onLogout, railCollapsed = false }) {
   const { tenant, theme, isClient, hasFeature } = useTenant();
 
   // `committed` = the persisted "keep the rail open" choice. Turned ON when the
@@ -89,7 +89,11 @@ export default function Sidebar({ activePage, onNavigate = () => {}, jobsCount, 
   // peek collapses when the pointer/focus leaves, but a committed rail does not — so
   // a click anywhere in the main page never closes it.
   const [peeking, setPeeking] = useState(false);
-  const open = committed || peeking;
+  // On a full-bleed console page (railCollapsed, e.g. Recruiter Contacts) the rail
+  // rests collapsed regardless of the persisted latch — it still PEEKS open on
+  // hover/focus so the nav stays reachable, and the saved choice is untouched for
+  // every other page.
+  const open = railCollapsed ? peeking : (committed || peeking);
 
   // Clicking a nav option commits the rail open, then navigates.
   const go = (key) => { setCommitted(true); onNavigate(key); };
@@ -163,6 +167,9 @@ export default function Sidebar({ activePage, onNavigate = () => {}, jobsCount, 
             )}
             {hasFeature("leads") && (
               <NavItem glyph={UserSearch} active={activePage === "leads"} onClick={() => go("leads")}>Lead Intelligence</NavItem>
+            )}
+            {hasFeature("contacts") && (
+              <NavItem glyph={Contact} active={activePage === "contacts"} onClick={() => go("contacts")}>Apollo Enrichment</NavItem>
             )}
             {hasFeature("outreach") && (
               <NavItem glyph={Send} active={activePage === "outreach"} onClick={() => go("outreach")}>Mail logs</NavItem>

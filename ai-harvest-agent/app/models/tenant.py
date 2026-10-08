@@ -64,7 +64,7 @@ SEED_TENANTS = [
         "config": {
             "theme": {"accent": "#2563EB", "brand": "SightSpectrum"},
             "features": {
-                "jobs": True, "history": True, "sources": True, "leads": True,
+                "jobs": True, "history": True, "sources": True, "leads": True, "contacts": True,
                 "outreach": True, "rules": True, "analytics": True,
                 "ruleEngineRedesign": False,
             },
@@ -80,7 +80,7 @@ SEED_TENANTS = [
             # Both client workspaces get the full page set; the US client keeps
             # the REDESIGNED Rule Engine variant.
             "features": {
-                "jobs": True, "history": True, "sources": True, "leads": True,
+                "jobs": True, "history": True, "sources": True, "leads": True, "contacts": True,
                 "outreach": True, "rules": True, "analytics": True,
                 "ruleEngineRedesign": True,
             },
@@ -96,7 +96,7 @@ SEED_TENANTS = [
             # Full page set like the US client, with the classic Rule Engine
             # (the redesign stays US-only).
             "features": {
-                "jobs": True, "history": True, "sources": True, "leads": True,
+                "jobs": True, "history": True, "sources": True, "leads": True, "contacts": True,
                 "outreach": True, "rules": True, "analytics": True,
                 "ruleEngineRedesign": False,
             },

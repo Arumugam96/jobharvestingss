@@ -22,6 +22,7 @@ async def engine():
     import app.models.auth  # noqa: F401 — registers users / otp_verifications on Base.metadata
     import app.models.harvest_run  # noqa: F401 — registers harvest_runs / scraped_jobs / llm_calls on Base.metadata
     import app.models.recruiter  # noqa: F401 — registers recruiters (scraped_jobs.recruiter_id FK target) on Base.metadata
+    import app.models.recruiter_finder  # noqa: F401 — registers recruiter_finder_usage/jobs/items on Base.metadata
     import app.models.outreach  # noqa: F401 — registers email_outreach on Base.metadata
 
     eng = create_async_engine(TEST_DB_URL, echo=False)

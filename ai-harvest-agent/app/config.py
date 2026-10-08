@@ -120,6 +120,21 @@ class Settings(BaseSettings):
     # before giving up on finding one (credit conservation — reveals cost credits).
     company_contact_reveal_cap: int = 5
 
+    # ── Recruiter Contact Finder (app/services/recruiter_finder_service.py) ───────
+    # The Contact Finder's OWN Apollo credit bucket — one per tenant, per UTC day —
+    # kept SEPARATE from apollo_daily_cap (the account-wide harvest backstop) so a
+    # workspace's on-demand lookups can't be starved by harvest runs and vice versa.
+    # Enforced atomically in the DB (app/services/recruiter_finder_budget.py) keyed
+    # on (usage_date, tenant_id). 0 = unlimited. A tenant may override this via its
+    # tenants.config JSON ("recruiter_finder_daily_cap"), resolved per request.
+    recruiter_finder_daily_cap: int = 50
+    # Hard ceiling on rows accepted from one uploaded CSV/XLSX (guards memory + spend).
+    recruiter_finder_max_rows: int = 1000
+    # How many Apollo lookups a single bulk-enrichment job runs in parallel. Apollo
+    # is HTTP-only (no browser), so this is just connection concurrency, not the
+    # Chrome single-flight guard.
+    recruiter_finder_concurrency: int = 3
+
     # ── Playwright ───────────────────────────────────────────────────────────────
     playwright_browser: Literal["chromium", "firefox", "webkit"] = "chromium"
     playwright_headless: bool = True
@@ -129,6 +144,14 @@ class Settings(BaseSettings):
     playwright_viewport_height: int = 800
 
     # ── LinkedIn scraper ─────────────────────────────────────────────────────────
+    # Master switch for visiting a person's LinkedIn /in/ profile to scrape
+    # publicly visible contact info (email/phone/headline/location). OFF by
+    # default. When off, the shared _extract_linkedin_contact_info no-ops, so all
+    # three contact-discovery call sites (harvest-time recruiter pass in
+    # linkedin_agent, recruiter_contact_agent, prospect_intelligence_agent) skip
+    # the profile visit entirely and lean on other sources (e.g. Apollo). Gating
+    # in the one shared function keeps the three call sites in sync.
+    linkedin_contact_scraping:           bool = False
     linkedin_scraper_slow_mo_ms:         int = 600    # ms between Playwright actions
     linkedin_description_concurrency:    int = 3      # parallel detail-page tabs
     linkedin_headless:                   bool = True
@@ -268,6 +291,66 @@ class Settings(BaseSettings):
     # Brevo v3 API key (header "api-key"). Used ONLY by scripts/register_brevo_events.py to
     # create/update the transactional event webhook — NOT the SMTP key used to send mail.
     brevo_api_key: str = ""
+
+    # ── Reply tracking (inbound prospect replies) ─────────────────────────────────
+    # How captured replies reach us. Both paths funnel into the SAME capture pipeline
+    # (outreach_reply_service.record_inbound_replies) — matching, storage, replied_at
+    # stamping, and the forward-to-alert-mailbox are identical. Only the ingestion
+    # SOURCE differs:
+    #   "brevo" → Brevo inbound-parse POSTs to /outreach/inbound-reply (needs a
+    #             dedicated inbound MX record pointed at Brevo — the legacy default).
+    #   "imap"  → we POLL the reply mailbox over IMAP on a timer and feed each new
+    #             message through the same pipeline. Needs NO DNS/MX change — it just
+    #             reads a mailbox you already own. Use this when the domain can't take
+    #             another MX record AND the mailbox provider allows app-password IMAP
+    #             (Zoho, Google Workspace, cPanel — NOT Microsoft 365).
+    #   "graph" → POLL a Microsoft 365 mailbox via the Microsoft Graph API (app-only
+    #             OAuth2). The required path for M365, which blocks password/app-password
+    #             IMAP (Basic Auth is disabled). Same pipeline, no DNS/MX change. Uses the
+    #             GRAPH_* fields below.
+    #   "off"   → none run (replies are not captured).
+    # The /outreach/inbound-reply webhook stays mounted in every mode (harmless unless
+    # Brevo actually posts to it); this switch only gates which poller runs.
+    reply_tracking_mode: Literal["brevo", "imap", "graph", "off"] = "brevo"
+
+    # ── IMAP reply mailbox (used only when REPLY_TRACKING_MODE="imap") ─────────────
+    # The mailbox replies land in — i.e. the address used as the outreach From /
+    # Reply-To. This is a mailbox on YOUR mail provider (Google Workspace, Zoho, M365,
+    # cPanel…), NOT Brevo: Brevo only relays outbound. Every such provider exposes IMAP
+    # over TLS on 993 at no extra cost.
+    imap_host: str = ""                 # e.g. imap.gmail.com, imappro.zoho.com, outlook.office365.com
+    imap_port: int = 993
+    imap_username: str = ""             # the reply mailbox address
+    # Mailbox password OR an app-specific password. Google Workspace / M365 with MFA
+    # require an app password (or OAuth); Zoho / cPanel usually accept the mailbox
+    # password directly. See docs/README for the per-provider steps.
+    imap_password: str = ""
+    imap_use_ssl: bool = True           # True → implicit TLS on 993 (standard); False → plain/STARTTLS on 143
+    imap_mailbox: str = "INBOX"         # folder to scan — point at a dedicated "Replies" folder if a server-side filter files them there
+    # How often the poller checks for new replies. 120–300s is plenty and well within
+    # every provider's IMAP limits.
+    imap_poll_interval_seconds: int = 180
+    # Safety cap on messages processed per poll (a huge backlog on first run won't
+    # stall the tick). Remaining messages are picked up on the next poll.
+    imap_max_messages_per_poll: int = 50
+
+    # ── Microsoft Graph reply mailbox (used only when REPLY_TRACKING_MODE="graph") ─
+    # App-only (client-credentials) OAuth2 against Microsoft 365. Register an app in
+    # Microsoft Entra ID, grant it the APPLICATION permission "Mail.Read" (admin
+    # consent), create a client secret, then scope it to just the reply mailbox with
+    # an Exchange Application Access Policy (New-ApplicationAccessPolicy). See the
+    # README/.env.example for the exact steps. No interactive login, no refresh token.
+    graph_tenant_id: str = ""        # Entra "Directory (tenant) ID"
+    graph_client_id: str = ""        # Entra "Application (client) ID"
+    graph_client_secret: str = ""    # a client secret VALUE (not the secret id)
+    # The mailbox whose replies we read, e.g. "ananyamehta@sightspectrum.com" — this is
+    # the OUTREACH_AUTO_REPLY_TO / Reply-To address. Blank falls back to SMTP_SENDER_MAIL.
+    graph_mailbox: str = ""
+    # Which folder to read. "inbox" is the well-known name; a custom folder would be its
+    # folder id. Point at a dedicated "Replies" folder if a mail rule files them there.
+    graph_mailbox_folder: str = "inbox"
+    graph_poll_interval_seconds: int = 180
+    graph_max_messages_per_poll: int = 50
     # Public base URL of the app (scheme + host, no trailing slash), e.g.
     # "https://app.example.com" — used to build absolute links in outreach emails
     # (the unsubscribe link + List-Unsubscribe header). Falls back to localhost.

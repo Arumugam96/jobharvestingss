@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 import app.models.auth  # noqa: F401
 import app.models.harvest_run  # noqa: F401
 import app.models.recruiter  # noqa: F401
+import app.models.recruiter_finder  # noqa: F401
 import app.models.outreach  # noqa: F401
 import app.models.suppression  # noqa: F401
 import app.models.tenant  # noqa: F401

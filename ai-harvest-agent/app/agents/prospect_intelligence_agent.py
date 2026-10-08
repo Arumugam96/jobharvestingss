@@ -793,6 +793,16 @@ async def _extract_linkedin_contact_info(
         "location":              "",
     }
 
+    # Master gate — skip the LinkedIn profile visit entirely unless explicitly
+    # enabled. OFF by default, so all three call sites (harvest recruiter pass,
+    # recruiter_contact_agent, prospect_intelligence_agent) no-op here and never
+    # open a /in/ page. Returns the empty-but-well-shaped `out` so callers read
+    # profile_opened=False / email="" and move on to their other sources.
+    from app.config import get_settings
+    if not get_settings().linkedin_contact_scraping:
+        logger.info("linkedin_contact_scraping_disabled", linkedin_url=linkedin_url)
+        return out
+
     # Reduce activity/overlay/detail URLs (and query strings) to the canonical
     # /in/<slug> profile — otherwise the page loads a feed and the fallback
     # scan below grabs the first activity-feed member's contact, not this

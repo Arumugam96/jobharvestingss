@@ -53,6 +53,7 @@ async def upsert_recruiter(
     designation: str = "",
     linkedin_profile_url: str | None = None,
     harvest_source: str = "",
+    tenant_id: str | None = None,
 ) -> RecruiterORM | None:
     """Resolve-or-create the one RecruiterORM row for this person.
 
@@ -109,6 +110,10 @@ async def upsert_recruiter(
         first_seen_at=now,
         last_seen_at=now,
     )
+    # Own a NEW recruiter to the caller's tenant when given (the Contact Finder passes
+    # the current tenant); harvest callers omit it and keep the server_default 'internal'.
+    if tenant_id:
+        recruiter.tenant_id = tenant_id
     try:
         # Scoped to a SAVEPOINT: on a concurrent-insert race (another
         # session upserting the same dedup_key at the same time) only this
@@ -215,6 +220,71 @@ async def save_enrichment(
         # skip this profile on subsequent runs.
         recruiter.apollo_enriched_at = now
     await db.flush()
+
+
+async def save_finder_contact(
+    db: AsyncSession,
+    *,
+    person_name: str,
+    company_name: str = "",
+    designation: str = "",
+    linkedin_profile_url: str | None = None,
+    company_domain: str = "",
+    official_email_id: str = "",
+    email_status: str = "NOT_FOUND",
+    contact_number: str = "",
+    phone_status: str = "NOT_FOUND",
+    location: str = "",
+    city: str = "",
+    state: str = "",
+    country: str = "",
+    position_level: str = "NOT_FOUND",
+    confidence_score: str = "Low",
+    verified: bool = False,
+    requested_by: str | None = None,
+    tenant_id: str | None = None,
+    source_label: str = "contact_finder",
+) -> str | None:
+    """Resolve-or-create the recruiter for a Contact Finder hit, tag its finder
+    provenance (a distinct ``source_label`` + the requesting user, kept SEPARATE from
+    ``harvest_source``), and cache the Apollo contact on the row — reusing
+    upsert_recruiter + save_enrichment so finder contacts dedupe with harvested ones
+    and flow into outreach. Returns the recruiter id (None if the person had no name)."""
+    recruiter = await upsert_recruiter(
+        db,
+        person_name=person_name,
+        company_name=company_name,
+        designation=designation,
+        linkedin_profile_url=linkedin_profile_url,
+        harvest_source="",  # leave harvest provenance untouched; finder uses source_label
+        tenant_id=tenant_id,
+    )
+    if recruiter is None:
+        return None
+    if source_label:
+        recruiter.source_label = source_label
+    if requested_by:
+        recruiter.requested_by = requested_by
+    await db.flush()
+    await save_enrichment(
+        db,
+        recruiter.id,
+        company_domain=company_domain,
+        official_email_id=official_email_id,
+        email_status=email_status,
+        contact_number=contact_number,
+        phone_status=phone_status,
+        location=location,
+        city=city,
+        state=state,
+        country=country,
+        position_level=position_level,
+        confidence_score=confidence_score,
+        verified=verified,
+        enrichment_source="apollo",
+        apollo_attempted=True,
+    )
+    return recruiter.id
 
 
 async def link_recruiter_jobs_by_url(db: AsyncSession, recruiter_id: str, linkedin_profile_url: str) -> int:

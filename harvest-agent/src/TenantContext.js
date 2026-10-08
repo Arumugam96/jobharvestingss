@@ -20,7 +20,7 @@ export const INTERNAL_TENANT = {
   region: "",
   theme: { accent: "#2563EB", brand: "SightSpectrum" },
   features: {
-    jobs: true, history: true, sources: true, leads: true,
+    jobs: true, history: true, sources: true, leads: true, contacts: true,
     outreach: true, rules: true, analytics: true, ruleEngineRedesign: false,
   },
 };

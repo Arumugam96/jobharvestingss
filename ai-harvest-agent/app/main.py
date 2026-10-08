@@ -26,6 +26,7 @@ from app.core.middleware import LoggingMiddleware, RateLimitMiddleware
 import app.models.auth  # noqa: F401 — registers users / otp_verifications on Base.metadata
 import app.models.harvest_run  # noqa: F401 — registers harvest_runs / scraped_jobs / llm_calls on Base.metadata
 import app.models.recruiter  # noqa: F401 — registers recruiters on Base.metadata
+import app.models.recruiter_finder  # noqa: F401 — registers recruiter_finder_usage/jobs/items on Base.metadata
 import app.models.outreach  # noqa: F401 — registers email_outreach on Base.metadata
 import app.models.outreach_reply  # noqa: F401 — registers outreach_replies on Base.metadata
 import app.models.suppression  # noqa: F401 — registers email_suppressions on Base.metadata
@@ -42,6 +43,7 @@ from app.routes.run_harvest_agent import router as run_harvest_agent_router
 from app.routes.frontend_routes import router as frontend_router
 from app.routes.prospect_routes import router as prospect_intelligence_router
 from app.routes.recruiter_routes import router as recruiter_discovery_router
+from app.routes.recruiter_finder_routes import router as recruiter_finder_router
 from app.routes.lead_intelligence_routes import router as lead_intelligence_router
 from app.routes.outreach_routes import router as outreach_router, webhook_router as outreach_webhook_router
 from app.services.job_tracker import JobTracker
@@ -135,6 +137,9 @@ def _ensure_recruiter_columns(sync_conn) -> None:
         # Global outreach opt-out mirror (source of truth is email_suppressions).
         ("unsubscribed",         "ALTER TABLE recruiters ADD COLUMN unsubscribed BOOLEAN NOT NULL DEFAULT FALSE"),
         ("unsubscribed_at",      f"ALTER TABLE recruiters ADD COLUMN unsubscribed_at {ts_type}"),
+        # Recruiter Contact Finder provenance (app/services/recruiter_finder_service.py).
+        ("source_label",         "ALTER TABLE recruiters ADD COLUMN source_label VARCHAR(60) NOT NULL DEFAULT ''"),
+        ("requested_by",         "ALTER TABLE recruiters ADD COLUMN requested_by VARCHAR(120)"),
     ]
     for name, ddl in pending:
         if name not in existing_cols:
@@ -279,6 +284,9 @@ _TENANT_CONTENT_TABLES = [
     "harvest_runs", "scraped_jobs", "llm_calls", "reenrichment_tasks",
     "harvest_jobs", "harvest_results", "email_outreach", "outreach_replies",
     "recruiters", "recruiter_discovery_runs", "email_suppressions",
+    # Recruiter Contact Finder (recruiter_finder_usage is a standalone counter scoped
+    # by explicit tenant_id in SQL, like apollo_daily_usage — so NOT listed here).
+    "recruiter_finder_jobs", "recruiter_finder_items",
 ]
 
 
@@ -428,6 +436,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception as exc:
         logger.warning("stale_run_reconcile_failed", error=str(exc))
 
+    # Same reconcile for the Contact Finder's detached enrichment jobs — a restart
+    # orphans any running/queued job, so fail them (and their in-flight items) so a
+    # retry can resume. Best-effort — never block startup.
+    try:
+        from app.services.recruiter_finder_service import fail_stale_jobs
+        stale_finder = await fail_stale_jobs()
+        if stale_finder:
+            logger.info("stale_finder_jobs_reconciled", count=stale_finder)
+    except Exception as exc:
+        logger.warning("stale_finder_reconcile_failed", error=str(exc))
+
     # ── Playwright pool (optional — demo routes create their own browser) ─────
     # On Windows with --reload, uvicorn forces SelectorEventLoop which cannot
     # spawn Playwright's browser subprocess.  The pool is skipped gracefully;
@@ -478,6 +497,30 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             logger.info("scheduler_schedule_applied", frequency=cfg.schedule.frequency)
     except Exception as exc:
         logger.warning("scheduler_setup_failed", error=str(exc))
+
+    # Reply poller (DNS-free alternative to the Brevo inbound-parse webhook). Runs only
+    # when REPLY_TRACKING_MODE is "imap" or "graph"; pulls new replies from the mailbox
+    # on a timer and funnels them through the same capture pipeline the webhook uses.
+    # imap → generic IMAP mailbox; graph → Microsoft 365 via Microsoft Graph.
+    try:
+        if settings.reply_tracking_mode == "imap":
+            from app.services.imap_reply_poller import poll_once
+            scheduler.schedule_reply_poll(
+                job_fn           = poll_once,
+                interval_seconds = settings.imap_poll_interval_seconds,
+                enabled          = True,
+                name             = "IMAP Reply Poller",
+            )
+        elif settings.reply_tracking_mode == "graph":
+            from app.services.graph_reply_poller import poll_once
+            scheduler.schedule_reply_poll(
+                job_fn           = poll_once,
+                interval_seconds = settings.graph_poll_interval_seconds,
+                enabled          = True,
+                name             = "Microsoft Graph Reply Poller",
+            )
+    except Exception as exc:
+        logger.warning("reply_poll_setup_failed", error=str(exc))
 
     yield  # ← app runs here
 
@@ -553,6 +596,7 @@ def create_app() -> FastAPI:
     app.include_router(dice_agent_router, dependencies=protected)             # POST /run-dice-agent  +  dice results endpoints
     app.include_router(prospect_intelligence_router, dependencies=protected)  # POST /run-prospect-intelligence
     app.include_router(recruiter_discovery_router, dependencies=protected)    # POST /run-recruiter-discovery
+    app.include_router(recruiter_finder_router, dependencies=protected)       # POST /recruiter-finder/* (Apollo Contact Finder)
     app.include_router(lead_intelligence_router, dependencies=protected)      # POST /run-lead-intelligence, GET /lead-intelligence, /download/lead-intelligence/*
     app.include_router(outreach_router, dependencies=protected)               # POST /outreach/generate-email, /generate-linkedin, /send-email
     # Mailjet delivery-event webhook — unauthenticated (Mailjet has no login
