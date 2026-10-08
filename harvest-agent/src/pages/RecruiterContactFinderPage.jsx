@@ -247,6 +247,8 @@ function StatBand({ usage, collapsed }) {
 }
 
 // ── Single lookup ─────────────────────────────────────────────────────────────
+const MAX_COUNT = 25; // mirrors settings.company_contact_max_count (server clamps anyway)
+
 function SinglePanel({ onSpent }) {
   const [target, setTarget] = useState("company"); // company | people
   const [reveal, setReveal] = useState("email");
@@ -255,6 +257,8 @@ function SinglePanel({ onSpent }) {
   const [persona, setPersona] = useState(PERSONA_OPTIONS[0]);
   const [personName, setPersonName] = useState("");
   const [linkedinUrl, setLinkedinUrl] = useState("");
+  const [count, setCount] = useState(1);        // company mode: how many contacts to reveal
+  const [confirming, setConfirming] = useState(false);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
@@ -263,11 +267,19 @@ function SinglePanel({ onSpent }) {
     (async () => { try { const r = await getFinderRecentContacts(); setRecent(r.contacts || []); } catch { /* ignore */ } })();
   }, []);
 
+  const perCost = reveal === "both" ? 2 : 1;          // credits per revealed contact
+  const wanted = target === "company" ? count : 1;    // people lookup is always a single contact
+  const maxCost = perCost * wanted;                   // upper bound — only revealed contacts are charged
+  const canSubmit = target === "company"
+    ? !!company.trim()
+    : !!(personName.trim() || linkedinUrl.trim());
+  const setCountSafe = (n) => setCount(Number.isFinite(n) ? Math.min(MAX_COUNT, Math.max(1, n)) : 1);
+
   const run = async () => {
-    setLoading(true); setError(""); setResult(null);
+    setConfirming(false); setLoading(true); setError(""); setResult(null);
     try {
       const body = target === "company"
-        ? { company, location, persona, reveal }
+        ? { company, location, persona, reveal, count }
         : { company, reveal, person_name: personName, linkedin_url: linkedinUrl };
       setResult(await finderSearch(body));
       onSpent();
@@ -286,12 +298,12 @@ function SinglePanel({ onSpent }) {
     <div className="panel">
       <div className="opts-row">
         <div className="optgrp"><span className="olbl">Look up</span>
-          <Seg value={target} onChange={setTarget} options={[
+          <Seg value={target} onChange={(v) => { setTarget(v); setConfirming(false); }} options={[
             { value: "company", label: "Recruiters at a company", icon: <Building2 size={14} /> },
             { value: "people", label: "A specific person", icon: <Users size={14} /> },
           ]} />
         </div>
-        <div className="optgrp"><span className="olbl">Reveal</span><Seg value={reveal} onChange={setReveal} options={revealOpts} /></div>
+        <div className="optgrp"><span className="olbl">Reveal</span><Seg value={reveal} onChange={(v) => { setReveal(v); setConfirming(false); }} options={revealOpts} /></div>
       </div>
 
       {target === "company" ? (
@@ -301,7 +313,14 @@ function SinglePanel({ onSpent }) {
           <div className="field"><label>Location <span className="opt">(optional)</span></label>
             <div className="input"><MapPin size={15} /><input value={location} onChange={(e) => setLocation(e.target.value)} placeholder="City or country" /></div></div>
           <div className="field"><label>Who to look up</label><PersonaSelect value={persona} onChange={setPersona} /></div>
-          <button className="btn btn-primary" onClick={run} disabled={loading}>
+          <div className="field"><label>How many</label>
+            <div className="input cntwrap">
+              <button type="button" className="cntbtn" aria-label="Fewer" disabled={count <= 1} onClick={() => setCountSafe(count - 1)}>−</button>
+              <input value={count} inputMode="numeric" aria-label="Number of contacts to reveal"
+                onChange={(e) => setCountSafe(parseInt(e.target.value, 10))} />
+              <button type="button" className="cntbtn" aria-label="More" disabled={count >= MAX_COUNT} onClick={() => setCountSafe(count + 1)}>+</button>
+            </div></div>
+          <button className="btn btn-primary" onClick={() => setConfirming(true)} disabled={loading || !canSubmit}>
             {loading ? <Loader2 size={16} className="ha-spin" /> : <Search size={16} />} Find contacts
           </button>
         </div>
@@ -313,15 +332,28 @@ function SinglePanel({ onSpent }) {
             <div className="input"><Building2 size={15} /><input value={company} onChange={(e) => setCompany(e.target.value)} placeholder="e.g. Stripe" /></div></div>
           <div className="field"><label>LinkedIn URL <span className="opt">(works on its own)</span></label>
             <div className="input"><Link2 size={15} /><input value={linkedinUrl} onChange={(e) => setLinkedinUrl(e.target.value)} placeholder="linkedin.com/in/…" /></div></div>
-          <button className="btn btn-primary" onClick={run} disabled={loading}>
+          <button className="btn btn-primary" onClick={() => setConfirming(true)} disabled={loading || !canSubmit}>
             {loading ? <Loader2 size={16} className="ha-spin" /> : <Zap size={16} />} Enrich
           </button>
         </div>
       )}
 
-      <div className="form-foot"><Zap size={15} />
-        <span><b>1 credit</b> per revealed email ({reveal === "both" ? "2 for both" : reveal === "phone" ? "1 for phone" : "email"}) · cached contacts are free</span>
-      </div>
+      {confirming ? (
+        <div className="confirm">
+          <Zap size={15} />
+          <span className="cm">
+            {target === "company"
+              ? <>Reveal up to <b>{wanted}</b> contact{wanted > 1 ? "s" : ""} — costs up to <b>{maxCost}</b> credit{maxCost > 1 ? "s" : ""}. You're only charged for contacts actually found.</>
+              : <>Reveal this contact — costs <b>{maxCost}</b> credit{maxCost > 1 ? "s" : ""} if found.</>}
+          </span>
+          <button className="btn sm btn-ghost" onClick={() => setConfirming(false)}>Cancel</button>
+          <button className="btn sm btn-primary" onClick={run}>Confirm &amp; reveal</button>
+        </div>
+      ) : (
+        <div className="form-foot"><Zap size={15} />
+          <span><b>{perCost} credit{perCost > 1 ? "s" : ""}</b> per revealed contact ({reveal === "both" ? "email + phone" : reveal === "phone" ? "phone" : "email"}){target === "company" ? <> · up to <b>{maxCost}</b> for this search</> : null} · cached contacts are free</span>
+        </div>
+      )}
 
       {error && <div className="valnote" style={{ marginTop: 16, background: "var(--bad-bg)", borderColor: "transparent" }}><AlertTriangle className="ic" style={{ color: "var(--bad)" }} /><div className="t">{error}</div></div>}
       {result && <SingleResult result={result} company={company} />}
@@ -334,25 +366,61 @@ function SingleResult({ result, company }) {
   if (result.status === "unconfigured" || result.status === "over_budget") {
     return <div className="valnote" style={{ marginTop: 16 }}><AlertTriangle className="ic" /><div className="t">{result.message}</div></div>;
   }
-  const tone = result.status === "completed" ? "done" : result.status === "ambiguous" ? "amb" : result.status === "failed" ? "fail" : "nf";
-  const label = {
-    completed: "Found", ambiguous: "Multiple matches — refine", not_found: "No contact found", failed: result.error || "Lookup failed",
-  }[result.status] || result.status;
+  const rows = result.results || [];
+  // No contacts revealed → one informational row explaining why.
+  if (rows.length === 0) {
+    const tone = result.status === "ambiguous" ? "amb" : result.status === "failed" ? "fail" : "nf";
+    const label = {
+      ambiguous: "Multiple matches — refine", not_found: "No contact found",
+      failed: result.message || "Lookup failed",
+    }[result.status] || result.status;
+    return (
+      <>
+        <div className="gridtool"><h3><span className="ic" style={{ color: "var(--primary)" }}><Users size={16} /></span>Result</h3></div>
+        <div className="table-scroll" style={{ maxHeight: "none" }}>
+          <table className="rt">
+            <thead><tr><th>Contact</th><th>Title</th><th>Company</th><th>Email</th><th>Phone</th><th>Status</th></tr></thead>
+            <tbody>
+              <tr>
+                <td className="contact"><span className="intent">—</span></td>
+                <td>—</td>
+                <td className="co"><b>{company || "—"}</b>{result.company_domain ? <span>{result.company_domain}</span> : null}</td>
+                <td className="email"><span className="muted">{label}</span></td>
+                <td className="phone"><span className="none">—</span></td>
+                <td><span className={"chip " + tone}><span className="d" />{label}</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </>
+    );
+  }
+  const short = result.requested > 1 && result.revealed < result.requested;
   return (
     <>
-      <div className="gridtool"><h3><span className="ic" style={{ color: "var(--primary)" }}><Users size={16} /></span>Result</h3></div>
+      <div className="gridtool">
+        <h3><span className="ic" style={{ color: "var(--primary)" }}><Users size={16} /></span>Result</h3>
+        <span className="count-pill num">{result.revealed}</span>
+        <span style={{ flex: 1 }} />
+        <span style={{ fontSize: 12, color: "var(--ink-soft)" }}>
+          <b>{result.credits_spent}</b> credit{result.credits_spent === 1 ? "" : "s"} spent
+          {result.budget_exhausted ? " · daily budget reached" : short ? ` · only ${result.revealed} of ${result.requested} found` : ""}
+        </span>
+      </div>
       <div className="table-scroll" style={{ maxHeight: "none" }}>
         <table className="rt">
           <thead><tr><th>Contact</th><th>Title</th><th>Company</th><th>Email</th><th>Phone</th><th>Status</th></tr></thead>
           <tbody>
-            <tr>
-              <td className="contact">{result.contact_name ? <span className="nm">{result.contact_name}</span> : <span className="intent">—</span>}</td>
-              <td>{result.contact_title || "—"}</td>
-              <td className="co"><b>{company || "—"}</b>{result.company_domain ? <span>{result.company_domain}</span> : null}</td>
-              <td className="email">{result.email ? <span className="addr">{result.email}</span> : <span className="muted">{label}</span>}</td>
-              <td className="phone">{result.phone || <span className="none">—</span>}</td>
-              <td><span className={"chip " + tone}><span className="d" />{label}</span></td>
-            </tr>
+            {rows.map((r, i) => (
+              <tr key={i}>
+                <td className="contact">{r.contact_name ? <span className="nm">{r.contact_name}</span> : <span className="intent">—</span>}</td>
+                <td>{r.contact_title || "—"}</td>
+                <td className="co"><b>{company || "—"}</b>{r.company_domain ? <span>{r.company_domain}</span> : null}</td>
+                <td className="email">{r.email ? <span className="addr">{r.email}</span> : <span className="muted">—</span>}</td>
+                <td className="phone">{r.phone || <span className="none">—</span>}</td>
+                <td><span className="chip done"><span className="d" />Found</span></td>
+              </tr>
+            ))}
           </tbody>
         </table>
       </div>
@@ -879,7 +947,7 @@ const CSS = `
 .rcf .seg-btn:hover{color:var(--ink)}
 .rcf .seg-btn.active{background:var(--glass-solid);color:var(--primary);box-shadow:var(--shadow-sm)}
 .rcf .fields{display:grid;gap:12px;align-items:end}
-.rcf .fields.mode-company{grid-template-columns:1.3fr 1fr 1.25fr auto}
+.rcf .fields.mode-company{grid-template-columns:1.3fr 1fr 1.25fr auto auto}
 .rcf .fields.mode-people{grid-template-columns:1.1fr 1.1fr 1.4fr auto}
 .rcf .field{display:flex;flex-direction:column;gap:6px;min-width:0}
 .rcf .field label{font-size:10.5px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:var(--ink-soft)}
@@ -900,6 +968,14 @@ const CSS = `
 .rcf .btn[disabled]{opacity:.5;cursor:not-allowed}
 .rcf .form-foot{display:flex;align-items:center;gap:8px;margin-top:14px;color:var(--ink-soft);font-size:12px}
 .rcf .form-foot svg{color:var(--accent);flex:none}.rcf .form-foot b{color:var(--ink)}
+.rcf .cntwrap{justify-content:space-between;gap:6px;width:116px}
+.rcf .cntwrap input{text-align:center;width:36px;flex:none;font-weight:700;font-variant-numeric:tabular-nums}
+.rcf .cntbtn{border:none;background:var(--line-soft);color:var(--ink);width:24px;height:24px;border-radius:7px;font-size:16px;line-height:1;cursor:pointer;display:grid;place-items:center;flex:none}
+.rcf .cntbtn:hover{background:var(--pale);color:var(--primary)}
+.rcf .cntbtn[disabled]{opacity:.4;cursor:not-allowed}
+.rcf .confirm{display:flex;align-items:center;gap:12px;margin-top:14px;padding:11px 14px;border:1px solid var(--pale-br);background:var(--pale);border-radius:12px;font-size:12.5px;color:var(--ink)}
+.rcf .confirm .cm{flex:1;min-width:0}.rcf .confirm b{color:var(--ink)}
+.rcf .confirm svg{color:var(--accent);flex:none}
 .rcf .stepper{display:flex;align-items:center;gap:0;margin-bottom:18px;flex-wrap:wrap}
 .rcf .step{display:flex;align-items:center;gap:9px;font-size:12.5px;font-weight:600;color:var(--ink-faint)}
 .rcf .step .dot{width:26px;height:26px;border-radius:50%;display:grid;place-items:center;background:var(--line-soft);color:var(--ink-faint);font-weight:800;font-size:12px;border:1px solid var(--line)}

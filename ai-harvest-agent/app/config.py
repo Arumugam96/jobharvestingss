@@ -130,6 +130,10 @@ class Settings(BaseSettings):
     recruiter_finder_daily_cap: int = 50
     # Hard ceiling on rows accepted from one uploaded CSV/XLSX (guards memory + spend).
     recruiter_finder_max_rows: int = 1000
+    # Single search (company mode) only: the largest "how many contacts" a user may
+    # request in one lookup. Caps per-search credit spend — each revealed contact costs
+    # 1 credit (email/phone) or 2 (both), still bounded by the per-tenant daily cap.
+    company_contact_max_count: int = 25
     # How many Apollo lookups a single bulk-enrichment job runs in parallel. Apollo
     # is HTTP-only (no browser), so this is just connection concurrency, not the
     # Chrome single-flight guard.

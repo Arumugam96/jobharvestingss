@@ -162,6 +162,60 @@ async def _company_lookup(
     return _blank_outcome("ambiguous", company_domain=(org.domain or domain or ""))
 
 
+async def _company_lookup_many(
+    client: ApolloClient, item: dict, titles: list[str], want_email: bool, want_phone: bool,
+    want_count: int, reveal_cap: int, reserve,
+) -> tuple[list[dict], str, bool]:
+    """Single-search multi-reveal: find up to ``want_count`` DISTINCT persona contacts
+    AT a company. Walks the candidate list, revealing one at a time, and reserves a
+    credit via ``reserve()`` ONLY for each contact it actually delivers (so a miss costs
+    nothing). Stops at ``want_count`` successes, when candidates run out, or when the
+    budget is exhausted mid-run. Returns (results, fallback_status, budget_exhausted);
+    ``fallback_status`` is only meaningful when ``results`` is empty."""
+    company, domain, location = item["company"], item["domain"], item["location"]
+    org = None
+    if domain:
+        org = await client.enrich_organization(domain)
+    if org is None or not org.id:
+        org = await client.search_organization(company, domain=domain)
+    if org is None or not org.id:
+        return [], "not_found", False
+    domain_out = org.domain or domain or ""
+
+    person_locations = [location] if location else None
+    # Fetch more candidates than wanted so failed reveals have slack (reveal_cap).
+    fetch_n = min(100, max(10, want_count + reveal_cap))
+    people = await client.search_people(
+        [org.id], titles, person_locations=person_locations, per_page=fetch_n
+    )
+    if not people:
+        return [], "not_found", False
+
+    results: list[dict] = []
+    seen: set[str] = set()
+    budget_exhausted = False
+    for person in people:
+        if len(results) >= want_count:
+            break
+        pid = getattr(person, "id", None)
+        if not pid or pid in seen:
+            continue
+        seen.add(pid)
+        try:
+            match = await client.match_person_by_id(pid, reveal_email=want_email, reveal_phone=want_phone)
+        except ApolloAPIError:
+            continue
+        if (want_email and match.email) or (want_phone and match.phone):
+            if not await reserve():  # out of per-tenant budget — keep what we have
+                budget_exhausted = True
+                break
+            out = _completed_outcome(match, person, org)
+            out["company_domain"] = out["company_domain"] or domain_out
+            results.append(out)
+    # Candidates existed but none yielded a revealable contact → ambiguous (needs review).
+    return results, ("ambiguous" if not results else "completed"), budget_exhausted
+
+
 async def _enrich_item(
     client: ApolloClient, item: dict, titles: list[str], want_email: bool, want_phone: bool, reveal_cap: int
 ) -> dict:
@@ -441,22 +495,70 @@ async def _run_enrichment_background(job_id: str) -> None:
     logger.info("recruiter_finder_job_done", job_id=job_id)
 
 
+async def _persist_completed(outcome: dict, item: dict, requested_by: str | None, tenant: str) -> str | None:
+    """Upsert one completed lookup into `recruiters` (source_label='contact_finder')
+    and return its recruiter id."""
+    return await db_write(lambda db, o=outcome, it=item: save_finder_contact(
+        db,
+        person_name=o["contact_name"] or it["person_name"] or "",
+        company_name=it["company"],
+        designation=o["contact_title"],
+        linkedin_profile_url=it["linkedin_url"] or None,
+        company_domain=o["company_domain"] or it["domain"],
+        official_email_id=o["email"],
+        email_status=_recruiter_email_status(o),
+        contact_number=o["phone"],
+        phone_status="PUBLIC" if o["phone"] else "NOT_FOUND",
+        city=o["city"], state=o["state"], country=o["country"],
+        confidence_score=o["confidence"] or "Low",
+        verified=bool(o["email"] or o["phone"]),
+        requested_by=requested_by, tenant_id=tenant,
+    ))
+
+
 async def run_single(
     *, company: str = "", location: str = "", persona: str = "", reveal: str = "email",
-    person_name: str = "", linkedin_url: str = "", domain: str = "", requested_by: str | None = None,
+    person_name: str = "", linkedin_url: str = "", domain: str = "", count: int = 1,
+    requested_by: str | None = None,
 ) -> dict:
-    """Synchronous single lookup (company→recruiter or known person). Reserves a
-    per-tenant credit, enriches, upserts the hit into recruiters, and returns the
-    contact. Runs in the request context (tenant already bound)."""
+    """Synchronous single lookup. A known person (name+company or LinkedIn) enriches
+    exactly ONE contact; a company lookup reveals up to ``count`` DISTINCT persona
+    contacts. A per-tenant credit is reserved for each contact ACTUALLY revealed (a
+    miss costs nothing), bounded by the workspace's remaining daily budget. Every hit
+    is upserted into `recruiters`. Runs in the request context (tenant already bound).
+
+    Returns ``{status, requested, revealed, credits_spent, budget_exhausted,
+    company_domain, message, results: [outcome+recruiter_id, …]}``."""
     settings = get_settings()
     tenant = get_current_tenant_id()
     want_email, want_phone, cost = _reveal_flags(reveal)
+
+    def _resp(status, *, results=None, requested=1, budget_exhausted=False, message="", domain_out=""):
+        results = results or []
+        return {
+            "status": status, "requested": requested, "revealed": len(results),
+            "credits_spent": len(results) * cost, "budget_exhausted": budget_exhausted,
+            "company_domain": domain_out, "message": message, "results": results,
+        }
+
     if not settings.apollo_api_key:
-        return {"status": "unconfigured", "message": "Apollo is not configured (set APOLLO_API_KEY)."}
+        return _resp("unconfigured", message="Apollo is not configured (set APOLLO_API_KEY).")
+
+    is_person = bool((person_name or "").strip() or (linkedin_url or "").strip())
+    want_count = 1 if is_person else max(1, min(int(count or 1), settings.company_contact_max_count))
+
     cap = await resolve_tenant_cap(tenant)
-    if not await recruiter_finder_budget.try_consume(cost, tenant, cap=cap):
-        return {"status": "over_budget",
-                "message": "Daily Apollo budget reached for this workspace — try again tomorrow."}
+    # Pre-flight budget check (no spend): short-circuit when the workspace can't afford
+    # even one contact, and never try to reveal more than today's budget allows.
+    remaining = await recruiter_finder_budget.remaining_today(tenant, cap=cap)  # None = unlimited
+    if remaining is not None and remaining < cost:
+        return _resp("over_budget", requested=want_count,
+                     message="Daily Apollo budget reached for this workspace — try again tomorrow.")
+    if remaining is not None:
+        want_count = min(want_count, remaining // cost)
+
+    async def reserve():
+        return await recruiter_finder_budget.try_consume(cost, tenant, cap=cap)
 
     client = ApolloClient(settings)
     item = {
@@ -464,27 +566,35 @@ async def run_single(
         "linkedin_url": linkedin_url or "", "domain": domain or "", "location": location or "", "title": "",
     }
     titles = titles_for_persona(persona)
-    outcome = await _enrich_item(client, item, titles, want_email, want_phone, settings.company_contact_reveal_cap)
 
-    recruiter_id = None
-    if outcome["status"] == "completed":
-        recruiter_id = await db_write(lambda db, o=outcome, it=item: save_finder_contact(
-            db,
-            person_name=o["contact_name"] or it["person_name"] or "",
-            company_name=it["company"],
-            designation=o["contact_title"],
-            linkedin_profile_url=it["linkedin_url"] or None,
-            company_domain=o["company_domain"] or it["domain"],
-            official_email_id=o["email"],
-            email_status=_recruiter_email_status(o),
-            contact_number=o["phone"],
-            phone_status="PUBLIC" if o["phone"] else "NOT_FOUND",
-            city=o["city"], state=o["state"], country=o["country"],
-            confidence_score=o["confidence"] or "Low",
-            verified=bool(o["email"] or o["phone"]),
-            requested_by=requested_by, tenant_id=tenant,
-        ))
-    return {**outcome, "recruiter_id": recruiter_id}
+    if is_person:
+        try:
+            outcome = await _person_lookup(client, item, want_email, want_phone)
+        except ApolloAPIError as exc:
+            outcome = _blank_outcome("failed", error=str(exc))
+        except Exception as exc:  # defensive — mirror _enrich_item
+            logger.warning("recruiter_finder_single_error", error=str(exc))
+            outcome = _blank_outcome("failed", error=str(exc))
+        if outcome["status"] != "completed":
+            return _resp(outcome["status"], requested=1, message=outcome.get("error", ""),
+                         domain_out=outcome.get("company_domain", ""))
+        if not await reserve():
+            return _resp("over_budget", requested=1,
+                         message="Daily Apollo budget reached for this workspace — try again tomorrow.")
+        outcome["recruiter_id"] = await _persist_completed(outcome, item, requested_by, tenant)
+        return _resp("completed", results=[outcome], requested=1,
+                     domain_out=outcome.get("company_domain", ""))
+
+    results, fallback, budget_exhausted = await _company_lookup_many(
+        client, item, titles, want_email, want_phone, want_count,
+        settings.company_contact_reveal_cap, reserve,
+    )
+    for o in results:
+        o["recruiter_id"] = await _persist_completed(o, item, requested_by, tenant)
+    domain_out = results[0].get("company_domain", "") if results else ""
+    status = "completed" if results else fallback
+    return _resp(status, results=results, requested=want_count,
+                 budget_exhausted=budget_exhausted, domain_out=domain_out)
 
 
 # ── Reads for the routes (tenant-scoped via apply_tenant) ───────────────────────

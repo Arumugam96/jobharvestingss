@@ -79,6 +79,9 @@ class SearchRequest(BaseModel):
     person_name: str = ""
     linkedin_url: str = ""
     domain: str = ""
+    count: int = Field(default=1, ge=1, le=100,
+                       description="Company lookup only: how many distinct contacts to reveal "
+                                   "(clamped server-side to company_contact_max_count; 1 for a person)")
 
 
 # ── Bulk: validate / upload ──────────────────────────────────────────────────
@@ -153,7 +156,7 @@ async def single_search(
     return await run_single(
         company=body.company, location=body.location, persona=body.persona, reveal=body.reveal,
         person_name=body.person_name, linkedin_url=body.linkedin_url, domain=body.domain,
-        requested_by=current_user.email,
+        count=body.count, requested_by=current_user.email,
     )
 
 
