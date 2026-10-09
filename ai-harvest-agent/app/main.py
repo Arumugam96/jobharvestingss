@@ -236,6 +236,24 @@ def _ensure_email_outreach_columns(sync_conn) -> None:
     ))
 
 
+def _ensure_recruiter_finder_jobs_columns(sync_conn) -> None:
+    """One-time, idempotent ADD COLUMN backfill for the pre-existing
+    recruiter_finder_jobs table. `personas` stores the ordered, newline-joined
+    "Who to look up" roles a bulk upload was started with — the enrichment worker
+    walks them top-to-bottom per company and reveals the first role that yields a
+    contact. Mirrors the other _ensure_* helpers (and alembic 0018) — create_all
+    never alters an existing table."""
+    inspector = sa_inspect(sync_conn)
+    if "recruiter_finder_jobs" not in inspector.get_table_names():
+        return  # brand-new DB — create_all already made this table with the column
+    cols = {c["name"] for c in inspector.get_columns("recruiter_finder_jobs")}
+    if "personas" not in cols:
+        sync_conn.execute(sa_text(
+            "ALTER TABLE recruiter_finder_jobs ADD COLUMN personas TEXT NOT NULL DEFAULT ''"
+        ))
+        logger.info("recruiter_finder_jobs_column_added", column="personas")
+
+
 def _backfill_scraped_jobs_location(sync_conn) -> None:
     """One-time data backfill: populate country/state on pre-existing scraped_jobs
     rows by re-parsing their free-text `location` (app/core/location.py).
@@ -414,6 +432,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # email_outreach gained channel + follow-up threading (outreach_kind,
         # parent_outreach_id) + provider_message_id — same idempotent treatment.
         await conn.run_sync(_ensure_email_outreach_columns)
+        # recruiter_finder_jobs gained personas (the ordered multi-select "Who to
+        # look up" for a bulk upload) — same idempotent ADD COLUMN treatment.
+        await conn.run_sync(_ensure_recruiter_finder_jobs_columns)
         # Data backfill: re-parse country/state onto scraped_jobs rows harvested
         # before location parsing was wired (columns above exist but stayed empty).
         await conn.run_sync(_backfill_scraped_jobs_location)
