@@ -41,6 +41,12 @@ _FIELD_SYNONYMS: list[tuple[str, list[str]]] = [
 
 _FIELDS = [f for f, _ in _FIELD_SYNONYMS]
 
+# Values that look empty in exported sheets but aren't literally blank. Exports routinely
+# fill unknown cells with an em/en dash or "N/A"; treating those as real data is what
+# collapsed every row to the same dedupe key (a LinkedIn column full of "—" → one key for
+# the whole file). Compared case-insensitively against the trimmed cell.
+_PLACEHOLDERS = {"", "-", "--", "---", "–", "—", "n/a", "na", "n.a.", "null", "none", "nil"}
+
 
 def _norm(h: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", str(h).lower()).strip()
@@ -104,7 +110,9 @@ def _clean_linkedin(value: str) -> str:
 
 
 def _dedupe_key(row: dict) -> str:
-    if row["linkedin_url"]:
+    # Only treat the LinkedIn field as an identity when it is an ACTUAL profile URL — a
+    # stray placeholder/garbage value must never become the dedupe key for the whole file.
+    if "linkedin.com" in row["linkedin_url"].lower():
         return "li:" + row["linkedin_url"].lower().rstrip("/")
     return "cp:" + row["company"].lower() + "|" + row["person_name"].lower()
 
@@ -151,7 +159,8 @@ def parse_and_validate(content: bytes, filename: str, *, max_rows: int = 1000) -
         if not col:
             return ""
         val = record.get(col, "")
-        return "" if val is None else str(val).strip()
+        s = "" if val is None else str(val).strip()
+        return "" if s.lower() in _PLACEHOLDERS else s
 
     rows: list[dict] = []
     seen: set[str] = set()

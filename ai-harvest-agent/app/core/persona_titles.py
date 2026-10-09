@@ -104,3 +104,23 @@ def titles_for_persona(persona: str | None, custom_titles: list[str] | None = No
             return cleaned
     key = (persona or "").strip().lower()
     return PERSONA_TITLES.get(key, HR_TITLES)
+
+
+def titles_for_personas(selections: list[str] | None) -> list[str]:
+    """Resolve the multi-select "Who to look up" input into one combined, de-duplicated
+    Apollo title list. Each selection is either a known persona label (expanded to its
+    PERSONA_TITLES list) or a free-text job title the user typed (used verbatim). Empty
+    input falls back to Recruiting & HR."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for sel in selections or []:
+        label = (sel or "").strip()
+        if not label:
+            continue
+        titles = PERSONA_TITLES.get(label.lower(), [label])  # known persona → its titles; else the typed title
+        for t in titles:
+            k = t.strip().lower()
+            if k and k not in seen:
+                seen.add(k)
+                out.append(t.strip())
+    return out or HR_TITLES

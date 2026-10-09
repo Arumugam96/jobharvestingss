@@ -72,6 +72,10 @@ class RecruiterFinderJobORM(Base):
     source: Mapped[str] = mapped_column(String(20), nullable=False, default="upload")  # "upload" | "single"
     filename: Mapped[str] = mapped_column(String(300), nullable=False, default="")
     persona: Mapped[str] = mapped_column(String(80), nullable=False, default="")
+    # Ordered, newline-joined "Who to look up" roles for a bulk upload (the multi-select).
+    # The worker walks them top-to-bottom per company and reveals the first that yields a
+    # contact. `persona` holds the first selection for backward-compatible display.
+    personas: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
     reveal: Mapped[str] = mapped_column(String(10), nullable=False, default="email")  # "email" | "phone" | "both"
     # queued | running | completed | partial | failed
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="queued", index=True)
@@ -143,3 +147,47 @@ class RecruiterFinderItemORM(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+
+class RecruiterFinderRevealLogORM(Base):
+    """One row per Apollo contact ACTUALLY revealed from the Single-search section
+    (company browse or specific-person), powering the History tab. Separate from
+    `recruiters` (the deduped contact store) so it is an append-only audit trail —
+    who revealed what, when, which reveal type, and the credit it cost — and keeps the
+    richer Apollo fields (secondary email, org industry/size, precise location) that the
+    deduped recruiter record doesn't carry. Tenant-scoped (RLS + apply_tenant)."""
+    __tablename__ = "recruiter_finder_reveal_log"
+    __table_args__ = (
+        Index("ix_rf_reveal_log_tenant_created", "tenant_id", "created_at"),
+    )
+
+    tenant_id: Mapped[str] = mapped_column(String(40), nullable=False, server_default="'internal'", index=True)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    person_id: Mapped[str] = mapped_column(String(60), nullable=False, default="")  # Apollo person id
+
+    contact_name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    contact_title: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    company: Mapped[str] = mapped_column(String(500), nullable=False, default="")
+    company_domain: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+
+    email: Mapped[str] = mapped_column(String(320), nullable=False, default="")
+    email_status: Mapped[str] = mapped_column(String(30), nullable=False, default="")
+    secondary_email: Mapped[str] = mapped_column(String(320), nullable=False, default="")
+    phone: Mapped[str] = mapped_column(String(50), nullable=False, default="")
+    phone_status: Mapped[str] = mapped_column(String(20), nullable=False, default="")
+    linkedin_url: Mapped[str] = mapped_column(Text, nullable=False, default="")
+
+    city: Mapped[str] = mapped_column(String(120), nullable=False, default="")
+    state: Mapped[str] = mapped_column(String(120), nullable=False, default="")
+    country: Mapped[str] = mapped_column(String(120), nullable=False, default="")
+    industry: Mapped[str] = mapped_column(String(120), nullable=False, default="")
+    company_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    confidence: Mapped[str] = mapped_column(String(20), nullable=False, default="")
+    reveal_type: Mapped[str] = mapped_column(String(10), nullable=False, default="email")  # email | phone | both
+    credits_spent: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    source: Mapped[str] = mapped_column(String(30), nullable=False, default="")  # company_browse | person | company_single
+    requested_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    recruiter_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)

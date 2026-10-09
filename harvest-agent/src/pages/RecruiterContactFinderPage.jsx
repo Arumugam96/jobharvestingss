@@ -2,11 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Loader2, Search, Upload, RotateCw, Download, Zap, Mail, FileSpreadsheet,
   CheckCircle2, AlertTriangle, Building2, MapPin, UserSearch, Users, Link2,
-  History, Folder, LayoutList, ChevronLeft,
+  History, Folder, LayoutList, ChevronLeft, Lock, Clock,
 } from "lucide-react";
 import {
-  finderSearch, finderValidate, finderUpload, getFinderJob, getFinderJobItems,
-  retryFinderJob, getFinderUsage, getFinderHistory, getFinderRecentContacts, ApiError,
+  finderSearch, finderCandidates, finderRevealSelected, finderHistoryLog, finderValidate,
+  finderUpload, getFinderJob, getFinderJobItems, retryFinderJob, getFinderUsage, getFinderHistory,
+  getFinderRecentContacts, ApiError,
 } from "../api";
 
 /* ── Recruiter Contact Finder — ports the approved artifact design. The whole page
@@ -53,10 +54,6 @@ function Seg({ value, onChange, options }) {
       ))}
     </div>
   );
-}
-
-function PersonaSelect({ value, onChange }) {
-  return <Dropdown value={value} onChange={onChange} options={PERSONA_OPTIONS} icon={<UserSearch size={15} />} minWidth={220} />;
 }
 
 // Styled dropdown (replaces the native <select> so the options panel aligns with the design).
@@ -246,53 +243,325 @@ function StatBand({ usage, collapsed }) {
   );
 }
 
+// ── Multi-select "Who to look up" (chips + typeahead + free text) ─────────────
+function MultiPersonaSelect({ value, onChange }) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState("");
+  const ref = useRef(null);
+  const inputRef = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    const h = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener("mousedown", h);
+    return () => document.removeEventListener("mousedown", h);
+  }, [open]);
+
+  const ql = q.trim().toLowerCase();
+  const matches = PERSONA_OPTIONS.filter((p) => !ql || p.toLowerCase().includes(ql));
+  const canAdd = !!ql && !PERSONA_OPTIONS.some((p) => p.toLowerCase() === ql) && !value.some((v) => v.toLowerCase() === ql);
+  const toggle = (p) => {
+    onChange(value.includes(p) ? value.filter((x) => x !== p) : [...value, p]);
+    setQ(""); if (inputRef.current) inputRef.current.focus();
+  };
+  const addCustom = () => { const v = q.trim(); if (v && !value.some((x) => x.toLowerCase() === v.toLowerCase())) onChange([...value, v]); setQ(""); };
+
+  return (
+    <div className="ms" ref={ref}>
+      <div className={"ms-box" + (open ? " focus" : "")}
+        onMouseDown={(e) => { if (e.target === e.currentTarget) { setOpen(true); if (inputRef.current) inputRef.current.focus(); } }}>
+        <Search size={15} className="ms-ic" />
+        <input ref={inputRef} value={q} aria-label="Add a role or job title"
+          placeholder={value.length ? "Add another role…" : "Type a role, e.g. Recruiter, Head of Talent…"}
+          onFocus={() => setOpen(true)}
+          onChange={(e) => { setQ(e.target.value); setOpen(true); }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") { e.preventDefault(); if (canAdd) addCustom(); else if (matches[0]) toggle(matches[0]); }
+            else if (e.key === "Backspace" && !q && value.length) onChange(value.slice(0, -1));
+          }} />
+      </div>
+      {value.length > 0 && (
+        <div className="ms-chips">
+          {value.map((tag, i) => (
+            <span key={tag} className="chip-tag" title={`Priority ${i + 1}`}>
+              <span className="chip-ord num">{i + 1}</span>{tag}
+              <button type="button" aria-label={"Remove " + tag}
+                onMouseDown={(e) => { e.preventDefault(); onChange(value.filter((x) => x !== tag)); }}>×</button>
+            </span>
+          ))}
+        </div>
+      )}
+      {open && (
+        <div className="ms-pop" role="listbox">
+          {matches.map((p) => {
+            const on = value.includes(p);
+            return (
+              <div key={p} role="option" aria-selected={on} className={"ms-opt" + (on ? " sel" : "")}
+                onMouseDown={(e) => { e.preventDefault(); toggle(p); }}>
+                <span className="ck">{on ? "✓" : ""}</span>{p}
+              </div>
+            );
+          })}
+          {canAdd && (
+            <div className="ms-opt" onMouseDown={(e) => { e.preventDefault(); addCustom(); }}>
+              <span className="ck" />Add “{q.trim()}”<span className="add">custom title</span>
+            </div>
+          )}
+          {!matches.length && !canAdd && <div className="ms-opt" style={{ color: "var(--ink-faint)" }}>No roles match.</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Animated empty state for the two lookup forms (before a search) ───────────
+function EmptyState({ icon, title, children, tags }) {
+  return (
+    <div className="empty">
+      <div className="orb"><span className="ring" /><span className="ring" /><span className="ic">{icon}</span></div>
+      <h3>{title}</h3>
+      <p>{children}</p>
+      {tags && <div className="mini">{tags.map((t, i) => <span key={i}>{t}</span>)}</div>}
+    </div>
+  );
+}
+
+// ── History tab: filterable log of every revealed contact ─────────────────────
+const HIST_PAGE = 25;
+function histStatusTone(s) {
+  const v = (s || "").toLowerCase();
+  if (v === "verified" || v === "valid") return "done";
+  if (v.includes("likely")) return "proc";
+  return "nf";
+}
+function confTone(c) { return c === "High" ? "done" : c === "Medium" ? "nf" : "pending"; }
+const SOURCE_LABEL = { company_browse: "Company browse", person: "Specific person", company_single: "Company" };
+
+function exportHistoryCsv(rows) {
+  const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+  const head = ["Contact", "Title", "Company", "Domain", "Email", "Email status", "Secondary email",
+    "Phone", "Location", "Industry", "Confidence", "Reveal", "Credits", "Source", "Revealed by", "Date"];
+  const lines = [head.join(",")].concat(rows.map((r) => [
+    r.contact_name, r.contact_title, r.company, r.company_domain, r.email, r.email_status, r.secondary_email,
+    r.phone, r.location, r.industry, r.confidence, r.reveal_type, r.credits_spent,
+    SOURCE_LABEL[r.source] || r.source, r.requested_by, r.created_at,
+  ].map(esc).join(",")));
+  const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = "revealed-contacts.csv"; a.click();
+  URL.revokeObjectURL(url);
+}
+
+function HistoryTab() {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [q, setQ] = useState("");
+  const [company, setCompany] = useState("");
+  const [status, setStatus] = useState("");
+  const [conf, setConf] = useState("");
+  const [period, setPeriod] = useState("");
+  const [page, setPage] = useState(1);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try { setData(await finderHistoryLog({ q, company, email_status: status, confidence: conf, period, page, page_size: HIST_PAGE })); }
+    catch { setData(null); }
+    finally { setLoading(false); }
+  }, [q, company, status, conf, period, page]);
+  useEffect(() => { const t = setTimeout(load, 220); return () => clearTimeout(t); }, [load]);
+
+  const setFilter = (fn) => { fn(); setPage(1); };
+  const rows = data?.rows || [];
+  const k = data?.kpis || { revealed_total: 0, verified_pct: 0, this_week: 0, credits_spent: 0 };
+  const facets = data?.facets || { companies: [], email_statuses: [] };
+  const total = data?.total || 0;
+  const pages = Math.max(1, Math.ceil(total / HIST_PAGE));
+
+  return (
+    <div className="hwrap">
+      <div className="kpis">
+        <div className="kpi"><span className="k"><Users size={13} /> Revealed total</span><span className="v num">{k.revealed_total}</span></div>
+        <div className="kpi good"><span className="k"><CheckCircle2 size={13} /> Verified emails</span><span className="v num">{k.verified_pct}<small>%</small></span></div>
+        <div className="kpi"><span className="k"><Clock size={13} /> This week</span><span className="v num">{k.this_week}</span></div>
+        <div className="kpi accent"><span className="k"><Zap size={13} /> Credits spent</span><span className="v num">{k.credits_spent}</span></div>
+      </div>
+
+      <div className="filters">
+        <div className="input search" style={{ height: 36 }}><Search size={14} />
+          <input value={q} onChange={(e) => setFilter(() => setQ(e.target.value))} placeholder="Search name, title, company, email…" /></div>
+        <div className="hsel"><select value={company} onChange={(e) => setFilter(() => setCompany(e.target.value))}>
+          <option value="">All companies</option>{facets.companies.map((c) => <option key={c} value={c}>{c}</option>)}</select></div>
+        <div className="hsel"><select value={status} onChange={(e) => setFilter(() => setStatus(e.target.value))}>
+          <option value="">Any email status</option>{facets.email_statuses.map((s) => <option key={s} value={s}>{s}</option>)}</select></div>
+        <div className="hsel"><select value={conf} onChange={(e) => setFilter(() => setConf(e.target.value))}>
+          <option value="">Any confidence</option><option>High</option><option>Medium</option><option>Low</option></select></div>
+        <div className="hsel"><select value={period} onChange={(e) => setFilter(() => setPeriod(e.target.value))}>
+          <option value="">Any time</option><option value="today">Today</option><option value="week">This week</option><option value="month">This month</option></select></div>
+        <button className="btn sm btn-ghost" onClick={() => exportHistoryCsv(rows)} disabled={!rows.length}><Download size={14} /> Export</button>
+        <span className="count">{loading ? "Loading…" : <>Showing <b className="num">{rows.length}</b> of <b className="num">{total}</b></>}</span>
+      </div>
+
+      <div className="table-scroll" style={{ maxHeight: 520 }}>
+        <table className="rt" style={{ minWidth: 1040 }}>
+          <thead><tr>
+            <th>Contact</th><th>Title</th><th>Company</th><th>Email</th><th>Status</th>
+            <th>Phone</th><th>Location</th><th>Confidence</th><th>Source</th><th>Revealed by</th><th>Date</th>
+          </tr></thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.id}>
+                <td className="contact"><span className="fav" style={{ background: favColor(r.company) }}>{(r.contact_name || "?").charAt(0).toUpperCase()}</span><span className="nm">{r.contact_name || "—"}</span></td>
+                <td>{r.contact_title || "—"}</td>
+                <td className="co"><b>{r.company || "—"}</b>{r.company_domain ? <span>{r.company_domain}</span> : null}</td>
+                <td className="email">{r.email ? <span className="addr">{r.email}</span> : <span className="muted">—</span>}</td>
+                <td>{r.email_status ? <span className={"chip " + histStatusTone(r.email_status)}><span className="d" />{r.email_status}</span> : <span className="none">—</span>}</td>
+                <td>{r.phone || <span className="none">—</span>}</td>
+                <td>{r.location || <span className="none">—</span>}</td>
+                <td>{r.confidence ? <span className={"chip " + confTone(r.confidence)}><span className="d" />{r.confidence}</span> : <span className="none">—</span>}</td>
+                <td><span className="histsrc">{SOURCE_LABEL[r.source] || r.source || "—"}</span></td>
+                <td className="muted">{r.requested_by || "—"}</td>
+                <td className="muted num">{relTimeFrom(r.created_at)}</td>
+              </tr>
+            ))}
+            {!rows.length && !loading && (
+              <tr><td colSpan={11} style={{ textAlign: "center", color: "var(--ink-faint)", padding: 30 }}>
+                {total === 0 && !q && !company && !status && !conf && !period
+                  ? "No revealed contacts yet — reveal some from Recruiters at a company or A specific person."
+                  : "No contacts match these filters."}
+              </td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="pager">
+        <span className="meta">Every contact you reveal is logged here and saved to your <b>Recruiters</b> list.</span>
+        {pages > 1 && (
+          <div className="pg">
+            <button type="button" onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1}>‹</button>
+            <span className="pgnow num">Page {page} / {pages}</span>
+            <button type="button" onClick={() => setPage((p) => Math.min(pages, p + 1))} disabled={page >= pages}>›</button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── Single lookup ─────────────────────────────────────────────────────────────
-const MAX_COUNT = 25; // mirrors settings.company_contact_max_count (server clamps anyway)
+const REVEAL_OPTS = [
+  { value: "email", label: "Email", icon: <Mail size={14} /> },
+  { value: "phone", label: "Phone" },
+  { value: "both", label: "Both" },
+];
 
 function SinglePanel({ onSpent }) {
-  const [target, setTarget] = useState("company"); // company | people
+  const [target, setTarget] = useState("company"); // company | people | history
   const [reveal, setReveal] = useState("email");
   const [company, setCompany] = useState("");
   const [location, setLocation] = useState("");
-  const [persona, setPersona] = useState(PERSONA_OPTIONS[0]);
+  const [personas, setPersonas] = useState([PERSONA_OPTIONS[0]]); // multi-select "Who to look up"
   const [personName, setPersonName] = useState("");
   const [linkedinUrl, setLinkedinUrl] = useState("");
-  const [count, setCount] = useState(1);        // company mode: how many contacts to reveal
+
+  // People mode: one synchronous lookup (run_single).
   const [confirming, setConfirming] = useState(false);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
-  const [recent, setRecent] = useState([]);
-  useEffect(() => {
-    (async () => { try { const r = await getFinderRecentContacts(); setRecent(r.contacts || []); } catch { /* ignore */ } })();
-  }, []);
 
-  const perCost = reveal === "both" ? 2 : 1;          // credits per revealed contact
-  const wanted = target === "company" ? count : 1;    // people lookup is always a single contact
-  const maxCost = perCost * wanted;                   // upper bound — only revealed contacts are charged
-  const canSubmit = target === "company"
-    ? !!company.trim()
-    : !!(personName.trim() || linkedinUrl.trim());
-  const setCountSafe = (n) => setCount(Number.isFinite(n) ? Math.min(MAX_COUNT, Math.max(1, n)) : 1);
+  // Company mode: browse candidates (free) → select → reveal.
+  const [candidates, setCandidates] = useState(null); // null = not searched yet
+  const [companyDomain, setCompanyDomain] = useState("");
+  const [candLoading, setCandLoading] = useState(false);
+  const [titleFilter, setTitleFilter] = useState("All titles");
+  const [nameQuery, setNameQuery] = useState("");
+  const [selected, setSelected] = useState(() => new Set());
+  const [revealedMap, setRevealedMap] = useState({}); // person_id → reveal result
+  const [revealing, setRevealing] = useState(false);
+  const [revealSummary, setRevealSummary] = useState(null);
 
-  const run = async () => {
+  const perCost = reveal === "both" ? 2 : 1; // credits per revealed contact
+
+  // ── People mode ──
+  const canSubmitPerson = !!(personName.trim() || linkedinUrl.trim());
+  const runPerson = async () => {
     setConfirming(false); setLoading(true); setError(""); setResult(null);
     try {
-      const body = target === "company"
-        ? { company, location, persona, reveal, count }
-        : { company, reveal, person_name: personName, linkedin_url: linkedinUrl };
-      setResult(await finderSearch(body));
+      setResult(await finderSearch({ company, reveal, person_name: personName, linkedin_url: linkedinUrl }));
       onSpent();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not reach the harvest backend.");
     } finally { setLoading(false); }
   };
 
-  const revealOpts = [
-    { value: "email", label: "Email", icon: <Mail size={14} /> },
-    { value: "phone", label: "Phone" },
-    { value: "both", label: "Both" },
-  ];
+  // ── Company mode ──
+  const findCandidates = async () => {
+    setCandLoading(true); setError(""); setCandidates(null); setCompanyDomain("");
+    setSelected(new Set()); setRevealedMap({}); setRevealSummary(null);
+    setTitleFilter("All titles"); setNameQuery("");
+    try {
+      const r = await finderCandidates({ company, location, personas });
+      setCompanyDomain(r.company_domain || "");
+      if (r.status === "unconfigured") { setError(r.message || "Apollo is not configured."); setCandidates([]); }
+      else setCandidates(r.candidates || []);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not reach the harvest backend.");
+      setCandidates([]);
+    } finally { setCandLoading(false); }
+  };
+
+  const titleOptions = useMemo(() => {
+    const t = Array.from(new Set((candidates || []).map((c) => c.title).filter(Boolean))).sort();
+    return ["All titles", ...t];
+  }, [candidates]);
+
+  const filtered = useMemo(() => {
+    const q = nameQuery.trim().toLowerCase();
+    return (candidates || []).filter((c) =>
+      (titleFilter === "All titles" || c.title === titleFilter) &&
+      (!q || `${c.name} ${c.title}`.toLowerCase().includes(q)));
+  }, [candidates, titleFilter, nameQuery]);
+
+  const isRevealed = (pid) => revealedMap[pid]?.status === "completed";
+  const selectableVisible = filtered.filter((c) => c.person_id && !isRevealed(c.person_id));
+  const allVisibleSelected = selectableVisible.length > 0 && selectableVisible.every((c) => selected.has(c.person_id));
+
+  const toggleOne = (pid) => setSelected((prev) => {
+    const next = new Set(prev);
+    next.has(pid) ? next.delete(pid) : next.add(pid);
+    return next;
+  });
+  const toggleAll = () => setSelected((prev) => {
+    const next = new Set(prev);
+    if (allVisibleSelected) selectableVisible.forEach((c) => next.delete(c.person_id));
+    else selectableVisible.forEach((c) => next.add(c.person_id));
+    return next;
+  });
+
+  const selCount = selected.size;
+  const doReveal = async () => {
+    if (selCount === 0) return;
+    setRevealing(true); setError("");
+    try {
+      const selections = (candidates || []).filter((c) => selected.has(c.person_id)).map((c) => ({
+        person_id: c.person_id, company, domain: companyDomain, name: c.name,
+        title: c.title, linkedin_url: c.linkedin_url, location: c.location,
+      }));
+      const r = await finderRevealSelected({ reveal, selections });
+      setRevealedMap((prev) => {
+        const next = { ...prev };
+        (r.results || []).forEach((res) => { next[res.person_id] = res; });
+        return next;
+      });
+      setRevealSummary({ credits_spent: r.credits_spent, revealed: r.revealed,
+        requested: r.requested, budget_exhausted: r.budget_exhausted });
+      setSelected(new Set());
+      onSpent();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not reveal the selected contacts.");
+    } finally { setRevealing(false); }
+  };
 
   return (
     <div className="panel">
@@ -301,63 +570,155 @@ function SinglePanel({ onSpent }) {
           <Seg value={target} onChange={(v) => { setTarget(v); setConfirming(false); }} options={[
             { value: "company", label: "Recruiters at a company", icon: <Building2 size={14} /> },
             { value: "people", label: "A specific person", icon: <Users size={14} /> },
+            { value: "history", label: "History", icon: <Clock size={14} /> },
           ]} />
         </div>
-        <div className="optgrp"><span className="olbl">Reveal</span><Seg value={reveal} onChange={(v) => { setReveal(v); setConfirming(false); }} options={revealOpts} /></div>
+        {target !== "history" && (
+          <div className="optgrp"><span className="olbl">Reveal</span><Seg value={reveal} onChange={setReveal} options={REVEAL_OPTS} /></div>
+        )}
       </div>
 
-      {target === "company" ? (
-        <div className="fields mode-company">
-          <div className="field"><label>Company</label>
-            <div className="input"><Building2 size={15} /><input value={company} onChange={(e) => setCompany(e.target.value)} placeholder="e.g. Stripe" /></div></div>
-          <div className="field"><label>Location <span className="opt">(optional)</span></label>
-            <div className="input"><MapPin size={15} /><input value={location} onChange={(e) => setLocation(e.target.value)} placeholder="City or country" /></div></div>
-          <div className="field"><label>Who to look up</label><PersonaSelect value={persona} onChange={setPersona} /></div>
-          <div className="field"><label>How many</label>
-            <div className="input cntwrap">
-              <button type="button" className="cntbtn" aria-label="Fewer" disabled={count <= 1} onClick={() => setCountSafe(count - 1)}>−</button>
-              <input value={count} inputMode="numeric" aria-label="Number of contacts to reveal"
-                onChange={(e) => setCountSafe(parseInt(e.target.value, 10))} />
-              <button type="button" className="cntbtn" aria-label="More" disabled={count >= MAX_COUNT} onClick={() => setCountSafe(count + 1)}>+</button>
-            </div></div>
-          <button className="btn btn-primary" onClick={() => setConfirming(true)} disabled={loading || !canSubmit}>
-            {loading ? <Loader2 size={16} className="ha-spin" /> : <Search size={16} />} Find contacts
-          </button>
-        </div>
-      ) : (
-        <div className="fields mode-people">
-          <div className="field"><label>Full name</label>
-            <div className="input"><Users size={15} /><input value={personName} onChange={(e) => setPersonName(e.target.value)} placeholder="e.g. Sarah Chen" /></div></div>
-          <div className="field"><label>Company <span className="opt">(with name)</span></label>
-            <div className="input"><Building2 size={15} /><input value={company} onChange={(e) => setCompany(e.target.value)} placeholder="e.g. Stripe" /></div></div>
-          <div className="field"><label>LinkedIn URL <span className="opt">(works on its own)</span></label>
-            <div className="input"><Link2 size={15} /><input value={linkedinUrl} onChange={(e) => setLinkedinUrl(e.target.value)} placeholder="linkedin.com/in/…" /></div></div>
-          <button className="btn btn-primary" onClick={() => setConfirming(true)} disabled={loading || !canSubmit}>
-            {loading ? <Loader2 size={16} className="ha-spin" /> : <Zap size={16} />} Enrich
-          </button>
-        </div>
-      )}
+      {target === "history" ? (
+        <HistoryTab />
+      ) : target === "company" ? (
+        <>
+          <div className="fields mode-company">
+            <div className="field"><label>Company</label>
+              <div className="input"><Building2 size={15} /><input value={company} onChange={(e) => setCompany(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter" && company.trim()) findCandidates(); }} placeholder="e.g. Stripe" /></div></div>
+            <div className="field"><label>Location <span className="opt">(optional)</span></label>
+              <div className="input"><MapPin size={15} /><input value={location} onChange={(e) => setLocation(e.target.value)} placeholder="City or country" /></div></div>
+            <div className="field"><label>Who to look up <span className="opt">(add several)</span></label>
+              <MultiPersonaSelect value={personas} onChange={setPersonas} /></div>
+            <button className="btn btn-primary" onClick={findCandidates} disabled={candLoading || !company.trim()}>
+              {candLoading ? <Loader2 size={16} className="ha-spin" /> : <Search size={16} />} Find contacts
+            </button>
+          </div>
+          <div className="form-foot"><Zap size={15} />
+            <span>Listing contacts is <b>free</b> — you only spend <b>{perCost} credit{perCost > 1 ? "s" : ""}</b> per contact when you reveal ({reveal === "both" ? "email + phone" : reveal === "phone" ? "phone" : "email"}). Cached contacts are free.</span>
+          </div>
 
-      {confirming ? (
-        <div className="confirm">
-          <Zap size={15} />
-          <span className="cm">
-            {target === "company"
-              ? <>Reveal up to <b>{wanted}</b> contact{wanted > 1 ? "s" : ""} — costs up to <b>{maxCost}</b> credit{maxCost > 1 ? "s" : ""}. You're only charged for contacts actually found.</>
-              : <>Reveal this contact — costs <b>{maxCost}</b> credit{maxCost > 1 ? "s" : ""} if found.</>}
-          </span>
-          <button className="btn sm btn-ghost" onClick={() => setConfirming(false)}>Cancel</button>
-          <button className="btn sm btn-primary" onClick={run}>Confirm &amp; reveal</button>
-        </div>
-      ) : (
-        <div className="form-foot"><Zap size={15} />
-          <span><b>{perCost} credit{perCost > 1 ? "s" : ""}</b> per revealed contact ({reveal === "both" ? "email + phone" : reveal === "phone" ? "phone" : "email"}){target === "company" ? <> · up to <b>{maxCost}</b> for this search</> : null} · cached contacts are free</span>
-        </div>
-      )}
+          {error && <div className="valnote" style={{ marginTop: 16, background: "var(--bad-bg)", borderColor: "transparent" }}><AlertTriangle className="ic" style={{ color: "var(--bad)" }} /><div className="t">{error}</div></div>}
 
-      {error && <div className="valnote" style={{ marginTop: 16, background: "var(--bad-bg)", borderColor: "transparent" }}><AlertTriangle className="ic" style={{ color: "var(--bad)" }} /><div className="t">{error}</div></div>}
-      {result && <SingleResult result={result} company={company} />}
-      {recent.length > 0 && <RecentContacts recent={recent} />}
+          {candidates === null && !candLoading && !error && (
+            <EmptyState icon={<Search size={28} />} title="Browse a company's recruiters — free"
+              tags={["🔒 emails stay locked until you reveal", "✓ filter by job title", "⚡ pay per reveal, not per search"]}>
+              Enter a company, pick one or more roles, and hit <b>Find contacts</b>. You'll get the full candidate list with locked emails at no cost — reveal only the ones you want.
+            </EmptyState>
+          )}
+
+          {candidates && candidates.length === 0 && !candLoading && (
+            <div className="valnote" style={{ marginTop: 16 }}><AlertTriangle className="ic" /><div className="t">No contacts found for that company and role(s) — try a broader role or drop the location.</div></div>
+          )}
+
+          {candidates && candidates.length > 0 && (
+            <>
+              <div className="cand-tool">
+                <h3 style={{ margin: 0, fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}>
+                  <span className="ic" style={{ color: "var(--primary)" }}><Users size={16} /></span>Candidates
+                </h3>
+                <span className="count-pill num">{candidates.length}</span>
+                <Dropdown value={titleFilter} onChange={setTitleFilter} options={titleOptions} icon={<UserSearch size={14} />} minWidth={190} />
+                <div className="input" style={{ height: 36, maxWidth: 200 }}><Search size={14} /><input value={nameQuery} onChange={(e) => setNameQuery(e.target.value)} placeholder="Filter by name…" /></div>
+                <span className="grow" />
+                <span style={{ fontSize: 12, color: "var(--ink-soft)" }}>
+                  <Lock size={12} style={{ verticalAlign: "-2px" }} /> emails locked until you reveal
+                </span>
+              </div>
+
+              {revealSummary && (
+                <div className="form-foot" style={{ marginTop: 0, marginBottom: 10, color: "var(--good)" }}>
+                  <CheckCircle2 size={15} style={{ color: "var(--good)" }} />
+                  <span><b>{revealSummary.revealed}</b> revealed · <b>{revealSummary.credits_spent}</b> credit{revealSummary.credits_spent === 1 ? "" : "s"} spent · saved to Recruiters
+                    {revealSummary.budget_exhausted ? " · daily budget reached" : (revealSummary.requested > revealSummary.revealed ? ` · ${revealSummary.requested - revealSummary.revealed} had no unlockable contact` : "")}</span>
+                </div>
+              )}
+
+              <div className="table-scroll" style={{ maxHeight: 460 }}>
+                <table className="rt">
+                  <thead><tr>
+                    <th className="sel"><input type="checkbox" aria-label="Select all" checked={allVisibleSelected} onChange={toggleAll} disabled={selectableVisible.length === 0} /></th>
+                    <th>Contact</th><th>Title</th><th>Location</th><th>Email</th><th>Status</th>
+                  </tr></thead>
+                  <tbody>
+                    {filtered.map((c) => {
+                      const rv = revealedMap[c.person_id];
+                      const done = rv?.status === "completed";
+                      return (
+                        <tr key={c.person_id}>
+                          <td className="sel"><input type="checkbox" aria-label={`Select ${c.name}`}
+                            checked={selected.has(c.person_id)} disabled={done || !c.person_id}
+                            onChange={() => toggleOne(c.person_id)} /></td>
+                          <td className="contact">{c.name ? <span className="nm">{c.name}</span> : <span className="intent">—</span>}</td>
+                          <td>{c.title || "—"}</td>
+                          <td>{c.location || <span className="none">—</span>}</td>
+                          <td className="email">
+                            {done ? <span className="addr">{rv.email}</span>
+                              : rv ? <span className="muted">no email</span>
+                              : <span className="lockpill"><Lock size={11} /> Locked</span>}
+                          </td>
+                          <td>{done
+                            ? <span className="chip done"><span className="d" />Revealed</span>
+                            : c.email_status ? <span className="lockpill">{c.email_status}</span>
+                            : <span className="none">—</span>}</td>
+                        </tr>
+                      );
+                    })}
+                    {filtered.length === 0 && <tr><td colSpan={6} style={{ textAlign: "center", color: "var(--ink-faint)", padding: 22 }}>No candidates match this filter.</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+
+              {selCount > 0 && (
+                <div className="confirm" style={{ position: "sticky", bottom: 0 }}>
+                  <Zap size={15} />
+                  <span className="cm"><b>{selCount}</b> selected — reveal {reveal === "both" ? "email + phone" : reveal} for <b>{perCost * selCount}</b> credit{perCost * selCount > 1 ? "s" : ""}. You're only charged for contacts with a real email.</span>
+                  <button className="btn sm btn-ghost" onClick={() => setSelected(new Set())} disabled={revealing}>Clear</button>
+                  <button className="btn sm btn-primary" onClick={doReveal} disabled={revealing}>
+                    {revealing ? <Loader2 size={15} className="ha-spin" /> : <Mail size={15} />} Reveal {selCount} · {perCost * selCount} credit{perCost * selCount > 1 ? "s" : ""}
+                  </button>
+                </div>
+              )}
+            </>
+          )}
+        </>
+      ) : (
+        <>
+          <div className="fields mode-people">
+            <div className="field"><label>Full name</label>
+              <div className="input"><Users size={15} /><input value={personName} onChange={(e) => setPersonName(e.target.value)} placeholder="e.g. Sarah Chen" /></div></div>
+            <div className="field"><label>Company <span className="opt">(with name)</span></label>
+              <div className="input"><Building2 size={15} /><input value={company} onChange={(e) => setCompany(e.target.value)} placeholder="e.g. Stripe" /></div></div>
+            <div className="field"><label>LinkedIn URL <span className="opt">(works on its own)</span></label>
+              <div className="input"><Link2 size={15} /><input value={linkedinUrl} onChange={(e) => setLinkedinUrl(e.target.value)} placeholder="linkedin.com/in/…" /></div></div>
+            <button className="btn btn-primary" onClick={() => setConfirming(true)} disabled={loading || !canSubmitPerson}>
+              {loading ? <Loader2 size={16} className="ha-spin" /> : <Zap size={16} />} Enrich
+            </button>
+          </div>
+
+          {confirming ? (
+            <div className="confirm">
+              <Zap size={15} />
+              <span className="cm">Reveal this contact — costs <b>{perCost}</b> credit{perCost > 1 ? "s" : ""} if found.</span>
+              <button className="btn sm btn-ghost" onClick={() => setConfirming(false)}>Cancel</button>
+              <button className="btn sm btn-primary" onClick={runPerson}>Confirm &amp; reveal</button>
+            </div>
+          ) : (
+            <div className="form-foot"><Zap size={15} />
+              <span><b>{perCost} credit{perCost > 1 ? "s" : ""}</b> per revealed contact ({reveal === "both" ? "email + phone" : reveal === "phone" ? "phone" : "email"}) · charged only if found · cached contacts are free</span>
+            </div>
+          )}
+
+          {error && <div className="valnote" style={{ marginTop: 16, background: "var(--bad-bg)", borderColor: "transparent" }}><AlertTriangle className="ic" style={{ color: "var(--bad)" }} /><div className="t">{error}</div></div>}
+          {result && <SingleResult result={result} company={company} />}
+          {!result && !loading && !confirming && !error && (
+            <EmptyState icon={<Users size={28} />} title="Find one person by name or LinkedIn"
+              tags={["👁 preview the match for free", "✉️ reveal on confirm"]}>
+              Enter a name + company or a LinkedIn URL. We confirm the match before you spend a credit, so you never pay for a wrong one.
+            </EmptyState>
+          )}
+        </>
+      )}
     </div>
   );
 }
@@ -575,7 +936,7 @@ function BulkPanel({ onSpent }) {
   const [file, setFile] = useState(null);
   const [preview, setPreview] = useState(null);
   const [validating, setValidating] = useState(false);
-  const [persona, setPersona] = useState(PERSONA_OPTIONS[0]);
+  const [personas, setPersonas] = useState([PERSONA_OPTIONS[0]]); // ordered "Who to look up" (priority)
   const [reveal, setReveal] = useState("email");
   const [error, setError] = useState("");
   const [jobId, setJobId] = useState(null);
@@ -598,6 +959,7 @@ function BulkPanel({ onSpent }) {
   const [histLoading, setHistLoading] = useState(false);
   const pollRef = useRef(null);
   const fileRef = useRef(null);
+  const [dragging, setDragging] = useState(false);
 
   const loadHistory = useCallback(async () => {
     try { const h = await getFinderHistory(); const jobs = (h && h.jobs) || []; setHistory(jobs); return jobs; }
@@ -673,7 +1035,7 @@ function BulkPanel({ onSpent }) {
   const start = async () => {
     if (!file) return;
     setStarting(true); setError("");
-    try { const res = await finderUpload(file, { persona, reveal }); setBulkTab("running"); setJobId(res.job_id); setJob(null); setItems([]); tick(res.job_id); loadHistory(); }
+    try { const res = await finderUpload(file, { personas, reveal }); setBulkTab("running"); setJobId(res.job_id); setJob(null); setItems([]); tick(res.job_id); loadHistory(); }
     catch (err) { setError(err instanceof ApiError ? err.message : "Could not start enrichment."); }
     finally { setStarting(false); }
   };
@@ -774,7 +1136,11 @@ function BulkPanel({ onSpent }) {
       {!jobId && (
         <>
           <div className="drop-wrap" onClick={() => fileRef.current && fileRef.current.click()}
-            style={{ border: "2px dashed var(--pale-br)", background: "var(--pale)", borderRadius: 12, padding: "28px 20px", textAlign: "center", cursor: "pointer" }}>
+            onDragEnter={(e) => { e.preventDefault(); e.stopPropagation(); setDragging(true); }}
+            onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); if (e.dataTransfer) e.dataTransfer.dropEffect = "copy"; setDragging(true); }}
+            onDragLeave={(e) => { e.preventDefault(); e.stopPropagation(); setDragging(false); }}
+            onDrop={(e) => { e.preventDefault(); e.stopPropagation(); setDragging(false); const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]; if (f) onFile(f); }}
+            style={{ border: dragging ? "2px dashed var(--primary)" : "2px dashed var(--pale-br)", background: dragging ? "var(--pale-br)" : "var(--pale)", borderRadius: 12, padding: "28px 20px", textAlign: "center", cursor: "pointer", transition: "background .15s, border-color .15s" }}>
             <input ref={fileRef} type="file" accept=".csv,.xlsx,.xls" style={{ display: "none" }} onChange={(e) => onFile(e.target.files && e.target.files[0])} />
             <div style={{ width: 48, height: 48, borderRadius: 13, background: "var(--glass-solid)", border: "1px solid var(--pale-br)", display: "grid", placeItems: "center", color: "var(--primary)", margin: "0 auto 8px", boxShadow: "var(--shadow-sm)" }}><Upload size={24} /></div>
             <h3 style={{ margin: "2px 0 0", fontSize: 14, fontWeight: 700 }}>Drop a CSV or Excel file here</h3>
@@ -815,8 +1181,11 @@ function BulkPanel({ onSpent }) {
                 <div className="t">Data is <b>sanitized</b> before any Apollo call (trimmed, de-duplicated, URLs normalized). <b>{sum.ready}</b> records are ready to enrich; anything missing a company is excluded. If the daily budget runs out mid-run, the rest queue for tomorrow.</div>
               </div>
 
+              <div>
+                <div className="block-lbl">Who to look up <span style={{ color: "var(--ink-soft)", textTransform: "none", letterSpacing: 0, fontWeight: 600 }}>· company rows are searched in the order you add roles — the first with a match is revealed</span></div>
+                <MultiPersonaSelect value={personas} onChange={setPersonas} />
+              </div>
               <div className="opts-row" style={{ margin: 0 }}>
-                <div className="optgrp"><span className="olbl">Persona (company-only rows)</span><PersonaSelect value={persona} onChange={setPersona} /></div>
                 <div className="optgrp"><span className="olbl">Reveal</span><Seg value={reveal} onChange={setReveal} options={revealOpts} /></div>
                 <button className="btn btn-primary" onClick={start} disabled={starting || sum.ready === 0}>
                   {starting ? <Loader2 size={16} className="ha-spin" /> : <Zap size={16} />} Start enrichment ({sum.ready})
@@ -947,7 +1316,7 @@ const CSS = `
 .rcf .seg-btn:hover{color:var(--ink)}
 .rcf .seg-btn.active{background:var(--glass-solid);color:var(--primary);box-shadow:var(--shadow-sm)}
 .rcf .fields{display:grid;gap:12px;align-items:end}
-.rcf .fields.mode-company{grid-template-columns:1.3fr 1fr 1.25fr auto auto}
+.rcf .fields.mode-company{grid-template-columns:1.3fr 1fr 1.25fr auto}
 .rcf .fields.mode-people{grid-template-columns:1.1fr 1.1fr 1.4fr auto}
 .rcf .field{display:flex;flex-direction:column;gap:6px;min-width:0}
 .rcf .field label{font-size:10.5px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:var(--ink-soft)}
@@ -968,14 +1337,73 @@ const CSS = `
 .rcf .btn[disabled]{opacity:.5;cursor:not-allowed}
 .rcf .form-foot{display:flex;align-items:center;gap:8px;margin-top:14px;color:var(--ink-soft);font-size:12px}
 .rcf .form-foot svg{color:var(--accent);flex:none}.rcf .form-foot b{color:var(--ink)}
-.rcf .cntwrap{justify-content:space-between;gap:6px;width:116px}
-.rcf .cntwrap input{text-align:center;width:36px;flex:none;font-weight:700;font-variant-numeric:tabular-nums}
-.rcf .cntbtn{border:none;background:var(--line-soft);color:var(--ink);width:24px;height:24px;border-radius:7px;font-size:16px;line-height:1;cursor:pointer;display:grid;place-items:center;flex:none}
-.rcf .cntbtn:hover{background:var(--pale);color:var(--primary)}
-.rcf .cntbtn[disabled]{opacity:.4;cursor:not-allowed}
 .rcf .confirm{display:flex;align-items:center;gap:12px;margin-top:14px;padding:11px 14px;border:1px solid var(--pale-br);background:var(--pale);border-radius:12px;font-size:12.5px;color:var(--ink)}
 .rcf .confirm .cm{flex:1;min-width:0}.rcf .confirm b{color:var(--ink)}
 .rcf .confirm svg{color:var(--accent);flex:none}
+.rcf .cand-tool{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:18px 0 10px}
+.rcf .cand-tool .grow{flex:1}
+.rcf .rt th.sel,.rcf .rt td.sel{width:34px;text-align:center;padding-left:6px;padding-right:6px}
+.rcf .rt input[type=checkbox]{width:15px;height:15px;cursor:pointer;accent-color:var(--primary)}
+.rcf .rt input[type=checkbox][disabled]{cursor:not-allowed;opacity:.4}
+.rcf .lockpill{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;font-weight:600;color:var(--ink-faint)}
+.rcf .lockpill svg{color:var(--ink-faint)}
+
+/* multi-select "Who to look up" */
+.rcf .ms{position:relative}
+.rcf .ms-box{display:flex;align-items:center;gap:8px;min-height:42px;padding:4px 12px;background:var(--glass);border:1px solid var(--line);border-radius:10px;cursor:text}
+.rcf .ms-box.focus{border-color:var(--primary);box-shadow:0 0 0 3px var(--pale)}
+.rcf .ms-ic{color:var(--ink-faint);flex:none}
+.rcf .ms-box input{border:none;background:none;outline:none;font:inherit;color:var(--ink);flex:1;min-width:80px;height:30px}
+.rcf .ms-box input::placeholder{color:var(--ink-faint)}
+/* selected roles live BELOW the input — the box stays a clean single line */
+.rcf .ms-chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.rcf .chip-tag{display:inline-flex;align-items:center;gap:5px;background:var(--pale);color:var(--primary-ink);border:1px solid var(--pale-br);border-radius:8px;padding:3px 7px 3px 4px;font-size:12px;font-weight:600;white-space:nowrap}
+.rcf .chip-tag .chip-ord{display:inline-grid;place-items:center;min-width:16px;height:16px;padding:0 3px;border-radius:5px;background:var(--primary);color:#fff;font-size:10px;font-weight:700;line-height:1}
+.rcf .chip-tag button{border:none;background:none;color:var(--primary-ink);cursor:pointer;font-size:15px;line-height:1;padding:0;opacity:.6}
+.rcf .chip-tag button:hover{opacity:1}
+.rcf .ms-pop{position:absolute;z-index:30;top:calc(100% + 6px);left:0;right:0;max-height:240px;overflow:auto;background:var(--glass-solid);border:1px solid var(--line);border-radius:11px;box-shadow:var(--shadow);padding:6px}
+.rcf .ms-opt{padding:8px 10px;border-radius:8px;font-size:13px;cursor:pointer;display:flex;align-items:center;gap:9px;color:var(--ink)}
+.rcf .ms-opt:hover,.rcf .ms-opt.active{background:var(--pale);color:var(--primary-ink)}
+.rcf .ms-opt .ck{width:15px;height:15px;border-radius:4px;border:1.5px solid var(--line);flex:none;display:grid;place-items:center;color:#fff;font-size:10px}
+.rcf .ms-opt.sel .ck{background:var(--primary);border-color:var(--primary)}
+.rcf .ms-opt .add{margin-left:auto;font-size:10.5px;color:var(--ink-faint)}
+
+/* animated empty state */
+.rcf .empty{margin-top:20px;border:1.5px dashed var(--pale-br);background:linear-gradient(180deg,var(--pale),transparent);border-radius:14px;padding:42px 24px;text-align:center;display:flex;flex-direction:column;align-items:center;gap:5px}
+.rcf .empty .orb{position:relative;width:72px;height:72px;margin-bottom:6px}
+.rcf .empty .orb .ring{position:absolute;inset:0;border-radius:50%;border:2px solid var(--pale-br);animation:rcforb 2.8s ease-out infinite}
+.rcf .empty .orb .ring:nth-child(2){animation-delay:1.4s}
+.rcf .empty .orb .ic{position:absolute;inset:13px;border-radius:50%;background:var(--glass-solid);border:1px solid var(--pale-br);display:grid;place-items:center;color:var(--primary);box-shadow:var(--shadow-sm);animation:rcfbob 3.4s ease-in-out infinite}
+.rcf .empty h3{margin:3px 0 0;font-size:15px;font-weight:700}
+.rcf .empty p{margin:0;color:var(--ink-soft);font-size:13px;max-width:440px}
+.rcf .empty .mini{display:flex;gap:7px;margin-top:12px;flex-wrap:wrap;justify-content:center}
+.rcf .empty .mini span{font-size:11.5px;color:var(--ink-soft);background:var(--glass);border:1px solid var(--line);border-radius:999px;padding:4px 11px}
+@keyframes rcforb{0%{transform:scale(.7);opacity:.9}70%{opacity:0}100%{transform:scale(1.5);opacity:0}}
+@keyframes rcfbob{0%,100%{transform:translateY(0)}50%{transform:translateY(-6px)}}
+@media (prefers-reduced-motion:reduce){.rcf .empty .orb .ring,.rcf .empty .orb .ic{animation:none}}
+
+/* history tab */
+.rcf .hwrap{display:flex;flex-direction:column;gap:14px;margin-top:4px}
+.rcf .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+.rcf .kpi{background:var(--glass);border:1px solid var(--line);border-radius:12px;padding:12px 15px;display:flex;flex-direction:column;gap:2px}
+.rcf .kpi .k{font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--ink-faint);display:flex;align-items:center;gap:6px}
+.rcf .kpi .v{font-size:23px;font-weight:800;color:var(--ink)}
+.rcf .kpi .v small{font-size:12px;font-weight:600;color:var(--ink-faint)}
+.rcf .kpi.good .v{color:var(--good)}.rcf .kpi.accent .v{color:var(--warn)}
+.rcf .filters{display:flex;align-items:center;gap:9px;flex-wrap:wrap;background:var(--glass);border:1px solid var(--line);border-radius:12px;padding:10px 12px}
+.rcf .filters .search{flex:1;min-width:190px}
+.rcf .hsel select{appearance:none;font:inherit;font-size:12.5px;font-weight:600;color:var(--ink);background:var(--glass);border:1px solid var(--line);border-radius:9px;height:36px;padding:0 12px;cursor:pointer}
+.rcf .filters .count{font-size:12px;color:var(--ink-soft);margin-left:auto;white-space:nowrap}.rcf .filters .count b{color:var(--ink)}
+.rcf .histsrc{font-size:11px;font-weight:600;color:var(--viol);background:var(--viol-bg);border-radius:6px;padding:2px 8px;white-space:nowrap}
+.rcf .pager{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:2px}
+.rcf .pager .meta{font-size:12px;color:var(--ink-soft)}.rcf .pager .meta b{color:var(--ink)}
+.rcf .pg{display:flex;align-items:center;gap:8px}
+.rcf .pg button{min-width:32px;height:32px;border:1px solid var(--line);background:var(--glass);border-radius:8px;font:inherit;font-weight:700;color:var(--ink-soft);cursor:pointer}
+.rcf .pg button:hover:not([disabled]){border-color:var(--ink-faint);color:var(--ink)}
+.rcf .pg button[disabled]{opacity:.4;cursor:not-allowed}
+.rcf .pgnow{font-size:12.5px;font-weight:600;color:var(--ink-soft)}
+.rcf .rt .fav{display:inline-grid;place-items:center;width:24px;height:24px;border-radius:6px;color:#fff;font-weight:800;font-size:11px;margin-right:8px;vertical-align:-6px}
+@media (max-width:860px){.rcf .kpis{grid-template-columns:1fr 1fr}}
 .rcf .stepper{display:flex;align-items:center;gap:0;margin-bottom:18px;flex-wrap:wrap}
 .rcf .step{display:flex;align-items:center;gap:9px;font-size:12.5px;font-weight:600;color:var(--ink-faint)}
 .rcf .step .dot{width:26px;height:26px;border-radius:50%;display:grid;place-items:center;background:var(--line-soft);color:var(--ink-faint);font-weight:800;font-size:12px;border:1px solid var(--line)}

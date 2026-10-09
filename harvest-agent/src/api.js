@@ -311,11 +311,15 @@ export function finderValidate(file) {
   return uploadRequest("/recruiter-finder/validate", fd);
 }
 
-/** POST /recruiter-finder/upload — start a bulk enrichment job; returns {job_id, summary}. */
-export function finderUpload(file, { persona, reveal } = {}) {
+/** POST /recruiter-finder/upload — start a bulk enrichment job; returns {job_id, summary}.
+ * `personas` is the ordered "Who to look up" roles (priority order); each is sent as a
+ * repeated `personas` form field. `persona` kept for backward compatibility. */
+export function finderUpload(file, { persona, personas, reveal } = {}) {
   const fd = new FormData();
   fd.append("file", file);
-  fd.append("persona", persona || "");
+  const list = Array.isArray(personas) ? personas.filter(Boolean) : [];
+  list.forEach((p) => fd.append("personas", p));
+  fd.append("persona", persona || list[0] || "");
   fd.append("reveal", reveal || "email");
   return uploadRequest("/recruiter-finder/upload", fd);
 }
@@ -323,6 +327,24 @@ export function finderUpload(file, { persona, reveal } = {}) {
 /** POST /recruiter-finder/search — one synchronous lookup (company→recruiter or known person). */
 export function finderSearch(body) {
   return request("/recruiter-finder/search", { method: "POST", body: JSON.stringify(body) });
+}
+
+/** POST /recruiter-finder/candidates — list a company's candidates (locked emails, free). */
+export function finderCandidates(body) {
+  return request("/recruiter-finder/candidates", { method: "POST", body: JSON.stringify(body) });
+}
+
+/** POST /recruiter-finder/reveal — reveal emails for hand-picked candidates (1 credit each). */
+export function finderRevealSelected(body) {
+  return request("/recruiter-finder/reveal", { method: "POST", body: JSON.stringify(body) });
+}
+
+/** GET /recruiter-finder/history-log — filterable history of revealed contacts + KPIs. */
+export function finderHistoryLog(params = {}) {
+  const qs = new URLSearchParams();
+  Object.entries(params).forEach(([k, v]) => { if (v !== undefined && v !== null && v !== "") qs.set(k, v); });
+  const s = qs.toString();
+  return request("/recruiter-finder/history-log" + (s ? "?" + s : ""));
 }
 
 /** GET /recruiter-finder/jobs/{jobId} — job status + live counters (poll target). */

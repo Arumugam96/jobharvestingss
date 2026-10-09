@@ -348,19 +348,26 @@ class ApolloClient:
         *,
         person_locations: list[str] | None = None,
         per_page: int = 10,
+        page: int = 1,
+        reserve: bool = True,
     ) -> list[ApolloPersonResult]:
         """POST /mixed_people/api_search — list a company's people filtered by title
         and (crucially) ``person_locations``, so the result is LOCATION-SPECIFIC. The
         returned people carry id/name/title but usually a LOCKED email (reveal via
         match_person_by_id). Returns [] when nobody matches or the daily cap is
-        reached."""
+        reached.
+
+        ``page`` selects the result page (Apollo caps ``per_page`` at 100). Listing
+        reveals NO emails and costs no Apollo email credit; set ``reserve=False`` when
+        paging through a free candidate list so extra pages don't drain the account-wide
+        daily cap (reserve once on the first page)."""
         if not self.enabled:
             raise ApolloAPIError("Apollo is not configured (APOLLO_API_KEY is empty)")
         organization_ids = [o for o in (organization_ids or []) if o]
         if not organization_ids or not titles:
             return []
 
-        if not await self._reserve_credit("mixed_people/api_search"):
+        if reserve and not await self._reserve_credit("mixed_people/api_search"):
             return []
 
         payload: dict[str, Any] = {
@@ -368,7 +375,7 @@ class ApolloClient:
             "person_titles": titles,
             "include_similar_titles": True,
             "contact_email_status": ["verified", "likely to engage", "unverified"],
-            "page": 1,
+            "page": page,
             "per_page": per_page,
         }
         locations = [p for p in (person_locations or []) if p]

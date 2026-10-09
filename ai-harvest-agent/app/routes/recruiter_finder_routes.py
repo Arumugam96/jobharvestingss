@@ -29,12 +29,15 @@ from app.services.recruiter_finder_import import parse_and_validate
 from app.services.recruiter_finder_service import (
     create_job_with_items,
     get_job,
+    history_log,
     launch_job,
+    list_company_candidates,
     list_items,
     list_jobs,
     list_recent_contacts,
     resolve_tenant_cap,
     retry_job,
+    reveal_candidates,
     run_single,
 )
 
@@ -47,7 +50,8 @@ router = APIRouter(tags=["Recruiter Contact Finder"])
 def _job_dict(job) -> dict[str, Any]:
     return {
         "job_id": job.id, "status": job.status, "progress": job.progress, "message": job.message,
-        "source": job.source, "filename": job.filename, "persona": job.persona, "reveal": job.reveal,
+        "source": job.source, "filename": job.filename, "persona": job.persona,
+        "personas": [p for p in (job.personas or "").split("\n") if p], "reveal": job.reveal,
         "total": job.total, "processed": job.processed, "completed": job.completed,
         "not_found": job.not_found, "ambiguous": job.ambiguous, "failed": job.failed,
         "queued": job.queued, "credits_spent": job.credits_spent,
@@ -84,6 +88,30 @@ class SearchRequest(BaseModel):
                                    "(clamped server-side to company_contact_max_count; 1 for a person)")
 
 
+class CandidatesRequest(BaseModel):
+    company: str = ""
+    location: str = ""
+    persona: str = Field(default="", description="Single B2B persona (legacy; default: Recruiters & HR)")
+    personas: list[str] = Field(default_factory=list,
+                                description="Multi-select 'Who to look up' — persona labels and/or free-text titles")
+    domain: str = ""
+
+
+class Selection(BaseModel):
+    person_id: str
+    company: str = ""
+    domain: str = ""
+    name: str = ""
+    title: str = ""
+    linkedin_url: str = ""
+    location: str = ""
+
+
+class RevealRequest(BaseModel):
+    reveal: str = Field(default="email", description="email | phone | both")
+    selections: list[Selection] = Field(default_factory=list)
+
+
 # ── Bulk: validate / upload ──────────────────────────────────────────────────
 
 @router.post("/recruiter-finder/validate")
@@ -110,6 +138,7 @@ async def validate_upload(
 async def upload_and_enrich(
     file: UploadFile = File(...),
     persona: str = Form(""),
+    personas: list[str] = Form(default=[]),
     reveal: str = Form("email"),
     db: AsyncSession = Depends(get_db_session),
     current_user=Depends(get_current_user),
@@ -132,7 +161,7 @@ async def upload_and_enrich(
             detail="No valid rows to enrich — every row is missing a company or is a duplicate.",
         )
     job_id = await create_job_with_items(
-        db, rows=preview["rows"], persona=persona, reveal=reveal,
+        db, rows=preview["rows"], persona=persona, personas=personas, reveal=reveal,
         filename=file.filename or "", source="upload",
         tenant_id=current_user.tenant_id, requested_by=current_user.email,
     )
@@ -157,6 +186,38 @@ async def single_search(
         company=body.company, location=body.location, persona=body.persona, reveal=body.reveal,
         person_name=body.person_name, linkedin_url=body.linkedin_url, domain=body.domain,
         count=body.count, requested_by=current_user.email,
+    )
+
+
+@router.post("/recruiter-finder/candidates")
+async def candidates(
+    body: CandidatesRequest,
+    current_user=Depends(get_current_user),
+) -> Any:
+    """List a company's persona candidates with LOCKED emails for the browse table.
+    Reveals nothing, so it spends NO credit — the UI shows these free, then the user
+    picks rows to reveal via POST /recruiter-finder/reveal."""
+    if not body.company.strip():
+        raise HTTPException(status_code=422, detail="Enter a company to browse its contacts.")
+    return await list_company_candidates(
+        company=body.company, location=body.location, persona=body.persona,
+        personas=body.personas, domain=body.domain,
+    )
+
+
+@router.post("/recruiter-finder/reveal")
+async def reveal(
+    body: RevealRequest,
+    current_user=Depends(get_current_user),
+) -> Any:
+    """Reveal the emails/phones of hand-picked candidates (by Apollo person id). Charges
+    one credit per contact actually revealed (bounded by the daily cap) and upserts each
+    hit into `recruiters`."""
+    if not body.selections:
+        raise HTTPException(status_code=422, detail="Select at least one contact to reveal.")
+    return await reveal_candidates(
+        selections=[s.model_dump() for s in body.selections],
+        reveal=body.reveal, requested_by=current_user.email,
     )
 
 
@@ -239,6 +300,26 @@ async def history(
 ) -> Any:
     jobs = await list_jobs(db, limit=50)
     return {"jobs": [_job_dict(j) for j in jobs]}
+
+
+@router.get("/recruiter-finder/history-log")
+async def history_log_endpoint(
+    q: str = "",
+    company: str = "",
+    email_status: str = "",
+    confidence: str = "",
+    period: str = "",
+    page: int = 1,
+    page_size: int = 25,
+    db: AsyncSession = Depends(get_db_session),
+    current_user=Depends(get_current_user),
+) -> Any:
+    """Filterable, paginated history of every contact revealed from Single search
+    (company browse or specific person) + tenant-wide KPIs and filter facets."""
+    return await history_log(
+        db, q=q.strip(), company=company, email_status=email_status, confidence=confidence,
+        period=period, page=page, page_size=page_size,
+    )
 
 
 @router.get("/recruiter-finder/recent-contacts")

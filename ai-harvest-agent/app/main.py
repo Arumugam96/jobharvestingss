@@ -286,7 +286,7 @@ _TENANT_CONTENT_TABLES = [
     "recruiters", "recruiter_discovery_runs", "email_suppressions",
     # Recruiter Contact Finder (recruiter_finder_usage is a standalone counter scoped
     # by explicit tenant_id in SQL, like apollo_daily_usage — so NOT listed here).
-    "recruiter_finder_jobs", "recruiter_finder_items",
+    "recruiter_finder_jobs", "recruiter_finder_items", "recruiter_finder_reveal_log",
 ]
 
 
