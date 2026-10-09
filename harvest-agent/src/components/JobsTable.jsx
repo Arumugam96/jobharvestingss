@@ -383,10 +383,10 @@ export default function JobsTable({
                     {j.poc || <span style={{ color: "#94A3B8" }}>—</span>}
                   </td>
                   <td className="ha-td">
-                    <DualContact scraped={j.emailScraped} recruiter={j.emailRecruiter} fallback={j.email} link="mailto:" cls="ha-mail" />
+                    <DualContact scraped={j.emailScraped} recruiter={j.emailRecruiter} company={j.emailCompany} fallback={j.email} link="mailto:" cls="ha-mail" />
                   </td>
                   <td className="ha-td" style={{ whiteSpace: "nowrap" }}>
-                    <DualContact scraped={j.mobileScraped} recruiter={j.mobileRecruiter} fallback={j.mobile} link="tel:" cls="ha-tel" />
+                    <DualContact scraped={j.mobileScraped} recruiter={j.mobileRecruiter} company={j.mobileCompany} fallback={j.mobile} link="tel:" cls="ha-tel" />
                   </td>
                   <td className="ha-td">
                     <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>

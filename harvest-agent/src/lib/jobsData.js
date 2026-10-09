@@ -18,6 +18,15 @@ export function mapApiJob(j) {
     emailRecruiter: j.email_recruiter || null,
     mobileScraped: j.phone_scraped || null,
     mobileRecruiter: j.phone_recruiter || null,
+    // Inferred HR contact found by (company + job location) via Apollo, attached
+    // only to jobs with no scraped-poster and no enriched-recruiter email. Shown
+    // inline with a "Company" tag in the table; its own section in the detail view.
+    emailCompany: j.company_contact_email || null,
+    mobileCompany: j.company_contact_phone || null,
+    companyContactName: j.company_contact_name || null,
+    companyContactTitle: j.company_contact_title || null,
+    companyContactLocation: j.company_contact_location || null,
+    companyContactSource: j.company_contact_source || null,
     linkedin: j.linkedin_profile_url || null,
     source: j.source || "—",
     jobDescription: j.job_description || "",
@@ -78,6 +87,16 @@ export function mapJobToDetail(j) {
       emailRecruiter: j.emailRecruiter || "",
       mobileScraped: j.mobileScraped || "",
       mobileRecruiter: j.mobileRecruiter || "",
+    },
+    // Inferred (company + job-location) HR contact — rendered as its own detail
+    // section, kept out of posterContact so Point of Contact stays untouched.
+    companyContact: {
+      name: j.companyContactName || "",
+      title: j.companyContactTitle || "",
+      email: j.emailCompany || "",
+      phone: j.mobileCompany || "",
+      location: j.companyContactLocation || "",
+      source: j.companyContactSource || "",
     },
     source: j.source,
     domain: j.domain || "",

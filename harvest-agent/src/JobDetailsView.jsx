@@ -138,6 +138,15 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
   const emailSent = !!outreach.email;
   const liSent = !!outreach.linkedin;
 
+  // Inferred (company + job-location) HR contact — its own section below Point of
+  // Contact, shown only when one was discovered for this job. Kept separate from
+  // the scraped/recruiter poster so provenance stays unambiguous.
+  const cc = job.companyContact || {};
+  const hasCompanyContact = !!(cc.email || cc.phone || cc.name);
+  const ccSourceLabel = cc.source
+    ? `Inferred · ${cc.source.charAt(0).toUpperCase()}${cc.source.slice(1)}`
+    : "Inferred";
+
   const linkOrDash = (url, label) =>
     url ? (
       <a className="ha-link" href={url} target="_blank" rel="noreferrer">
@@ -255,6 +264,66 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
             </div>
           </div>
         </section>
+
+        {hasCompanyContact && (
+          <section className="ha-section ha-poc ha-enriched">
+            <div className="ha-label">
+              <Building2 size={14} /> Company / Location Enriched
+              <span className="ha-en-badge">{ccSourceLabel}</span>
+            </div>
+            <div className="ha-poc-body">
+              <div className="ha-poster">
+                <div className="ha-avatar ha-avatar-amber"><User size={20} /></div>
+                <div className="ha-poster-info">
+                  <div className="ha-poster-name">{cc.name || "HR Contact"}</div>
+                  <div className="ha-poster-title">{cc.title || "—"}</div>
+                </div>
+              </div>
+
+              <div className="ha-poc-fields">
+                <div className="ha-field">
+                  <span className="ha-key">Email</span>
+                  <span className="ha-val">{cc.email || <span className="ha-muted">—</span>}</span>
+                </div>
+                <div className="ha-field">
+                  <span className="ha-key">Phone</span>
+                  <span className="ha-val">{cc.phone || <span className="ha-muted">—</span>}</span>
+                </div>
+                <div className="ha-field">
+                  <span className="ha-key">Location</span>
+                  <span className="ha-val">{cc.location || <span className="ha-muted">—</span>}</span>
+                </div>
+              </div>
+
+              <div className="ha-actions">
+                <ContactAction
+                  glyph={WhatsAppIcon}
+                  variant="wa"
+                  title="WhatsApp"
+                  href={cc.phone ? `https://wa.me/${cc.phone.replace(/\D/g, "")}` : null}
+                />
+                <ContactAction
+                  glyph={Mail}
+                  variant="mail"
+                  title={emailSent ? "Email sent — click to follow up" : "Email HR contact"}
+                  sent={emailSent}
+                  newTab={false}
+                  onClick={
+                    job.id && emailSent
+                      ? () => setEmailModal({ job: { ...job, email: cc.email }, followup: true, parentOutreachId: outreach.email.outreach_id })
+                      : job.id && cc.email
+                        ? () => setEmailModal({ job: { ...job, email: cc.email }, followup: false })
+                        : undefined
+                  }
+                  href={!job.id && cc.email ? `mailto:${cc.email}` : null}
+                />
+              </div>
+            </div>
+            <div className="ha-en-foot">
+              Not the job poster — a likely HR contact at this company's location. Verify before relying on it.
+            </div>
+          </section>
+        )}
 
         <div className="ha-grid">
           <main className="ha-main">
@@ -400,6 +469,20 @@ const styles = `
   .ha-poc .ha-poster { margin-bottom: 0; padding-bottom: 0; border-bottom: none;
     padding-right: 28px; border-right: 1px solid #F1F5F9; }
   .ha-poc .ha-actions { margin-top: 0; width: 320px; flex-shrink: 0; }
+
+  /* Company/location enriched contact — its own section, amber-accented so an
+     inferred HR contact never reads as the scraped job poster. */
+  .ha-enriched { position: relative; border-color: #FCE3BC; }
+  .ha-enriched::before { content: ""; position: absolute; left: 0; top: 16px; bottom: 16px;
+    width: 3px; border-radius: 0 3px 3px 0; background: #F59E0B; }
+  .ha-enriched .ha-label { color: #92580B; }
+  .ha-enriched .ha-label svg { color: #F59E0B; }
+  .ha-en-badge { font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+    background: #FFF7EC; color: #92580B; border: 1px solid #FCE3BC; padding: 2px 8px; border-radius: 999px; }
+  .ha-avatar-amber { background: #FEF3E2; color: #B45309; }
+  .ha-en-foot { margin-top: 14px; display: flex; align-items: center; gap: 7px;
+    font-size: 12px; color: #92580B; background: #FFF7EC; border: 1px solid #FCE3BC;
+    border-radius: 9px; padding: 9px 13px; }
 
   .ha-section { ${GLASS} border-radius: 14px; padding: 22px; }
   .ha-label { display: flex; align-items: center; gap: 7px;

@@ -321,43 +321,68 @@ export function ContactActionBtn({ glyph: Glyph, title, available, href, onClick
 
 /* Sidebar lives in Sidebar.jsx — the single shared nav used by every page. */
 
+// Tinted source-tag chips, keyed by origin. Company = amber to read as an
+// inferred (lower-confidence) contact, distinct from the scraped/recruiter blues.
+const SRC_TAG_STYLE = {
+  job:       { bg: "#F1F5F9", fg: "#475569", br: "#E2E8F0" },
+  recruiter: { bg: "#EFF4FF", fg: "#1D4ED8", br: "#DBE6FF" },
+  company:   { bg: "#FFF7EC", fg: "#92580B", br: "#FCE3BC" },
+};
+
+function SrcTag({ variant, children }) {
+  const s = SRC_TAG_STYLE[variant] || SRC_TAG_STYLE.job;
+  return (
+    <span style={{
+      fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".03em",
+      padding: "1.5px 6px", borderRadius: 5, background: s.bg, color: s.fg,
+      border: `1px solid ${s.br}`, whiteSpace: "nowrap", flexShrink: 0,
+    }}>{children}</span>
+  );
+}
+
 /**
- * Renders a contact value that may come from two sources — the scraped job and
- * the enriched recruiter record. When both exist (and differ) they are shown as
- * two labeled lines (Job: / Recruiter:); a single source renders unlabeled, and
- * nothing renders an em-dash. `link` is "mailto:" or "tel:"; `cls` the anchor
- * class (ha-mail / ha-tel). Used by the jobs table and the job-details view.
+ * Renders a contact value that may come from up to three sources — the scraped
+ * job, the enriched recruiter record, and the inferred (company + job-location)
+ * HR contact. Each present, distinct value shows as a labeled line; a lone
+ * scraped/recruiter value renders unlabeled, but the Company value ALWAYS keeps
+ * its tag (it's inferred, not observed). Nothing → em-dash. `link` is "mailto:"
+ * or "tel:"; `cls` the anchor class (ha-mail / ha-tel). Used by the jobs table.
  */
-export function DualContact({ scraped, recruiter, fallback, link, cls }) {
+export function DualContact({ scraped, recruiter, company, fallback, link, cls }) {
   const s = (scraped || "").trim();
   const r = (recruiter || "").trim();
+  const c = (company || "").trim();
   const dash = <span style={{ color: "#94A3B8" }}>—</span>;
   const anchor = (val) => <a className={cls} href={link + val}>{val}</a>;
 
+  // Distinct, present values in priority order (dedupe identical strings).
+  const parts = [];
+  if (s) parts.push({ variant: "job", label: "Job", val: s });
+  if (r && r !== s) parts.push({ variant: "recruiter", label: "Recruiter", val: r });
+  if (c && c !== s && c !== r) parts.push({ variant: "company", label: "Company", val: c });
+
   // JSON read-path rows carry only the merged value (no split source fields) —
   // fall back to it so they still render a single unlabeled contact.
-  if (!s && !r) {
+  if (parts.length === 0) {
     const f = (fallback || "").trim();
     return f ? anchor(f) : dash;
   }
 
-  // Both present and distinct → label each by origin.
-  if (s && r && s !== r) {
-    return (
-      <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-        <span style={{ display: "flex", gap: 5, alignItems: "baseline" }}>
-          <span style={{ fontSize: 10, fontWeight: 600, color: "#64748B", textTransform: "uppercase", letterSpacing: ".03em" }}>Job</span>
-          {anchor(s)}
+  // A lone scraped/recruiter value stays unlabeled; the Company source always
+  // keeps its tag, and any multi-source cell labels every line.
+  const showLabels = parts.length > 1 || parts[0].variant === "company";
+  if (!showLabels) return anchor(parts[0].val);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+      {parts.map((p) => (
+        <span key={p.variant} style={{ display: "flex", gap: 5, alignItems: "baseline" }}>
+          <SrcTag variant={p.variant}>{p.label}</SrcTag>
+          {anchor(p.val)}
         </span>
-        <span style={{ display: "flex", gap: 5, alignItems: "baseline" }}>
-          <span style={{ fontSize: 10, fontWeight: 600, color: "#64748B", textTransform: "uppercase", letterSpacing: ".03em" }}>Recruiter</span>
-          {anchor(r)}
-        </span>
-      </div>
-    );
-  }
-  const single = s || r;
-  return single ? anchor(single) : dash;
+      ))}
+    </div>
+  );
 }
 
 // Company-size table cell: a coloured tier badge (Small/Medium/Large/Enterprise)
