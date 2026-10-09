@@ -443,7 +443,7 @@ const styles = `
     padding: 7px 12px; border-radius: 8px; }
 
   .ha-hero { ${GLASS} border-radius: 14px;
-    padding: 24px 28px; margin-bottom: 18px; }
+    padding: 15px 28px; margin-bottom: 15px; }
   .ha-hero-meta { display: flex; align-items: center; gap: 14px; margin-bottom: 12px; }
   .ha-source { font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase;
     color: #2563EB; background: rgba(239,244,255,.8); border: 1px solid #DBE6FF;
@@ -472,7 +472,7 @@ const styles = `
 
   /* Company/location enriched contact — its own section, amber-accented so an
      inferred HR contact never reads as the scraped job poster. */
-  .ha-enriched { position: relative; border-color: #FCE3BC; }
+  .ha-enriched { position: relative; border-color: #FCE3BC; margin-top: 18px; }
   .ha-enriched::before { content: ""; position: absolute; left: 0; top: 16px; bottom: 16px;
     width: 3px; border-radius: 0 3px 3px 0; background: #F59E0B; }
   .ha-enriched .ha-label { color: #92580B; }
