@@ -700,8 +700,8 @@ async def list_company_candidates(
 ) -> dict:
     """List a company's persona candidates (LOCKED emails) for the browse table.
     Paginates search_people over up to 5 free pages (per_page=100) — reveals nothing,
-    so it spends NO credit (neither the per-tenant Finder budget nor, past page 1, the
-    account-wide cap). ``personas`` (the multi-select "Who to look up" input — known
+    so it spends NO credit: listing is free and ungated (neither the per-tenant Finder
+    budget nor the account-wide cap). ``personas`` (the multi-select "Who to look up" input — known
     persona labels and/or free-text titles) takes precedence over the single ``persona``.
     Returns ``{status, company_domain, total, candidates: [...]}``."""
     settings = get_settings()
@@ -729,7 +729,7 @@ async def list_company_candidates(
     for page in range(1, max_pages + 1):
         people = await client.search_people(
             [org.id], titles, person_locations=person_locations,
-            per_page=per_page, page=page, reserve=(page == 1),
+            per_page=per_page, page=page,
         )
         if not people:
             break

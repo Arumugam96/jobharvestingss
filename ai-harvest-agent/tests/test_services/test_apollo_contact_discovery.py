@@ -51,11 +51,7 @@ async def test_search_organization_prefers_domain_match(monkeypatch) -> None:
             {"id": "o2", "name": "Acme Other", "primary_domain": "other.com"},
         ]}
 
-    async def _always(*a, **k):
-        return True
-
     monkeypatch.setattr(client, "_request", _fake_request)
-    monkeypatch.setattr(client, "_reserve_credit", _always)
 
     org = await client.search_organization("Acme", domain="other.com")
     assert org is not None and org.id == "o2"
@@ -73,11 +69,7 @@ async def test_search_people_sends_titles_and_locations(monkeypatch) -> None:
         calls["json"] = json
         return {"people": [{"id": "p1", "name": "A", "title": "HR Manager"}]}
 
-    async def _always(*a, **k):
-        return True
-
     monkeypatch.setattr(client, "_request", _fake_request)
-    monkeypatch.setattr(client, "_reserve_credit", _always)
 
     people = await client.search_people(["o1"], ["HR Manager"], person_locations=["India"])
     assert len(people) == 1 and people[0].id == "p1"
@@ -111,21 +103,51 @@ async def test_match_person_by_id_posts_id_in_body(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_credit_methods_short_circuit_when_capped(monkeypatch) -> None:
+async def test_reveal_methods_short_circuit_when_capped(monkeypatch) -> None:
+    """Only the credit-spending reveal calls are gated by the daily cap: when it is
+    reached they short-circuit to an empty result without issuing the request."""
     client = ApolloClient(_fake_settings())
 
     async def _denied(*a, **k):
         return False
 
-    async def _boom(*a, **k):  # must never be reached once the cap denies
+    async def _boom(*a, **k):  # must never be reached once the cap denies a reveal
         raise AssertionError("_request should not run when the cap is reached")
 
     monkeypatch.setattr(client, "_reserve_credit", _denied)
     monkeypatch.setattr(client, "_request", _boom)
 
-    assert await client.search_organization("Acme") is None
-    assert await client.search_people(["o1"], ["HR"]) == []
     assert (await client.match_person_by_id("p1")).matched is False
+    assert (await client.enrich_person_by_linkedin("https://www.linkedin.com/in/x")).matched is False
+
+
+@pytest.mark.asyncio
+async def test_free_lookups_ignore_the_credit_cap(monkeypatch) -> None:
+    """Search/enrich calls reveal no contact and cost no Apollo credit, so they must
+    run even when the daily cap is exhausted — they never reserve against it."""
+    client = ApolloClient(_fake_settings())
+
+    async def _denied(*a, **k):  # cap exhausted — must be irrelevant to free lookups
+        return False
+
+    async def _fake_request(path, *, params=None, json=None):
+        if path == "/mixed_companies/search":
+            return {"organizations": [{"id": "o1", "name": "Acme", "primary_domain": "acme.com"}]}
+        if path == "/mixed_people/api_search":
+            return {"people": [{"id": "p1", "name": "A", "title": "HR"}]}
+        if path == "/organizations/enrich":
+            return {"organization": {"id": "o1", "name": "Acme", "primary_domain": "acme.com"}}
+        raise AssertionError(f"unexpected path {path}")
+
+    monkeypatch.setattr(client, "_reserve_credit", _denied)
+    monkeypatch.setattr(client, "_request", _fake_request)
+
+    org = await client.search_organization("Acme")
+    assert org is not None and org.id == "o1"
+    people = await client.search_people(["o1"], ["HR"])
+    assert len(people) == 1 and people[0].id == "p1"
+    org2 = await client.enrich_organization("acme.com")
+    assert org2 is not None and org2.id == "o1"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
