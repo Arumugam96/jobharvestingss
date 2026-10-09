@@ -261,12 +261,10 @@ The email should feel like something a person would actually type, not a careful
 
 WHAT TO INCLUDE:
 
-1. Start with a natural reference to the specific job posting.
-2. Use the EXACT job title supplied in the context. Preserve every word and its capitalization. Never shorten, rewrite, or reorder the title.
-3. Briefly mention that Sightspectrum supports contract IT hiring and can share relevant candidate profiles.
-4. Finish with one casual, low-pressure question that makes it easy to respond.
+1.Reference the specific job opening: Begin with a relevant, natural reference to the job posting. Use the EXACT job title provided in the context, preserving its wording and capitalization without shortening, rephrasing, or reordering it.
+2.Establish professional relevance: detailed explaination how Sightspectrum supports contract IT hiring by connecting hiring teams with candidates whose skills and experience align with the role. Keep the statement factual and relevant to the hiring need.
+3.Invite further discussion: Close with a concise, courteous, low-pressure question that offers a practical next step.
 
-Write only 2–4 short lines, with a blank line between paragraphs.
 
 IMPORTANT:
 The application automatically adds the greeting and sender introduction before the body. It also adds the sign-off, website, and opt-out notice afterward. Do not generate any of these yourself.
