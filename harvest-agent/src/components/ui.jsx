@@ -347,13 +347,20 @@ function SrcTag({ variant, children }) {
  * scraped/recruiter value renders unlabeled, but the Company value ALWAYS keeps
  * its tag (it's inferred, not observed). Nothing → em-dash. `link` is "mailto:"
  * or "tel:"; `cls` the anchor class (ha-mail / ha-tel). Used by the jobs table.
+ *
+ * Layout: a labeled value stacks its source tag ABOVE the value so the value
+ * gets the column's full width, and every value is a single ellipsized line
+ * (.ha-contact-val, full value in the tooltip) — so a long email can never
+ * spill into the neighbouring Mobile column of the fixed-layout table.
  */
 export function DualContact({ scraped, recruiter, company, fallback, link, cls }) {
   const s = (scraped || "").trim();
   const r = (recruiter || "").trim();
   const c = (company || "").trim();
   const dash = <span style={{ color: "#94A3B8" }}>—</span>;
-  const anchor = (val) => <a className={cls} href={link + val}>{val}</a>;
+  const anchor = (val) => (
+    <a className={cls + " ha-contact-val"} href={link + val} title={val}>{val}</a>
+  );
 
   // Distinct, present values in priority order (dedupe identical strings).
   const parts = [];
@@ -374,12 +381,12 @@ export function DualContact({ scraped, recruiter, company, fallback, link, cls }
   if (!showLabels) return anchor(parts[0].val);
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+    <div className="ha-contact">
       {parts.map((p) => (
-        <span key={p.variant} style={{ display: "flex", gap: 5, alignItems: "baseline" }}>
+        <div key={p.variant} className="ha-contact-item">
           <SrcTag variant={p.variant}>{p.label}</SrcTag>
           {anchor(p.val)}
-        </span>
+        </div>
       ))}
     </div>
   );

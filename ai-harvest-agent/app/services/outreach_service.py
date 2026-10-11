@@ -114,6 +114,7 @@ class OutreachService:
             parsed = self._parse_email_json(text)
             if parsed:
                 _, pitch = parsed
+                pitch = self._fix_platform(pitch, job)
                 # Subject is built deterministically (exact job title + a random
                 # tagline) so its format is guaranteed; the LLM subject is ignored.
                 subject = outreach_prompts.build_email_subject(job)
@@ -157,6 +158,7 @@ class OutreachService:
             parsed = self._parse_email_json(text)
             if parsed:
                 _, pitch = parsed
+                pitch = self._fix_platform(pitch, job)
                 subject = outreach_prompts.build_followup_subject(prior_subject, job)
                 # Deterministic greeting leads the follow-up too (no self-intro on a
                 # second-touch); the LLM writes the nudge + value + CTA lines.
@@ -170,6 +172,21 @@ class OutreachService:
 
         subject, body = outreach_prompts.render_followup_fallback(job, prior_subject, sender_email, deck_url, contact_block)
         return EmailDraft(subject=subject, body=body, fallback_used=True, meta=meta)
+
+    @staticmethod
+    def _fix_platform(pitch: str, job: dict) -> str:
+        """Deterministic post-check on the LLM-written lines: the model tends to call
+        every posting a "LinkedIn post"; rewrite a wrong platform in a posting context to
+        the job's real source (or drop it when the source is unknown). Applied to the
+        pitch only, before the deterministic greeting/intro/closing are added."""
+        fixed, n = outreach_prompts.correct_platform_mentions(pitch, job)
+        if n:
+            logger.info(
+                "outreach_platform_corrected",
+                platform=outreach_prompts.job_platform(job) or "unknown",
+                corrections=n, job_url=job.get("job_url"),
+            )
+        return fixed
 
     @staticmethod
     def _parse_email_json(text: str) -> tuple[str, str] | None:
@@ -199,7 +216,9 @@ class OutreachService:
             meta.success = False
             meta.error_message = meta.error_message or "empty LLM response"
         return LinkedinDraft(
-            message=outreach_prompts.render_linkedin_fallback(company),
+            message=outreach_prompts.render_linkedin_fallback(
+                company, outreach_prompts.job_platform(job),
+            ),
             fallback_used=True,
             meta=meta,
         )

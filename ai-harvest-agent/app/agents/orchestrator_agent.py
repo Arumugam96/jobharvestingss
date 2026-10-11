@@ -25,7 +25,7 @@ To add a new source (e.g. Indeed):
 from __future__ import annotations
 
 import asyncio
-import re
+from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,10 +40,18 @@ from app.agents.linkedin_agent import (
     LinkedInScrapedJob,
 )
 from app.core.exceptions import LLMUnavailableError
+from app.core.job_url import normalize_job_url
 from app.models.harvest_models import HarvestConfig
 from app.models.response_models import HarvestJob
 from app.models.unified_job import UnifiedJob
+from app.services import run_guard
 from app.services.business_filter_service import BusinessFilterService
+from app.services.source_status import (
+    REASON_ERROR,
+    REASON_LLM_UNAVAILABLE,
+    REASON_LOGIN_REQUIRED,
+    SourceStatusTracker,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -108,85 +116,39 @@ def _filter_by_date_window(jobs: list[UnifiedJob], window_hours: int) -> list[Un
 
 
 def _deduplicate(jobs: list[UnifiedJob]) -> list[UnifiedJob]:
-    """Remove duplicates across all sources by job_url, then company+title."""
+    """Remove duplicates across all sources by normalized job_url only.
+
+    The posting URL is the identity: the same company + title at different
+    locations (or reposted) are distinct postings with distinct URLs, so
+    company+title is deliberately NOT a key. Jobs with no URL are kept."""
     seen_urls: set[str] = set()
-    seen_ct:   set[str] = set()
     deduped:   list[UnifiedJob] = []
     for job in jobs:
-        url_key = job.job_url.split("?")[0].rstrip("/").lower() if job.job_url else ""
-        ct_key  = (
-            re.sub(r"\s+", " ", job.company.lower().strip())
-            + "::"
-            + re.sub(r"\s+", " ", job.job_title.lower().strip())
-        )
-        if (url_key and url_key in seen_urls) or ct_key in seen_ct:
+        url_key = normalize_job_url(job.job_url)
+        if url_key and url_key in seen_urls:
             continue
         if url_key:
             seen_urls.add(url_key)
-        seen_ct.add(ct_key)
         deduped.append(job)
     return deduped
-
-
-def _cross_source_enrich(jobs: list[UnifiedJob]) -> list[UnifiedJob]:
-    """
-    Cross-source lead enrichment.
-
-    Builds a lookup from Naukri jobs (which have the richest contact data) keyed
-    by (recruiter_name_lower, company_lower).  LinkedIn and Dice jobs that share
-    the same recruiter name + company but are missing email / phone / LinkedIn URL
-    are enriched from the matching Naukri record.
-    """
-    # Build index from Naukri records that have at least a name
-    naukri_index: dict[str, UnifiedJob] = {}
-    for j in jobs:
-        if j.source == "Naukri" and j.job_poster_name:
-            key = (
-                re.sub(r"\s+", "", j.job_poster_name.lower())
-                + "::"
-                + re.sub(r"\s+", "", (j.current_company or j.company or "").lower())
-            )
-            if key not in naukri_index:
-                naukri_index[key] = j
-
-    enriched_count = 0
-    for job in jobs:
-        if job.source == "Naukri":
-            continue
-        if not job.job_poster_name:
-            continue
-        key = (
-            re.sub(r"\s+", "", job.job_poster_name.lower())
-            + "::"
-            + re.sub(r"\s+", "", (job.current_company or job.company or "").lower())
-        )
-        match = naukri_index.get(key)
-        if not match:
-            continue
-        changed = False
-        if not job.email_id and match.email_id:
-            job.email_id = match.email_id
-            changed = True
-        if not job.contact_number and match.contact_number:
-            job.contact_number = match.contact_number
-            changed = True
-        if not job.job_poster_designation and match.job_poster_designation:
-            job.job_poster_designation = match.job_poster_designation
-            changed = True
-        if changed:
-            enriched_count += 1
-
-    logger.info("cross_source_enrichment_complete", enriched=enriched_count)
-    return jobs
 
 
 # Fixed execution priority — lower index = runs first
 _SOURCE_PRIORITY = ["naukri", "linkedin", "dice"]
 
+# Config/status key → the UnifiedJob.source / jobs_by_source display name.
+_SOURCE_DISPLAY = {"naukri": "Naukri", "linkedin": "LinkedIn", "dice": "Dice"}
+
 
 # ── Converters: source-specific dataclass → UnifiedJob ────────────────────────
 
 def _naukri_to_unified(j: "NaukriScrapedJob") -> UnifiedJob:  # type: ignore[name-defined]
+    # Naukri's own consultant flag is the strongest Staffing-vs-Direct signal
+    # there is (see BusinessFilterService._infer_hiring_entity): True => posted by
+    # a recruitment consultant, False => posted by the company itself, None =>
+    # Naukri didn't say (no hint).
+    consultant = getattr(j, "consultant", None)
+    hiring_hint = "staffing" if consultant is True else ("direct" if consultant is False else "")
     return UnifiedJob(
         job_title               = j.job_title,
         company                 = j.company,
@@ -196,12 +158,20 @@ def _naukri_to_unified(j: "NaukriScrapedJob") -> UnifiedJob:  # type: ignore[nam
         posted_date             = j.posted_date,
         job_url                 = j.job_url,
         job_description         = j.job_description,
+        job_description_html    = getattr(j, "job_description_html", ""),
         skills                  = j.skills,
         work_mode               = j.work_mode,
         source                  = "Naukri",
         scraped_at              = datetime.now(timezone.utc),
+        company_url             = getattr(j, "company_url", ""),
+        company_size            = getattr(j, "company_size", ""),
+        employment_type         = getattr(j, "employment_type", ""),
+        job_type                = getattr(j, "employment_type", ""),
+        domain_hint             = getattr(j, "industry_hint", ""),
+        hiring_hint             = hiring_hint,
         job_poster_name         = getattr(j, "recruiter_name", None),
         job_poster_designation  = getattr(j, "job_poster_designation", None),
+        linkedin_profile_url    = getattr(j, "linkedin_profile_url", None),
         current_company         = getattr(j, "recruiter_company", None),
         email_id                = getattr(j, "email_id", None),
         contact_number          = getattr(j, "contact_number", None),
@@ -286,6 +256,14 @@ class OrchestratorResult:
     # (see LinkedInAgent.get_reenrich_queue()) — [] on a healthy run. The caller
     # persists these to reenrichment_tasks for a later run to re-extract.
     reenrich_queue:   list[dict]                   = field(default_factory=list)
+    # Final per-source status snapshot (app/services/source_status.py) — one
+    # {state, count, message, reason, error, updated_at} entry per ENABLED source.
+    source_status:    dict[str, dict]              = field(default_factory=dict)
+    # Provider message when LinkedIn stopped on an extraction-LLM outage while the
+    # other enabled source(s) completed — the run still finishes normally (its
+    # LinkedIn partial jobs / LLM log / re-enrich queue are in the fields above).
+    # "" when there was no isolated outage.
+    llm_outage:       str                          = ""
 
     @property
     def total_jobs(self) -> int:
@@ -335,10 +313,13 @@ class OrchestratorAgent:
 
     def __init__(self, config: HarvestConfig, already_harvested: set[str] | None = None) -> None:
         self._config = config
-        # Normalized job_urls to skip at the source (LinkedIn only) — loaded from
+        # Normalized job_urls to skip at the source (LinkedIn + Naukri) — loaded from
         # the DB by the route for cross-run dedup, so a posting harvested within
         # the lookback window isn't re-scraped/re-emailed. Empty ⇒ no source skip.
         self._already_harvested: set[str] = already_harvested or set()
+        # Set by _collect_all when LinkedIn stopped on an extraction-LLM outage
+        # while another enabled source completed (the run carries on).
+        self._llm_outage: LLMUnavailableError | None = None
 
     # ── Full pipeline (POST /run-harvest-agent) ───────────────────────────────
 
@@ -347,6 +328,7 @@ class OrchestratorAgent:
         wait_for_login: bool = False,
         on_status: Callable[[str], Awaitable[None]] | None = None,
         on_persist: Callable[[list[UnifiedJob]], Awaitable[None]] | None = None,
+        on_source_status: Callable[[dict[str, dict]], Awaitable[None]] | None = None,
     ) -> OrchestratorResult:
         """
         Execute all enabled sources in priority order, apply business filters,
@@ -367,19 +349,39 @@ class OrchestratorAgent:
                         incrementally — crash safety + live progress. These
                         batches are RAW (pre-classification/pre-dedup); the
                         caller reconciles with the final result.all_jobs at end.
+        on_source_status Optional async callback handed a per-source status
+                        snapshot ({source: {state, count, message, reason,
+                        error, updated_at}}) whenever a source changes state,
+                        scrapes a batch, or (throttled) reports progress — the
+                        caller persists it for GET /harvest-status `sources`.
+
+        An extraction-LLM outage stops ONLY LinkedIn (the one LLM consumer):
+        Naukri/Dice run to completion and the pipeline below runs as usual, with
+        LinkedIn's pre-outage partial jobs included and result.llm_outage set.
+        Only when no other enabled source completed does the outage still abort
+        the run (LLMUnavailableError carrying .partial_result) — today's
+        all-sources-failed behaviour.
         """
         config      = self._config
         started_at  = datetime.now(timezone.utc)
         run_id      = started_at.strftime("%Y%m%d_%H%M%S")
         result      = OrchestratorResult(started_at=started_at)
+        # Created here (inside the loop run_all executes on — a proactor worker
+        # thread on Windows) so its lock/timer bind to the right event loop.
+        tracker     = SourceStatusTracker(
+            [s for s in _SOURCE_PRIORITY if getattr(config.sources, s, False)],
+            on_change=on_source_status,
+        )
 
         # ── Step 1: collect raw jobs from all enabled sources ─────────────────
         try:
             raw_by_source, result.token_usage, result.llm_calls, result.reenrich_queue = await self._collect_all(
-                config, wait_for_login=wait_for_login, on_status=on_status, on_persist=on_persist
+                config, wait_for_login=wait_for_login, on_status=on_status, on_persist=on_persist,
+                tracker=tracker,
             )
         except LLMUnavailableError as exc:
-            # The extraction LLM went down mid-scrape. Keep whatever was
+            # LinkedIn's extraction LLM went down AND no other enabled source
+            # completed, so there is nothing to carry the run. Keep whatever was
             # collected (unprocessed — we skip dedup/classify/verify since the
             # run is failing anyway) so the caller can persist the partial
             # harvest, then re-raise to mark the run failed.
@@ -395,6 +397,7 @@ class OrchestratorAgent:
                 partial_jobs.extend(jobs)
             result.jobs_by_source = dict(partial_raw)
             result.all_jobs       = partial_jobs
+            result.source_status  = tracker.snapshot()
             result.completed_at   = datetime.now(timezone.utc)
             exc.partial_result    = result
             logger.error(
@@ -402,6 +405,10 @@ class OrchestratorAgent:
                 error=str(exc), partial_jobs=len(partial_jobs),
             )
             raise
+
+        if self._llm_outage is not None:
+            # Isolated outage: LinkedIn stopped, the other source(s) completed.
+            result.llm_outage = getattr(self._llm_outage, "message", "") or str(self._llm_outage)
 
         # ── Step 2: convert to UnifiedJob ─────────────────────────────────────
         all_unified: list[UnifiedJob] = []
@@ -509,6 +516,13 @@ class OrchestratorAgent:
 
         _li_final = len(deduped_by_source.get("LinkedIn", []))
         logger.info("linkedin_jobs_final", count=_li_final)
+
+        # Align each source's live (raw, pre-dedup) count with its final kept
+        # total so `sources[*].count` matches the legacy naukri/linkedin/dice
+        # fields the caller writes from jobs_by_source. States are untouched.
+        for key in tracker.sources:
+            tracker.set_count(key, len(deduped_by_source.get(_SOURCE_DISPLAY.get(key, key), [])))
+        result.source_status = tracker.snapshot()
 
         result.completed_at  = datetime.now(timezone.utc)
 
@@ -628,6 +642,7 @@ class OrchestratorAgent:
         wait_for_login: bool = False,
         on_status: Callable[[str], Awaitable[None]] | None = None,
         on_persist: Callable[[list[UnifiedJob]], Awaitable[None]] | None = None,
+        tracker: SourceStatusTracker | None = None,
     ) -> tuple[dict[str, list[UnifiedJob]], dict, list[dict], list[dict]]:
         """
         Run all enabled source agents IN PARALLEL using a single shared browser
@@ -640,24 +655,101 @@ class OrchestratorAgent:
         cumulative Claude/Ollama usage, per-call audit log, and degraded-job
         re-enrichment queue (Naukri and Dice never hit the LLM), empty if
         LinkedIn wasn't enabled or never triggered the fallback.
+
+        Every source runs to its own end: each runner catches its own failures
+        and reports them on `tracker` (per-source state/count/message). An
+        extraction-LLM outage in LinkedIn stops ONLY LinkedIn — its pre-outage
+        jobs are kept as its result and self._llm_outage is set — unless no other
+        enabled source completed, in which case the LLMUnavailableError is raised
+        (carrying the partial harvest) exactly as before.
         """
         from app.scrapers.browser_manager import PersistentBrowserManager
         from app.scrapers.dice_scraper import DiceScrapedJob, DiceScraper
         from app.services.llm_service import empty_usage_summary
         from app.services.session_manager import account_profile_dir
 
+        self._llm_outage = None
         results:  dict[str, list[UnifiedJob]] = {}
         # Populated by _harvest_linkedin so token usage survives even if that
         # coroutine raises — the LinkedInAgent instance is created before any
         # of its login/scrape work that could fail.
         linkedin_agent_holder: dict[str, LinkedInAgent] = {}
+        # The LLMUnavailableError LinkedIn stopped on (if any) — held here, not
+        # raised, so the other sources keep running.
+        linkedin_outage: dict[str, LLMUnavailableError] = {}
         enabled = [s for s in _SOURCE_PRIORITY if getattr(config.sources, s, False)]
+        if tracker is None:
+            tracker = SourceStatusTracker(enabled)
 
         if not enabled:
             logger.warning("orchestrator_no_sources_enabled")
-            return results, empty_usage_summary(), []
+            return results, empty_usage_summary(), [], []
 
         logger.info("orchestrator_parallel_start", sources=enabled)
+
+        # ── Per-source progress wrappers ───────────────────────────────────────
+        # The source is known at the call site, so each source's messages and
+        # batch counts land in ITS tracker entry (no cross-source overwrite);
+        # the run-level on_status still receives every message (latest overall).
+        def _status_for(src: str) -> Callable[[str], Awaitable[None]]:
+            async def _cb(msg: str) -> None:
+                await tracker.message(src, msg)
+                if on_status:
+                    await on_status(msg)
+            return _cb
+
+        # Structured live progress (Rule Engine "Live Harvest" card): each agent's
+        # on_progress payload (phase / found / listed / skipped / target / done /
+        # in_batch / …) lands in ITS tracker entry. The run's filter window rides
+        # along so the card can show "Past Nh". Never raises into the scraper.
+        window_hours = getattr(config.filters, "search_window_hours", None)
+
+        def _progress_for(src: str) -> Callable[[dict], Awaitable[None]]:
+            async def _cb(payload: dict) -> None:
+                try:
+                    data = dict(payload or {})
+                    if data.get("window_hours") is None and window_hours is not None:
+                        data["window_hours"] = window_hours
+                    await tracker.progress(src, data)
+                except Exception as exc:
+                    logger.debug("orchestrator_progress_failed", source=src, error=str(exc))
+            return _cb
+
+        async def _start(src: str) -> None:
+            await tracker.start(src)
+            if window_hours is not None:
+                try:
+                    await tracker.set_listing(src, window_hours=window_hours)
+                except Exception as exc:
+                    logger.debug("orchestrator_progress_failed", source=src, error=str(exc))
+
+        async def _finish(src: str, n: int) -> None:
+            msg = f"Stopped by user — {n} jobs scraped" if run_guard.is_stop_requested() else None
+            await tracker.done(src, n, message=msg)
+
+        async def _skip_if_stopped(src: str) -> bool:
+            # A stop requested before this source even began (e.g. during the
+            # browser launch) — don't start it at all.
+            if run_guard.is_stop_requested():
+                await tracker.skip(src, "Stopped by user")
+                return True
+            return False
+
+        # Browser layout. DEFAULT (NAUKRI_BROWSER_MODE=shared): ONE browser — the
+        # selected LinkedIn account's persistent Chrome profile — with one TAB per
+        # enabled source, all scraping concurrently (both tabs visible in the one
+        # window of the Live Browser / noVNC view). Naukri is guest-only, so its
+        # tab only needs the context's full-Chromium channel (Akamai denies
+        # chromium-headless-shell; PersistentBrowserManager now passes
+        # channel="chromium"). Opt-out, NAUKRI_BROWSER_MODE=isolated: Naukri runs
+        # in its own fresh cookie-less browser (see naukri_guest_browser), and the
+        # persistent profile isn't launched at all when Naukri is the only source
+        # — for a Naukri-only worker / a host without the LinkedIn profile.
+        from app.config import get_settings
+        naukri_isolated = (
+            "naukri" in enabled and get_settings().naukri_browser_mode == "isolated"
+        )
+        shared_sources = [s for s in enabled if not (s == "naukri" and naukri_isolated)]
 
         # Launch the shared browser under the SELECTED LinkedIn account's Chrome
         # profile so account "2" reuses its own saved session (account "1"/default
@@ -667,176 +759,260 @@ class OrchestratorAgent:
         # non-default account they'd use the account-suffixed profile too; the
         # account selector is a LinkedIn concern, so run other sources under
         # account "1" if they need their own saved sessions.
-        linkedin_profile = account_profile_dir(
-            config.browser.chrome_profile, config.sources.linkedin_account,
-        )
-        logger.info(
-            "orchestrator_profile_selected",
-            linkedin_account=config.sources.linkedin_account, profile_dir=linkedin_profile,
-        )
-
-        async with PersistentBrowserManager(
-            profile_dir = linkedin_profile,
-            headless    = config.browser.headless,
-            slow_mo     = config.browser.slow_mo_ms,
-        ) as pbm:
-            # Open one independent tab per source — they share cookies but
-            # each has its own navigation state.
-            pages: dict[str, Any] = {}
-            for source in enabled:
-                pages[source] = await pbm.new_page()
-
-            # ── Per-source harvest coroutines ──────────────────────────────────
-
-            async def _harvest_naukri(page: Any) -> tuple[str, list[UnifiedJob]]:
-                from app.agents.naukri_agent import NaukriAgent, NaukriScrapedJob
-                logger.info("orchestrator_dispatching", source="naukri")
-                try:
-                    agent   = NaukriAgent()
-                    scraped: list[NaukriScrapedJob] = await agent._run(page, config.filters)
-                    unified = [_naukri_to_unified(j) for j in scraped]
-                    logger.info("orchestrator_source_done", source="naukri", count=len(unified))
-                    logger.info("batch_saved", source="Naukri", count=len(unified))
-                    # Incremental persist (crash safety): Naukri returns its whole
-                    # list at once, so persist it here as one batch.
-                    if on_persist and unified:
-                        await on_persist(unified)
-                    return "Naukri", unified
-                except Exception as exc:
-                    logger.exception(
-                        "orchestrator_naukri_error", error=str(exc),
-                        note="Naukri failed; LinkedIn and Dice results are retained",
+        try:
+            async with AsyncExitStack() as browser_stack:
+                # Open one independent tab per shared source — they share cookies but
+                # each has its own navigation state. An isolated Naukri gets no tab
+                # here (pages["naukri"] stays None -> it opens its own guest browser).
+                pages: dict[str, Any] = {s: None for s in enabled}
+                if shared_sources:
+                    linkedin_profile = account_profile_dir(
+                        config.browser.chrome_profile, config.sources.linkedin_account,
                     )
-                    return "Naukri", []
-
-            async def _harvest_linkedin(page: Any) -> tuple[str, list[UnifiedJob]]:
-                logger.info("orchestrator_dispatching", source="linkedin")
-                logger.info("linkedin_agent_started")
-                try:
-                    agent   = LinkedInAgent(already_harvested=self._already_harvested)
-                    linkedin_agent_holder["agent"] = agent
-
-                    # Per-page incremental persist: the agent hands us each page's
-                    # freshly-scraped LinkedInScrapedJobs; convert to UnifiedJob
-                    # here (where _linkedin_to_unified lives) and forward to the
-                    # caller's persist callback. LinkedIn is the long pole, so
-                    # this is where mid-scrape crash protection + live progress
-                    # matter most. Best-effort in the callback itself.
-                    async def _linkedin_on_batch(scraped_batch: list[LinkedInScrapedJob]) -> None:
-                        if on_persist and scraped_batch:
-                            await on_persist([_linkedin_to_unified(j) for j in scraped_batch])
-
-                    scraped: list[LinkedInScrapedJob] = await agent._run(
-                        page, config.filters, wait_for_login=wait_for_login, on_status=on_status,
-                        on_batch=(_linkedin_on_batch if on_persist else None),
+                    logger.info(
+                        "orchestrator_profile_selected",
+                        linkedin_account=config.sources.linkedin_account, profile_dir=linkedin_profile,
                     )
-                    # ── Checkpoint 2: jobs received by orchestrator ────────────
-                    logger.info("linkedin_jobs_received_by_orchestrator", count=len(scraped))
-                    unified = [_linkedin_to_unified(j) for j in scraped]
-                    logger.info("orchestrator_source_done", source="linkedin", count=len(unified))
-                    logger.info("batch_saved", source="LinkedIn", count=len(unified))
-
-                    # Save raw debug snapshot for orchestrator stage
-                    try:
-                        _dbg = Path("data/debug/linkedin")
-                        _dbg.mkdir(parents=True, exist_ok=True)
-                        import json as _json_o
-                        (_dbg / "linkedin_raw_jobs.json").write_text(
-                            _json_o.dumps(
-                                {"stage": "orchestrator_received", "count": len(unified),
-                                 "jobs": [{"title": j.job_title, "company": j.company,
-                                           "url": j.job_url} for j in unified]},
-                                indent=2, ensure_ascii=False,
-                            ),
-                            encoding="utf-8",
-                        )
-                    except Exception:
-                        pass
-
-                    return "LinkedIn", unified
-                except LinkedInLoginError as exc:
-                    logger.warning(
-                        "orchestrator_linkedin_login_failed", error=str(exc),
-                        note="LinkedIn skipped; other sources are retained",
+                    pbm = await browser_stack.enter_async_context(PersistentBrowserManager(
+                        profile_dir = linkedin_profile,
+                        headless    = config.browser.headless,
+                        slow_mo     = config.browser.slow_mo_ms,
+                    ))
+                    for source in shared_sources:
+                        pages[source] = await pbm.acquire_page(label=source)
+                    logger.info(
+                        "orchestrator_browser_layout",
+                        mode="single_browser_tabs", tabs=shared_sources,
+                        own_browser=["naukri"] if naukri_isolated else [],
+                        headless=config.browser.headless,
                     )
-                    return "LinkedIn", []
-                except LLMUnavailableError:
-                    # Extraction LLM is down — do NOT downgrade to an empty
-                    # source; let it propagate so _collect_all halts the whole
-                    # run (all sources), per product requirement.
-                    raise
-                except Exception as exc:
-                    logger.exception(
-                        "orchestrator_linkedin_error", error=str(exc),
-                        note="LinkedIn failed; other sources are retained",
-                    )
-                    return "LinkedIn", []
-
-            async def _harvest_dice(page: Any) -> tuple[str, list[UnifiedJob]]:
-                logger.info("orchestrator_dispatching", source="dice")
-                logger.info("dice_agent_started")
-                try:
-                    scraper = DiceScraper(page, config.filters)
-                    scraped: list[DiceScrapedJob] = await scraper.run()
-                    unified = [_dice_to_unified(j) for j in scraped]
-                    logger.info("orchestrator_source_done", source="dice", count=len(unified))
-                    logger.info("batch_saved", source="Dice", count=len(unified))
-                    # Incremental persist (crash safety): Dice returns its whole
-                    # list at once, so persist it here as one batch.
-                    if on_persist and unified:
-                        await on_persist(unified)
-                    return "Dice", unified
-                except Exception as exc:
-                    logger.exception(
-                        "orchestrator_dice_error", error=str(exc),
-                        note="Dice failed; other sources are retained",
-                    )
-                    return "Dice", []
-
-            _RUNNERS = {
-                "naukri":   _harvest_naukri,
-                "linkedin": _harvest_linkedin,
-                "dice":     _harvest_dice,
-            }
-
-            # ── Launch all enabled sources concurrently ────────────────────────
-            # FIRST_EXCEPTION (not gather-return_exceptions) so an
-            # LLMUnavailableError escaping any source stops the wait immediately;
-            # benign per-source failures are already caught inside each runner
-            # (returned as ("Source", [])), so the only thing that can raise here
-            # is a fatal LLM outage — which must halt the *entire* scrape.
-            tasks = [
-                asyncio.ensure_future(_RUNNERS[src](pages[src]))
-                for src in enabled
-            ]
-            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
-
-            fatal: LLMUnavailableError | None = None
-            for task in done:
-                exc = task.exception()
-                if exc is None:
-                    item = task.result()
-                    if item:
-                        source_name, unified_jobs = item
-                        results[source_name] = unified_jobs
-                elif isinstance(exc, LLMUnavailableError):
-                    fatal = exc
                 else:
-                    logger.exception("orchestrator_source_unexpected_exception", error=str(exc))
+                    pbm = None
 
-            if fatal is not None:
-                # Stop all still-running sources — the LLM they'd fall back on
-                # is down, so there's nothing to wait for.
-                for task in pending:
-                    task.cancel()
-                if pending:
-                    await asyncio.gather(*pending, return_exceptions=True)
-                logger.error(
-                    "orchestrator_llm_unavailable_abort",
-                    error=str(fatal),
-                    partial_sources={k: len(v) for k, v in results.items()},
-                    note="LLM provider down — all scraping stopped",
-                )
+                # ── Per-source harvest coroutines ──────────────────────────────
+                # Each runner owns its failure handling: it never raises (bar
+                # cancellation), it returns ("Source", jobs) and records its
+                # outcome (done / failed + reason) on the tracker.
+
+                async def _harvest_naukri(page: Any) -> tuple[str, list[UnifiedJob]]:
+                    from app.agents.naukri_agent import (
+                        NaukriAgent,
+                        NaukriScrapedJob,
+                        naukri_guest_browser,
+                    )
+                    if await _skip_if_stopped("naukri"):
+                        return "Naukri", []
+                    logger.info("orchestrator_dispatching", source="naukri",
+                                browser_mode="isolated" if page is None else "shared")
+                    await _start("naukri")
+                    try:
+                        agent = NaukriAgent(already_harvested=self._already_harvested)
+
+                        # Incremental persist, exactly like LinkedIn: the agent hands
+                        # us every N freshly-scraped jobs; count them for the live
+                        # per-source status, then convert + forward them. No
+                        # end-of-run on_persist for Naukri (that would double-insert).
+                        async def _naukri_on_batch(scraped_batch: list[NaukriScrapedJob]) -> None:
+                            if not scraped_batch:
+                                return
+                            await tracker.add_jobs("naukri", len(scraped_batch))
+                            if on_persist:
+                                await on_persist([_naukri_to_unified(j) for j in scraped_batch])
+
+                        async def _run_on(p: Any) -> list[NaukriScrapedJob]:
+                            return await agent._run(
+                                p, config.filters, on_status=_status_for("naukri"),
+                                on_batch=_naukri_on_batch,
+                                on_progress=_progress_for("naukri"),
+                            )
+
+                        if page is None:
+                            async with naukri_guest_browser(
+                                headless = config.browser.headless,
+                                slow_mo  = config.browser.slow_mo_ms,
+                            ) as guest:
+                                scraped = await _run_on(await guest.new_page())
+                        else:
+                            scraped = await _run_on(page)
+                        unified = [_naukri_to_unified(j) for j in scraped]
+                        logger.info("orchestrator_source_done", source="naukri", count=len(unified))
+                        logger.info("batch_saved", source="Naukri", count=len(unified))
+                        await _finish("naukri", len(unified))
+                        return "Naukri", unified
+                    except Exception as exc:
+                        logger.exception(
+                            "orchestrator_naukri_error", error=str(exc),
+                            note="Naukri failed; LinkedIn and Dice results are retained",
+                        )
+                        await tracker.fail("naukri", REASON_ERROR, error=str(exc) or type(exc).__name__)
+                        return "Naukri", []
+
+                async def _harvest_linkedin(page: Any) -> tuple[str, list[UnifiedJob]]:
+                    if await _skip_if_stopped("linkedin"):
+                        return "LinkedIn", []
+                    logger.info("orchestrator_dispatching", source="linkedin")
+                    logger.info("linkedin_agent_started")
+                    await _start("linkedin")
+                    # Every job handed to on_batch so far — the pre-outage partial
+                    # harvest if the extraction LLM dies mid-scrape. Raw objects
+                    # (converted only if needed) so later in-place enrichment sticks.
+                    scraped_so_far: list[LinkedInScrapedJob] = []
+                    try:
+                        agent   = LinkedInAgent(already_harvested=self._already_harvested)
+                        linkedin_agent_holder["agent"] = agent
+
+                        # Per-page incremental persist: the agent hands us each page's
+                        # freshly-scraped LinkedInScrapedJobs; count them for the live
+                        # per-source status, convert to UnifiedJob here (where
+                        # _linkedin_to_unified lives) and forward to the caller's
+                        # persist callback. LinkedIn is the long pole, so this is
+                        # where mid-scrape crash protection + live progress matter
+                        # most. Best-effort in the callback itself.
+                        async def _linkedin_on_batch(scraped_batch: list[LinkedInScrapedJob]) -> None:
+                            if not scraped_batch:
+                                return
+                            scraped_so_far.extend(scraped_batch)
+                            await tracker.add_jobs("linkedin", len(scraped_batch))
+                            if on_persist:
+                                await on_persist([_linkedin_to_unified(j) for j in scraped_batch])
+
+                        scraped: list[LinkedInScrapedJob] = await agent._run(
+                            page, config.filters, wait_for_login=wait_for_login,
+                            on_status=_status_for("linkedin"),
+                            on_batch=_linkedin_on_batch,
+                            on_progress=_progress_for("linkedin"),
+                        )
+                        # ── Checkpoint 2: jobs received by orchestrator ────────
+                        logger.info("linkedin_jobs_received_by_orchestrator", count=len(scraped))
+                        unified = [_linkedin_to_unified(j) for j in scraped]
+                        logger.info("orchestrator_source_done", source="linkedin", count=len(unified))
+                        logger.info("batch_saved", source="LinkedIn", count=len(unified))
+
+                        # Save raw debug snapshot for orchestrator stage
+                        try:
+                            _dbg = Path("data/debug/linkedin")
+                            _dbg.mkdir(parents=True, exist_ok=True)
+                            import json as _json_o
+                            (_dbg / "linkedin_raw_jobs.json").write_text(
+                                _json_o.dumps(
+                                    {"stage": "orchestrator_received", "count": len(unified),
+                                     "jobs": [{"title": j.job_title, "company": j.company,
+                                               "url": j.job_url} for j in unified]},
+                                    indent=2, ensure_ascii=False,
+                                ),
+                                encoding="utf-8",
+                            )
+                        except Exception:
+                            pass
+
+                        await _finish("linkedin", len(unified))
+                        return "LinkedIn", unified
+                    except LinkedInLoginError as exc:
+                        logger.warning(
+                            "orchestrator_linkedin_login_failed", error=str(exc),
+                            note="LinkedIn skipped; other sources are retained",
+                        )
+                        await tracker.fail("linkedin", REASON_LOGIN_REQUIRED, error=str(exc))
+                        return "LinkedIn", []
+                    except LLMUnavailableError as exc:
+                        # The extraction LLM is down. Stop ONLY LinkedIn (the one
+                        # LLM consumer): keep the jobs it scraped before the outage
+                        # and let Naukri/Dice run to completion. Token usage, the
+                        # LLM call log and the re-enrich queue are read off the
+                        # agent after the gather, exactly as on a healthy run.
+                        linkedin_outage["exc"] = exc
+                        partial = [_linkedin_to_unified(j) for j in scraped_so_far]
+                        logger.error(
+                            "orchestrator_linkedin_llm_unavailable",
+                            error=str(exc), partial_jobs=len(partial),
+                            note="LinkedIn stopped; other sources keep running",
+                        )
+                        await tracker.fail(
+                            "linkedin", REASON_LLM_UNAVAILABLE,
+                            error=getattr(exc, "message", "") or str(exc),
+                            count=len(partial),
+                            message=f"Stopped — LLM unavailable ({len(partial)} jobs kept)",
+                        )
+                        return "LinkedIn", partial
+                    except Exception as exc:
+                        logger.exception(
+                            "orchestrator_linkedin_error", error=str(exc),
+                            note="LinkedIn failed; other sources are retained",
+                        )
+                        await tracker.fail("linkedin", REASON_ERROR, error=str(exc) or type(exc).__name__)
+                        return "LinkedIn", []
+
+                async def _harvest_dice(page: Any) -> tuple[str, list[UnifiedJob]]:
+                    if await _skip_if_stopped("dice"):
+                        return "Dice", []
+                    logger.info("orchestrator_dispatching", source="dice")
+                    logger.info("dice_agent_started")
+                    await _start("dice")
+                    try:
+                        scraper = DiceScraper(page, config.filters)
+                        scraped: list[DiceScrapedJob] = await scraper.run()
+                        unified = [_dice_to_unified(j) for j in scraped]
+                        logger.info("orchestrator_source_done", source="dice", count=len(unified))
+                        logger.info("batch_saved", source="Dice", count=len(unified))
+                        # Incremental persist (crash safety): Dice returns its whole
+                        # list at once, so persist it here as one batch.
+                        if on_persist and unified:
+                            await on_persist(unified)
+                        await _finish("dice", len(unified))
+                        return "Dice", unified
+                    except Exception as exc:
+                        logger.exception(
+                            "orchestrator_dice_error", error=str(exc),
+                            note="Dice failed; other sources are retained",
+                        )
+                        await tracker.fail("dice", REASON_ERROR, error=str(exc) or type(exc).__name__)
+                        return "Dice", []
+
+                _RUNNERS = {
+                    "naukri":   _harvest_naukri,
+                    "linkedin": _harvest_linkedin,
+                    "dice":     _harvest_dice,
+                }
+
+                async def _run_in_tab(src: str) -> tuple[str, list[UnifiedJob]]:
+                    # Run one source on its own tab, then close JUST that tab
+                    # (finished, failed or user-stopped) so the remaining
+                    # source(s) keep the window. release_page never closes the
+                    # last open tab (a headed Chromium would quit) and never
+                    # raises; an isolated Naukri has no tab here (None).
+                    try:
+                        return await _RUNNERS[src](pages[src])
+                    finally:
+                        if pbm is not None and pages[src] is not None:
+                            await pbm.release_page(pages[src], label=src)
+
+                # ── Launch all enabled sources concurrently ────────────────────
+                # Wait for EVERY source (no FIRST_EXCEPTION short-circuit): each
+                # runner catches its own failures — including LinkedIn's LLM
+                # outage — so one source failing never cancels the others. If
+                # _collect_all itself is cancelled, gather cancels every child and
+                # waits for them before re-raising, so no task outlives the
+                # browser context closed below.
+                tasks = [
+                    asyncio.ensure_future(_run_in_tab(src))
+                    for src in enabled
+                ]
+                outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+
+                for src, outcome in zip(enabled, outcomes):
+                    if isinstance(outcome, BaseException):
+                        # Defensive — runners don't raise; never lose the others.
+                        logger.error(
+                            "orchestrator_source_unexpected_exception",
+                            source=src, error=str(outcome), error_type=type(outcome).__name__,
+                        )
+                        await tracker.fail(src, REASON_ERROR, error=str(outcome) or type(outcome).__name__)
+                        continue
+                    source_name, unified_jobs = outcome
+                    results[source_name] = unified_jobs
+        finally:
+            # Cancel the throttled-message timer and flush the last snapshot.
+            await tracker.aclose()
 
         # ── Log batch_saved events every 100 jobs across combined list ─────────
         all_so_far = [j for jobs in results.values() for j in jobs]
@@ -867,15 +1043,35 @@ class OrchestratorAgent:
         )
         logger.info("orchestrator_token_usage", **token_usage["total"])
 
+        fatal = linkedin_outage.get("exc")
         if fatal is not None:
-            # Carry the partial harvest + usage/audit out on the exception so the
-            # caller (run_all → _run_harvest_background) can persist what was
-            # scraped before the outage and record the failing LLM call, then
-            # mark the run failed with the provider message.
-            fatal.partial_raw = results
-            fatal.partial_token_usage = token_usage
-            fatal.partial_llm_calls = llm_calls
-            fatal.partial_reenrich_queue = reenrich_queue
-            raise fatal
+            completed = [s for s in enabled if s != "linkedin" and tracker.state(s) == "done"]
+            if not completed:
+                # No other enabled source completed (LinkedIn-only run, or every
+                # other source failed too) — keep today's failure behaviour: carry
+                # the partial harvest + usage/audit out on the exception so the
+                # caller (run_all → _run_harvest_background) can persist what was
+                # scraped before the outage and record the failing LLM call, then
+                # mark the run failed with the provider message.
+                logger.error(
+                    "orchestrator_llm_unavailable_abort",
+                    error=str(fatal),
+                    partial_sources={k: len(v) for k, v in results.items()},
+                    note="LLM provider down and no other source completed — run fails",
+                )
+                fatal.partial_raw = results
+                fatal.partial_token_usage = token_usage
+                fatal.partial_llm_calls = llm_calls
+                fatal.partial_reenrich_queue = reenrich_queue
+                raise fatal
+            # Isolated outage — the run carries on with the completed sources.
+            self._llm_outage = fatal
+            logger.warning(
+                "orchestrator_llm_unavailable_linkedin_only",
+                error=str(fatal),
+                completed_sources=completed,
+                partial_sources={k: len(v) for k, v in results.items()},
+                note="LLM provider down — LinkedIn stopped, other sources completed",
+            )
 
         return results, token_usage, llm_calls, reenrich_queue

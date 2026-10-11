@@ -2,7 +2,6 @@ import React, { useEffect, useRef, useState } from "react";
 import {
   SlidersHorizontal,
   Play, Save, Clock, Info, AlertTriangle, ChevronDown, Check, Loader2, LogIn, Eye,
-  Target, Database, Hourglass,
 } from "lucide-react";
 import {
   getHarvestConfig, saveHarvestConfig, runHarvestAgent, getHarvestStatus,
@@ -10,6 +9,7 @@ import {
 } from "./api";
 import LiveBrowserView from "./components/LiveBrowserView";
 import StopHarvestButton from "./components/StopHarvestModal";
+import LiveHarvestCard, { LIVE_HARVEST_PREVIEW } from "./components/LiveHarvestCard";
 import { GLASS, GLASS_FALLBACK, GLASS_INPUT, GLASS_INPUT_FOCUS } from "./theme";
 import {
   JOB_TYPES, WORK_MODES, HIRING_ENTITIES, GCC_MODES, SEARCH_WINDOWS,
@@ -17,7 +17,6 @@ import {
   IT_JOB_CATEGORIES, NON_IT_JOB_CATEGORIES, COMPANY_SIZE_RANGES,
 } from "./lib/ruleEngineOptions";
 import SearchableMultiSelect from "./components/SearchableMultiSelect";
-import useCountUp from "./useCountUp";
 import { makeStallWatch, STALL_WARN_MSG } from "./stallWatch";
 
 /* Glyph badge for a source/account tile — identical to the US redesign's
@@ -164,10 +163,14 @@ export default function RuleEngineConfig({
   const [harvestedLive, setHarvestedLive] = useState(0); // jobs saved so far, updated live during a run
   const [maxPerDay, setMaxPerDay] = useState(0);         // MAX_JOBS_PER_DAY from the backend (.env); 0 = unlimited
   const [runState, setRunState] = useState("idle"); // idle | running | success | failed
-  // DEV ONLY: flip to true to force the progress cards visible so you can style
-  // them without an active run. Set back to false to restore normal behavior.
+  // DEV ONLY: flip to true to force the Live Harvest card visible (with a
+  // realistic sample LinkedIn + Naukri run when there's no live `sources`) so
+  // you can style it without an active run. Set back to false for normal behavior.
   const PREVIEW_PROG = false;
   const [runMessage, setRunMessage] = useState("");
+  // Per-source live status from GET /harvest-status `sources` (null on older
+  // backends / before the first poll) — one row per enabled source.
+  const [sourceStatus, setSourceStatus] = useState(null);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
   const [dirty, setDirty] = useState(false);
@@ -177,14 +180,6 @@ export default function RuleEngineConfig({
   const stallWatch = useRef(makeStallWatch());
   const [stallWarn, setStallWarn] = useState(""); // amber "no progress" notice while a run is stalled
   useEffect(() => () => clearTimeout(pollTimer.current), []);
-
-  // Animated count-up for the live progress cards. `liveCount` is the real
-  // jobs-saved-to-DB count (status.combined); Remaining = Max − Saved, clamped
-  // at 0. When the daily cap is 0 (unlimited) Max/Remaining show ∞.
-  const unlimited = !(maxPerDay > 0);
-  const liveCount = useCountUp(harvestedLive);
-  const maxCount = useCountUp(maxPerDay);
-  const remainingCount = useCountUp(unlimited ? 0 : Math.max(0, maxPerDay - harvestedLive));
 
   useEffect(() => {
     let cancelled = false;
@@ -311,8 +306,9 @@ export default function RuleEngineConfig({
     };
   }
 
+  // Returns true once the config on screen is persisted, false otherwise.
   const handleSave = async () => {
-    if (hasErrors) { setAttempted(true); setActiveTab("sources"); return; }
+    if (hasErrors) { setAttempted(true); setActiveTab("sources"); return false; }
     setSaving(true);
     setSaveError("");
     try {
@@ -321,8 +317,10 @@ export default function RuleEngineConfig({
       setLastSaved(nowLabel());
       setDirty(false);
       setAttempted(false);
+      return true;
     } catch (err) {
       setSaveError(err instanceof ApiError ? err.message : "Could not save configuration — check the backend connection.");
+      return false;
     } finally {
       setSaving(false);
     }
@@ -336,6 +334,7 @@ export default function RuleEngineConfig({
     const tick = async () => {
       try {
         const status = await getHarvestStatus(jobId);
+        setSourceStatus(status.sources || null);
         if (status.status === "running") {
           setRunMessage(status.message || "Running…");
           const live = status.jobs_saved_today ?? status.combined ?? 0;
@@ -363,8 +362,10 @@ export default function RuleEngineConfig({
           setHarvestRunning(false);
           return;
         }
-        // success | no_results
+        // success | no_results — keep the final message (it notes a LinkedIn
+        // LLM outage when the other sources still completed).
         setRunState("success");
+        if (status.message) setRunMessage(status.message);
         setHarvested(status.combined ?? harvested);
         setLastRun(fmtRunDate(status.completed_at));
         setHarvestRunning(false);
@@ -415,6 +416,7 @@ export default function RuleEngineConfig({
           setRunState("running");
           setRunMessage("Harvesting…");
           setHarvestedLive(0);
+          setSourceStatus(null);
           stallWatch.current.reset();
           setStallWarn("");
           pollHarvestStatus(res.job_id, res.run_id);
@@ -432,20 +434,25 @@ export default function RuleEngineConfig({
     if (harvestRunning) {
       setRunState("failed");
       setRunMessage("Another harvest is already running (Source Runs page or a previous session) — wait for it to finish. Running two at once collides on the shared browser profile and both fail.");
+      setSourceStatus(null);
       return;
     }
     if (hasErrors) { setAttempted(true); setActiveTab("sources"); return; }
 
-    // Run against whatever is currently saved on the server — save first if dirty.
-    if (dirty) {
-      await handleSave();
-      if (hasErrors) return;
+    // Always persist what's on screen before running, so the run never uses a
+    // stale config (a control that forgets markDirty can't cause a silent
+    // mismatch), and don't start the run if that save fails.
+    if (!(await handleSave())) {
+      setRunState("failed");
+      setRunMessage("Harvest not started — the configuration could not be saved.");
+      return;
     }
 
     setRunState("running");
     setHarvestRunning(true);
     setRunMessage("Starting harvest…");
     setHarvestedLive(0);
+    setSourceStatus(null);
     stallWatch.current.reset();
     setStallWarn("");
     try {
@@ -515,7 +522,12 @@ export default function RuleEngineConfig({
   // The backend pauses a running harvest and waits for manual LinkedIn login
   // (see LinkedInAgent._wait_for_manual_login) — surface that clearly so the
   // user knows to click "Watch Live Browser" instead of just waiting.
-  const needsLogin = runState === "running" && /log ?in/i.test(runMessage || "");
+  // The LinkedIn row's own message carries the login prompt too (the run-level
+  // message is shared by every source and can be overwritten by Naukri/Dice).
+  const needsLogin = runState === "running" && (
+    /log ?in/i.test(runMessage || "") ||
+    (sourceStatus?.linkedin?.state === "running" && /log ?in/i.test(sourceStatus.linkedin.message || ""))
+  );
 
   // Labels for the compact schedule summary banner (mirrors the US redesign).
   const tzLabel = TIMEZONES.find((t) => t.value === timezone)?.label || timezone;
@@ -600,35 +612,19 @@ export default function RuleEngineConfig({
           </div>
         </header>
 
-        {(runState === "running" || PREVIEW_PROG) && (
-          <div className="rec-prog">
-            {/* Max Jobs / Day — daily cap from the backend .env (MAX_JOBS_PER_DAY) */}
-            <div className="rec-prog-card">
-              <div className="rec-prog-chip"><Target size={18} /></div>
-              <div className="rec-prog-num">{unlimited ? "∞" : maxCount}</div>
-              <div className="rec-prog-label">Max Jobs / Day</div>
-              <div className="rec-prog-hint">daily harvest ceiling</div>
-              <div className="rec-prog-bar" />
-            </div>
-
-            {/* Jobs Saved — live count of rows actually persisted to the DB */}
-            <div className="rec-prog-card is-live">
-              <span className="rec-prog-tag"><i /> Live</span>
-              <div className="rec-prog-chip"><Database size={18} /></div>
-              <div className="rec-prog-num">{liveCount}</div>
-              <div className="rec-prog-label">Jobs Saved</div>
-              <div className="rec-prog-hint">persisted to database</div>
-              <div className="rec-prog-bar" />
-            </div>
-
-            {/* Remaining — Max − Saved, recomputed as Jobs Saved climbs */}
-            <div className="rec-prog-card">
-              <div className="rec-prog-chip"><Hourglass size={18} /></div>
-              <div className="rec-prog-num">{unlimited ? "∞" : remainingCount}</div>
-              <div className="rec-prog-label">Remaining Jobs</div>
-              <div className="rec-prog-hint">Max − Saved</div>
-              <div className="rec-prog-bar" />
-            </div>
+        {/* Live Harvest card — summary strip (Jobs saved / Daily cap / Remaining)
+            + one lane per enabled source (found count, phase, funnel, detail
+            progress, persist-batch meter, latest message). Stays up after the
+            run ends so the final per-source outcome remains visible. */}
+        {(runState === "running" || PREVIEW_PROG || (runState !== "idle" && sourceStatus)) && (
+          <div className="rec-live">
+            <LiveHarvestCard
+              sources={PREVIEW_PROG && !sourceStatus ? LIVE_HARVEST_PREVIEW : sourceStatus}
+              saved={PREVIEW_PROG && !sourceStatus ? 110 : harvestedLive}
+              maxPerDay={PREVIEW_PROG && !(maxPerDay > 0) ? 500 : maxPerDay}
+              live={runState === "running" || PREVIEW_PROG}
+              windowHours={searchWindow}
+            />
           </div>
         )}
 
@@ -901,7 +897,7 @@ export default function RuleEngineConfig({
 
                 <Card title="Company Size" desc="Filter jobs based on the hiring company&rsquo;s approximate employee count.">
                   <div className="rec-chips">
-                    <Chip active={companySizes.includes("ALL")} onClick={() => setCompanySizes(["ALL"])}>All Sizes</Chip>
+                    <Chip active={companySizes.includes("ALL")} onClick={() => { setCompanySizes(["ALL"]); markDirty(); }}>All Sizes</Chip>
                     {COMPANY_SIZE_RANGES.map((r) => (
                       <Chip key={r.value} active={companySizes.includes(r.value)}
                         onClick={() => {
@@ -912,6 +908,7 @@ export default function RuleEngineConfig({
                               : [...withoutAll, r.value];
                             return next.length === 0 ? ["ALL"] : next;
                           });
+                          markDirty();
                         }}>{r.label}</Chip>
                     ))}
                   </div>
@@ -1036,58 +1033,8 @@ const styles = `
     50%      { box-shadow: 0 0 0 6px rgba(245,158,11,0); }
   }
 
-  /* ── Live harvest progress cards (Max / Saved / Remaining) ─────────────── */
-  /* Compact + centered: capped width with auto side margins leaves breathing
-     room at the left/right of the page. */
-  /* Full-width white band flush with the header/tabs gutters (28px) so the
-     stats read as part of the page, not a boxed cluster on a grey strip. */
-  .rec-prog { margin:0; padding:18px 28px; background:rgba(255,255,255,.55); display:grid; gap:16px; grid-template-columns:repeat(3,minmax(0,1fr)); }
-  @media (max-width:640px) { .rec-prog { grid-template-columns:1fr; } }
-  .rec-prog-card {
-    position:relative; overflow:hidden; text-align:center;
-    background:linear-gradient(180deg,#F6F3FF 42%,#fff 72%),#fff;
-    border:1px solid #ECEAF6; border-radius:12px; padding:14px 12px 18px;
-    box-shadow:0 1px 2px rgba(30,27,46,.05);
-    transition:transform .22s cubic-bezier(.2,.7,.3,1), box-shadow .22s ease, border-color .22s ease;
-  }
-  .rec-prog-card::before {
-    content:""; position:absolute; inset:0; pointer-events:none;
-    background:radial-gradient(120% 90% at 50% -10%, rgba(124,92,252,.14), rgba(124,92,252,0) 60%);
-    opacity:.9; transition:opacity .22s ease;
-  }
-  .rec-prog-card > * { position:relative; z-index:1; }
-  .rec-prog-card:hover {
-    transform:scale(1.035) translateY(-3px);
-    box-shadow:0 18px 40px -18px rgba(109,40,217,.45), 0 8px 18px -12px rgba(30,27,46,.25);
-    border-color:#DED9F2;
-  }
-  .rec-prog-card:hover::before { opacity:1; }
-  .rec-prog-card.is-live { border-color:#DED9F2; }
-  .rec-prog-tag {
-    position:absolute; top:8px; right:8px; z-index:2; display:inline-flex; align-items:center; gap:4px;
-    font-size:8.5px; font-weight:700; letter-spacing:.09em; text-transform:uppercase; color:#6D28D9;
-    background:#EDE7FF; padding:2px 6px; border-radius:99px; border:1px solid #DED9F2;
-  }
-  .rec-prog-tag i { width:5px; height:5px; border-radius:99px; background:#7C5CFC; animation:rec-pulse-dot 1.8s ease-out infinite; }
-  @keyframes rec-pulse-dot {
-    0%   { box-shadow:0 0 0 0 rgba(124,92,252,.5); }
-    70%  { box-shadow:0 0 0 6px rgba(124,92,252,0); }
-    100% { box-shadow:0 0 0 0 rgba(124,92,252,0); }
-  }
-  .rec-prog-chip {
-    width:38px; height:38px; margin:0 auto 9px; display:grid; place-items:center; border-radius:11px;
-    color:#6D28D9; background:linear-gradient(160deg,rgba(124,92,252,.18),rgba(124,92,252,.08));
-    border:1px solid #DED9F2; transition:transform .22s cubic-bezier(.2,.7,.3,1);
-  }
-  .rec-prog-card:hover .rec-prog-chip { transform:translateY(-1px) scale(1.06); }
-  .rec-prog-num { font-size:30px; font-weight:800; line-height:1; letter-spacing:-.02em; color:#1E1B2E; font-variant-numeric:tabular-nums; }
-  .rec-prog-label { margin-top:6px; font-size:10.5px; font-weight:600; letter-spacing:.05em; text-transform:uppercase; color:#6B6785; }
-  .rec-prog-hint { margin-top:2px; font-size:10px; color:#9A96B5; }
-  .rec-prog-bar { position:absolute; left:12px; right:12px; bottom:9px; height:4px; border-radius:99px; background:linear-gradient(90deg,#7C5CFC,#6D28D9); opacity:.9; }
-  @media (prefers-reduced-motion: reduce) {
-    .rec-prog-card, .rec-prog-chip { transition:none; }
-    .rec-prog-tag i { animation:none; }
-  }
+  /* ── Live Harvest card band (components/LiveHarvestCard) ─────────────── */
+  .rec-live { padding:16px 28px 0; }
 
   /* Tabs */
   .rec-tabs { display:flex; gap:26px; padding:0 28px;

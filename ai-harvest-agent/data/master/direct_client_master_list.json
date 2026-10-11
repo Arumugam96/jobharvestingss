@@ -1,5 +1,5 @@
 {
-  "_comment": "Known direct clients (companies hiring directly, not via staffing). Lowercase. Partial match applied.",
+  "_comment": "Known direct clients (companies hiring directly, not via staffing). Lowercase. Matched as WHOLE WORDS, not substrings (business_filter_service._PhraseMatcher).",
   "companies": [
     "swiggy", "zomato", "ola", "meesho", "nykaa", "zepto",
     "razorpay", "paytm", "phonepe", "groww", "zerodha", "upstox",

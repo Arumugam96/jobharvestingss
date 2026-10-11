@@ -37,6 +37,9 @@ class JobStatus:
     json_path:    str = ""
     error:        str = ""
     token_usage:  dict = field(default_factory=dict)
+    # Per-source live status ({source: {state, count, message, reason, error,
+    # updated_at}}) — see app/services/source_status.py. {} for single-source runs.
+    sources:      dict = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

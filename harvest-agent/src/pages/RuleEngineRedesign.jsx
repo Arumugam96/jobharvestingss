@@ -1,7 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import {
-  Play, Save, Loader2, Clock, Info, CheckCircle2, AlertTriangle, Eye,
-  Target, Database, Hourglass, Check,
+  Play, Save, Loader2, Clock, Info, CheckCircle2, AlertTriangle, Eye, Check,
 } from "lucide-react";
 import {
   getHarvestConfig, saveHarvestConfig, runHarvestAgent, getHarvestStatus, getActiveRun,
@@ -9,7 +8,8 @@ import {
 } from "../api";
 import LiveBrowserView from "../components/LiveBrowserView";
 import StopHarvestButton from "../components/StopHarvestModal";
-import useCountUp from "../useCountUp";
+import SourceProgress from "../components/SourceProgress";
+import LiveHarvestCard from "../components/LiveHarvestCard";
 import { makeStallWatch, STALL_WARN_MSG } from "../stallWatch";
 import { useHarvestData } from "../HarvestDataContext";
 import { GLASS, GLASS_FALLBACK, GLASS_INPUT, GLASS_INPUT_FOCUS, GLASS_MODAL } from "../theme";
@@ -110,6 +110,9 @@ export default function RuleEngineRedesign() {
   const [runState, setRunState] = useState("idle"); // idle | running | success | failed
   const [runMessage, setRunMessage] = useState("");
   const [runProgress, setRunProgress] = useState(0);
+  // Per-source live status from GET /harvest-status `sources` (null on older
+  // backends / before the first poll) — one row per enabled source.
+  const [sourceStatus, setSourceStatus] = useState(null);
   const [overlayOpen, setOverlayOpen] = useState(false); // dismissible mid-run
   const [stallWarn, setStallWarn] = useState("");
   const pollTimer = useRef(null);
@@ -124,11 +127,9 @@ export default function RuleEngineRedesign() {
   const [naukriSetup, setNaukriSetup] = useState({ loading: false, message: "" });
   const [liveViewSource, setLiveViewSource] = useState(null); // "linkedin" | "naukri" | "harvest" | null
 
-  // Animated count-up for the live progress cards.
+  // Daily cap of 0 = unlimited (the run overlay's "of N daily cap" line).
+  // The animated Jobs saved / Daily cap / Remaining figures live in LiveHarvestCard.
   const unlimited = !(maxPerDay > 0);
-  const liveCount = useCountUp(harvestedLive);
-  const maxCount = useCountUp(maxPerDay);
-  const remainingCount = useCountUp(unlimited ? 0 : Math.max(0, maxPerDay - harvestedLive));
 
   // Tabs with sliding indicator
   const [tab, setTab] = useState("sources");
@@ -236,8 +237,9 @@ export default function RuleEngineRedesign() {
   }
 
   async function handleSave() {
-    if (!config || saving) return;
-    if (hasErrors) { setAttempted(true); setTab("sources"); return; }
+    // Returns true once the config on screen is persisted, false otherwise.
+    if (!config || saving) return false;
+    if (hasErrors) { setAttempted(true); setTab("sources"); return false; }
     setSaving(true);
     setSaveError("");
     try {
@@ -248,8 +250,10 @@ export default function RuleEngineRedesign() {
       setLastSaved(nowLabel());
       setDirty(false);
       setAttempted(false);
+      return true;
     } catch (err) {
       setSaveError(err instanceof ApiError ? err.message : "Could not save configuration — check the backend connection.");
+      return false;
     } finally {
       setSaving(false);
     }
@@ -263,6 +267,7 @@ export default function RuleEngineRedesign() {
     const tick = async () => {
       try {
         const status = await getHarvestStatus(jobId);
+        setSourceStatus(status.sources || null);
         if (status.status === "running") {
           setRunMessage(status.message || "Running…");
           setRunProgress(status.progress ?? 0);
@@ -282,8 +287,10 @@ export default function RuleEngineRedesign() {
           setHarvestRunning(false);
           return;
         }
-        // success | no_results | stopped
+        // success | no_results | stopped — keep the final message (it notes a
+        // LinkedIn LLM outage when the other sources still completed).
         setRunState("success");
+        if (status.message) setRunMessage(status.message);
         setHarvested(status.combined ?? 0);
         setLastRun(fmtRunDate(status.completed_at));
         setHarvestRunning(false);
@@ -330,6 +337,7 @@ export default function RuleEngineRedesign() {
           setRunState("running");
           setRunMessage("Harvesting…");
           setHarvestedLive(0);
+          setSourceStatus(null);
           setHarvestRunning(true);
           stallWatch.current.reset();
           setStallWarn("");
@@ -346,18 +354,23 @@ export default function RuleEngineRedesign() {
     if (harvestRunning) {
       setRunState("failed");
       setRunMessage("Another harvest is already running (Source Runs page or a previous session) — wait for it to finish. Running two at once collides on the shared browser profile and both fail.");
+      setSourceStatus(null);
       return;
     }
     if (hasErrors) { setAttempted(true); setTab("sources"); return; }
-    if (dirty) {
-      await handleSave();
-      if (hasErrors) return;
+    // Always persist what's on screen before running, and don't start the run
+    // if that save fails — the run must never use a stale config.
+    if (!(await handleSave())) {
+      setRunState("failed");
+      setRunMessage("Harvest not started — the configuration could not be saved.");
+      return;
     }
     setRunState("running");
     setHarvestRunning(true);
     setRunMessage("Starting harvest…");
     setRunProgress(0);
     setHarvestedLive(0);
+    setSourceStatus(null);
     setOverlayOpen(true);
     stallWatch.current.reset();
     setStallWarn("");
@@ -409,7 +422,12 @@ export default function RuleEngineRedesign() {
 
   // The backend pauses a running harvest waiting for a manual LinkedIn login —
   // pulse the Watch button so the user knows to open the live browser.
-  const needsLogin = runState === "running" && /log ?in/i.test(runMessage || "");
+  // The LinkedIn row's own message carries the login prompt too (the run-level
+  // message is shared by every source and can be overwritten by Naukri/Dice).
+  const needsLogin = runState === "running" && (
+    /log ?in/i.test(runMessage || "") ||
+    (sourceStatus?.linkedin?.state === "running" && /log ?in/i.test(sourceStatus.linkedin.message || ""))
+  );
   const gccIsLocked = gccLocked(hiringEntity);
 
   if (loading) {
@@ -496,31 +514,18 @@ export default function RuleEngineRedesign() {
 
       {loadError && <div className="rr-err">{loadError}</div>}
 
-      {/* ── Live progress cards (Max / Saved / Remaining) ── */}
-      {runState === "running" && (
-        <div className="rr-prog">
-          <div className="rr-card rr-prog-card">
-            <div className="rr-prog-chip"><Target size={18} /></div>
-            <div className="rr-prog-num">{unlimited ? "∞" : maxCount}</div>
-            <div className="rr-prog-label">Max Jobs / Day</div>
-            <div className="rr-prog-hint">daily harvest ceiling</div>
-            <div className="rr-prog-bar" />
-          </div>
-          <div className="rr-card rr-prog-card">
-            <span className="rr-prog-tag"><i /> Live</span>
-            <div className="rr-prog-chip"><Database size={18} /></div>
-            <div className="rr-prog-num">{liveCount}</div>
-            <div className="rr-prog-label">Jobs Saved</div>
-            <div className="rr-prog-hint">persisted to database</div>
-            <div className="rr-prog-bar" />
-          </div>
-          <div className="rr-card rr-prog-card">
-            <div className="rr-prog-chip"><Hourglass size={18} /></div>
-            <div className="rr-prog-num">{unlimited ? "∞" : remainingCount}</div>
-            <div className="rr-prog-label">Remaining Jobs</div>
-            <div className="rr-prog-hint">Max − Saved</div>
-            <div className="rr-prog-bar" />
-          </div>
+      {/* ── Live Harvest card (shared with the classic Rule Engine) — summary
+           strip (Jobs saved / Daily cap / Remaining) + one lane per enabled
+           source: found count, phase, funnel, detail progress, batch meter. ── */}
+      {(runState === "running" || (runState !== "idle" && sourceStatus)) && (
+        <div className="rr-live">
+          <LiveHarvestCard
+            sources={sourceStatus}
+            saved={harvestedLive}
+            maxPerDay={maxPerDay}
+            live={runState === "running"}
+            windowHours={searchWindow}
+          />
         </div>
       )}
 
@@ -779,6 +784,7 @@ export default function RuleEngineRedesign() {
               <div className="rr-run-live">
                 Jobs saved so far: <b>{harvestedLive}</b>{!unlimited && <> of <b>{maxPerDay}</b> daily cap</>}
               </div>
+              <SourceProgress sources={sourceStatus} bare title="By source" />
             </div>
             <div className="rr-run-foot">
               {runState === "running" && (
@@ -916,19 +922,7 @@ const CSS = `
 .rr-acct-btn:disabled{opacity:.7;cursor:default;}
 
 /* Live progress cards */
-.rr-prog{display:grid;gap:16px;grid-template-columns:repeat(3,minmax(0,1fr));margin-top:22px;}
-@media(max-width:640px){.rr-prog{grid-template-columns:1fr;}}
-.rr-prog-card{position:relative;overflow:hidden;text-align:center;padding:16px 12px 20px;}
-.rr-prog-card::before{content:"";position:absolute;inset:0;pointer-events:none;background:radial-gradient(120% 90% at 50% -10%, rgba(124,92,252,.16), rgba(124,92,252,0) 60%);}
-.rr-prog-card>*{position:relative;}
-.rr-prog-tag{position:absolute;top:8px;right:8px;display:inline-flex;align-items:center;gap:4px;font-size:8.5px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:#6D28D9;background:#EDE7FF;padding:2px 6px;border-radius:99px;border:1px solid #DED9F2;}
-.rr-prog-tag i{width:5px;height:5px;border-radius:99px;background:#7C5CFC;animation:rrPulseDot 1.8s ease-out infinite;}
-@keyframes rrPulseDot{0%{box-shadow:0 0 0 0 rgba(124,92,252,.5);}70%{box-shadow:0 0 0 6px rgba(124,92,252,0);}100%{box-shadow:0 0 0 0 rgba(124,92,252,0);}}
-.rr-prog-chip{width:38px;height:38px;margin:0 auto 9px;display:grid;place-items:center;border-radius:11px;color:#6D28D9;background:linear-gradient(160deg,rgba(124,92,252,.18),rgba(124,92,252,.08));border:1px solid #DED9F2;}
-.rr-prog-num{font-size:30px;font-weight:800;line-height:1;letter-spacing:-.02em;font-variant-numeric:tabular-nums;}
-.rr-prog-label{margin-top:6px;font-size:10.5px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:#6B6785;}
-.rr-prog-hint{margin-top:2px;font-size:10px;color:#9A96B5;}
-.rr-prog-bar{position:absolute;left:12px;right:12px;bottom:9px;height:4px;border-radius:99px;background:linear-gradient(90deg,#7C5CFC,#6D28D9);opacity:.9;}
+.rr-live{margin-top:22px;}
 
 /* Run overlay */
 .rr-overlay{position:fixed;inset:0;background:rgba(15,23,42,.45);-webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px);z-index:60;display:flex;align-items:center;justify-content:center;padding:20px;animation:rrFade .2s;}

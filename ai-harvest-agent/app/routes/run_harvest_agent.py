@@ -62,6 +62,11 @@ from app.services.job_tracker import JobTracker
 from app.services.reenrichment_service import run_reenrichment_sweep
 from app.services.report_service import compute_harvest_insights, merged_job_dicts
 from app.services.run_history_service import RunHistoryService
+from app.services.source_status import (
+    finalize_source_status,
+    initial_source_status,
+    per_source_counts,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -135,7 +140,8 @@ async def _persist_reenrich_queue(run_pk: str, queue: list[dict], log) -> None:
 
 def _run_to_job_status_dict(run: HarvestRunORM) -> dict[str, Any]:
     """Maps a HarvestRunORM row onto the exact shape JobStatus.to_dict()
-    already returns, so GET /harvest-status/{job_id} is unchanged for callers."""
+    already returns, so GET /harvest-status/{job_id} is unchanged for callers
+    (plus the additive per-source `sources` map — see _public_sources)."""
     return {
         "job_id":       run.job_id or "",
         "run_id":       run.run_id,
@@ -152,7 +158,19 @@ def _run_to_job_status_dict(run: HarvestRunORM) -> dict[str, Any]:
         "json_path":    run.json_path or "",
         "error":        run.error or "",
         "token_usage":  run.token_usage or {},
+        "sources":      _public_sources(getattr(run, "source_status", None), run.status, run.error or ""),
     }
+
+
+def _public_sources(snapshot: dict | None, run_status: str, run_error: str = "") -> dict[str, Any]:
+    """Per-source live status for GET /harvest-status — one
+    {state, count, message, reason, error, updated_at} entry per ENABLED source,
+    keyed "naukri" | "linkedin" | "dice". {} for runs that predate it. Once the
+    run has ended, a source still marked pending/running (process restart, run
+    aborted) is reported as failed/skipped rather than spinning forever."""
+    if not isinstance(snapshot, dict):
+        return {}
+    return finalize_source_status(snapshot, run_status or "", run_error)
 
 
 def _run_to_history_entry(run: HarvestRunORM) -> dict[str, Any]:
@@ -214,6 +232,17 @@ async def _run_harvest_background_impl(
     log = logger.bind(job_id=job_id, run_id=run_id, sources=enabled)
     log.info("harvest_background_start")
 
+    # Per-source live status (GET /harvest-status `sources`): every enabled source
+    # starts "pending"; the orchestrator's SourceStatusTracker then reports each
+    # source's own state/count/message via _on_source_status below. `latest`
+    # keeps the newest snapshot so the failure paths can finalize it.
+    latest_sources: dict[str, dict] = {"snap": initial_source_status(enabled)}
+    JobTracker.update(job_id, sources=latest_sources["snap"])
+    if run_pk:
+        await db_write(lambda db: HarvestRunService(db).update_run(
+            run_pk, source_status=latest_sources["snap"],
+        ))
+
     # Re-enrichment sweep: retry jobs that degraded to selector-only on an earlier
     # run because the LLM was down. Runs before scraping so a recovered LLM
     # backfills the backlog; bounded by REENRICHMENT_SWEEP_LIMIT and self-limiting
@@ -264,13 +293,17 @@ async def _run_harvest_background_impl(
     # rows are RAW (pre-classification/dedup); the end-of-run reconcile below
     # replaces them atomically with the final result.all_jobs.
     main_loop = asyncio.get_event_loop()
+    # Decided HERE, on the main loop: inside the proactor worker thread
+    # needs_proactor() sees that thread's ProactorEventLoop and returns False,
+    # so asking it from within _do_write would never marshal.
+    marshal_to_main = needs_proactor()
     saved_counter = {"n": 0}
 
     async def _do_write(coro) -> None:
         # On Windows --reload, run_all runs on a proactor worker thread; the
         # asyncpg pool is bound to the main loop, so marshal DB writes back to it.
         # On Linux/EC2 (needs_proactor False) run_all is on the main loop already.
-        if needs_proactor():
+        if marshal_to_main:
             await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(coro, main_loop))
         else:
             await coro
@@ -292,6 +325,26 @@ async def _run_harvest_background_impl(
             # end-of-run reconcile re-writes the canonical set regardless.
             log.warning("harvest_incremental_persist_failed", error=str(exc))
 
+    async def _on_source_status(snapshot: dict) -> None:
+        # Per-source state/count/message from the orchestrator's tracker — already
+        # throttled there (state/count changes immediately, message-only changes
+        # at most every few seconds). Mirrors the live per-source counts onto the
+        # legacy linkedin/naukri/dice fields so they rise during the run too.
+        latest_sources["snap"] = snapshot
+        counts = per_source_counts(snapshot)
+        JobTracker.update(job_id, sources=snapshot, **counts)
+        if not run_pk:
+            return
+        try:
+            await _do_write(db_write(lambda db: HarvestRunService(db).update_run(
+                run_pk,
+                source_status=snapshot,
+                **{f"{src}_count": n for src, n in counts.items()
+                   if src in ("linkedin", "naukri", "dice")},
+            )))
+        except Exception as exc:
+            log.warning("harvest_source_status_persist_failed", error=str(exc))
+
     try:
         # wait_for_login: a manually-triggered run (POST /run-harvest-agent)
         # passes True — if LinkedIn isn't authenticated, pause and wait for a
@@ -301,18 +354,31 @@ async def _run_harvest_background_impl(
         if needs_proactor():
             log.debug("using_proactor_thread")
             result: OrchestratorResult = await run_in_proactor(
-                lambda: orch.run_all(wait_for_login=wait_for_login, on_status=_on_status, on_persist=_persist)
+                lambda: orch.run_all(
+                    wait_for_login=wait_for_login, on_status=_on_status, on_persist=_persist,
+                    on_source_status=_on_source_status,
+                )
             )
         else:
-            result = await orch.run_all(wait_for_login=wait_for_login, on_status=_on_status, on_persist=_persist)
+            result = await orch.run_all(
+                wait_for_login=wait_for_login, on_status=_on_status, on_persist=_persist,
+                on_source_status=_on_source_status,
+            )
     except LLMUnavailableError as exc:
-        # The extraction LLM went down mid-run. Per product requirement: stop
-        # the whole scrape, surface the provider error verbatim (the local-LLM
-        # message names LOCAL_LLM_MODEL + "contact the admin team"), but KEEP
-        # whatever jobs were scraped before the outage.
+        # The extraction LLM went down mid-run AND no other enabled source
+        # completed (an outage that only stops LinkedIn while Naukri/Dice finish
+        # does NOT land here — run_all returns normally with result.llm_outage
+        # set). Surface the provider error verbatim (the local-LLM message names
+        # LOCAL_LLM_MODEL + "contact the admin team"), but KEEP whatever jobs
+        # were scraped before the outage.
         err_msg = exc.message
         log.error("harvest_background_llm_unavailable", error=err_msg)
         partial: OrchestratorResult | None = getattr(exc, "partial_result", None)
+        final_sources = finalize_source_status(
+            (partial.source_status if partial is not None and partial.source_status else None)
+            or latest_sources["snap"],
+            "failed", err_msg,
+        )
 
         if run_pk and partial is not None:
             if partial.all_jobs:
@@ -344,6 +410,7 @@ async def _run_harvest_background_impl(
             error        = err_msg,
             combined     = partial_count,
             completed_at = datetime.now(timezone.utc).isoformat(),
+            sources      = final_sources,
         )
         if run_pk:
             await db_write(lambda db: HarvestRunService(db).update_run(
@@ -354,6 +421,7 @@ async def _run_harvest_background_impl(
                 error          = err_msg,
                 combined_count = partial_count,
                 completed_at   = datetime.now(timezone.utc),
+                source_status  = final_sources,
             ))
 
         await send_harvest_report(
@@ -368,6 +436,7 @@ async def _run_harvest_background_impl(
         return
     except Exception as exc:
         log.exception("harvest_background_error", error=str(exc))
+        failed_sources = finalize_source_status(latest_sources["snap"], "failed", str(exc))
         _history_svc.append(
             RunHistoryService.make_entry(
                 run_id       = run_id,
@@ -386,15 +455,17 @@ async def _run_harvest_background_impl(
             message      = f"Harvest failed: {exc}",
             error        = str(exc),
             completed_at = datetime.now(timezone.utc).isoformat(),
+            sources      = failed_sources,
         )
         if run_pk:
             await db_write(lambda db: HarvestRunService(db).update_run(
                 run_pk,
-                status       = "failed",
-                progress     = 100,
-                message      = f"Harvest failed: {exc}",
-                error        = str(exc),
-                completed_at = datetime.now(timezone.utc),
+                status        = "failed",
+                progress      = 100,
+                message       = f"Harvest failed: {exc}",
+                error         = str(exc),
+                completed_at  = datetime.now(timezone.utc),
+                source_status = failed_sources,
             ))
 
         # ── Alert configured recipients that the run failed (best-effort) ────────
@@ -409,6 +480,9 @@ async def _run_harvest_background_impl(
         )
         return
 
+    # Final per-source status (counts already aligned with jobs_by_source by
+    # run_all). Falls back to the last live snapshot if the result carries none.
+    result_sources = result.source_status or latest_sources["snap"]
     JobTracker.update(
         job_id,
         progress = 70,
@@ -417,6 +491,7 @@ async def _run_harvest_background_impl(
         naukri   = len(result.jobs_by_source.get("Naukri",   [])),
         dice     = len(result.jobs_by_source.get("Dice",     [])),
         combined = result.total_jobs,
+        sources  = result_sources,
     )
     if run_pk:
         await db_write(lambda db: HarvestRunService(db).update_run(
@@ -427,6 +502,7 @@ async def _run_harvest_background_impl(
             naukri_count   = len(result.jobs_by_source.get("Naukri",   [])),
             dice_count     = len(result.jobs_by_source.get("Dice",     [])),
             combined_count = result.total_jobs,
+            source_status  = result_sources,
         ))
 
     # ── Persist the final deduped/filtered/verified job list + LLM call log ──
@@ -451,6 +527,15 @@ async def _run_harvest_background_impl(
 
     # ── Update run history ────────────────────────────────────────────────────
     status_str = "stopped" if stopped else ("success" if result.total_jobs > 0 else "no_results")
+    # LinkedIn stopped on an extraction-LLM outage but the other source(s)
+    # completed: the run still succeeds (status above is unchanged); the outage
+    # is recorded on the run's error field + final message, and per-source in
+    # `sources.linkedin` (state=failed, reason="LLM unavailable").
+    outage_note = (
+        f"LinkedIn stopped — LLM unavailable: {result.llm_outage}" if result.llm_outage else ""
+    )
+    if outage_note:
+        log.warning("harvest_linkedin_llm_outage_isolated", error=result.llm_outage, status=status_str)
     history_entry = RunHistoryService.make_entry(
         run_id          = run_id,
         sources         = result.sources_executed,
@@ -463,6 +548,7 @@ async def _run_harvest_background_impl(
         gcc             = result.gcc,
         staffing_firms  = result.staffing_firms,
         ambiguous       = result.ambiguous,
+        error           = outage_note or None,
     )
     try:
         _history_svc.append(history_entry)
@@ -490,6 +576,9 @@ async def _run_harvest_background_impl(
         if stopped
         else f"Harvest complete — {result.total_jobs} jobs found"
     )
+    if outage_note:
+        final_message += " (LinkedIn stopped: LLM unavailable)"
+    final_sources = finalize_source_status(result_sources, status_str, outage_note)
     JobTracker.update(
         job_id,
         status       = status_str,
@@ -499,6 +588,8 @@ async def _run_harvest_background_impl(
         excel_path   = result.excel_path   or "",
         json_path    = result.combined_path or "",
         token_usage  = result.token_usage,
+        error        = outage_note,
+        sources      = final_sources,
     )
     if run_pk:
         await db_write(lambda db: HarvestRunService(db).update_run(
@@ -506,6 +597,8 @@ async def _run_harvest_background_impl(
             status          = status_str,
             progress        = 100,
             message         = final_message,
+            error           = outage_note or None,
+            source_status   = final_sources,
             completed_at    = result.completed_at,
             excel_path      = result.excel_path or None,
             json_path       = result.combined_path or None,
@@ -779,6 +872,13 @@ async def get_harvest_status(job_id: str) -> Any:
     - `no_results` — harvest completed but found no matching jobs
     - `failed`     — harvest error (check `error` field)
     - `stopped`    — harvest was stopped by the user (partial jobs saved; report deferred)
+
+    `sources` carries live per-source status for each ENABLED source, e.g.
+    `{"naukri": {"state": "running", "count": 40, "message": "...", "reason": "",
+    "error": "", "updated_at": "..."}}` — state is pending | running | done |
+    failed | skipped. A LinkedIn LLM outage while other sources complete shows as
+    `sources.linkedin.state == "failed"` (reason "LLM unavailable") on a
+    `success`/`no_results` run whose `error` notes the outage.
     """
     mode = data_source_mode()
     run, source = await resolve_read(
@@ -814,6 +914,7 @@ async def get_harvest_status(job_id: str) -> Any:
             content     = {"detail": f"No harvest job found with id '{job_id}'"},
         )
     payload = run.to_dict()
+    payload["sources"] = _public_sources(payload.get("sources"), payload.get("status", ""), payload.get("error", ""))
     payload["max_jobs_per_day"] = max_per_day
     payload["jobs_saved_today"] = saved_today if saved_today is not None else payload.get("combined", 0)
     return payload

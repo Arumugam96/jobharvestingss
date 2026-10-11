@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import random
 import re
 from dataclasses import dataclass, field
@@ -41,7 +40,18 @@ from playwright.async_api import ElementHandle, Page
 
 from app.core.company_size import normalize_company_size, parse_company_size_band
 from app.core.contact_normalize import normalize_email, normalize_phone
+from app.core.harvest_helpers import env_max_jobs_cap
 from app.core.job_url import normalize_job_url
+from app.core.search_keywords import (
+    CANONICAL_CATEGORY_SETS,
+    CATEGORY_CATCHALL_RE,
+    IT_CATEGORY_SET,
+    NON_IT_CATEGORY_SET,
+    categories_cover_domain,
+    compose_keyword_query,
+    join_terms,
+    linkedin_or_joiner,
+)
 from app.core.exceptions import LLMUnavailableError
 from app.core.text_formatting import (
     description_text_to_html,
@@ -71,6 +81,55 @@ _LOGIN_WAIT_TIMEOUT_S = 600
 _LOGIN_WAIT_POLL_S    = 2
 
 StatusCallback = Callable[[str], Awaitable[None]]
+# Live-progress payload for the Rule Engine "Live Harvest" card — a dict of
+# source_status.PROGRESS_KEYS (+ optional "message"); see SourceStatusTracker.progress.
+ProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
+
+# Best-effort read of the search page's own "N results" count (the corner number
+# on the Live Harvest card). Tries the known header nodes of the authenticated
+# (jobs-search-results-list__subtitle / __text) and guest
+# (results-context-header__job-count) layouts, then scans short leaf text nodes
+# for "<number> result(s)". Returns the raw number string or null — never throws.
+_RESULTS_COUNT_JS = r"""
+() => {
+  try {
+    const parse = (t) => {
+      t = (t || '').replace(/\s+/g, ' ').trim();
+      if (!t || t.length > 60) return null;
+      const m = t.match(/^(\d[\d,.\u00a0 ]*)\s*\+?\s*results?\b/i)
+             || t.match(/^(\d[\d,.\u00a0 ]*)\s*\+?$/);
+      return m ? m[1] : null;
+    };
+    const sels = [
+      '.jobs-search-results-list__subtitle',
+      '[class*="jobs-search-results-list__subtitle"]',
+      'small.jobs-search-results-list__text',
+      '.jobs-search-results-list__text',
+      '.jobs-search-results-list__title-heading small',
+      '.results-context-header__job-count',
+      '[class*="results-context-header__job-count"]',
+    ];
+    for (const s of sels) {
+      for (const el of document.querySelectorAll(s)) {
+        const v = parse(el.textContent);
+        if (v) return v;
+      }
+    }
+    let scanned = 0;
+    for (const el of document.querySelectorAll('small, span, div, p, h1, h2, h3')) {
+      if (el.childElementCount > 1) continue;
+      const t = (el.textContent || '').trim();
+      if (!t || t.length > 40) continue;
+      if (/results?/i.test(t)) {
+        const m = t.replace(/\s+/g, ' ').match(/^(\d[\d,.\u00a0 ]*)\s*\+?\s*results?$/i);
+        if (m) return m[1];
+      }
+      if (++scanned > 6000) break;
+    }
+  } catch (e) { /* best-effort */ }
+  return null;
+}
+"""
 
 
 _LINKEDIN_SEARCH_URL = "https://www.linkedin.com/jobs/search/?"
@@ -120,35 +179,12 @@ _DATE_MAP: dict[int, str] = {
     720: "r2592000",
 }
 
-# Canonical Rule Engine sub-category lists per coarse domain — MIRRORS
-# harvest-agent/src/lib/ruleEngineOptions.js (IT_JOB_CATEGORIES /
-# NON_IT_JOB_CATEGORIES), minus each list's "Other …" catch-all. Used ONLY to
-# detect "All <domain> Jobs": when the selected job_categories cover the whole
-# list, the LinkedIn search uses the coarse domain ("IT"/"Non-IT") instead of
-# OR-ing every category (see _compose_keyword_query). This keeps all-vs-subset
-# correct even against a stale saved config that still holds the full list (the
-# frontend also sends [] for "all"). Keep in sync with the frontend — a drift
-# only affects this detection, never filtering/classification.
-_IT_CATEGORY_SET: frozenset[str] = frozenset(c.lower() for c in (
-    "Software Development", "Frontend Development", "Backend Development",
-    "Full Stack Development", "Mobile Development", "DevOps", "Cloud Engineering",
-    "Infrastructure", "System Administration", "Network Engineering",
-    "Cyber Security", "Data Engineering", "Data Science", "AI / ML",
-    "Database Administration", "QA / Testing", "Automation Testing", "SAP", "ERP",
-    "UI / UX", "Technical Support", "Solution Architecture", "Business Intelligence",
-))
-_NON_IT_CATEGORY_SET: frozenset[str] = frozenset(c.lower() for c in (
-    "Human Resources", "Recruitment / Talent Acquisition", "Finance", "Accounting",
-    "Sales", "Marketing", "Digital Marketing", "Operations", "Administration",
-    "Customer Support", "Business Development", "Legal", "Procurement",
-    "Supply Chain", "Logistics", "Healthcare", "Education", "Banking", "Insurance",
-    "Retail", "Manufacturing", "Construction", "Real Estate", "Hospitality",
-    "Media / Content",
-))
-_CANONICAL_CATEGORY_SETS: dict[str, frozenset[str]] = {
-    "IT": _IT_CATEGORY_SET,
-    "Non-IT": _NON_IT_CATEGORY_SET,
-}
+# Canonical Rule Engine sub-category sets + keyword composition now live in
+# app/core/search_keywords.py (shared with the Naukri agent). Re-exported under
+# the historical private names for any importer of this module.
+_IT_CATEGORY_SET = IT_CATEGORY_SET
+_NON_IT_CATEGORY_SET = NON_IT_CATEGORY_SET
+_CANONICAL_CATEGORY_SETS = CANONICAL_CATEGORY_SETS
 
 # ── Scraped job dataclass ─────────────────────────────────────────────────────
   
@@ -629,16 +665,9 @@ def _test_mode_max_jobs() -> int | None:
     (.env). When set to a positive integer, it overrides FiltersConfig.max_jobs
     with a lower value so a test run doesn't harvest the full result set.
     Unset/blank/non-positive → no override (normal max_jobs behaviour).
+    Delegates to the shared app.core.harvest_helpers.env_max_jobs_cap.
     """
-    raw = os.getenv("LINKEDIN_TEST_MAX_JOBS", "").strip()
-    if not raw:
-        return None
-    try:
-        value = int(raw)
-    except ValueError:
-        logger.warning("linkedin_test_max_jobs_invalid", value=raw)
-        return None
-    return value if value > 0 else None
+    return env_max_jobs_cap("LINKEDIN_TEST_MAX_JOBS")
 
 
 async def _delay(page: Page, lo: int, hi: int) -> None:
@@ -879,7 +908,6 @@ def _group_recruiters_for_enrichment(
 # Fills company size + HQ location, cached on CompanyORM and applied to every job
 # of the company (incl. those with no recruiter). See LinkedInAgent._enrich_companies.
 
-_COMPANY_ENRICH_CAP = 40           # max unique companies to enrich per run (bounds scraping time)
 _COMPANY_LLM_TEXT_MAX = 6_000      # chars of company-card text handed to the LLM
 _LI_COMPANY_SLUG_RE = re.compile(r'/company/([^/?#]+)', re.I)
 # Labels present in a LinkedIn company "Overview" card — used to locate the card in HTML.
@@ -1236,6 +1264,7 @@ class LinkedInAgent:
         wait_for_login: bool = False,
         on_status: StatusCallback | None = None,
         on_batch: Callable[[list["LinkedInScrapedJob"]], Awaitable[None]] | None = None,
+        on_progress: ProgressCallback | None = None,
     ) -> list[LinkedInScrapedJob]:
         """
         Navigate directly to LinkedIn Jobs search.
@@ -1252,7 +1281,13 @@ class LinkedInAgent:
                         that page's freshly-scraped jobs — lets the caller persist
                         them incrementally (crash safety + live progress) before
                         the whole run finishes.
+        on_progress     Optional async callback with structured live progress
+                        (phase, reported_total, listed, skipped, target, done,
+                        in_batch, …) — after each page's enumeration/dedupe and
+                        once per extracted job. Best-effort: never breaks scraping.
         """
+        self._on_progress = on_progress
+        self._prog = {}
         search_url = self._build_search_url(f, start=0)
         logger.info("search_started", source="linkedin", keyword=f.keyword, location=f.location)
         logger.info("search_url_generated", source="linkedin", url=search_url)
@@ -1492,6 +1527,11 @@ class LinkedInAgent:
             max_jobs  = f.max_jobs,
         )
         logger.info("linkedin_pagination_started", safety_cap=safety_cap)
+        await self._report_progress(
+            phase="listing", page=1, listed=0, done=0, in_batch=0, cap=safety_cap,
+            batch_size=max(1, get_settings().harvest_persist_batch_size),
+            window_hours=f.search_window_hours,
+        )
 
         while len(all_jobs) < safety_cap:
             # Cooperative stop: a user asked to halt the run. Stop paginating and
@@ -1504,6 +1544,10 @@ class LinkedInAgent:
             start      = page_num * batch_size
             search_url = self._build_search_url(f, start=start)
             logger.info("linkedin_page_start", page=page_num + 1, start=start, collected=len(all_jobs))
+            await self._report_progress(
+                phase="listing", page=page_num + 1, done=len(all_jobs), in_batch=0,
+                message=f"LinkedIn: reading results page {page_num + 1}",
+            )
 
             # Navigate
             async def _goto(url: str = search_url) -> None:
@@ -1558,6 +1602,13 @@ class LinkedInAgent:
                 logger.warning("linkedin_page_prepare_failed", page=page_num + 1, error=str(exc))
                 break
 
+            # The site's own match count for the filter window ("N results"
+            # header) — read once, retried on later pages while unknown.
+            if self._on_progress is not None and self._prog.get("reported_total") is None:
+                reported = await self._read_results_count(page)
+                if reported is not None:
+                    await self._report_progress(reported_total=reported)
+
             remaining = safety_cap - len(all_jobs)
             try:
                 # on_batch is forwarded down into Phase B so jobs persist every N
@@ -1594,6 +1645,7 @@ class LinkedInAgent:
             await _delay(page, 1_500, 2_500)   # polite inter-page delay
 
         logger.info("pagination_completed", source="linkedin", pages=page_num, total=len(all_jobs))
+        await self._report_progress(phase="done", done=len(all_jobs), in_batch=0)
         logger.info(
             "linkedin_pagination_complete", pages=page_num, total=len(all_jobs),
             skipped_already_harvested=self._skipped_already_harvested,
@@ -1918,169 +1970,32 @@ class LinkedInAgent:
         CompanyORM so bulk_insert_scraped_jobs applies it to all of that company's
         jobs.
 
-        Best-effort throughout; deduped per company; a recheck cooldown
-        (settings.apollo_recheck_days) skips companies enriched recently. Companies
-        that already have a size on some job are skipped (within-run propagation
-        covers their other jobs for free)."""
+        Delegates to the shared, browser-free
+        app.services.company_enrichment_service.enrich_companies (also used by the
+        Naukri agent). Apollo only for now: the LinkedIn company-card web scrape is
+        disabled — to re-enable it pass
+        ``fallback=self._company_card_fallback(page)``."""
         from app.config import get_settings
-        from app.core.dependencies import get_session_factory
-        from app.services.company_service import (
-            company_needs_enrichment,
-            get_companies_by_keys,
-            normalize_company_key,
-            upsert_company_enrichment,
-        )
+        from app.services.company_enrichment_service import enrich_companies
 
-        settings = get_settings()
+        await enrich_companies(jobs, get_settings())
 
-        # One entry per unique company: display name + a company_url to scrape +
-        # any size already scraped from a job (seeded so the cache keeps it and the
-        # waterfall then only needs to find the HQ location).
-        entries: dict[str, dict] = {}
-        for j in jobs:
-            name = (getattr(j, "company", "") or "").strip()
-            if not name:
-                continue
-            key = normalize_company_key(name)
-            slot = entries.setdefault(key, {"company_name": name, "company_url": "", "company_size": ""})
-            if not slot["company_url"] and (getattr(j, "company_url", "") or "").strip():
-                slot["company_url"] = j.company_url.strip()
-            if not slot["company_size"] and (getattr(j, "company_size", "") or "").strip():
-                slot["company_size"] = j.company_size.strip()
-
-        # Every unique company runs — a company with a scraped size still needs its
-        # HQ location. The cache cooldown (company_needs_enrichment) skips companies
-        # already holding BOTH size and country, so this doesn't redo settled ones.
-        keys = list(entries)
-        if not keys:
-            return
-
-        session_factory = get_session_factory(settings)
-        async with session_factory() as db:
-            cached = await get_companies_by_keys(db, set(keys))
-        keys = [k for k in keys
-                if company_needs_enrichment(cached.get(k), settings.apollo_recheck_days)]
-        if not keys:
-            return
-
-        llm = self._get_llm_service()
-        enriched = 0
-        for key in keys:
-            if enriched >= _COMPANY_ENRICH_CAP:
-                logger.info("company_enrich_cap_reached", cap=_COMPANY_ENRICH_CAP)
-                break
-            if run_guard.is_stop_requested():
-                logger.info("company_enrichment_stopped_by_user", enriched=enriched)
-                break
-            info = entries[key]
-            # A company already attempted once (its cache row carries an Apollo
-            # stamp) only reaches here after the 30-day cooldown — re-scraping its
-            # LinkedIn About page won't surface data the first pass missed, so retry
-            # via Apollo ONLY. A brand-new company (no stamp) runs the full waterfall
-            # incl. the LinkedIn card. See _run_company_waterfall(apollo_only=...).
-            # LinkedIn company-card web scraping disabled for now — Apollo only.
-            apollo_only = True
-            # _row = cached.get(key)
-            # apollo_only = bool(_row is not None and _row.apollo_enriched_at is not None)
-            try:
-                data = await self._run_company_waterfall(
-                    page, settings, llm,
-                    company_name=info["company_name"],
-                    company_url=info["company_url"],
-                    seed_size=info["company_size"],
-                    apollo_only=apollo_only,
-                )
-            except Exception as exc:
-                logger.debug("company_waterfall_failed", company=info["company_name"], error=str(exc))
-                data = {}
-            enriched += 1
-            try:
-                async with session_factory() as db:
-                    await upsert_company_enrichment(
-                        db,
-                        company_key=key,
-                        company_name=info["company_name"],
-                        domain=data.get("domain", ""),
-                        company_size=data.get("company_size", ""),
-                        company_country=data.get("company_country", ""),
-                        company_state=data.get("company_state", ""),
-                        company_industry=data.get("company_industry", ""),
-                        apollo_attempted=data.get("apollo_attempted", False),
-                    )
-                    await db.commit()
-            except Exception as exc:
-                logger.warning("company_cache_write_failed", company=info["company_name"], error=str(exc))
-
-        logger.info("company_enrichment_pass_complete", companies=len(keys), enriched=enriched)
-
-    async def _run_company_waterfall(
-        self, page: Page, settings: Any, llm: Any, *,
-        company_name: str, company_url: str, seed_size: str = "",
-        apollo_only: bool = False,
-    ) -> dict:
-        """Fill one company's size + HQ location, in the order the product wants:
-
-          1. Apollo organizations/enrich by domain (recruiter-learned domain if we
-             have one, else inferred from the name). Preferred when it matches.
-          2. If size or country is STILL missing → open the company's LinkedIn page,
-             pull the Overview "card" text with BeautifulSoup, and let the LLM turn
-             that into {size, HQ location, industry}.
-
-        `apollo_only` runs Step 1 ONLY and skips the LinkedIn scrape — used for the
-        30-day recheck of a company already attempted once: if its About card was
-        going to yield data, the first pass (with a proper render wait) already
-        captured it, so re-scraping the same page is wasted work; only Apollo is
-        worth retrying. See _enrich_companies.
-
-        `seed_size` is any size already scraped from a job, kept so a company that
-        only needs its HQ location doesn't lose it. Returns the merged fields
-        {company_size, company_country, company_state, company_industry, domain,
-        apollo_attempted}."""
-        out = {"company_size": seed_size or "", "company_country": "", "company_state": "",
-               "company_industry": "", "domain": "", "apollo_attempted": False}
-
-        def _fill(d: dict) -> None:
-            for f in ("company_size", "company_country", "company_state", "company_industry"):
-                if not out[f] and d.get(f):
-                    out[f] = d[f]
-
-        def _missing() -> bool:
-            return not out["company_size"] or not out["company_country"]
-
-        # ── Step 1 — Apollo organizations/enrich by domain ──
-        from app.core.company_domain import infer_company_domain
-        out["domain"] = infer_company_domain(company_name)[0]
-        if settings.apollo_enrich_company and settings.apollo_api_key and out["domain"]:
-            try:
-                from app.core.company_size import band_from_employee_count
-                from app.services.apollo_client import ApolloClient
-                out["apollo_attempted"] = True
-                org = await ApolloClient(settings).enrich_organization(out["domain"])
-                if org:
-                    for f, v in (("company_country", org.country or ""),
-                                 ("company_state", org.state or ""),
-                                 ("company_industry", org.industry or ""),
-                                 ("company_size", band_from_employee_count(org.size))):
-                        if v:
-                            out[f] = v  # Apollo preferred → overwrite
-                    if org.domain:
-                        out["domain"] = org.domain
-            except Exception as exc:
-                logger.debug("company_apollo_failed", domain=out["domain"], error=str(exc))
-
-        # ── Step 2 — LinkedIn company card (BeautifulSoup) → LLM ──
-        # Skipped on an Apollo-only recheck (see the apollo_only docstring note).
-        if _missing() and company_url and not apollo_only:
+    def _company_card_fallback(self, page: Page) -> Callable[[str, str], Awaitable[dict]]:
+        """Build the (currently unused) LinkedIn company-card fallback hook for
+        enrich_companies: open the company's LinkedIn About page in a new tab, pull
+        the Overview card text with BeautifulSoup and let the LLM turn it into
+        {company_size, company_country, company_state, company_industry}."""
+        async def _fallback(company_name: str, company_url: str) -> dict:
+            llm = self._get_llm_service()
             tab = None
             try:
                 tab = await page.context.new_page()
                 card_text = await _scrape_linkedin_company_card_text(tab, company_url)
                 if card_text and llm:
-                    _fill(await _llm_extract_company_fields(llm, card_text, company_url))
-                elif not card_text:
+                    return await _llm_extract_company_fields(llm, card_text, company_url)
+                if not card_text:
                     logger.debug("company_card_text_empty", url=company_url)
-            except Exception as exc:
-                logger.debug("company_li_card_failed", url=company_url, error=str(exc))
+                return {}
             finally:
                 if tab:
                     try:
@@ -2088,7 +2003,7 @@ class LinkedInAgent:
                     except Exception:
                         pass
 
-        return out
+        return _fallback
 
     async def _llm_fallback_extract_contact(self, page: Page, profile_url: str) -> dict:
         """
@@ -2183,38 +2098,23 @@ class LinkedInAgent:
     # Category labels that are catch-all buckets ("Other IT categories"), not real
     # search terms — dropped when composing the keyword query so they aren't
     # searched literally.
-    _CATEGORY_CATCHALL_RE = re.compile(r"^\s*other\b", re.IGNORECASE)
+    _CATEGORY_CATCHALL_RE = CATEGORY_CATCHALL_RE
+
+    # Keyword composition is shared with the Naukri agent — see
+    # app/core/search_keywords.py. These thin wrappers keep LinkedIn's historical
+    # API (and its boolean-OR joiner) unchanged.
 
     @staticmethod
     def _or_join(terms: list[str] | None, cap: int = 10) -> str:
-        """Build a LinkedIn `keywords=` boolean-OR query from selected category /
-        custom-title terms: each term quoted (so multi-word and slash forms like
-        "AI / ML" search as a phrase), joined with OR, capped so the URL stays
-        sane. Catch-all buckets are dropped. Returns "" when nothing usable."""
-        cleaned = [
-            t.strip() for t in (terms or [])
-            if t and t.strip() and not LinkedInAgent._CATEGORY_CATCHALL_RE.match(t)
-        ]
-        if not cleaned:
-            return ""
-        return " OR ".join(f'"{t}"' for t in cleaned[:cap])
+        """LinkedIn `keywords=` boolean-OR of the selected terms (each quoted,
+        catch-alls dropped, capped). Returns "" when nothing usable."""
+        return join_terms(terms, linkedin_or_joiner, cap)
 
     @staticmethod
     def _categories_cover_domain(domain: str, job_categories: list[str] | None) -> bool:
-        """True when the selected job_categories include EVERY canonical category
-        for the coarse domain (ignoring the "Other …" catch-all) — i.e. the user
-        chose "All IT Jobs" / "All Non-IT Jobs". In that case the search must use
-        the coarse domain, not an OR of every category. This makes the all-vs-subset
-        decision robust even when a stale saved config still holds the full list
-        (the frontend also sends [] for "all"). See _CANONICAL_CATEGORY_SETS."""
-        canonical = _CANONICAL_CATEGORY_SETS.get(domain)
-        if not canonical or not job_categories:
-            return False
-        selected = {
-            c.strip().lower() for c in job_categories
-            if c and c.strip() and not LinkedInAgent._CATEGORY_CATCHALL_RE.match(c)
-        }
-        return selected >= canonical
+        """True when job_categories cover the whole canonical set for `domain`
+        ("All IT/Non-IT Jobs") — see search_keywords.categories_cover_domain."""
+        return categories_cover_domain(domain, job_categories)
 
     @staticmethod
     def _compose_keyword_query(
@@ -2223,38 +2123,12 @@ class LinkedInAgent:
         job_categories: list[str] | None = None,
         custom_job_titles: list[str] | None = None,
     ) -> str:
-        """The LinkedIn `keywords=` value.
-
-        Priority:
-          1. A user-typed keyword always wins.
-          2. Otherwise, when a SUBSET of sub-categories or custom "Others" titles
-             were chosen in the Rule Engine, OR-join them into the search box so
-             LinkedIn returns those roles directly (custom titles first, then
-             IT/Non-IT sub-categories). "All <domain> Jobs" — an empty list OR a
-             selection covering the whole canonical category set — is NOT treated
-             as a subset; it falls through to the coarse domain below.
-          3. Otherwise the chosen domain label is placed into the search box as-is
-             — e.g. "Data Engineering", "AI/ML", "Cyber Security", "IT". "Any" and
-             "Non-IT" have no meaningful search term, so they contribute nothing
-             (LinkedIn returns its unfiltered result set).
-
-        LinkedIn's own filtered results stay the source of truth; post-scrape
-        domain classification is unaffected (still driven by the coarse `domain`)."""
-        keyword = (keyword or "").strip()
-        if keyword:
-            return keyword
-        titles_query = LinkedInAgent._or_join(custom_job_titles)
-        if titles_query:
-            return titles_query
-        # A full-coverage selection ("All IT/Non-IT Jobs") uses the coarse domain,
-        # not an OR of every category — only a genuine subset refines the search.
-        if not LinkedInAgent._categories_cover_domain(domain, job_categories):
-            categories_query = LinkedInAgent._or_join(job_categories)
-            if categories_query:
-                return categories_query
-        if domain in ("", "Any", "Non-IT"):
-            return ""
-        return domain
+        """The LinkedIn `keywords=` value — typed keyword, else OR-joined custom
+        titles / category subset, else the coarse domain (see
+        search_keywords.compose_keyword_query for the full priority rules)."""
+        return compose_keyword_query(
+            keyword, domain, job_categories, custom_job_titles, joiner=linkedin_or_joiner,
+        )
 
     @staticmethod
     def _build_search_url(f: FiltersConfig, start: int = 0) -> str:
@@ -2330,6 +2204,55 @@ class LinkedInAgent:
                 logger.debug("linkedin_dialog_escaped")
         except Exception:
             pass
+
+    # ── Live progress (Rule Engine "Live Harvest" card) ────────────────────────
+
+    # Class-level defaults; _run() sets per-run instance values.
+    _on_progress: ProgressCallback | None = None
+    _prog: dict[str, Any] = {}
+
+    async def _report_progress(self, message: str | None = None, **fields: Any) -> None:
+        """Merge ``fields`` into this run's progress state and hand the full state
+        to on_progress (the tracker persists only what changed). ``target`` is
+        derived: min(cap, found − skipped), never below ``done``; found is the
+        site's reported_total when known, else the cards listed so far.
+        Never raises — progress reporting must not break scraping."""
+        cb = self._on_progress
+        if cb is None:
+            return
+        try:
+            prog = self._prog
+            prog.update(fields)
+            prog["skipped"] = self._skipped_already_harvested
+            found = prog.get("reported_total")
+            if found is None:
+                found = prog.get("listed") or 0
+            done = int(prog.get("done") or 0)
+            target = max(done, int(found) - int(prog["skipped"]))
+            cap = prog.get("cap")
+            prog["target"] = min(int(cap), target) if cap else target
+            payload = dict(prog)
+            if message:
+                payload["message"] = message
+            await cb(payload)
+        except Exception as exc:
+            logger.debug("linkedin_progress_callback_failed", error=str(exc))
+
+    async def _read_results_count(self, page: Page) -> int | None:
+        """LinkedIn's own "N results" count for the current search (filter window
+        applied). Best-effort: None when the header isn't found / unparseable."""
+        try:
+            raw = await page.evaluate(_RESULTS_COUNT_JS)
+            digits = re.sub(r"\D", "", str(raw or ""))
+            if not digits:
+                logger.info("linkedin_results_count_not_found", url=page.url)
+                return None
+            total = int(digits)
+            logger.info("linkedin_results_count", total=total, raw=str(raw))
+            return total
+        except Exception as exc:
+            logger.debug("linkedin_results_count_failed", error=str(exc))
+            return None
 
     # ── Scrolling ──────────────────────────────────────────────────────────────
 
@@ -2472,6 +2395,9 @@ class LinkedInAgent:
         # (seen_urls) and against duplicates within this page (page_seen).
         enumerated: list[dict] = []
         page_seen: set[str] = set()
+        # Live progress: jobs finished before this page, and skips this page.
+        _done_base = int(self._prog.get("done") or 0) if self._on_progress is not None else 0
+        _skipped_before = self._skipped_already_harvested
         for idx, card_el in enumerate(raw):
             # Stop reading cards once we've gathered `remaining` of them — no
             # point parsing the rest of the page when the cap (e.g.
@@ -2504,6 +2430,12 @@ class LinkedInAgent:
             enumerated.append(list_data)
 
         logger.info("linkedin_cards_enumerated", count=len(enumerated), page_cards=len(raw))
+        await self._report_progress(
+            phase="details" if enumerated else "listing",
+            listed=int(self._prog.get("listed") or 0) + len(enumerated)
+            + (self._skipped_already_harvested - _skipped_before),
+            message=f"LinkedIn: {len(enumerated)} new of {len(raw)} cards on this page",
+        )
 
         # ── Phase B: fetch each enumerated card's detail (new tab, by URL) ─────
         for list_data in enumerated:
@@ -2592,6 +2524,10 @@ class LinkedInAgent:
                 # Incremental flush: persist every N cards as they're scraped so
                 # the live counter climbs steadily and a mid-scrape crash keeps them.
                 _pending.append(job)
+                await self._report_progress(
+                    done=_done_base + len(jobs), in_batch=len(_pending),
+                    message=f"Job {len(jobs)} of {len(enumerated)} on this page · {job.job_title}"[:160],
+                )
                 if len(_pending) >= _persist_batch_n:
                     await _flush_pending()
                 logger.info(

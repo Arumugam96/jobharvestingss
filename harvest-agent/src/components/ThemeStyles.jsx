@@ -96,6 +96,19 @@ const ThemeStyles = () => (
     .ha-mail:hover{text-decoration:underline;}
     .ha-tel{color:${C.text};text-decoration:none;}
     .ha-tel:hover{text-decoration:underline;}
+    /* Jobs-table contact cells (DualContact): a value never escapes its column —
+       source tag stacked above, value on one ellipsized line, full value in the
+       tooltip. min-width:0 lets the flex children shrink inside the fixed-width cell. */
+    .ha-contact{display:flex;flex-direction:column;gap:7px;min-width:0;max-width:100%;}
+    .ha-contact-item{display:flex;flex-direction:column;align-items:flex-start;gap:3px;min-width:0;max-width:100%;}
+    .ha-contact-val{display:block;max-width:100%;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+    /* Contact-actions column pinned to the scroller's right edge, so the
+       WhatsApp/Email/LinkedIn buttons are never clipped when the wide jobs table
+       scrolls horizontally. Opaque background so scrolled cells pass beneath it. */
+    .ha-th-pin,.ha-td-pin{position:sticky;right:0;}
+    .ha-th.ha-th-pin{z-index:2;}
+    .ha-td-pin{z-index:0;background:#FCFDFF;box-shadow:-10px 0 12px -12px rgba(15,23,42,.35);}
+    .ha-row:hover .ha-td-pin{background:#F1F5FE;}
     .ha-cbtn{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:8px;border:1px solid;transition:.15s;text-decoration:none;}
     .ha-cbtn-on{border-color:${C.primary};color:${C.primary};background:rgba(255,255,255,.85);cursor:pointer;}
     .ha-cbtn-on:hover{background:${C.primary};color:#fff;}

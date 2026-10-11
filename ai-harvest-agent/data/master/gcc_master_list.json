@@ -1,5 +1,5 @@
 {
-  "_comment": "Well-known Global Capability Centers (GCCs) operating in India. Lowercase. Partial match is applied.",
+  "_comment": "Well-known Global Capability Centers (GCCs) operating in India. Lowercase. Matched as WHOLE WORDS, not substrings (business_filter_service._PhraseMatcher): 'hp' matches 'HP Inc' but 'ing' never matches 'Consulting'.",
   "companies": [
     "amazon", "google", "microsoft", "apple", "meta", "netflix", "uber", "airbnb",
     "jpmorgan", "jp morgan", "goldman sachs", "morgan stanley", "wells fargo",

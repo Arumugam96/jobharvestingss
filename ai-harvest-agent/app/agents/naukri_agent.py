@@ -1,83 +1,139 @@
 """
-Naukri.com Harvest Agent — autonomous job scraper.
+Naukri.com Harvest Agent — guest job harvester (no login, no LLM).
 
-Responsibilities
-────────────────
-1. Receive FiltersConfig (keyword, location, job_type, work_mode, salary, …)
-2. Login to Naukri.com using credentials from Settings (NAUKRI_EMAIL / NAUKRI_PASSWORD)
-3. Build the Naukri Jobs search URL with all filter parameters encoded
-4. Open the page via BrowserManager (non-headless, stealth)
-5. Dismiss overlays / login prompts
-6. Scroll the result container until all virtual-DOM cards are loaded
-7. Parse every visible job card via dynamic fallback selector chains
-8. Return a deduplicated list[NaukriScrapedJob]
+Flow (mirrors the modern LinkedIn pipeline: _run → paginate → per-job detail →
+incremental flush → post-harvest company / contact passes)
+──────────────────────────────────────────────────────────────────────────────
+1. Build the Naukri search-results (SRP) URL: an SEO path that encodes keyword +
+   location (``python-developer-jobs-in-bengaluru[-N]``) plus EVERY applicable
+   query filter (``k``, ``l`` on page 1, ``jobAge``, ``wfhType``, ``ctcFilter``).
+2. Navigate normally. The SRP itself fetches ``GET /jobapi/v3/search`` (JSON);
+   that response is captured with ``page.on("response")`` — never called
+   directly, because it needs Naukri's own headers. Its request URL is used to
+   VERIFY the filters actually reached Naukri's backend (pageNo / jobAge /
+   wfhType / ctcFilter / k). Fallback: parse the DOM cards in ONE page.evaluate.
+3. Skip jobs already seen this run (jobId) or already harvested in earlier runs
+   (normalized URL / jobId) BEFORE any detail visit — skips don't use max_jobs.
+4. Detail pass per job: the job page fetches ``GET /jobapi/v4/job/{jobId}``
+   (captured the same way) → full description HTML, employment type, wfhType,
+   industry, company website, consultant flag. Fallbacks: the page's
+   ``application/ld+json`` JobPosting, then the ``[class*='dang-inner-html']``
+   description container.
+5. Flush jobs to the caller every settings.harvest_persist_batch_size jobs.
+6. Post-harvest (each pass isolated so none can lose jobs): shared company
+   enrichment (Apollo, budget-capped) and the company+location HR-contact pass.
 
-Filter URL parameters (Naukri)
-──────────────────────────────
-work_mode  Remote → wfhType=3  |  Hybrid → wfhType=1  |  Onsite → (omit)
-job_type   Permanent → jobType=1  |  Contract → jobType=2  |  Part-time → jobType=5
-date       24h → jobAge=1  |  7 days → jobAge=7  |  30 days → jobAge=30
-salary     <min_lpa>,<max_lpa>  (INR only — auto-converted from absolute to LPA)
+Filter URL parameters (verified live against naukri.com)
+────────────────────────────────────────────────────────
+work_mode  Remote → wfhType=2 | Hybrid → wfhType=3 | Onsite → wfhType=0
+           (wfhType=1 is Naukri's legacy "temporary WFH (covid)" bucket)
+job_type   NOT expressible — Naukri drops jobType from its search request; job
+           type is judged post-scrape from each job's own employmentType.
+date       24h → jobAge=1 | 48h → 2 | 72h → 3 | 7d → 7 | 30d → 30
+salary     INR only, and only when undisclosed-salary jobs are NOT wanted →
+           ctcFilter=<bucket> for every Naukri lakh bucket overlapping the range.
+pagination ``…-jobs-N`` path suffix. Page N>1 must NOT carry ``l=`` (Naukri then
+           redirects to page 1 and strips every param); location stays in the path.
+
+Browser
+───────
+Guest only. Runs either as a tab in the caller's context (orchestrator "shared"
+mode) or in its own cookie-less context (settings.naukri_browser_mode="isolated",
+see naukri_guest_browser) on bundled Chromium (channel="chromium") — Naukri's
+Akamai edge denies chromium-headless-shell.
 """
 from __future__ import annotations
 
+import json
+import math
 import random
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from urllib.parse import urlencode
+from typing import Any, Awaitable, Callable
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import structlog
-from playwright.async_api import ElementHandle, Page
+from playwright.async_api import Page
 
+from app.config import get_settings
+from app.core.contact_normalize import normalize_email, normalize_phone
+from app.core.harvest_helpers import env_max_jobs_cap, retry_async
+from app.core.job_url import normalize_job_url
+from app.core.search_keywords import comma_joiner, compose_keyword_query
+from app.core.text_formatting import (
+    description_text_to_html,
+    format_job_description,
+    html_description_to_text,
+    sanitize_description_html,
+)
 from app.models.harvest_models import FiltersConfig
-from app.scrapers.browser_manager import PersistentBrowserManager
+from app.scrapers.browser_manager import BrowserManager, PersistentBrowserManager
+from app.scrapers.human import human_scroll
+from app.services import run_guard
 
 logger = structlog.get_logger(__name__)
+
+StatusCallback = Callable[[str], Awaitable[None]]
+BatchCallback = Callable[[list["NaukriScrapedJob"]], Awaitable[None]]
+# Live-progress payload for the Rule Engine "Live Harvest" card — a dict of
+# source_status.PROGRESS_KEYS (+ optional "message"); see SourceStatusTracker.progress.
+ProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
 
 _DEBUG_DIR         = Path("data/debug/naukri")
 _DEBUG_SCREENSHOT  = Path("data/debug/screenshots")
 _DEBUG_HTML        = Path("data/debug/html")
 
+_NAUKRI_BASE = "https://www.naukri.com"
+_PAGE_SIZE   = 20          # Naukri SRP page size
+_MAX_PAGES   = 250         # hard safety stop for pagination
+_IST         = timezone(timedelta(hours=5, minutes=30))
+
+# Testing-only per-run cap (mirrors LINKEDIN_TEST_MAX_JOBS).
+_TEST_MAX_JOBS_ENV = "NAUKRI_TEST_MAX_JOBS"
+
 
 # ── Filter → URL param maps ───────────────────────────────────────────────────
 
+# Naukri's own wfhType ids (from the SRP's wfhType cluster): 0 = Work from
+# office, 2 = Remote, 3 = Hybrid; 1 = legacy "temporary WFH due to covid".
 _WORK_MODE_MAP: dict[str, str] = {
-    "Remote":  "3",   # WFH
-    "Hybrid":  "1",   # Hybrid
-    "Onsite":  "",    # Work from office (omit filter)
-    "Any":     "",
+    "Remote": "2",
+    "Hybrid": "3",
+    "Onsite": "0",
+    "Any":    "",
 }
-_JOB_TYPE_MAP: dict[str, str] = {
-    "Permanent": "1",
-    "Contract":  "2",
-    "Part-time": "5",
-    "Any":       "",
+# Per-job wfhType (v4 detail JSON) → our work_mode vocabulary.
+_WFH_TYPE_TO_WORK_MODE: dict[str, str] = {
+    "0": "onsite",
+    "2": "remote",
+    "3": "hybrid",
 }
+# FiltersConfig.search_window_hours (24/48/72/168/720) → Naukri jobAge days.
+# Naukri accepts any day count (jobAge=2 verified live), not just its UI buckets.
 _DATE_MAP: dict[int, str] = {
     24:  "1",
     48:  "2",
     72:  "3",
     168: "7",
-    336: "14",
     720: "30",
 }
+# Naukri salary buckets (lakhs per annum) as used by ctcFilter.
+_CTC_BUCKETS: tuple[tuple[int, int], ...] = (
+    (0, 3), (3, 6), (6, 10), (10, 15), (15, 25), (25, 50), (50, 75), (75, 100), (100, 500),
+)
 
-# recruit.naukri.com → redirects to /recruit/login?msg=TO&URL=recruit.naukri.com
-# Clicking the "Register/Log in" tab switches to the login form.
-# NOTE: Naukri now requires "Naukri Launcher" app for recruiter login —
-#       automated login will fail; agent falls back to guest/public search.
-_NAUKRI_LOGIN_URL        = "https://recruit.naukri.com/"
-_NAUKRI_LOGIN_URL_SEEKER = "https://www.naukri.com/nlogin/login"   # seeker/public fallback
-_NAUKRI_SEARCH_URL       = "https://www.naukri.com/jobs-in-india"
+_JUNK_EMAIL_PATTERNS = ("reportfraud", "noreply", "no-reply", "donotreply", "fraud@", "abuse@",
+                        "@naukri.com", "@infoedge")
 
 
 class SearchFilterNotAppliedException(RuntimeError):
     """
-    Raised when Naukri's jobAge (search_window_hours) filter is not present
-    in the final URL after navigation and one retry.  Harvesting is aborted
-    to prevent collecting all-time results instead of the intended window.
+    Raised when the requested search filters (jobAge / wfhType / ctcFilter /
+    keyword) are not present in Naukri's own search request after navigation
+    and one retry. Harvesting is aborted rather than collecting unfiltered
+    (e.g. all-time) results.
     """
 
 
@@ -93,311 +149,643 @@ class NaukriScrapedJob:
     posted_date:     str
     job_url:         str
     job_description: str
+    job_description_html: str  = ""   # sanitized rich HTML of the full description
     skills:          list[str] = field(default_factory=list)
-    work_mode:       str = "not_specified"
-    source:          str = "Naukri"
-    # Lead intelligence
-    recruiter_name:       str | None = None
-    recruiter_company:    str | None = None
+    work_mode:       str       = "not_specified"
+    source:          str       = "Naukri"
+    job_id:          str       = ""   # Naukri jobId — the posting's natural key
+    company_url:     str       = ""   # company's OWN website (v4 companyDetail.websiteUrl)
+    company_size:    str       = ""   # Naukri doesn't publish one; filled by Apollo cache
+    employment_type: str       = ""   # e.g. "Full Time, Permanent"
+    industry_hint:   str       = ""   # Naukri industry, e.g. "IT Services & Consulting"
+    # Hiring signals from Naukri's own data: consultant=True ⇒ posted by a
+    # staffing/recruitment consultant; hiring_for = the client named on it.
+    # None ⇒ Naukri didn't say.
+    consultant:      bool | None = None
+    hiring_for:      str       = ""
+    # Lead intelligence — only ever values present verbatim in Naukri's data.
+    recruiter_name:         str | None = None
+    recruiter_company:      str | None = None
     job_poster_designation: str | None = None
-    email_id:             str | None = None
-    contact_number:       str | None = None
+    email_id:               str | None = None
+    contact_number:         str | None = None
+    linkedin_profile_url:   str | None = None
+
+    # LinkedIn-compatible aliases — shared post-harvest passes (e.g.
+    # company_location_contact_service.discover_company_location_contacts) read
+    # job_poster_* via getattr.
+    @property
+    def job_poster_name(self) -> str | None:
+        return self.recruiter_name
+
+    @property
+    def job_poster_company(self) -> str | None:
+        return self.recruiter_company
+
+    @property
+    def job_poster_email(self) -> str | None:
+        return self.email_id
+
+    @property
+    def job_poster_phone(self) -> str | None:
+        return self.contact_number
 
 
-# ── CSS selector fallback chains ──────────────────────────────────────────────
+# ── Overlay selectors ─────────────────────────────────────────────────────────
 
-class _Sel:
-    # ── Login form ────────────────────────────────────────────────────────────
-    LOGIN_EMAIL: list[str] = [
-        "input#usernameField",
-        "input[placeholder*='Email']",
-        "input[placeholder*='Username']",
-        "input[type='text'][name*='user']",
-        "input[type='email']",
-    ]
-    LOGIN_PASSWORD: list[str] = [
-        "input#passwordField",
-        "input[placeholder*='assword']",
-        "input[type='password']",
-        "input[name*='pass']",
-    ]
-    LOGIN_SUBMIT: list[str] = [
-        "button.loginButton",
-        "button[type='submit']",
-        "button:has-text('Login')",
-        "input[type='submit']",
-    ]
-    LOGIN_ERROR: list[str] = [
-        ".naukri-err-msg",
-        ".error-msg",
-        "[class*='errTxt']",
-        "span[class*='err']",
-        "div.alert",
-    ]
+_COOKIE_SELECTORS: tuple[str, ...] = (
+    "button[class*='accept']",
+    "button:has-text('Accept')",
+    "button:has-text('Accept All')",
+    "button:has-text('OK')",
+)
+_MODAL_DISMISS_SELECTORS: tuple[str, ...] = (
+    "button[class*='close']",
+    "span[class*='close-icon']",
+    "button[aria-label='Close']",
+    "button:has-text('Skip')",
+    "button:has-text('Not now')",
+    "button:has-text('Cancel')",
+    ".modal-close",
+)
 
-    # ── Overlays ──────────────────────────────────────────────────────────────
-    COOKIE: list[str] = [
-        "button[class*='accept']",
-        "button:has-text('Accept')",
-        "button:has-text('Accept All')",
-        "button:has-text('OK')",
-    ]
-    MODAL_DISMISS: list[str] = [
-        "button[class*='close']",
-        "span[class*='close-icon']",
-        "button[aria-label='Close']",
-        "button:has-text('Skip')",
-        "button:has-text('Not now')",
-        "button:has-text('Cancel')",
-        ".modal-close",
-    ]
+# All SRP cards parsed in ONE round-trip (fallback when the v3 JSON wasn't captured).
+_DOM_CARDS_JS = r"""
+() => {
+  let cards = Array.from(document.querySelectorAll('div.srp-jobtuple-wrapper[data-job-id]'));
+  if (!cards.length) cards = Array.from(document.querySelectorAll('[data-job-id]'));
+  const out = [];
+  for (const card of cards) {
+    try {
+      const pick = (sels) => {
+        for (const s of sels) {
+          const e = card.querySelector(s);
+          if (!e) continue;
+          const v = (e.getAttribute('title') || e.textContent || '').trim();
+          if (v) return v;
+        }
+        return '';
+      };
+      const a = card.querySelector('a.title') || card.querySelector('a[href*="job-listings"]');
+      out.push({
+        job_id:      card.getAttribute('data-job-id') || '',
+        title:       a ? (a.getAttribute('title') || a.textContent || '').trim() : '',
+        url:         a ? (a.href || '') : '',
+        company:     pick(['a.comp-name', '[class*="comp-name"]']),
+        location:    pick(['span.locWdth', '[class*="loc"] [title]', '[class*="loc"]']),
+        experience:  pick(['span.expwdth', '[class*="exp"] [title]', '[class*="exp"]']),
+        salary:      pick(['[class*="sal"] [title]', '[class*="sal"]']),
+        description: pick(['span.job-desc', '[class*="job-desc"]']),
+        skills:      Array.from(card.querySelectorAll('ul.tags-gt li, ul[class*="tag"] li'))
+                       .map(li => (li.textContent || '').trim()).filter(Boolean),
+        posted:      pick(['span.job-post-day', '[class*="job-post-day"]']),
+      });
+    } catch (e) { /* one bad card never breaks the page */ }
+  }
+  return out;
+}
+"""
 
-    # ── Result container + individual cards ───────────────────────────────────
-    CONTAINER: list[str] = [
-        "#listContainer",
-        ".list-container",
-        ".srp-jobtuple-wrapper",
-        "[class*='listContainer']",
-        "[class*='resultContainer']",
-        "[class*='list-container']",
-        ".search-result-list",
-        "main",
-    ]
-    # Naukri 2024-2026 uses article[data-job-id]; old site used .jobTuple
-    CARD: list[str] = [
-        "div[data-job-id]",          # current Naukri 2025 DOM
-        "article[data-job-id]",      # legacy
-        "li[data-job-id]",
-        "article.jobTuple",
-        "article[class*='tuple']",
-        "article[class*='job']",
-        ".srp-jobtuple-wrapper article",
-        ".jobTuple",
-        "div[class*='jobTuple']",
-        "div[class*='job-card']",
-        "li[class*='jobTuple']",
-    ]
-
-    # ── Card fields ────────────────────────────────────────────────────────────
-    TITLE: list[str] = [
-        "a.title",
-        "a[class*='title']",
-        ".title a",
-        "h2 a",
-        "h3 a",
-        "[class*='job-title'] a",
-        "[class*='jobTitle'] a",
-        "a[href*='/job-listings/']",
-    ]
-    COMPANY: list[str] = [
-        "a.comp-name",
-        "a.subTitle",
-        ".comp-name",
-        "[class*='comp-name']",
-        "a[class*='comp']",
-        "[class*='company'] a",
-        "[class*='companyName'] a",
-        "span[class*='company']",
-    ]
-    LOCATION: list[str] = [
-        "span.locWdth",
-        "li.location span.ellipsis",
-        "span[class*='loc']",
-        "[class*='location'] span",
-        "li.location",
-        "[class*='locWdth']",
-        "span[class*='Location']",
-    ]
-    SALARY: list[str] = [
-        "li.salary span.ellipsis",
-        "span.salary-text",
-        "span[class*='salary']",
-        "li.salary",
-        "[class*='sal'] span",
-        "[class*='Salary'] span",
-    ]
-    EXPERIENCE: list[str] = [
-        "li.experience span.ellipsis",
-        "span[class*='exp']",
-        "li.experience",
-        "[class*='experience'] span",
-        "[class*='Experience'] span",
-        "span[class*='expwdth']",
-    ]
-    POSTED: list[str] = [
-        "span.job-post-day",
-        "span[class*='fresh']",
-        "span[class*='time']",
-        "span[class*='posted']",
-        "span[class*='date']",
-        "time",
-    ]
-    DESCRIPTION: list[str] = [
-        "div.job-description",
-        "[class*='job-description']",
-        "[class*='jobDesc']",
-        "span[class*='desc']",
-        ".jd-desc",
-        "[class*='snippet']",
-    ]
-    SKILLS: list[str] = [
-        "ul.tags-gt li a",
-        "ul[class*='tag'] li a",
-        "li.tag-li a",
-        "[class*='skills'] a",
-        "[class*='skill'] span",
-        "[class*='tags'] a",
-        "[class*='Tags'] a",
-    ]
-    LINK: list[str] = [
-        "a[href*='/job-listings/']",
-        "a.title",
-        "a[class*='title']",
-        "a[href*='naukri.com/']",
-        "h2 a",
-        "h3 a",
-    ]
-    # Recruiter / HR contact info (visible on some Naukri cards)
-    RECRUITER_NAME: list[str] = [
-        "a.nameHd",
-        ".rcName",
-        "[class*='rcName']",
-        "[class*='recruiterName']",
-        "[data-automation='recruiter-name']",
-        "span[class*='recName']",
-    ]
-    RECRUITER_COMPANY: list[str] = [
-        ".rcCompanyName",
-        "[class*='rcCompany']",
-        "[class*='recruiterCompany']",
-        "span[class*='compHd']",
-    ]
-    RECRUITER_EMAIL: list[str] = [
-        ".rcEmail a",
-        "[class*='rcEmail']",
-        "a[href^='mailto:']",
-    ]
-    RECRUITER_PHONE: list[str] = [
-        ".phoneNum",
-        "[class*='phone']",
-        "[class*='mobile']",
-        "a[href^='tel:']",
-    ]
-
-    # ── Detail page — recruiter / HR contact (navigate to job URL) ────────────
-    DETAIL_RECRUITER_NAME: list[str] = [
-        "a.nameHd",
-        ".nameHd",
-        ".rcName",
-        "[class*='rcName']",
-        "[class*='recruiterName']",
-        "span[class*='recName']",
-        ".jd-dInfoSec a",
-        "[class*='hirerName']",
-    ]
-    DETAIL_RECRUITER_DESIGNATION: list[str] = [
-        ".rcDesig",
-        "span.rcDesig",
-        "[class*='rcDesig']",
-        "[class*='designation']",
-        "p.rcDesig",
-        "[class*='Desig']",
-        ".ppw-desg",
-    ]
-    DETAIL_RECRUITER_COMPANY: list[str] = [
-        ".rcCompanyName",
-        "[class*='rcCompany']",
-        "[class*='recruiterCompany']",
-        "span[class*='compHd']",
-    ]
-    DETAIL_EMAIL: list[str] = [
-        "a[href^='mailto:']",
-        ".rcEmail a",
-        "[class*='email'] a",
-        "[class*='rcEmail'] a",
-    ]
-    DETAIL_PHONE: list[str] = [
-        "a[href^='tel:']",
-        ".phoneNum a",
-        "[class*='phone'] a",
-        "[class*='mobile'] a",
-    ]
+# Detail-page fallbacks (when the v4 JSON wasn't captured), in ONE round-trip.
+_DETAIL_FALLBACK_JS = r"""
+() => {
+  const ld = Array.from(document.querySelectorAll('script[type="application/ld+json"]'))
+               .map(s => s.textContent || '');
+  const d = document.querySelector('[class*="job-desc-container"] [class*="dang-inner-html"]')
+         || document.querySelector('[class*="dang-inner-html"]');
+  return {ld: ld, desc_html: d ? d.innerHTML : '', title: document.title || ''};
+}
+"""
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Pure helpers (unit-tested) ────────────────────────────────────────────────
 
-_UNICODE_JUNK = re.compile(r"[ ​‌‍﻿­]")
+_UNICODE_JUNK = re.compile(r"[ ​‌‍﻿­]")
 _WHITESPACE   = re.compile(r"[ \t]{2,}")
 
 
-def _clean(text: str) -> str:
-    text = _UNICODE_JUNK.sub(" ", text)
+def _clean(text: Any) -> str:
+    text = _UNICODE_JUNK.sub(" ", str(text or ""))
     text = _WHITESPACE.sub(" ", text)
     return re.sub(r"\n+", " ", text).strip()
 
 
-def _infer_work_mode(location: str) -> str:
-    loc = (location or "").lower()
-    if "remote" in loc or "work from home" in loc or "wfh" in loc:
+def _infer_work_mode(text: str) -> str:
+    t = (text or "").lower()
+    if "remote" in t or "work from home" in t or "wfh" in t:
         return "remote"
-    if "hybrid" in loc:
+    if "hybrid" in t:
         return "hybrid"
-    if "on-site" in loc or "onsite" in loc:
+    if "on-site" in t or "onsite" in t or "work from office" in t:
         return "onsite"
     return "not_specified"
 
 
-def _format_posted(raw: str) -> str:
+def _work_mode_from_wfh_type(code: Any) -> str:
+    """Naukri per-job wfhType id → work_mode ("" when unknown/absent)."""
+    return _WFH_TYPE_TO_WORK_MODE.get(str(code).strip(), "") if code is not None else ""
+
+
+def _epoch_ms_to_date(value: Any) -> str:
+    """Naukri createdDate (epoch milliseconds) → UTC YYYY-MM-DD, or ""."""
+    try:
+        ms = int(value)
+    except (TypeError, ValueError):
+        return ""
+    if ms <= 0:
+        return ""
+    try:
+        return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+    except (OverflowError, OSError, ValueError):
+        return ""
+
+
+def _ist_datetime_to_date(value: Any) -> str:
+    """v4 createdDate ("2026-10-07 18:49:46", India time) / ISO date → UTC
+    YYYY-MM-DD, or ""."""
+    raw = str(value or "").strip()
     if not raw:
-        return datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    raw = raw.strip()
-    if re.match(r"\d{4}-\d{2}-\d{2}", raw):
-        return raw[:10]
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        return ""
+    if raw.isdigit():
+        return _epoch_ms_to_date(raw)
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
+        return raw                      # a bare calendar date has no timezone to shift
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00").replace(" ", "T", 1))
+    except ValueError:
+        m = re.match(r"\d{4}-\d{2}-\d{2}", raw)
+        return m.group(0) if m else ""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=_IST)
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%d")
+
+
+_REL_NUM_RE = re.compile(r"(\d+)\s*\+?\s*(minute|min|hour|hr|day|week|month)s?", re.I)
+
+
+def _resolve_relative_posted(raw: str, ref: datetime) -> str:
+    """Naukri card freshness label → YYYY-MM-DD relative to `ref` (the run's
+    pinned start). Handles "Just now", "Few hours ago", "Today", "Yesterday",
+    "N days ago", "30+ Days Ago", "N weeks/months ago", and absolute ISO dates.
+    Returns "" when the label can't be resolved (never guesses "today")."""
+    text = (raw or "").strip().lower()
+    if not text:
+        return ""
+    m = re.search(r"\d{4}-\d{2}-\d{2}", text)
+    if m:
+        return m.group(0)
+    if any(p in text for p in ("just now", "few hours", "hour ago", "hours ago",
+                               "minute", "today", "few mins", "moments ago")):
+        return ref.strftime("%Y-%m-%d")
+    if "yesterday" in text:
+        return (ref - timedelta(days=1)).strftime("%Y-%m-%d")
+    m = _REL_NUM_RE.search(text)
+    if m:
+        n, unit = int(m.group(1)), m.group(2).lower()
+        if unit in ("minute", "min", "hour", "hr"):
+            return ref.strftime("%Y-%m-%d")
+        days = n * {"day": 1, "week": 7, "month": 30}[unit]
+        return (ref - timedelta(days=days)).strftime("%Y-%m-%d")
+    return ""
+
+
+def _abs_url(href: str) -> str:
+    href = (href or "").strip()
+    if not href:
+        return ""
+    if href.startswith("//"):
+        return "https:" + href
+    if href.startswith("/"):
+        return _NAUKRI_BASE + href
+    return href
+
+
+_JOB_ID_FROM_URL_RE = re.compile(r"-(\d{9,15})$")
+
+
+def naukri_job_id_from_url(url: str | None) -> str:
+    """Trailing Naukri jobId of a naukri.com job-listing URL ("" when absent or
+    when the URL belongs to another board)."""
+    norm = normalize_job_url(url)
+    if "naukri.com" not in norm:
+        return ""
+    m = _JOB_ID_FROM_URL_RE.search(norm)
+    return m.group(1) if m else ""
+
+
+def _slug(text: str) -> str:
+    """Naukri SEO slug: lowercase, c++ → c-plus-plus, c# → c-sharp, .net → dot-net,
+    every other non-alphanumeric run → '-'."""
+    t = (text or "").lower()
+    t = t.replace("++", " plus plus ").replace("#", " sharp ")
+    t = re.sub(r"(^|\s)\.net\b", r"\1 dot net ", t)
+    return re.sub(r"[^a-z0-9]+", "-", t).strip("-")
+
+
+def _salary_buckets(f: FiltersConfig) -> list[str]:
+    """Naukri ctcFilter buckets overlapping [salary_min, salary_max] (INR/yr), or
+    [] when no INR salary range is set OR undisclosed-salary jobs are wanted
+    (Naukri's salary filter would drop those — the post-scrape salary check in
+    BusinessFilterService handles the range instead)."""
+    if (f.salary_currency or "").upper() != "INR" or f.include_undisclosed_salary:
+        return []
+    if not f.salary_min and not f.salary_max:
+        return []
+    lo = (f.salary_min or 0) / 100_000
+    hi = (f.salary_max / 100_000) if f.salary_max else math.inf
+    return [f"{a}to{b}" for a, b in _CTC_BUCKETS if a < hi and b > lo]
+
+
+def _keyword_for(f: FiltersConfig) -> str:
+    """Naukri `k=` value: typed keyword, else comma-joined custom titles /
+    category subset, else the coarse domain (shared composition rules)."""
+    return compose_keyword_query(
+        f.keyword, f.domain, f.job_categories, f.custom_job_titles, joiner=comma_joiner,
+    )
+
+
+def _expected_filter_params(f: FiltersConfig) -> dict[str, list[str]]:
+    """The filter params Naukri's own search request must carry for this run."""
+    exp: dict[str, list[str]] = {}
+    if ja := _DATE_MAP.get(f.search_window_hours, ""):
+        exp["jobAge"] = [ja]
+    if wt := _WORK_MODE_MAP.get(f.work_mode, ""):
+        exp["wfhType"] = [wt]
+    if ctc := _salary_buckets(f):
+        exp["ctcFilter"] = ctc
+    return exp
+
+
+def build_search_url(f: FiltersConfig, page_no: int = 1) -> str:
+    """Naukri SRP URL for `page_no` with every applicable filter.
+
+    Path: ``{keyword}-jobs`` / ``{keyword}-jobs-in-{location}`` /
+    ``jobs-in-{location}`` / ``jobs-in-india``, with ``-{N}`` for page N>1.
+    Query: ``k`` (keyword, every page), ``l`` (location, page 1 ONLY — on later
+    pages Naukri redirects an ``l=`` URL to page 1 and strips every param; the
+    location is carried by the path), ``jobAge``, ``wfhType``, ``ctcFilter``.
+    """
+    keyword = _keyword_for(f)
+    location = (f.location or "").strip()
+    k_slug, l_slug = _slug(keyword), _slug(location)
+    if k_slug and l_slug:
+        path = f"{k_slug}-jobs-in-{l_slug}"
+    elif k_slug:
+        path = f"{k_slug}-jobs"
+    elif l_slug:
+        path = f"jobs-in-{l_slug}"
+    else:
+        path = "jobs-in-india"
+    if page_no > 1:
+        path = f"{path}-{page_no}"
+
+    params: list[tuple[str, str]] = []
+    if keyword:
+        params.append(("k", keyword))
+    if location and page_no == 1:
+        params.append(("l", location))
+    for key, values in _expected_filter_params(f).items():
+        params.extend((key, v) for v in values)
+    query = urlencode(params)
+    return f"{_NAUKRI_BASE}/{path}" + (f"?{query}" if query else "")
+
+
+def _norm_kw(text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (text or "").lower())
+
+
+def missing_search_filters(search_url: str, f: FiltersConfig, page_no: int) -> list[str]:
+    """Which requested filters are ABSENT from Naukri's own search request URL
+    (the intercepted /jobapi/v3/search, or the SRP URL as a fallback). Returns
+    [] when everything requested was applied."""
+    try:
+        q = parse_qs(urlparse(search_url).query, keep_blank_values=True)
+    except ValueError:
+        return ["unparseable_url"]
+    missing: list[str] = []
+    for key, values in _expected_filter_params(f).items():
+        have = set(q.get(key, []))
+        if not set(values) <= have:
+            missing.append(key)
+    if "/jobapi/" in search_url:
+        page_vals = q.get("pageNo", [])
+        if page_vals and page_vals[0] != str(page_no):
+            missing.append("pageNo")
+    keyword = _keyword_for(f)
+    if keyword:
+        sent = q.get("k", []) + q.get("keyword", [])
+        if not any(_norm_kw(v) == _norm_kw(keyword) for v in sent):
+            missing.append("k")
+    return missing
+
+
+def _placeholder(d: dict, kind: str) -> str:
+    for ph in d.get("placeholders") or []:
+        if isinstance(ph, dict) and ph.get("type") == kind:
+            return _clean(ph.get("label", ""))
+    return ""
+
+
+def _split_skills(raw: Any) -> list[str]:
+    if isinstance(raw, list):
+        items = [_clean(x) for x in raw]
+    else:
+        items = [_clean(x) for x in str(raw or "").split(",")]
+    out: list[str] = []
+    seen: set[str] = set()
+    for s in items:
+        if s and s.lower() not in seen:
+            seen.add(s.lower())
+            out.append(s)
+    return out[:15]
+
+
+def _snippet_to_text(snippet: str) -> str:
+    if not snippet:
+        return ""
+    if "<" in snippet:
+        return html_description_to_text(snippet) or _clean(re.sub(r"<[^>]+>", " ", snippet))
+    return format_job_description(snippet)
+
+
+def _salary_label(raw: str) -> str:
+    raw = _clean(raw)
+    if not raw or raw.lower() in ("not disclosed", "not specified"):
+        return "Not Disclosed"
+    return raw
+
+
+def job_from_search_json(d: dict, ref: datetime) -> NaukriScrapedJob | None:
+    """One /jobapi/v3/search ``jobDetails[]`` entry → NaukriScrapedJob, or None
+    when it has no usable title/URL."""
+    if not isinstance(d, dict):
+        return None
+    title = _clean(d.get("title"))
+    url = _abs_url(d.get("jdURL") or d.get("staticUrl") or "")
+    if not title or not url or "job-listings" not in url:
+        return None
+    location = _placeholder(d, "location")
+    posted = _epoch_ms_to_date(d.get("createdDate")) or _resolve_relative_posted(
+        str(d.get("footerPlaceholderLabel") or ""), ref,
+    )
+    consultant = d.get("consultant") if isinstance(d.get("consultant"), bool) else None
+    company = _clean(d.get("companyName"))
+    return NaukriScrapedJob(
+        job_title       = title,
+        company         = company or "Unknown Company",
+        location        = location or "Unknown Location",
+        salary          = _salary_label(_placeholder(d, "salary")),
+        experience      = _placeholder(d, "experience") or _clean(d.get("experienceText")) or "Not Specified",
+        posted_date     = posted,
+        job_url         = url,
+        job_description = _snippet_to_text(str(d.get("jobDescription") or "")),
+        skills          = _split_skills(d.get("tagsAndSkills")),
+        work_mode       = _infer_work_mode(location),
+        job_id          = str(d.get("jobId") or "") or naukri_job_id_from_url(url),
+        consultant      = consultant,
+        hiring_for      = _clean(d.get("hiringFor") or d.get("clientTitleString")),
+    )
+
+
+def job_from_dom_card(d: dict, ref: datetime) -> NaukriScrapedJob | None:
+    """One DOM-card dict (see _DOM_CARDS_JS) → NaukriScrapedJob, or None."""
+    if not isinstance(d, dict):
+        return None
+    title = _clean(d.get("title"))
+    url = _abs_url(str(d.get("url") or "").split("?")[0])
+    if not title or not url:
+        return None
+    location = _clean(d.get("location"))
+    return NaukriScrapedJob(
+        job_title       = title,
+        company         = _clean(d.get("company")) or "Unknown Company",
+        location        = location or "Unknown Location",
+        salary          = _salary_label(d.get("salary") or ""),
+        experience      = _clean(d.get("experience")) or "Not Specified",
+        posted_date     = _resolve_relative_posted(str(d.get("posted") or ""), ref),
+        job_url         = url,
+        job_description = format_job_description(_clean(d.get("description"))),
+        skills          = _split_skills(d.get("skills") or []),
+        work_mode       = _infer_work_mode(location),
+        job_id          = str(d.get("job_id") or "") or naukri_job_id_from_url(url),
+    )
+
+
+# Recruiter/contact blocks Naukri may attach to a v4 job when it chooses to show
+# them (showRecruiterDetail). Read defensively — guests usually get none.
+_RECRUITER_KEYS = ("recruiterDetail", "recruiterDetails", "recruiterProfile",
+                   "contactDetails", "recruiter")
+
+_EMAIL_IN_TEXT_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+# A phone is only taken from free text when a contact cue sits right before it,
+# so job ids / salary figures are never mistaken for numbers.
+_PHONE_IN_TEXT_RE = re.compile(
+    r"(?:call|contact|mobile|mob|phone|ph|whats\s*app|tel)\s*(?:no\.?|number|#)?\s*[:\-.]?\s*"
+    r"(\+?\d[\d\s\-()]{7,16}\d)",
+    re.I,
+)
+
+
+def _clean_email(raw: str | None) -> str | None:
+    email = normalize_email(raw)
+    if email and any(p in email.lower() for p in _JUNK_EMAIL_PATTERNS):
+        return None
+    return email
+
+
+def extract_contacts_from_text(text: str) -> tuple[str | None, str | None]:
+    """(email, phone) present VERBATIM in a job's description text, or None each.
+    Junk/system addresses (report-fraud, no-reply, Naukri's own) are dropped;
+    values go through the shared contact normalizers."""
+    email = None
+    for m in _EMAIL_IN_TEXT_RE.finditer(text or ""):
+        if (email := _clean_email(m.group(0).rstrip("."))):
+            break
+    phone = None
+    for m in _PHONE_IN_TEXT_RE.finditer(text or ""):
+        if (phone := normalize_phone(m.group(1))):
+            break
+    return email, phone
+
+
+def _apply_contacts(job: NaukriScrapedJob, name: Any = None, designation: Any = None,
+                    company: Any = None, email: Any = None, phone: Any = None) -> None:
+    """Fill recruiter fields only where empty and only with real values."""
+    if (v := _clean(name)) and not job.recruiter_name:
+        job.recruiter_name = v
+    if (v := _clean(designation)) and not job.job_poster_designation:
+        job.job_poster_designation = v
+    if (v := _clean(company)) and not job.recruiter_company:
+        job.recruiter_company = v
+    if email and not job.email_id and (e := _clean_email(str(email))):
+        job.email_id = e
+    if phone and not job.contact_number and (p := normalize_phone(str(phone))):
+        job.contact_number = p
+
+
+def _set_description(job: NaukriScrapedJob, html: str) -> bool:
+    html = (html or "").strip()
+    if not html:
+        return False
+    text = html_description_to_text(html) if "<" in html else format_job_description(html)
+    if not text:
+        return False
+    job.job_description = text
+    job.job_description_html = sanitize_description_html(html) or description_text_to_html(text)
+    return True
+
+
+_BARE_WORK_MODE_LOCATIONS = {"remote", "hybrid", "work from home", "wfh", "unknown location", ""}
+
+
+def apply_detail_json(job: NaukriScrapedJob, payload: dict) -> bool:
+    """Merge a /jobapi/v4/job/{id} payload into `job`. Returns True when it
+    carried a usable jobDetails block."""
+    jd = (payload or {}).get("jobDetails") if isinstance(payload, dict) else None
+    if not isinstance(jd, dict):
+        return False
+
+    _set_description(job, str(jd.get("description") or ""))
+
+    if emp := _clean(jd.get("employmentType")):
+        job.employment_type = emp
+    wm = _work_mode_from_wfh_type(jd.get("wfhType"))
+    if wm:
+        job.work_mode = wm
+    elif job.work_mode == "not_specified":
+        job.work_mode = _infer_work_mode(str(jd.get("wfhLabel") or ""))
+    if ind := _clean(jd.get("industry")):
+        job.industry_hint = ind
+    if isinstance(jd.get("consultant"), bool):
+        job.consultant = jd["consultant"]
+
+    cd = jd.get("companyDetail") if isinstance(jd.get("companyDetail"), dict) else {}
+    if site := _clean(cd.get("websiteUrl")):
+        job.company_url = site
+    if not job.hiring_for:
+        job.hiring_for = _clean(cd.get("hiringFor") or jd.get("clientTitleString"))
+    if job.company in ("", "Unknown Company") and (name := _clean(cd.get("name"))):
+        job.company = name
+
+    labels = [_clean(loc.get("label")) for loc in jd.get("locations") or [] if isinstance(loc, dict)]
+    labels = [lbl for lbl in labels if lbl]
+    if labels and job.location.strip().lower() in _BARE_WORK_MODE_LOCATIONS:
+        job.location = ", ".join(labels)
+
+    ks = jd.get("keySkills") if isinstance(jd.get("keySkills"), dict) else {}
+    detail_skills = [
+        s.get("label") for grp in ("preferred", "other") for s in (ks.get(grp) or [])
+        if isinstance(s, dict)
+    ]
+    if detail_skills:
+        job.skills = _split_skills(list(job.skills) + detail_skills)
+
+    sal = jd.get("salaryDetail") if isinstance(jd.get("salaryDetail"), dict) else {}
+    if job.salary == "Not Disclosed" and not sal.get("hideSalary") and (st := _clean(sal.get("salaryText") or sal.get("label"))):
+        job.salary = st
+    if not job.posted_date:
+        job.posted_date = _ist_datetime_to_date(jd.get("createdDate"))
+    if job.experience == "Not Specified" and (ex := _clean(jd.get("experienceText"))):
+        job.experience = ex
+
+    # Recruiter contact — only when Naukri itself exposes one.
+    for key in _RECRUITER_KEYS:
+        rec = jd.get(key)
+        if isinstance(rec, dict):
+            _apply_contacts(
+                job,
+                name=rec.get("name") or rec.get("recruiterName") or rec.get("contactName"),
+                designation=rec.get("designation") or rec.get("title"),
+                company=rec.get("companyName") or rec.get("company"),
+                email=rec.get("email") or rec.get("emailId"),
+                phone=rec.get("mobile") or rec.get("phone") or rec.get("contactNumber"),
+            )
+    email, phone = extract_contacts_from_text(job.job_description)
+    _apply_contacts(job, email=email, phone=phone)
+    return True
+
+
+def _find_job_posting(obj: Any) -> dict | None:
+    if isinstance(obj, list):
+        for item in obj:
+            if (found := _find_job_posting(item)) is not None:
+                return found
+        return None
+    if isinstance(obj, dict):
+        t = obj.get("@type")
+        if t == "JobPosting" or (isinstance(t, list) and "JobPosting" in t):
+            return obj
+        if "@graph" in obj:
+            return _find_job_posting(obj["@graph"])
+    return None
+
+
+def apply_ld_json(job: NaukriScrapedJob, ld_texts: list[str]) -> bool:
+    """Merge the page's schema.org JobPosting (application/ld+json) into `job`.
+    Returns True when a JobPosting with a description was found."""
+    posting = None
+    for raw in ld_texts or []:
+        try:
+            posting = _find_job_posting(json.loads(raw))
+        except (ValueError, TypeError):
+            continue
+        if posting:
+            break
+    if not posting:
+        return False
+    if not _set_description(job, str(posting.get("description") or "")):
+        return False
+
+    emp = posting.get("employmentType")
+    if isinstance(emp, list):
+        emp = ", ".join(str(e) for e in emp if e)
+    if emp and not job.employment_type:
+        job.employment_type = _clean(str(emp).replace("_", " ").title())
+    if str(posting.get("jobLocationType") or "").upper() == "TELECOMMUTE":
+        job.work_mode = "remote"
+    if (ind := _clean(posting.get("industry"))) and not job.industry_hint:
+        job.industry_hint = ind
+    org = posting.get("hiringOrganization") if isinstance(posting.get("hiringOrganization"), dict) else {}
+    same_as = _clean(org.get("sameAs") or org.get("url"))
+    if same_as and "naukri.com" not in same_as.lower() and not job.company_url:
+        job.company_url = same_as
+    if job.company in ("", "Unknown Company") and (name := _clean(org.get("name"))):
+        job.company = name
+    if not job.posted_date:
+        job.posted_date = _ist_datetime_to_date(posting.get("datePosted"))
+    if (skills := posting.get("skills")) and not job.skills:
+        job.skills = _split_skills(skills)
+    email, phone = extract_contacts_from_text(job.job_description)
+    _apply_contacts(job, email=email, phone=phone)
+    return True
+
+
+def apply_dom_description(job: NaukriScrapedJob, desc_html: str) -> bool:
+    """Last-resort detail fallback: the rendered description container's HTML."""
+    if not _set_description(job, desc_html):
+        return False
+    if job.work_mode == "not_specified":
+        job.work_mode = _infer_work_mode(job.location)
+    email, phone = extract_contacts_from_text(job.job_description)
+    _apply_contacts(job, email=email, phone=phone)
+    return True
+
+
+# ── Browser factory for isolated guest mode ───────────────────────────────────
+
+def naukri_guest_browser(headless: bool = True, slow_mo: int = 0) -> BrowserManager:
+    """A fresh cookie-less guest browser for Naukri, independent of any LinkedIn
+    Chrome profile. Bundled Chromium via channel="chromium" (NOT the
+    chromium-headless-shell, which Naukri's Akamai edge answers with "Access
+    Denied"); Indian locale/timezone like a real visitor. Cross-platform."""
+    return BrowserManager(
+        headless=headless, slow_mo=slow_mo,
+        channel="chromium", locale="en-IN", timezone_id="Asia/Kolkata",
+    )
 
 
 async def _delay(page: Page, lo: int, hi: int) -> None:
     await page.wait_for_timeout(random.randint(lo, hi))
-
-
-async def _first_text(root: Page | ElementHandle, selectors: list[str]) -> str:
-    for sel in selectors:
-        try:
-            el = await root.query_selector(sel)
-            if el:
-                text = await el.inner_text()
-                if text and text.strip():
-                    return text.strip()
-        except Exception:
-            continue
-    return ""
-
-
-async def _first_attr(root: Page | ElementHandle, selectors: list[str], attr: str) -> str:
-    for sel in selectors:
-        try:
-            el = await root.query_selector(sel)
-            if el:
-                val = await el.get_attribute(attr)
-                if val:
-                    return val.strip()
-        except Exception:
-            continue
-    return ""
-
-
-async def _all_texts(root: Page | ElementHandle, selectors: list[str]) -> list[str]:
-    """Collect inner text from all matching elements (used for skills list)."""
-    for sel in selectors:
-        try:
-            els = await root.query_selector_all(sel)
-            if els:
-                texts = [t for el in els if (t := (await el.inner_text() or "").strip())]
-                if texts:
-                    return texts
-        except Exception:
-            continue
-    return []
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -406,16 +794,29 @@ async def _all_texts(root: Page | ElementHandle, selectors: list[str]) -> list[s
 
 class NaukriAgent:
     """
-    Naukri.com job harvester using a persistent Chrome profile session.
+    Naukri.com guest job harvester. Instantiate fresh for each run.
 
-    No login automation — the user logs in once via POST /naukri-setup-session
-    and the Chrome profile directory persists the session for all future runs.
-
-    Instantiate fresh for each run.
+    already_harvested  normalized job_urls harvested within the lookback window
+                       (loaded by the route); matching postings — by URL or by
+                       their trailing Naukri jobId — are skipped BEFORE the
+                       detail visit and don't consume max_jobs.
     """
 
-    def __init__(self) -> None:
-        pass
+    def __init__(self, already_harvested: set[str] | None = None) -> None:
+        self._already_harvested: set[str] = already_harvested or set()
+        self._already_harvested_ids: set[str] = {
+            jid for u in self._already_harvested if (jid := naukri_job_id_from_url(u))
+        }
+        self._skipped_already_harvested = 0
+        # Pinned once per run so every relative "N days ago" label on a long run
+        # resolves against the same reference point.
+        self._harvest_started_at = datetime.now(timezone.utc)
+        # Intercepted Naukri API responses: v3 search keyed by pageNo,
+        # v4 job detail keyed by jobId.
+        self._v3_by_page: dict[int, tuple[str, dict]] = {}
+        self._v4_by_id: dict[str, dict] = {}
+        self._details_enabled = True
+        self._detail_block_streak = 0
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -425,43 +826,34 @@ class NaukriAgent:
         headless: bool = False,
         slow_mo:  int  = 0,
     ) -> list[NaukriScrapedJob]:
-        """
-        Open Naukri with the persistent Chrome profile and harvest jobs
-        matching filters.  Returns [] if the profile is not authenticated.
-        """
-        from app.services.config_service import ConfigService
-        chrome_profile = ConfigService().load().browser.chrome_profile
-
-        logger.info(
-            "config_loaded",
-            source              = "naukri",
-            keyword             = filters.keyword,
-            location            = filters.location,
-            job_type            = filters.job_type,
-            work_mode           = filters.work_mode,
-            domain              = getattr(filters, "domain", "Any"),
-            search_window_hours = filters.search_window_hours,
-            max_jobs            = filters.max_jobs,
-            chrome_profile      = chrome_profile,
-        )
+        """Standalone run (/run-naukri-agent and the legacy orchestrator.run()).
+        Browser per settings.naukri_browser_mode: "shared" → the configured
+        persistent Chrome profile; "isolated" → a fresh guest context."""
+        settings = get_settings()
+        mode = settings.naukri_browser_mode
         logger.info(
             "naukri_search_started",
-            keyword        = filters.keyword,
-            location       = filters.location,
-            job_type       = filters.job_type,
-            work_mode      = filters.work_mode,
-            max_jobs       = filters.max_jobs,
-            chrome_profile = chrome_profile,
+            keyword   = filters.keyword,
+            location  = filters.location,
+            work_mode = filters.work_mode,
+            max_jobs  = filters.max_jobs,
+            browser_mode = mode,
         )
         try:
-            async with PersistentBrowserManager(
-                profile_dir = chrome_profile,
-                headless    = headless,
-                slow_mo     = slow_mo,
-            ) as pbm:
-                page = await pbm.new_page()
-                jobs = await self._run(page, filters)
-            logger.info("naukri_jobs_extracted", total=len(jobs))
+            if mode == "isolated":
+                async with naukri_guest_browser(headless=headless, slow_mo=slow_mo) as bm:
+                    page = await bm.new_page()
+                    jobs = await self._run(page, filters)
+            else:
+                from app.services.config_service import ConfigService
+                chrome_profile = ConfigService().load().browser.chrome_profile
+                async with PersistentBrowserManager(
+                    profile_dir = chrome_profile,
+                    headless    = headless,
+                    slow_mo     = slow_mo,
+                ) as pbm:
+                    page = await pbm.acquire_page(label="naukri")
+                    jobs = await self._run(page, filters)
             logger.info("agent_completed", source="naukri", total=len(jobs))
             return jobs
         except Exception as exc:
@@ -470,25 +862,427 @@ class NaukriAgent:
 
     # ── Internal flow ──────────────────────────────────────────────────────────
 
-    async def _run(self, page: Page, f: FiltersConfig) -> list[NaukriScrapedJob]:
-        """Navigate directly to Naukri search — no login step."""
-        jobs = await self._paginate_and_collect(page, f)
-        if jobs:
-            # Second pass: visit job detail pages to extract recruiter contact info
-            jobs = await self._enrich_leads_batch(page, jobs)
+    async def _run(
+        self,
+        page: Page,
+        f: FiltersConfig,
+        on_status: StatusCallback | None = None,
+        on_batch: BatchCallback | None = None,
+        on_progress: ProgressCallback | None = None,
+    ) -> list[NaukriScrapedJob]:
+        """Harvest Naukri for `f` on `page` (guest — no login step).
+
+        on_status   optional async callback for human-readable progress messages.
+        on_batch    optional async callback fired with each batch of freshly
+                    scraped jobs (every settings.harvest_persist_batch_size) so the
+                    caller can persist incrementally — crash safety + live progress.
+        on_progress optional async callback with structured live progress (phase,
+                    reported_total, listed, skipped, target, done, in_batch, …) —
+                    after each page's listing/dedupe and once per extracted job.
+                    Best-effort: a failing callback never affects scraping.
+        """
+        page.on("response", self._on_response)
+        try:
+            jobs = await self._paginate_and_collect(
+                page, f, on_status=on_status, on_batch=on_batch, on_progress=on_progress,
+            )
+        finally:
+            try:
+                page.remove_listener("response", self._on_response)
+            except Exception:
+                pass
+
+        logger.info(
+            "naukri_jobs_extracted", total=len(jobs),
+            skipped_already_harvested=self._skipped_already_harvested,
+        )
+        if not jobs:
+            return jobs
+
+        settings = get_settings()
+        # Company-level enrichment (size + HQ) — the shared, browser-free Apollo
+        # pass LinkedIn uses; cached on CompanyORM. Best-effort: never loses jobs.
+        try:
+            await _status(on_status, f"Naukri: enriching companies for {len(jobs)} jobs")
+            from app.services.company_enrichment_service import enrich_companies
+            await enrich_companies(jobs, settings)
+        except Exception as exc:
+            logger.warning("naukri_company_enrichment_pass_failed", error=str(exc))
+
+        # Company+location HR-contact fallback for jobs still without an email —
+        # same pass as LinkedIn (writes only its cache; attached at insert time).
+        try:
+            from app.services.company_location_contact_service import (
+                discover_company_location_contacts,
+            )
+            await discover_company_location_contacts(jobs, settings)
+        except Exception as exc:
+            logger.warning("naukri_company_location_contact_pass_failed", error=str(exc))
+
         return jobs
 
+    async def _on_response(self, response: Any) -> None:
+        """Capture Naukri's own search (v3) / job-detail (v4) JSON as the page
+        loads it. Never raises into Playwright's event loop."""
+        try:
+            url = response.url
+            if "/jobapi/v3/search" in url:
+                if response.status != 200:
+                    return
+                q = parse_qs(urlparse(url).query)
+                try:
+                    page_no = int((q.get("pageNo") or ["1"])[0])
+                except ValueError:
+                    page_no = 1
+                body = await response.json()
+                if isinstance(body, dict):
+                    self._v3_by_page[page_no] = (url, body)
+            elif "/jobapi/v4/job/" in url:
+                if response.status != 200:
+                    return
+                m = re.search(r"/jobapi/v4/job/(\d+)", url)
+                body = await response.json()
+                if m and isinstance(body, dict):
+                    self._v4_by_id[m.group(1)] = body
+        except Exception as exc:
+            logger.debug("naukri_response_capture_failed", error=str(exc))
+
+    async def _await_capture(self, page: Page, check: Callable[[], Any], timeout_ms: int) -> Any:
+        waited = 0
+        while waited < timeout_ms:
+            if (val := check()):
+                return val
+            await page.wait_for_timeout(250)
+            waited += 250
+        return check()
+
+    async def _paginate_and_collect(
+        self,
+        page: Page,
+        f: FiltersConfig,
+        on_status: StatusCallback | None = None,
+        on_batch: BatchCallback | None = None,
+        on_progress: ProgressCallback | None = None,
+    ) -> list[NaukriScrapedJob]:
+        """Page through the SRP collecting jobs (listing + detail) until the cap,
+        the end of results, a block/CAPTCHA, a filter loss, or a user stop."""
+        settings = get_settings()
+        safety_cap = f.max_jobs if f.max_jobs > 0 else 5_000
+        test_cap = env_max_jobs_cap(_TEST_MAX_JOBS_ENV)
+        if test_cap is not None:
+            logger.warning(
+                "naukri_test_mode_max_jobs_active", test_cap=test_cap,
+                configured_max_jobs=f.max_jobs,
+                hint=f"{_TEST_MAX_JOBS_ENV} is set in .env — remove it to harvest normally.",
+            )
+            safety_cap = min(safety_cap, test_cap)
+        self._details_enabled = bool(settings.naukri_fetch_details)
+
+        all_jobs: list[NaukriScrapedJob] = []
+        seen_ids: set[str] = set()
+        empty_pages = 0
+        total_pages: int | None = None
+        page_num = 1
+
+        persist_n = max(1, settings.harvest_persist_batch_size)
+        pending: list[NaukriScrapedJob] = []
+
+        async def _flush_pending() -> None:
+            if on_batch and pending:
+                batch = list(pending)
+                pending.clear()
+                try:
+                    await on_batch(batch)
+                except Exception as exc:
+                    logger.warning("naukri_on_batch_failed", count=len(batch), error=str(exc))
+
+        # Structured live progress (Live Harvest card). The full state is sent on
+        # every call; the tracker persists only what changed (ticks throttled).
+        prog: dict[str, Any] = {
+            "phase": "listing", "reported_total": None, "listed": 0, "skipped": 0,
+            "cap": safety_cap, "batch_size": persist_n,
+            "window_hours": f.search_window_hours, "page": page_num, "total_pages": None,
+        }
+
+        async def _progress(message: str | None = None, **fields: Any) -> None:
+            if on_progress is None:
+                return
+            try:
+                prog.update(fields)
+                prog["skipped"] = self._skipped_already_harvested
+                found = prog["reported_total"] if prog["reported_total"] is not None else prog["listed"]
+                prog["target"] = min(safety_cap, max(len(all_jobs), int(found) - prog["skipped"]))
+                prog["done"] = len(all_jobs)
+                prog["in_batch"] = len(pending)
+                payload = dict(prog)
+                if message:
+                    payload["message"] = message
+                await on_progress(payload)
+            except Exception as exc:  # progress reporting must never break a scrape
+                logger.debug("naukri_progress_callback_failed", error=str(exc))
+
+        logger.info(
+            "search_started", source="naukri", keyword=_keyword_for(f), location=f.location,
+            work_mode=f.work_mode, job_type=f.job_type, max_jobs=f.max_jobs,
+            search_window_hours=f.search_window_hours, safety_cap=safety_cap,
+        )
+        await _status(on_status, "Naukri: searching…")
+
+        while len(all_jobs) < safety_cap and page_num <= _MAX_PAGES:
+            if run_guard.is_stop_requested():
+                logger.info("naukri_pagination_stopped_by_user", page=page_num, collected=len(all_jobs))
+                break
+            if total_pages is not None and page_num > total_pages:
+                logger.info("naukri_results_exhausted", page=page_num, total_pages=total_pages)
+                break
+
+            await _progress(phase="listing", page=page_num)
+            try:
+                listing, search_req_url = await self._load_results_page(page, f, page_num)
+            except SearchFilterNotAppliedException:
+                if page_num == 1:
+                    raise
+                logger.warning("naukri_filter_lost_stopping", page=page_num, collected=len(all_jobs))
+                break
+            except _PageBlocked as exc:
+                logger.warning("naukri_page_blocked", page=page_num, reason=str(exc), collected=len(all_jobs))
+                break
+            except Exception as exc:
+                if page_num == 1:
+                    logger.error("naukri_navigation_failed", page=page_num, error=str(exc))
+                    raise
+                logger.warning("naukri_page_failed", page=page_num, error=str(exc), collected=len(all_jobs))
+                break
+
+            if page_num == 1:
+                v3 = self._v3_by_page.get(1)
+                no_of_jobs = v3[1].get("noOfJobs") if v3 else None
+                if isinstance(no_of_jobs, int):
+                    total_pages = max(1, math.ceil(no_of_jobs / _PAGE_SIZE))
+                logger.info(
+                    "naukri_search_diagnostics", search_request=search_req_url,
+                    final_url=page.url, total_jobs_reported=no_of_jobs, total_pages=total_pages,
+                )
+                await _status(
+                    on_status,
+                    f"Naukri: {no_of_jobs if no_of_jobs is not None else 'unknown number of'} matching jobs",
+                )
+                await _progress(
+                    reported_total=no_of_jobs if isinstance(no_of_jobs, int) else None,
+                    total_pages=total_pages,
+                )
+
+            if not listing:
+                empty_pages += 1
+                logger.info("naukri_page_empty", page=page_num, consecutive_empty=empty_pages)
+                if empty_pages >= 2 or total_pages is not None:
+                    break
+                page_num += 1
+                continue
+            empty_pages = 0
+
+            # Phase A: dedup / skip BEFORE any detail visit (skips don't use the cap).
+            remaining = safety_cap - len(all_jobs)
+            to_fetch: list[NaukriScrapedJob] = []
+            for job in listing:
+                if len(to_fetch) >= remaining:
+                    break
+                key = job.job_id or normalize_job_url(job.job_url)
+                if not key or key in seen_ids:
+                    continue
+                if (normalize_job_url(job.job_url) in self._already_harvested
+                        or (job.job_id and job.job_id in self._already_harvested_ids)):
+                    self._skipped_already_harvested += 1
+                    seen_ids.add(key)
+                    continue
+                seen_ids.add(key)
+                to_fetch.append(job)
+            await _progress(
+                phase="details" if to_fetch else "listing",
+                listed=int(prog["listed"] or 0) + len(listing),
+                message=f"Naukri: page {page_num} — {len(to_fetch)} new of {len(listing)} listed",
+            )
+
+            # Phase B: per-job detail (isolated per job), then incremental flush.
+            for idx, job in enumerate(to_fetch):
+                if run_guard.is_stop_requested():
+                    logger.info("naukri_detail_loop_stopped_by_user", collected=len(all_jobs))
+                    break
+                if self._details_enabled:
+                    try:
+                        await self._fetch_detail(page, job)
+                    except Exception as exc:
+                        logger.warning("naukri_detail_failed", url=job.job_url, error=str(exc))
+                    if idx < len(to_fetch) - 1:
+                        await _delay(page, settings.naukri_detail_delay_min_ms,
+                                     max(settings.naukri_detail_delay_min_ms,
+                                         settings.naukri_detail_delay_max_ms))
+                all_jobs.append(job)
+                pending.append(job)
+                logger.info("job_card_extracted", source="naukri", title=job.job_title,
+                            company=job.company, url=job.job_url)
+                await _progress(
+                    message=f"Page {page_num} · detail {idx + 1} of {len(to_fetch)} fetched",
+                )
+                if len(pending) >= persist_n:
+                    await _flush_pending()
+            await _flush_pending()
+
+            logger.info(
+                "naukri_page_done", page=page_num, listed=len(listing), new=len(to_fetch),
+                total=len(all_jobs), skipped_already_harvested=self._skipped_already_harvested,
+            )
+            await _status(on_status, f"Naukri: page {page_num} done — {len(all_jobs)} jobs collected")
+
+            if run_guard.is_stop_requested():
+                break
+            page_num += 1
+            if page_num % 10 == 0:
+                await _delay(page, 8_000, 14_000)
+            else:
+                await _delay(page, 3_000, 6_000)
+
+        await _flush_pending()
+        await _progress(phase="done")
+        logger.info(
+            "pagination_completed", source="naukri", pages_visited=page_num,
+            total_jobs=len(all_jobs), skipped_already_harvested=self._skipped_already_harvested,
+        )
+        return all_jobs
+
+    async def _load_results_page(
+        self, page: Page, f: FiltersConfig, page_num: int,
+    ) -> tuple[list[NaukriScrapedJob], str]:
+        """Navigate to SRP page `page_num`, verify filters, and return its jobs
+        (+ the search-request URL used for verification)."""
+        search_url = build_search_url(f, page_no=page_num)
+        logger.info("generated_search_url", url=search_url, page=page_num)
+
+        for attempt in (1, 2):
+            self._v3_by_page.pop(page_num, None)
+            await retry_async(
+                lambda: page.goto(search_url, wait_until="domcontentloaded", timeout=30_000),
+                retries=3, delay_s=3.0,
+            )
+            await self._raise_if_blocked(page, page_num)
+            v3 = await self._await_capture(page, lambda: self._v3_by_page.get(page_num), 15_000)
+            req_url = v3[0] if v3 else page.url
+            missing = missing_search_filters(req_url, f, page_num)
+            if not missing:
+                break
+            logger.warning(
+                "search_filter_not_applied", page=page_num, attempt=attempt,
+                missing=missing, generated_url=search_url, request_url=req_url,
+            )
+            if attempt == 2:
+                await self._screenshot(page, f"naukri_filter_missing_p{page_num}")
+                raise SearchFilterNotAppliedException(
+                    f"Naukri did not apply {missing} on page {page_num} "
+                    f"(requested {search_url}; Naukri searched {req_url})"
+                )
+            await _delay(page, 2_000, 4_000)
+
+        await self._dismiss_overlays(page)
+        # Brief human-like scroll through the result list (also triggers any
+        # lazy rendering the DOM fallback needs).
+        await human_scroll(page, max_rounds=8, pause_lo=250, pause_hi=700)
+
+        ref = self._harvest_started_at
+        jobs: list[NaukriScrapedJob] = []
+        method = "v3_json"
+        if v3:
+            for d in v3[1].get("jobDetails") or []:
+                try:
+                    if (job := job_from_search_json(d, ref)) is not None:
+                        jobs.append(job)
+                except Exception as exc:
+                    logger.debug("naukri_v3_card_skipped", error=str(exc))
+        if not jobs:
+            method = "dom"
+            try:
+                await page.wait_for_selector("[data-job-id]", timeout=8_000)
+            except Exception:
+                pass
+            try:
+                raw = await page.evaluate(_DOM_CARDS_JS)
+            except Exception as exc:
+                logger.warning("naukri_dom_cards_failed", page=page_num, error=str(exc))
+                raw = []
+            for d in raw or []:
+                try:
+                    if (job := job_from_dom_card(d, ref)) is not None:
+                        jobs.append(job)
+                except Exception as exc:
+                    logger.debug("naukri_dom_card_skipped", error=str(exc))
+            if not jobs and page_num == 1:
+                await self._screenshot(page, "naukri_no_cards")
+        logger.info("naukri_cards_found", page=page_num, count=len(jobs), method=method)
+        return jobs, req_url
+
+    async def _fetch_detail(self, page: Page, job: NaukriScrapedJob) -> None:
+        """Enrich `job` from its detail page: v4 JSON → ld+json → DOM fallback."""
+        if job.job_id:
+            self._v4_by_id.pop(job.job_id, None)
+        await retry_async(
+            lambda: page.goto(job.job_url, wait_until="domcontentloaded", timeout=30_000),
+            retries=2, delay_s=2.0,
+        )
+        try:
+            await self._raise_if_blocked(page, 0)
+            self._detail_block_streak = 0
+        except _PageBlocked as exc:
+            self._detail_block_streak += 1
+            logger.warning("naukri_detail_blocked", url=job.job_url, reason=str(exc),
+                           streak=self._detail_block_streak)
+            if self._detail_block_streak >= 3:
+                self._details_enabled = False
+                logger.warning("naukri_detail_pass_disabled", reason="repeated blocks")
+            return
+
+        payload = None
+        if job.job_id:
+            payload = await self._await_capture(page, lambda: self._v4_by_id.get(job.job_id), 10_000)
+        if payload and apply_detail_json(job, payload):
+            logger.debug("naukri_detail_source", source="v4_json", job_id=job.job_id)
+            return
+        try:
+            fb = await page.evaluate(_DETAIL_FALLBACK_JS)
+        except Exception as exc:
+            logger.debug("naukri_detail_fallback_eval_failed", error=str(exc))
+            return
+        if apply_ld_json(job, fb.get("ld") or []):
+            logger.debug("naukri_detail_source", source="ld_json", job_id=job.job_id)
+        elif apply_dom_description(job, fb.get("desc_html") or ""):
+            logger.debug("naukri_detail_source", source="dom", job_id=job.job_id)
+        else:
+            logger.debug("naukri_detail_source", source="none", job_id=job.job_id)
+
+    # ── Block / CAPTCHA detection ──────────────────────────────────────────────
+
+    async def _raise_if_blocked(self, page: Page, page_num: int) -> None:
+        url = page.url or ""
+        title = ""
+        try:
+            title = await page.title()
+        except Exception:
+            pass
+        if any(p in url for p in ("/challenge", "/authwall", "/nlogin/login")):
+            await self._save_captcha_artifacts(page, page_num)
+            raise _PageBlocked(f"redirected to {url}")
+        if "access denied" in title.lower():
+            raise _PageBlocked("Access Denied (edge bot wall)")
+        if await self._is_hard_captcha(page):
+            await self._save_captcha_artifacts(page, page_num)
+            raise _PageBlocked("captcha")
+
     async def _is_hard_captcha(self, page: Page) -> bool:
-        """
-        Detect an explicit user-facing CAPTCHA challenge.
-        Checks selectors visible from the MAIN frame (not inside iframes).
-        """
+        """Detect an explicit user-facing CAPTCHA challenge in the main frame."""
         hard_sels = [
-            "#challenge-form",                           # Cloudflare challenge
-            "iframe[src*='challenges.cloudflare.com']",  # Cloudflare turnstile
-            "iframe[src*='google.com/recaptcha/api2']",  # Google reCAPTCHA v2 iframe
-            "iframe[src*='recaptcha.net/recaptcha']",    # reCAPTCHA alternate CDN
-            "iframe[title*='reCAPTCHA']",                # reCAPTCHA by title attr
+            "#challenge-form",
+            "iframe[src*='challenges.cloudflare.com']",
+            "iframe[src*='google.com/recaptcha/api2']",
+            "iframe[src*='recaptcha.net/recaptcha']",
+            "iframe[title*='reCAPTCHA']",
         ]
         for sel in hard_sels:
             try:
@@ -497,880 +1291,52 @@ class NaukriAgent:
                     return True
             except Exception:
                 continue
-        # Also check body text as a last resort (Naukri's custom CAPTCHA page)
         try:
-            body = await page.inner_text("body")
-            if "I'm not a robot" in body or "check the box to let us know you" in body:
+            body = (await page.inner_text("body")).lower()
+            if "i'm not a robot" in body or "check the box to let us know you" in body:
                 return True
         except Exception:
             pass
         return False
 
     async def _save_captcha_artifacts(self, page: Page, page_num: int) -> dict:
-        """Save screenshot + full HTML when CAPTCHA is detected. Returns paths dict."""
+        """Save screenshot + HTML when blocked. Returns paths dict."""
         paths: dict = {}
-        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         try:
             _DEBUG_SCREENSHOT.mkdir(parents=True, exist_ok=True)
             ss_path = _DEBUG_SCREENSHOT / "naukri_captcha.png"
             await page.screenshot(path=str(ss_path), full_page=False)
             paths["screenshot"] = str(ss_path.resolve())
-            logger.info("captcha_screenshot_saved", path=paths["screenshot"])
         except Exception as exc:
             logger.debug("captcha_screenshot_failed", error=str(exc))
         try:
             _DEBUG_HTML.mkdir(parents=True, exist_ok=True)
             html_path = _DEBUG_HTML / "naukri_captcha.html"
-            html = await page.content()
-            html_path.write_text(html, encoding="utf-8")
+            html_path.write_text(await page.content(), encoding="utf-8")
             paths["html"] = str(html_path.resolve())
-            logger.info("captcha_html_saved", path=paths["html"], page=page_num)
         except Exception as exc:
             logger.debug("captcha_html_failed", error=str(exc))
+        logger.warning("naukri_captcha_detected", page_number=page_num, url=page.url, **paths)
         return paths
-
-    async def _detect_login_status(self, page: Page) -> str:
-        """Return 'logged_in', 'logged_out', or 'unknown' from page DOM."""
-        try:
-            # Logged-in indicators: user avatar / profile icon
-            for sel in ("a.nI-gNb-drawer__icon", "[class*='nI-gNb-user']",
-                        "[class*='user-name']", "[class*='profileIcon']"):
-                if await page.query_selector(sel):
-                    return "logged_in"
-            # Logged-out indicators: Login / Register buttons
-            for sel in ("a:has-text('Login')", "button:has-text('Login')",
-                        "a:has-text('Register')", ".login-layer"):
-                el = await page.query_selector(sel)
-                if el and await el.is_visible():
-                    return "logged_out"
-        except Exception:
-            pass
-        return "unknown"
-
-    async def _paginate_and_collect(
-        self, page: Page, f: FiltersConfig
-    ) -> list[NaukriScrapedJob]:
-        """
-        Paginate through Naukri results using pageNo=1,2,3,…
-
-        Naukri shows 20 jobs per page with URL-based pagination (no infinite scroll).
-        Delays: 3-6 s between pages; 8-14 s every 10 pages to avoid bot detection.
-
-        Stops when:
-        • CAPTCHA / robot-verification detected  → saves screenshot+HTML, stops
-        • URL redirected to auth / challenge page → stops
-        • No cards found on 2 consecutive pages  → results exhausted
-        • Safety cap reached (max_jobs or 5 000)
-        """
-        all_jobs:        list[NaukriScrapedJob] = []
-        seen_urls:       set[str]               = set()
-        page_num:        int                    = 1
-        safety_cap:      int                    = f.max_jobs if f.max_jobs > 0 else 5_000
-        empty_pages:     int                    = 0
-        pretty_base_url: str                    = ""   # set after first-page redirect
-        job_age_val:     str                    = _DATE_MAP.get(f.search_window_hours, "")
-
-        logger.info(
-            "search_started",
-            source              = "naukri",
-            keyword             = f.keyword,
-            location            = f.location,
-            job_type            = f.job_type,
-            work_mode           = f.work_mode,
-            max_jobs            = f.max_jobs,
-            search_window_hours = f.search_window_hours,
-            safety_cap          = safety_cap,
-        )
-
-        while len(all_jobs) < safety_cap:
-            # ── Build URL for this page ────────────────────────────────────────
-            # After first-page navigation Naukri redirects to a "pretty URL" and
-            # strips all query params (including jobAge).  We store that pretty
-            # base after page 1 and construct all subsequent URLs ourselves to
-            # keep the jobAge filter intact.
-            if pretty_base_url:
-                if page_num > 1:
-                    search_url = (
-                        f"{pretty_base_url}-{page_num}?jobAge={job_age_val}"
-                        if job_age_val else f"{pretty_base_url}-{page_num}"
-                    )
-                else:
-                    search_url = (
-                        f"{pretty_base_url}?jobAge={job_age_val}"
-                        if job_age_val else pretty_base_url
-                    )
-            else:
-                search_url = self._build_search_url(f, page_no=page_num)
-
-            logger.info(
-                "naukri_page_navigating",
-                page_number       = page_num,
-                search_url        = search_url,
-                collected_so_far  = len(all_jobs),
-                remaining_cap     = safety_cap - len(all_jobs),
-            )
-            logger.info("generated_search_url",
-                        url=search_url, page=page_num,
-                        search_window_hours=f.search_window_hours)
-
-            try:
-                await page.goto(search_url, wait_until="domcontentloaded", timeout=30_000)
-            except Exception as exc:
-                if page_num == 1:
-                    logger.error("naukri_navigation_failed",
-                                 page_number=page_num, search_url=search_url, error=str(exc))
-                    raise
-                logger.warning("naukri_page_nav_failed",
-                               page_number=page_num, search_url=search_url, error=str(exc))
-                break
-
-            await _delay(page, 2_500, 4_000)
-
-            # ── First-page: validate that the search filter was actually applied ──
-            if page_num == 1 and not pretty_base_url:
-                _init_url = page.url
-                _raw_base = _init_url.split("?")[0].rstrip("/")
-                _filter_ok = bool(job_age_val and f"jobAge={job_age_val}" in _init_url)
-
-                if job_age_val and not _filter_ok:
-                    # Root cause: Naukri redirects the query-param URL to a pretty URL
-                    # and strips all parameters including jobAge.  Re-apply the filter.
-                    _retry_url = f"{_raw_base}?jobAge={job_age_val}"
-                    logger.warning(
-                        "search_filter_not_applied",
-                        note           = "Naukri redirect stripped jobAge; retrying with filter on pretty URL",
-                        generated_url  = search_url,
-                        after_redirect = _init_url,
-                        retry_url      = _retry_url,
-                    )
-                    try:
-                        await page.goto(_retry_url, wait_until="domcontentloaded", timeout=30_000)
-                        await _delay(page, 2_500, 4_000)
-                    except Exception as _exc:
-                        logger.error("naukri_filter_retry_failed", error=str(_exc))
-                    _filter_ok = f"jobAge={job_age_val}" in page.url
-
-                # Store the pretty base URL (no query params) for all subsequent pages
-                pretty_base_url = page.url.split("?")[0].rstrip("/")
-
-                # ── Extract total reported job count from page title ────────────
-                _title = ""
-                try:
-                    _title = await page.title()
-                except Exception:
-                    pass
-                _total_naukri = 0
-                _cm = re.search(r"([\d,]+)\s+\w[\w\s]*\s+Job\s+Vacanc", _title)
-                if _cm:
-                    _total_naukri = int(_cm.group(1).replace(",", ""))
-                if not _total_naukri:
-                    try:
-                        _cnt_el = await page.query_selector(
-                            ".search-type-heading, .srp-count, [class*='srp-count'], "
-                            "[class*='count'][class*='jobs']"
-                        )
-                        if _cnt_el:
-                            _ct = (await _cnt_el.inner_text()).strip()
-                            _nm = re.search(r"[\d,]+", _ct)
-                            if _nm:
-                                _total_naukri = int(_nm.group(0).replace(",", ""))
-                    except Exception:
-                        pass
-
-                _pages_detected = (_total_naukri // 20 + 1) if _total_naukri else "unknown"
-
-                logger.info(
-                    "naukri_search_diagnostics",
-                    generated_search_url          = search_url,
-                    final_search_url              = page.url,
-                    current_page_url              = page.url,
-                    search_window_hours           = f.search_window_hours,
-                    total_jobs_reported_by_naukri = _total_naukri,
-                    total_pages_detected          = _pages_detected,
-                    expected_job_age              = job_age_val,
-                    filter_applied                = _filter_ok,
-                    pretty_base_url               = pretty_base_url,
-                )
-
-                # ── Raise if filter could not be applied ───────────────────────
-                if job_age_val and not _filter_ok:
-                    await self._screenshot(page, "naukri_search_page")
-                    try:
-                        _DEBUG_DIR.mkdir(parents=True, exist_ok=True)
-                        _html = await page.content()
-                        (_DEBUG_DIR / "naukri_search_page.html").write_text(_html, encoding="utf-8")
-                    except Exception:
-                        pass
-                    raise SearchFilterNotAppliedException(
-                        f"Naukri search filter not applied after retry. "
-                        f"Expected jobAge={job_age_val} "
-                        f"(search_window_hours={f.search_window_hours}) "
-                        f"in URL but URL is: {page.url}"
-                    )
-
-                # ── Warn if total count implies no filter ──────────────────────
-                if _total_naukri > 5000 and job_age_val:
-                    logger.warning(
-                        "naukri_filter_warning",
-                        total_jobs_count = _total_naukri,
-                        message = (
-                            f"Naukri reports {_total_naukri} jobs with "
-                            f"search_window_hours={f.search_window_hours}. "
-                            "Count > 5000 may indicate the time filter is not active."
-                        ),
-                    )
-
-            # ── Per-page diagnostics ───────────────────────────────────────────
-            current_url  = page.url
-            page_title   = ""
-            login_status = "unknown"
-
-            try:
-                page_title = await page.title()
-            except Exception:
-                pass
-
-            login_status = await self._detect_login_status(page)
-
-            # Check body text for robot / CAPTCHA phrases
-            body_text = ""
-            try:
-                body_text = (await page.inner_text("body")).lower()
-            except Exception:
-                pass
-
-            robot_phrases = [
-                "i'm not a robot", "i am not a robot",
-                "not a robot", "robot verification",
-                "verify you are human", "verify that you are human",
-                "check the box to let us know",
-            ]
-            robot_verification_detected = any(p in body_text for p in robot_phrases)
-            captcha_detected            = await self._is_hard_captcha(page)
-
-            # Check whether the job listing container is present
-            jobs_container_found  = False
-            jobs_container_selector = ""
-            for sel in _Sel.CONTAINER:
-                try:
-                    el = await page.query_selector(sel)
-                    if el:
-                        jobs_container_found    = True
-                        jobs_container_selector = sel
-                        break
-                except Exception:
-                    continue
-
-            logger.info(
-                "naukri_page_diagnostics",
-                page_number                = page_num,
-                current_url               = current_url,
-                page_title                = page_title,
-                login_status              = login_status,
-                search_url                = search_url,
-                captcha_detected          = captcha_detected,
-                robot_verification_detected = robot_verification_detected,
-                jobs_container_found      = jobs_container_found,
-                jobs_container_selector   = jobs_container_selector,
-                jobs_found_count          = len(all_jobs),
-            )
-
-            # ── URL-level block detection ──────────────────────────────────────
-            if any(pat in current_url for pat in ("/challenge", "/authwall", "/nlogin/login")):
-                await self._save_captcha_artifacts(page, page_num)
-                logger.warning(
-                    "naukri_url_blocked",
-                    page_number  = page_num,
-                    current_url  = current_url,
-                    page_title   = page_title,
-                    login_status = login_status,
-                    total_collected = len(all_jobs),
-                    pagination_status = "stopped_url_blocked",
-                )
-                break
-
-            # ── CAPTCHA / robot-verification detection ─────────────────────────
-            if captcha_detected or robot_verification_detected:
-                artifact_paths = await self._save_captcha_artifacts(page, page_num)
-                logger.warning(
-                    "naukri_captcha_detected",
-                    status                     = "captcha_detected",
-                    source                     = "naukri",
-                    message                    = "Manual verification required",
-                    page_number                = page_num,
-                    current_url               = current_url,
-                    page_title                = page_title,
-                    login_status              = login_status,
-                    captcha_detected          = captcha_detected,
-                    robot_verification_detected = robot_verification_detected,
-                    jobs_collected_before_captcha = len(all_jobs),
-                    screenshot                = artifact_paths.get("screenshot", ""),
-                    html                      = artifact_paths.get("html", ""),
-                    pagination_status         = "stopped_captcha",
-                )
-                break
-
-            # ── Proceed: dismiss overlays, scroll, extract ─────────────────────
-            try:
-                await self._dismiss_overlays(page)
-
-                if page_num == 1:
-                    await self._screenshot(page, "naukri_page_01_after_dismiss")
-
-                await self._scroll_results(page)
-
-                remaining = safety_cap - len(all_jobs)
-                page_jobs = await self._extract_cards(page, remaining, seen_urls)
-            except Exception as exc:
-                # A page-wide extraction failure must not discard jobs already
-                # collected from earlier pages — stop paginating and return them.
-                logger.warning("naukri_page_extract_failed", page_number=page_num, error=str(exc))
-                break
-
-            new_this_page = 0
-            if not page_jobs:
-                empty_pages += 1
-                logger.info(
-                    "naukri_page_empty",
-                    page_number       = page_num,
-                    consecutive_empty = empty_pages,
-                    jobs_found_count  = len(all_jobs),
-                    pagination_status = "empty_page",
-                )
-                if empty_pages >= 2:
-                    logger.info(
-                        "naukri_results_exhausted",
-                        page_number       = page_num,
-                        consecutive_empty = empty_pages,
-                        total_collected   = len(all_jobs),
-                        pagination_status = "stopped_no_more_results",
-                    )
-                    break
-            else:
-                empty_pages = 0
-                for j in page_jobs:
-                    url = (j.job_url or "").split("?")[0].rstrip("/").lower()
-                    if url and url not in seen_urls:
-                        seen_urls.add(url)
-                        all_jobs.append(j)
-                        new_this_page += 1
-
-            logger.info(
-                "naukri_page_done",
-                page_number       = page_num,
-                jobs_this_page    = len(page_jobs),
-                new_unique_jobs   = new_this_page,
-                total_jobs        = len(all_jobs),
-                pagination_status = "continuing" if len(all_jobs) < safety_cap else "cap_reached",
-            )
-
-            page_num += 1
-
-            if page_num % 10 == 0:
-                logger.info("naukri_long_pause", page_number=page_num, total=len(all_jobs))
-                await _delay(page, 8_000, 14_000)
-            else:
-                await _delay(page, 3_000, 6_000)
-
-        logger.info(
-            "pagination_completed",
-            source            = "naukri",
-            pages_visited     = page_num - 1,
-            total_jobs        = len(all_jobs),
-            pagination_status = "done",
-        )
-        logger.info("jobs_found", source="naukri", total=len(all_jobs))
-        return all_jobs
-
-    async def _enrich_leads_batch(
-        self, page: Page, jobs: list[NaukriScrapedJob], max_enrich: int = 200
-    ) -> list[NaukriScrapedJob]:
-        """
-        Second pass: open job detail URLs and extract recruiter / HR contact.
-        Only visits jobs without recruiter data from the list-card pass.
-        Capped at max_enrich visits to keep run time bounded.
-        """
-        candidates = [
-            (idx, job) for idx, job in enumerate(jobs)
-            if job.job_url and not (job.recruiter_name and (job.email_id or job.contact_number))
-        ]
-        to_visit = candidates[:max_enrich]
-        total    = len(jobs)
-        enriched = 0
-
-        logger.info(
-            "naukri_lead_enrichment_started",
-            total=total, candidates=len(candidates), visiting=len(to_visit),
-        )
-
-        for idx, job in to_visit:
-            try:
-                await page.goto(job.job_url, wait_until="domcontentloaded", timeout=20_000)
-                await _delay(page, 400, 600)
-                logger.info("job_opened", source="naukri", index=idx, url=job.job_url)
-                await self._dismiss_overlays(page)
-
-                name    = _clean(await _first_text(page, _Sel.DETAIL_RECRUITER_NAME)) or None
-                desig   = _clean(await _first_text(page, _Sel.DETAIL_RECRUITER_DESIGNATION)) or None
-                company = _clean(await _first_text(page, _Sel.DETAIL_RECRUITER_COMPANY)) or None
-
-                email_raw = await _first_attr(page, _Sel.DETAIL_EMAIL, "href")
-                email = email_raw.replace("mailto:", "").strip() if email_raw else (
-                    _clean(await _first_text(page, _Sel.DETAIL_EMAIL)) or None
-                )
-                phone_raw = await _first_attr(page, _Sel.DETAIL_PHONE, "href")
-                phone = phone_raw.replace("tel:", "").strip() if phone_raw else None
-
-                # Filter out known system/fraud-report addresses
-                _JUNK_EMAIL_PATTERNS = ("reportfraud", "noreply", "no-reply", "fraud@", "abuse@")
-                if email and any(p in email.lower() for p in _JUNK_EMAIL_PATTERNS):
-                    email = None
-
-                if name:
-                    job.recruiter_name = name
-                    logger.info("recruiter_found", source="naukri", name=name, index=idx)
-                if desig:
-                    job.job_poster_designation = desig
-                    logger.info("designation_found", source="naukri", designation=desig, index=idx)
-                if company and not job.recruiter_company:
-                    job.recruiter_company = company
-                if email:
-                    job.email_id = email
-                    logger.info("email_found", source="naukri", email=email, index=idx)
-                if phone:
-                    job.contact_number = phone
-                    logger.info("phone_found", source="naukri", phone=phone, index=idx)
-
-                if name or email or phone:
-                    enriched += 1
-                    logger.info(
-                        "lead_record_created",
-                        source  = "naukri",
-                        index   = idx,
-                        name    = name,
-                        email   = email,
-                        phone   = phone,
-                        company = company,
-                    )
-
-            except Exception as exc:
-                logger.debug("naukri_lead_enrich_failed", index=idx, url=job.job_url, error=str(exc))
-
-        logger.info(
-            "naukri_lead_enrichment_complete",
-            total=total, visited=len(to_visit), enriched=enriched,
-        )
-        return jobs
-
 
     # ── Overlay dismissal ──────────────────────────────────────────────────────
 
     async def _dismiss_overlays(self, page: Page) -> None:
-        # Press Escape first — closes most Naukri modals (login prompt,
-        # "Register for free", app download banners, etc.) without needing a selector
         try:
             await page.keyboard.press("Escape")
             await _delay(page, 300, 500)
         except Exception:
             pass
-
-        for sel in _Sel.COOKIE:
-            try:
-                el = page.locator(sel).first
-                if await el.is_visible(timeout=400):
-                    await el.click()
-                    await _delay(page, 200, 350)
-                    break
-            except Exception:
-                continue
-
-        for sel in _Sel.MODAL_DISMISS:
-            try:
-                el = page.locator(sel).first
-                if await el.is_visible(timeout=300):
-                    await el.click()
-                    await _delay(page, 200, 350)
-                    break
-            except Exception:
-                continue
-
-        # Second Escape in case a second modal appeared (e.g. cookie then login)
-        try:
-            await page.keyboard.press("Escape")
-            await _delay(page, 200, 300)
-        except Exception:
-            pass
-
-    # ── Scrolling ──────────────────────────────────────────────────────────────
-
-    async def _scroll_results(self, page: Page) -> None:
-        container = None
-        for sel in _Sel.CONTAINER:
-            try:
-                el = await page.query_selector(sel)
-                if el:
-                    container = el
-                    logger.info("jobs_container_found", source="naukri", selector=sel)
-                    break
-            except Exception:
-                continue
-
-        if not container:
-            logger.info("jobs_container_not_found", source="naukri", selectors_tried=_Sel.CONTAINER)
-
-        if container:
-            prev_h = -1
-            for _ in range(6):
-                h = await container.evaluate("el => el.scrollHeight")
-                if h == prev_h:
-                    break
-                prev_h = h
-                await container.evaluate("el => el.scrollTo(0, el.scrollHeight)")
-                await _delay(page, 200, 350)
-        else:
-            logger.debug("naukri_no_container_scrolling_window")
-            prev_h = -1
-            for _ in range(4):
-                h = await page.evaluate("document.body.scrollHeight")
-                if h == prev_h:
-                    break
-                prev_h = h
-                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                await _delay(page, 300, 500)
-
-    # ── Card extraction ────────────────────────────────────────────────────────
-
-    async def _extract_cards(
-        self,
-        page:      Page,
-        remaining: int,
-        seen_urls: set[str] | None = None,
-    ) -> list[NaukriScrapedJob]:
-        """
-        Extract job cards from the current page.
-        Strategy: CSS selectors first → JS link-scan fallback.
-        Logs selector used, card count, and extraction method at every step.
-        """
-        if seen_urls is None:
-            seen_urls = set()
-
-        # ── CSS selector probe: wait up to 5 s for any card selector to appear ──
-        matched_selector = ""
-        for sel in _Sel.CARD:
-            try:
-                await page.wait_for_selector(sel, timeout=5_000)
-                matched_selector = sel
-                logger.info("naukri_card_selector_matched", selector=sel)
-                break
-            except Exception:
-                continue
-
-        if not matched_selector:
-            logger.info("naukri_no_card_selector_matched",
-                        selectors_tried=len(_Sel.CARD),
-                        note="all CSS selectors timed out — falling back to JS extraction")
-
-        # ── CSS query: find the first selector that returns ≥1 elements ─────────
-        raw: list[ElementHandle] = []
-        css_selector_used = ""
-        for sel in _Sel.CARD:
-            found = await page.query_selector_all(sel)
-            cnt   = len(found)
-            logger.info("naukri_selector_tried", selector=sel, count=cnt)
-            if found:
-                raw               = found
-                css_selector_used = sel
-                logger.info(
-                    "naukri_cards_found",
-                    selector         = sel,
-                    count            = cnt,
-                    extraction_method = "css",
-                )
-                break
-
-        if not raw:
-            # ── Zero CSS hits → screenshot + JS fallback ─────────────────────
-            await self._screenshot(page, "naukri_no_cards")
-            logger.warning(
-                "naukri_no_css_cards",
-                selectors_tried   = len(_Sel.CARD),
-                jobs_found_count  = 0,
-                extraction_method = "js_fallback",
-                note              = "CSS selectors returned 0 elements; trying JS link-scan",
-            )
-            js_jobs = await self._js_extract_jobs(page, remaining, seen_urls)
-            logger.info(
-                "naukri_js_extraction_result",
-                jobs_found_count  = len(js_jobs),
-                extraction_method = "js",
-            )
-            return js_jobs
-
-        # ── CSS elements found → parse into NaukriScrapedJob objects ────────────
-        parsed = await self._parse_card_elements(raw, remaining, seen_urls)
-        logger.info(
-            "naukri_card_parse_result",
-            css_elements_found = len(raw),
-            selector_used      = css_selector_used,
-            jobs_parsed        = len(parsed),
-            jobs_found_count   = len(parsed),
-            extraction_method  = "css",
-        )
-
-        if not parsed:
-            # CSS elements exist but none parsed (different DOM structure for logged-out view)
-            logger.info(
-                "naukri_css_parse_empty",
-                css_elements     = len(raw),
-                selector_used    = css_selector_used,
-                extraction_method = "js_fallback",
-                note             = "CSS found elements but title/URL extraction empty — trying JS",
-            )
-            js_jobs = await self._js_extract_jobs(page, remaining, seen_urls)
-            logger.info(
-                "naukri_js_extraction_result",
-                jobs_found_count  = len(js_jobs),
-                extraction_method = "js",
-            )
-            return js_jobs
-
-        return parsed
-
-    async def _js_extract_jobs(
-        self, page: Page, remaining: int, seen_urls: set[str] | None = None
-    ) -> list[NaukriScrapedJob]:
-        """JavaScript-based extraction: find all Naukri job links then walk up to card containers."""
-        logger.info("naukri_js_extraction_started")
-        try:
-            raw_jobs: list[dict] = await page.evaluate("""
-                () => {
-                    function getText(el, sels) {
-                        for (const s of sels) {
-                            try {
-                                const found = el.querySelector(s);
-                                if (found && found.textContent.trim()) return found.textContent.trim();
-                            } catch(e) {}
-                        }
-                        return '';
-                    }
-
-                    // Find anchors that look like Naukri job-detail links
-                    const allAnchors = Array.from(document.querySelectorAll('a[href]'));
-                    const jobAnchors = allAnchors.filter(a => {
-                        const h = a.href || '';
-                        return h.includes('naukri.com') && (
-                            h.includes('/job-listings/') ||
-                            /\\/[a-z][a-z0-9-]+-\\d{7,}(\\?|$)/i.test(h)
-                        );
-                    });
-
-                    const seen = new Set();
-                    const results = [];
-                    for (const a of jobAnchors) {
-                        const url = a.href.split('?')[0];
-                        if (seen.has(url)) continue;
-                        seen.add(url);
-
-                        // Walk up to find the card container (article, li, or a named div)
-                        let card = a;
-                        for (let i = 0; i < 8; i++) {
-                            const p = card.parentElement;
-                            if (!p) break;
-                            card = p;
-                            const tag = card.tagName;
-                            const cls = card.className || '';
-                            if (tag === 'ARTICLE' || tag === 'LI') break;
-                            if (/job|tuple|card/i.test(cls)) break;
-                        }
-
-                        const titleSels = [
-                            'a.title', 'a[class*="title"]', '.title a', 'h2 a', 'h3 a',
-                            '[class*="job-title"] a', '[class*="jobTitle"] a'
-                        ];
-                        const title = a.textContent.trim() || getText(card, titleSels);
-                        if (!title || title.length < 3) continue;
-
-                        results.push({
-                            url,
-                            title,
-                            company: getText(card, ['a.comp-name','a.subTitle','.comp-name','[class*="comp-name"]','[class*="company"] a','[class*="companyName"]']),
-                            location: getText(card, ['span.locWdth','[class*="loc"]','[class*="location"] span','li.location']),
-                            salary: getText(card, ['li.salary','.salary','[class*="salary"]','[class*="Salary"]']),
-                            experience: getText(card, ['li.experience','[class*="exp"]','[class*="expwdth"]']),
-                            posted: getText(card, ['span.job-post-day','[class*="fresh"]','[class*="posted"]','time']),
-                            description: getText(card, ['[class*="job-description"]','[class*="desc"]','[class*="snippet"]']),
-                        });
-                        if (results.length >= 50) break;
-                    }
-                    return results;
-                }
-            """)
-        except Exception as exc:
-            logger.error("naukri_js_extraction_failed", error=str(exc))
-            return []
-
-        if not raw_jobs:
-            logger.warning(
-                "naukri_js_extraction_no_jobs",
-                jobs_found_count  = 0,
-                extraction_method = "js",
-                note = "JS found 0 job anchors — page may be a CAPTCHA or non-results page",
-            )
-            return []
-
-        logger.info(
-            "naukri_js_extraction_found",
-            count             = len(raw_jobs),
-            jobs_found_count  = len(raw_jobs),
-            extraction_method = "js",
-        )
-        if seen_urls is None:
-            seen_urls = set()
-        jobs: list[NaukriScrapedJob] = []
-        for j in raw_jobs:
-            if len(jobs) >= remaining:
-                break
-            url = j.get("url", "")
-            if not url:
-                continue
-            norm = url.split("?")[0].rstrip("/").lower()
-            if norm and norm in seen_urls:
-                continue
-            if not url.startswith("http"):
-                url = f"https://www.naukri.com{url}"
-            jobs.append(NaukriScrapedJob(
-                job_title       = j.get("title", ""),
-                company         = j.get("company", "") or "Unknown Company",
-                location        = j.get("location", "") or "Unknown Location",
-                salary          = j.get("salary", "") or "Not Disclosed",
-                experience      = j.get("experience", "") or "Not Specified",
-                posted_date     = _format_posted(j.get("posted", "")),
-                job_url         = url,
-                job_description = j.get("description", ""),
-                skills          = [],
-                work_mode       = _infer_work_mode(j.get("location", "")),
-                source          = "Naukri",
-            ))
-        return jobs
-
-    async def _parse_card_elements(
-        self,
-        raw:       list[ElementHandle],
-        remaining: int,
-        seen_urls: set[str],
-    ) -> list[NaukriScrapedJob]:
-        jobs: list[NaukriScrapedJob] = []
-        for el in raw:
-            if len(jobs) >= remaining:
-                break
-            job = await self._parse_card(el)
-            if not job or not job.job_url:
-                continue
-            norm = job.job_url.split("?")[0].rstrip("/").lower()
-            if norm and norm in seen_urls:
-                continue
-            jobs.append(job)
-        return jobs
-
-    async def _parse_card(self, el: ElementHandle) -> NaukriScrapedJob | None:
-        try:
-            title = _clean(await _first_text(el, _Sel.TITLE))
-            if not title:
-                return None
-
-            company     = _clean(await _first_text(el, _Sel.COMPANY))    or "Unknown Company"
-            location    = _clean(await _first_text(el, _Sel.LOCATION))   or "Unknown Location"
-            salary      = _clean(await _first_text(el, _Sel.SALARY))     or "Not Disclosed"
-            experience  = _clean(await _first_text(el, _Sel.EXPERIENCE)) or "Not Specified"
-            posted_raw  = _clean(await _first_text(el, _Sel.POSTED))
-            description = _clean(await _first_text(el, _Sel.DESCRIPTION))
-            skills      = await _all_texts(el, _Sel.SKILLS)
-
-            # Resolve job URL
-            href = (
-                await _first_attr(el, _Sel.LINK, "href")
-                or await _first_attr(el, _Sel.TITLE, "href")
-            )
-            clean_url = href.split("?")[0] if href and "?" in href else (href or "")
-            if clean_url and not clean_url.startswith("http"):
-                clean_url = f"https://www.naukri.com{clean_url}"
-
-            # Recruiter / lead intelligence (optional, may not appear on all cards)
-            recruiter_name    = _clean(await _first_text(el, _Sel.RECRUITER_NAME)) or None
-            recruiter_company = _clean(await _first_text(el, _Sel.RECRUITER_COMPANY)) or None
-            email_raw         = await _first_attr(el, _Sel.RECRUITER_EMAIL, "href")
-            email_id          = email_raw.replace("mailto:", "").strip() if email_raw else (
-                                _clean(await _first_text(el, _Sel.RECRUITER_EMAIL)) or None
-                                )
-            phone_raw         = await _first_attr(el, _Sel.RECRUITER_PHONE, "href")
-            contact_number    = phone_raw.replace("tel:", "").strip() if phone_raw else (
-                                _clean(await _first_text(el, _Sel.RECRUITER_PHONE)) or None
-                                )
-
-            job = NaukriScrapedJob(
-                job_title              = title,
-                company                = company,
-                location               = location,
-                salary                 = salary,
-                experience             = experience,
-                posted_date            = _format_posted(posted_raw),
-                job_url                = clean_url,
-                job_description        = description,
-                skills                 = skills[:15],
-                work_mode              = _infer_work_mode(location),
-                source                 = "Naukri",
-                recruiter_name         = recruiter_name,
-                recruiter_company      = recruiter_company,
-                job_poster_designation = None,
-                email_id               = email_id,
-                contact_number         = contact_number,
-            )
-            logger.info("job_found", source="naukri", title=title, company=company, url=clean_url)
-            logger.info("job_card_extracted", source="naukri", title=title, company=company, url=clean_url)
-            return job
-        except Exception as exc:
-            logger.debug("naukri_card_parse_error", error=str(exc))
-            return None
-
-    # ── Search URL builder ─────────────────────────────────────────────────────
-
-    @staticmethod
-    def _build_search_url(f: FiltersConfig, page_no: int = 1) -> str:
-        """Encode all active filter params into the Naukri search URL."""
-        params: dict[str, str] = {
-            "k": f.keyword,
-        }
-        # location is optional — only constrain the search when one is provided
-        # (mirrors dice_scraper._build_search_url); an empty l= would otherwise
-        # narrow Naukri to a blank-location search.
-        if f.location:
-            params["l"] = f.location
-        if tpr := _DATE_MAP.get(f.search_window_hours, ""):
-            params["jobAge"] = tpr
-        if wt := _WORK_MODE_MAP.get(f.work_mode, ""):
-            params["wfhType"] = wt
-        if jt := _JOB_TYPE_MAP.get(f.job_type, ""):
-            params["jobType"] = jt
-        if f.salary_currency == "INR" and f.salary_min:
-            lpa_min = max(1, int(f.salary_min // 100_000))
-            if f.salary_max:
-                lpa_max = max(lpa_min + 1, int(f.salary_max // 100_000))
-                params["salary"] = f"{lpa_min},{lpa_max}"
-            else:
-                params["salary"] = str(lpa_min)
-        if page_no > 1:
-            params["pageNo"] = str(page_no)
-
-        return f"{_NAUKRI_SEARCH_URL}?{urlencode(params)}"
-
-    # ── Block detection ────────────────────────────────────────────────────────
-
-    @staticmethod
-    def _check_blocked(url: str) -> None:
-        # Only block mid-search-flow redirects; login URLs are handled inside _login()
-        for pat in ("/challenge", "/authwall", "/nlogin/login"):
-            if pat in url:
-                raise RuntimeError(f"Naukri redirected to a gated page: {url}")
+        for group in (_COOKIE_SELECTORS, _MODAL_DISMISS_SELECTORS):
+            for sel in group:
+                try:
+                    el = page.locator(sel).first
+                    if await el.is_visible(timeout=300):
+                        await el.click()
+                        await _delay(page, 200, 350)
+                        break
+                except Exception:
+                    continue
 
     # ── Screenshot helper ──────────────────────────────────────────────────────
 
@@ -1383,3 +1349,22 @@ class NaukriAgent:
             logger.info("naukri_screenshot_saved", path=str(path))
         except Exception as exc:
             logger.debug("naukri_screenshot_failed", error=str(exc))
+
+    # ── Back-compat ────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _build_search_url(f: FiltersConfig, page_no: int = 1) -> str:
+        return build_search_url(f, page_no)
+
+
+class _PageBlocked(RuntimeError):
+    """The page is a CAPTCHA / bot wall / gated redirect, not content."""
+
+
+async def _status(cb: StatusCallback | None, msg: str) -> None:
+    if cb is None:
+        return
+    try:
+        await cb(msg)
+    except Exception as exc:
+        logger.debug("naukri_status_callback_failed", error=str(exc))

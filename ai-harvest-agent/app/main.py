@@ -38,6 +38,7 @@ from app.routes.harvest_routes import router as harvest_agent_router
 from app.routes.linkedin_routes import router as linkedin_agent_router
 from app.routes.linkedin_feed_routes import router as linkedin_feed_router
 from app.routes.naukri_routes import router as naukri_agent_router
+from app.routes.naukri_recruiter_routes import router as naukri_recruiter_router
 from app.routes.dice_routes import router as dice_agent_router
 from app.routes.run_harvest_agent import router as run_harvest_agent_router
 from app.routes.frontend_routes import router as frontend_router
@@ -187,6 +188,16 @@ def _ensure_harvest_runs_columns(sync_conn) -> None:
             "ALTER TABLE harvest_runs ADD COLUMN report_pending BOOLEAN NOT NULL DEFAULT FALSE"
         ))
         logger.info("harvest_runs_column_added", column="report_pending")
+    # source_status: per-source live status (state/count/message/error) for a
+    # multi-source run — GET /harvest-status `sources`. Nullable, no default
+    # (older runs stay NULL). JSONB on PostgreSQL; SQLite gives JSON TEXT
+    # affinity. Mirrored in alembic 0019.
+    if "source_status" not in existing_cols:
+        json_type = "JSONB" if sync_conn.dialect.name == "postgresql" else "JSON"
+        sync_conn.execute(sa_text(
+            f"ALTER TABLE harvest_runs ADD COLUMN source_status {json_type}"
+        ))
+        logger.info("harvest_runs_column_added", column="source_status")
 
 
 def _ensure_email_outreach_columns(sync_conn) -> None:
@@ -427,7 +438,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # outreach (email/linkedin) generation calls, not just harvest calls.
         await conn.run_sync(_ensure_llm_calls_columns)
         # harvest_runs gained report_pending (deferred report for user-stopped
-        # runs) — same idempotent ADD COLUMN treatment.
+        # runs) and source_status (per-source live status) — same idempotent
+        # ADD COLUMN treatment.
         await conn.run_sync(_ensure_harvest_runs_columns)
         # email_outreach gained channel + follow-up threading (outreach_kind,
         # parent_outreach_id) + provider_message_id — same idempotent treatment.
@@ -614,6 +626,7 @@ def create_app() -> FastAPI:
     app.include_router(linkedin_feed_router, dependencies=protected)          # POST /run-linkedin-feed-agent (Home Feed leads)
     app.include_router(harvest_agent_router, dependencies=protected)          # POST /run-harvest  +  management endpoints
     app.include_router(naukri_agent_router, dependencies=protected)           # POST /run-naukri-agent  +  results endpoints
+    app.include_router(naukri_recruiter_router, dependencies=protected)       # /naukri-recruiter/* (recruiter session status/verify/login)
     app.include_router(dice_agent_router, dependencies=protected)             # POST /run-dice-agent  +  dice results endpoints
     app.include_router(prospect_intelligence_router, dependencies=protected)  # POST /run-prospect-intelligence
     app.include_router(recruiter_discovery_router, dependencies=protected)    # POST /run-recruiter-discovery

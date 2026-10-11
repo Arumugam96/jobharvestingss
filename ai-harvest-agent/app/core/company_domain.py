@@ -64,3 +64,16 @@ def infer_company_domain(company_name: str) -> tuple[str, str]:
         domain = f"{cleaned}.com"
         return domain, f"https://www.{domain}"
     return "", ""
+
+
+# Display placeholders the scrapers substitute when a card carries no company name.
+# They are NOT a company: never enrich them, never key a company cache/dedup on them.
+_PLACEHOLDER_COMPANIES: frozenset[str] = frozenset({
+    "unknown company", "unknown", "company", "not disclosed", "not specified",
+    "confidential", "n/a", "na", "-",
+})
+
+
+def is_placeholder_company(name: str | None) -> bool:
+    """True when `name` is blank or a scraper placeholder such as "Unknown Company"."""
+    return (name or "").strip().lower() in _PLACEHOLDER_COMPANIES or not (name or "").strip()

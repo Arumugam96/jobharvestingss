@@ -249,10 +249,26 @@ class BrowserManager:
     slow_mo     Extra ms delay between Playwright actions (0 for maximum speed).
     """
 
-    def __init__(self, headless: bool = False, slow_mo: int = 0, storage_state: str | None = None) -> None:
+    def __init__(
+        self,
+        headless: bool = False,
+        slow_mo: int = 0,
+        storage_state: str | None = None,
+        *,
+        channel: str | None = None,
+        locale: str = "en-US",
+        timezone_id: str = "Europe/London",
+    ) -> None:
         self._headless:      bool               = headless
         self._slow_mo:       int                = slow_mo
         self._storage_state: str | None         = storage_state
+        # channel="chromium" forces Playwright's full bundled Chromium (new
+        # headless mode when headless=True) instead of chromium-headless-shell —
+        # some sites' bot walls (e.g. Naukri's Akamai edge) deny the shell.
+        # None keeps Playwright's default (historical behaviour).
+        self._channel:       str | None         = channel
+        self._locale:        str                = locale
+        self._timezone_id:   str                = timezone_id
         self._pw:            Playwright    | None = None
         self._browser:       Browser       | None = None
         self._context:       BrowserContext | None = None
@@ -260,17 +276,26 @@ class BrowserManager:
     async def __aenter__(self) -> "BrowserManager":
         self._pw = await async_playwright().start()
 
-        self._browser = await self._pw.chromium.launch(
+        launch_kwargs: dict = dict(
             headless = self._headless,
             slow_mo  = self._slow_mo,
             args     = _LAUNCH_ARGS,
         )
+        if self._channel:
+            launch_kwargs["channel"] = self._channel
+        try:
+            self._browser = await self._pw.chromium.launch(**launch_kwargs)
+        except Exception:
+            # Never leak the Playwright driver if the launch itself fails.
+            await self._pw.stop()
+            self._pw = None
+            raise
 
         ctx_kwargs: dict = dict(
             viewport            = _jittered_viewport(),
             user_agent          = _build_user_agent(self._browser.version),
-            locale              = "en-US",
-            timezone_id         = "Europe/London",
+            locale              = self._locale,
+            timezone_id         = self._timezone_id,
             color_scheme        = "light",
             java_script_enabled = True,
         )
@@ -283,6 +308,7 @@ class BrowserManager:
             await self._context.add_init_script(script)
 
         logger.info("browser_started", headless=self._headless, slow_mo=self._slow_mo,
+                    channel=self._channel or "default",
                     session_loaded=bool(self._storage_state))
         return self
 
@@ -339,16 +365,26 @@ class PersistentBrowserManager:
         profile_dir: "str | Path",
         headless:    bool = False,
         slow_mo:     int  = 0,
-        channel:     str  = "chromium",
+        channel:     str | None = "chromium",
     ) -> None:
         self._profile_dir: Path              = Path(profile_dir)
         self._headless:    bool              = headless
         self._slow_mo:     int               = slow_mo
-        self._channel:     str               = channel
+        # "chromium" (default) → Playwright's full bundled Chromium, in its new
+        # headless mode when headless=True. None → Playwright's default, which for
+        # headless=True is chromium-headless-shell — Naukri's Akamai edge answers
+        # the shell with 403 "Access Denied" (verified live), so a Naukri tab in
+        # this context only works with the full-Chromium channel.
+        self._channel:     str | None        = channel
         self._pw:          Playwright | None = None
         self._context:     BrowserContext | None = None
         self._lock                            = _get_profile_lock(str(self._profile_dir.resolve()))
         self._lock_acquired:  bool            = False
+        # The about:blank tab Chromium opens with a persistent context — handed
+        # out once by acquire_page() so N sources show exactly N tabs.
+        self._startup_page_claimed: bool      = False
+        # Serializes release_page()'s "is this the last tab?" check + close.
+        self._tab_lock                        = asyncio.Lock()
 
     async def __aenter__(self) -> "PersistentBrowserManager":
         if self._lock.locked():
@@ -396,7 +432,13 @@ class PersistentBrowserManager:
             # channel="chromium" → use Playwright's bundled Chromium (not system Chrome).
             # System Chrome (channel="chrome") exits immediately via --remote-debugging-pipe
             # on Windows when the profile directory is new — confirmed by runtime test.
+            # The channel was previously only logged, never passed, so headless=True
+            # silently ran chromium-headless-shell (Akamai-denied on Naukri).
+            persistent_kwargs: dict[str, Any] = {}
+            if self._channel:
+                persistent_kwargs["channel"] = self._channel
             self._context = await self._pw.chromium.launch_persistent_context(
+                **persistent_kwargs,
                 user_data_dir       = str(self._profile_dir),
                 headless            = self._headless,
                 slow_mo             = self._slow_mo,
@@ -435,10 +477,18 @@ class PersistentBrowserManager:
                 "persistent_browser_started",
                 profile_dir = str(self._profile_dir),
                 headless    = self._headless,
-                channel     = "chromium",
+                channel     = self._channel or "default",
             )
             return self
         except Exception:
+            # Never leak the Playwright driver if the launch itself failed.
+            if self._pw:
+                try:
+                    await self._pw.stop()
+                except Exception:
+                    pass
+                self._pw = None
+            self._context = None
             self._lock.release()
             self._lock_acquired = False
             raise
@@ -464,6 +514,66 @@ class PersistentBrowserManager:
         if not self._context:
             raise RuntimeError("PersistentBrowserManager must be used as an async context manager")
         return await self._context.new_page()
+
+    # ── Multi-tab use (one tab per concurrent source) ─────────────────────────
+    # Several sources may share this ONE browser/context, each driving its own
+    # tab concurrently (orchestrator "two tabs in one browser"). Cookies and
+    # storage are context-wide (fine — different sites); navigation, response
+    # listeners and closing are per tab, so one source never touches another's.
+
+    async def acquire_page(self, label: str = "") -> Page:
+        """A tab for one concurrent source. The first call hands out the
+        about:blank tab Chromium opens with a persistent context (instead of
+        leaving it idle beside the real ones); later calls open new tabs in the
+        same window. `label` is only used for logging."""
+        if not self._context:
+            raise RuntimeError("PersistentBrowserManager must be used as an async context manager")
+        page: Page | None = None
+        if not self._startup_page_claimed:
+            self._startup_page_claimed = True
+            for candidate in self._context.pages:
+                try:
+                    if not candidate.is_closed() and candidate.url in ("about:blank", ""):
+                        page = candidate
+                        break
+                except Exception:
+                    continue
+        if page is None:
+            page = await self._context.new_page()
+
+        def _on_crash(_: Any = None) -> None:
+            logger.error("browser_tab_crashed", tab=label or "?",
+                         hint="Only this tab's renderer died; other tabs keep running.")
+
+        try:
+            page.on("crash", _on_crash)
+        except Exception:
+            pass
+        logger.info("browser_tab_acquired", tab=label or "?", open_tabs=len(self._context.pages))
+        return page
+
+    async def release_page(self, page: Page | None, label: str = "") -> None:
+        """Close one source's tab when that source is finished, leaving every
+        other tab running. The LAST open tab is never closed — a headed
+        Chromium quits when its last window closes (verified live: the context
+        is dead afterwards) — it is parked on about:blank instead and goes
+        away with the context in __aexit__. Never raises."""
+        if page is None or self._context is None:
+            return
+        async with self._tab_lock:
+            try:
+                if page.is_closed():
+                    return
+                others = [p for p in self._context.pages if p is not page and not p.is_closed()]
+                if others:
+                    await page.close()
+                    logger.info("browser_tab_closed", tab=label or "?", open_tabs=len(others))
+                else:
+                    await page.goto("about:blank", timeout=10_000)
+                    logger.info("browser_tab_parked", tab=label or "?",
+                                hint="Last open tab — kept (on about:blank) so the browser stays up.")
+            except Exception as exc:
+                logger.debug("browser_tab_release_failed", tab=label or "?", error=str(exc))
 
     @property
     def context(self) -> BrowserContext:

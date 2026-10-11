@@ -348,15 +348,17 @@ export default function JobsTable({
           <table className="ha-table" style={{ minWidth }}>
             <thead className="ha-thead">
               <tr>
-                <SortHeader label="Job title" col="title" sort={sort} setSort={setSort} width={230} />
-                <SortHeader label="Company" col="company" sort={sort} setSort={setSort} width={170} />
-                <PlainHeader label="Company size" width={160} />
-                <SortHeader label="POC" col="poc" sort={sort} setSort={setSort} width={150} />
-                <PlainHeader label="Email" width={200} />
-                <PlainHeader label="Mobile" width={140} />
-                <PlainHeader label="Contact" align="center" width={130} />
+                {/* Widths rebalanced so Email gets room for a full address and the pinned
+                    Contact column stays visible; contact cells ellipsize within these. */}
+                <SortHeader label="Job title" col="title" sort={sort} setSort={setSort} width={220} />
+                <SortHeader label="Company" col="company" sort={sort} setSort={setSort} width={160} />
+                <PlainHeader label="Company size" width={130} />
+                <SortHeader label="POC" col="poc" sort={sort} setSort={setSort} width={140} />
+                <PlainHeader label="Email" width={230} />
+                <PlainHeader label="Mobile" width={150} />
+                <th className="ha-th ha-th-pin" style={{ textAlign: "center", width: 130, minWidth: 130 }}>Contact</th>
                 <SortHeader label="Source" col="source" sort={sort} setSort={setSort} width={100} />
-                <SortHeader label="Posted date" col="posted" sort={sort} setSort={setSort} width={130} />
+                <SortHeader label="Posted date" col="posted" sort={sort} setSort={setSort} width={120} />
               </tr>
             </thead>
             <tbody>
@@ -388,7 +390,7 @@ export default function JobsTable({
                   <td className="ha-td" style={{ whiteSpace: "nowrap" }}>
                     <DualContact scraped={j.mobileScraped} recruiter={j.mobileRecruiter} company={j.mobileCompany} fallback={j.mobile} link="tel:" cls="ha-tel" />
                   </td>
-                  <td className="ha-td">
+                  <td className="ha-td ha-td-pin">
                     <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
                       <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
                         <ContactActionBtn glyph={WhatsAppIcon} title="WhatsApp" available={!!j.whatsapp}

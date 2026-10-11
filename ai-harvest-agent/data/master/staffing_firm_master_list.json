@@ -1,5 +1,5 @@
 {
-  "_comment": "Known IT staffing and recruitment firms. Lowercase. Partial match is applied.",
+  "_comment": "Known IT staffing and recruitment firms. Lowercase. Matched as WHOLE WORDS, not substrings (business_filter_service._PhraseMatcher): 'hp' matches 'HP Inc' but 'ing' never matches 'Consulting'.",
   "companies": [
     "tcs", "tata consultancy", "infosys", "wipro", "hcl", "hcltech",
     "tech mahindra", "cognizant", "capgemini", "accenture", "ibm",

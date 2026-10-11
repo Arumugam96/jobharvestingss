@@ -23,6 +23,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.harvest import Base  # shared metadata — one Base.metadata.create_all() for all tables
@@ -60,6 +61,15 @@ class HarvestRunORM(Base):
     excel_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     json_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     token_usage: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # Per-source live status for a multi-source run — {source: {state, count,
+    # message, reason, error, updated_at}} for each ENABLED source (state ∈
+    # pending|running|done|failed|skipped). Written by the orchestrator's
+    # SourceStatusTracker (app/services/source_status.py) as each source changes
+    # state / scrapes a batch; served as GET /harvest-status `sources`. NULL for
+    # runs that predate it and for single-source runs. JSONB on PostgreSQL.
+    source_status: Mapped[dict | None] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=True
+    )
     # A run that ended via user-requested stop persists its partial jobs but does
     # NOT send its report email. report_pending=True marks it as owed; the next
     # successful run merges these jobs into its own report, then clears the flag.

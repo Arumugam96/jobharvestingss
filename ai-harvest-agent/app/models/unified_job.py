@@ -74,6 +74,11 @@ class UnifiedJob:
 
     # ── Raw platform hints consumed by BusinessFilterService, not user-facing ──
     domain_hint:    str  = ""           # e.g. LinkedIn's native "Industries" tag
+    # Board-supplied hiring-entity signal: "staffing" (Naukri consultant=true),
+    # "direct" (Naukri consultant=false — posted by the company itself), or ""
+    # (no signal). Consumed by BusinessFilterService._infer_hiring_entity; never
+    # persisted (the resulting hiring_entity is).
+    hiring_hint:    str  = ""
 
     # ── VerificationAgent fills this ──────────────────────────────────────────
     # "pending" | "verified" | "not_verified" | "career_page_not_found" | "skipped"

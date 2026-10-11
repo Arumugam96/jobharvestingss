@@ -261,7 +261,7 @@ The email should feel like something a person would actually type, not a careful
 
 WHAT TO INCLUDE:
 
-1.Reference the specific job opening: Begin with a relevant, natural reference to the job posting. Use the EXACT job title provided in the context, preserving its wording and capitalization without shortening, rephrasing, or reordering it.
+1.Reference the specific job opening: Begin with a relevant, natural reference to the job posting. Use the EXACT job title provided in the context, preserving its wording and capitalization without shortening, rephrasing, or reordering it. Name the platform the job was posted on exactly as given in the context's "Job posting source" (e.g. their Naukri posting, their LinkedIn post, their Dice posting). Never assume LinkedIn; if the source is unknown, don't name any platform.
 2.Establish professional relevance: detailed explaination how Sightspectrum supports contract IT hiring by connecting hiring teams with candidates whose skills and experience align with the role. Keep the statement factual and relevant to the hiring need.
 3.Invite further discussion: Close with a concise, courteous, low-pressure question that offers a practical next step.
 
@@ -376,7 +376,158 @@ def resolve_identity(sender_email: str) -> dict[str, str]:
     }
 
 
+# ── Job platform (where the posting was found) ──────────────────────────────
+# The outreach email references "your <platform> posting", so the platform must come
+# from the job's own `source` — a Naukri job must never be called a LinkedIn post.
+# scraped_jobs.source values: "LinkedIn" | "Naukri" | "Dice" | "LinkedIn Feed" (older
+# rows / agents may use lowercase). LinkedIn Feed leads are LinkedIn posts.
+
+PLATFORM_NAMES = ("LinkedIn", "Naukri", "Dice")
+
+# Only used when `source` is missing/unrecognized: the posting URL's host is hard
+# evidence of the platform (not a guess). Exact host or a subdomain of it.
+_PLATFORM_HOSTS = (("linkedin.com", "LinkedIn"), ("naukri.com", "Naukri"), ("dice.com", "Dice"))
+
+
+def _platform_from_name(value: str) -> str:
+    """Canonical platform for a source string / matched mention, or "" if none."""
+    v = re.sub(r"[\s_\-.]+", "", (value or "").lower())
+    if v.startswith("linkedin"):  # "linkedin", "linkedinfeed", "linkedin.com"
+        return "LinkedIn"
+    if v.startswith("naukri"):
+        return "Naukri"
+    if v.startswith("dice"):
+        return "Dice"
+    return ""
+
+
+def job_platform(job: dict) -> str:
+    """The job board the posting came from — "LinkedIn", "Naukri", "Dice", or "" when
+    it can't be determined. Uses the job's `source`; only when that is missing or
+    unrecognized does it fall back to the posting URL's host. Never guesses."""
+    platform = _platform_from_name(job.get("source") or "")
+    if platform:
+        return platform
+    url = (job.get("job_url") or "").strip().lower()
+    m = re.match(r"^[a-z][a-z0-9+.\-]*://([^/?#:]+)", url)
+    host = m.group(1) if m else ""
+    for domain, name in _PLATFORM_HOSTS:
+        if host == domain or host.endswith("." + domain):
+            return name
+    return ""
+
+
+def posting_phrase(job: dict) -> str:
+    """"your Naukri posting" / "your LinkedIn posting" / "your Dice posting", or the
+    neutral "your job posting" when the platform is unknown."""
+    platform = job_platform(job)
+    return f"your {platform} posting" if platform else "your job posting"
+
+
+# Post-check for LLM output: the model sometimes defaults to "LinkedIn" whatever the
+# source. Only platform mentions in a POSTING context are touched (e.g. "your LinkedIn
+# post", "saw your opening on LinkedIn") — an unrelated mention like "connect on LinkedIn"
+# is left alone, as are mentions inside the job title / company name / URLs / emails.
+_PLAT_TOKEN = r"(?:linked\s?in|naukri|dice)(?:\.com)?"  # compiled with re.I
+_POSTING_NOUN = (
+    r"(?:job\s+)?(?:post|posting|listing|ad|advert|advertisement|opening|vacancy|"
+    r"requirement|job|role)s?"
+)
+# "LinkedIn posting", "Naukri job post", "Dice listing" …
+_PLAT_BEFORE_NOUN_RE = re.compile(
+    rf"\b(?P<plat>{_PLAT_TOKEN})\b(?P<gap>\s+)(?={_POSTING_NOUN}\b)", re.I
+)
+# "saw your opening for X on LinkedIn", "came across your post on Naukri" …
+_PLAT_AFTER_VERB_RE = re.compile(
+    r"\b(?:post(?:ed|ing|s)?|listing|listed|advertis\w*|saw|seen|noticed|came\s+across|"
+    r"spotted|found|opening|role|requirement)\b[^.!?\n]{0,80}?"
+    rf"(?P<pre>\s(?:on|via|through|from)\s+)(?P<plat>{_PLAT_TOKEN})\b",
+    re.I,
+)
+_URL_OR_EMAIL_RE = re.compile(r"https?://\S+|[\w.+-]+@[\w-]+\.[\w.-]+")
+
+
+def _protected_spans(text: str, job: dict) -> list[tuple[int, int]]:
+    """Spans that must never be rewritten: the job title, the company name (either may
+    legitimately contain a platform word), and any URL / email address."""
+    spans = [m.span() for m in _URL_OR_EMAIL_RE.finditer(text)]
+    for value in ((job.get("job_title") or ""), (job.get("company") or "")):
+        tokens = value.split()
+        if not tokens:
+            continue
+        pat = re.compile(r"\s+".join(re.escape(t) for t in tokens), re.I)
+        spans.extend(m.span() for m in pat.finditer(text))
+    return spans
+
+
+def correct_platform_mentions(text: str, job: dict) -> tuple[str, int]:
+    """Make LLM-written outreach text name the job's real platform. Returns
+    (corrected_text, number_of_corrections).
+
+    * known platform → a wrong platform in a posting context is replaced by the right
+      one ("your LinkedIn post" → "your Naukri post" for a Naukri job);
+    * unknown platform → the platform mention is dropped ("your LinkedIn posting" →
+      "your posting", "your post on LinkedIn for X" → "your post for X"), since we must
+      not claim a platform we can't verify.
+    Mentions already naming the right platform, and anything outside a posting context,
+    are left unchanged."""
+    if not text:
+        return text, 0
+    platform = job_platform(job)
+    protected = _protected_spans(text, job)
+
+    def _is_protected(start: int, end: int) -> bool:
+        return any(start < pe and ps < end for ps, pe in protected)
+
+    edits: dict[int, tuple[int, int, str]] = {}  # keyed by plat start → (start, end, repl)
+    for m in _PLAT_BEFORE_NOUN_RE.finditer(text):
+        ps, pe = m.span("plat")
+        if _platform_from_name(m.group("plat")) == platform or _is_protected(ps, pe):
+            continue
+        if platform:
+            edits[ps] = (ps, pe, platform)
+        else:  # drop "LinkedIn " (word + following whitespace)
+            edits[ps] = (ps, m.end("gap"), "")
+    for m in _PLAT_AFTER_VERB_RE.finditer(text):
+        ps, pe = m.span("plat")
+        if ps in edits or _platform_from_name(m.group("plat")) == platform or _is_protected(ps, pe):
+            continue
+        if platform:
+            edits[ps] = (ps, pe, platform)
+        else:  # drop " on LinkedIn"
+            edits[ps] = (m.start("pre"), pe, "")
+
+    if not edits:
+        return text, 0
+    out = text
+    for start, end, repl in sorted(edits.values(), reverse=True):
+        before, after = out[:start], out[end:]
+        if not repl and after and (not before.strip() or before.rstrip()[-1] in ".!?\n"):
+            after = after[:1].upper() + after[1:]  # deletion left a sentence start
+        out = before + repl + after
+    return out, len(edits)
+
+
 # ── Job-context block shared by both builders ────────────────────────────────
+
+def _platform_context_line(job: dict) -> str:
+    """Prompt line telling the model which platform the posting is on (or that it is
+    unknown, in which case no platform may be named)."""
+    platform = job_platform(job)
+    title = (job.get("job_title") or "").strip()
+    if not platform:
+        return (
+            "Job posting source: unknown — refer to it neutrally as \"your job posting\" "
+            "and do NOT name any job platform (LinkedIn, Naukri, Dice, etc.)."
+        )
+    others = " or ".join(p for p in PLATFORM_NAMES if p != platform)
+    example = f"your {platform} posting for {title}" if title else f"your {platform} posting"
+    return (
+        f"Job posting source: {platform} — this role was posted on {platform}. When you "
+        f"reference the posting, call it their {platform} posting (e.g. \"{example}\"). "
+        f"Do NOT say it was posted on {others}."
+    )
+
 
 def _job_context(job: dict, include_description: bool = True) -> str:
     company = (job.get("company") or "").strip() or "the company"
@@ -401,6 +552,7 @@ def _job_context(job: dict, include_description: bool = True) -> str:
             f"Job title (refer to the role using this EXACT text, verbatim — do not "
             f"paraphrase, shorten, reorder, or change capitalization): {title}"
         )
+    lines.append(_platform_context_line(job))
     if poster:
         first_name = poster.split()[0]
         lines.append(
@@ -504,10 +656,14 @@ def render_email_fallback(
     title = (job.get("job_title") or "").strip()
 
     greeting = build_greeting(job)
+    # "your Naukri posting" / "your LinkedIn posting" / "your Dice posting", or the neutral
+    # "your job posting" when the source is unknown — never a guessed platform. The title
+    # stays verbatim so email_service._outreach_body_to_html links it to the posting.
+    posting = posting_phrase(job)
     reference = (
-        f"I came across your posting for {title} at {company}."
+        f"I came across {posting} for {title} at {company}."
         if title
-        else f"I wanted to reach out about your IT hiring at {company}."
+        else f"I came across {posting} at {company} and wanted to reach out about your IT hiring."
     )
     offer = (
         f"As your empaneled Sightspectrum partner, {OFFER_LINE[0].lower()}{OFFER_LINE[1:]}"
@@ -541,8 +697,10 @@ FOLLOWUP_SYSTEM_PROMPT = (
     "(1) A one-line gentle follow-up that references the earlier message about the "
     "role — e.g. 'Following up on my note about <JOB TITLE> at <COMPANY>.' Use the "
     "job title EXACTLY as given in the context (verbatim — do not paraphrase, "
-    "shorten, reorder, or change capitalization). Do NOT re-introduce Sightspectrum "
-    "as if for the first time. "
+    "shorten, reorder, or change capitalization). If you mention where the job was "
+    "posted, use ONLY the platform given as the context's 'Job posting source' (e.g. "
+    "their Naukri posting) — never assume LinkedIn; if the source is unknown, name no "
+    "platform. Do NOT re-introduce Sightspectrum as if for the first time. "
     "(2) A brief, general reminder of how you can help — in your OWN words, varied "
     "every time: that Sightspectrum supports their contract IT hiring across India "
     "and can put forward suitable candidates. Keep it to one natural, conversational "
@@ -646,10 +804,11 @@ def render_followup_fallback(
     title = (job.get("job_title") or "").strip()
 
     greeting = build_greeting(job)
+    posting = posting_phrase(job)  # platform from the job's source, else neutral
     reference = (
-        f"Just following up on my earlier note about {title} at {company}."
+        f"Just following up on my earlier note about {posting} for {title} at {company}."
         if title
-        else f"Just following up on my earlier note about your hiring at {company}."
+        else f"Just following up on my earlier note about {posting} at {company}."
     )
     body = "\n\n".join([reference, OFFER_LINE, CTA_LINE])
     return build_followup_subject(prior_subject, job), append_closing(
@@ -668,10 +827,13 @@ def build_linkedin_prompt(job: dict) -> str:
     )
 
 
-def render_linkedin_fallback(company: str) -> str:
+def render_linkedin_fallback(company: str, platform: str = "") -> str:
+    """`platform` is job_platform(job) — names where the job was posted (a LinkedIn
+    message about a Naukri job says "your Naukri job post"); "" keeps it neutral."""
     name = (company or "").strip() or _GENERIC_COMPANY
+    post = f"{platform} job post" if platform else "job post"
     return (
-        f"Hi, I came across your job post at {name}. Sightspectrum is an IT "
+        f"Hi, I came across your {post} at {name}. Sightspectrum is an IT "
         "staffing firm supporting Contract, C2H, and Permanent hiring across Data "
         "Analytics, Cloud, and Digital technologies. We'd love to support your "
         "open requirements with quality-screened profiles. Could we connect to "

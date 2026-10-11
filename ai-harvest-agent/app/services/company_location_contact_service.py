@@ -9,7 +9,7 @@ no company-wide fallback.
 This module owns:
   * the CompanyLocationContactORM cache (find/upsert + the recheck-cooldown predicate), and
   * ``discover_company_location_contacts`` — a best-effort, browser-free post-harvest pass
-    (called from LinkedInAgent._run alongside _enrich_recruiters/_enrich_companies) that
+    (called from LinkedInAgent._run / NaukriAgent._run after the company pass) that
     finds the email-less jobs, groups them by (company_key, location_key), and for each
     group that needs it runs ``apollo_company_contact_fallback`` and writes the result to
     the cache.
@@ -30,7 +30,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
-from app.core.company_domain import infer_company_domain
+from app.core.company_domain import infer_company_domain, is_placeholder_company
 from app.core.dependencies import get_session_factory
 from app.core.location import location_search_terms, normalize_location_key
 from app.models.harvest_run import CompanyLocationContactORM
@@ -45,7 +45,7 @@ from app.services.recruiter_service import (
 logger = structlog.get_logger(__name__)
 
 # Max distinct (company, location) pairs to Apollo-search per run — bounds search
-# volume/time the same way _COMPANY_ENRICH_CAP bounds the company size pass. The daily
+# volume/time the same way company_enrichment_service.COMPANY_ENRICH_CAP bounds the company size pass. The daily
 # credit cap (apollo_budget) is the hard account-wide backstop on top of this.
 _COMPANY_CONTACT_CAP = 40
 
@@ -196,8 +196,8 @@ async def discover_company_location_contacts(jobs: list, settings: Settings) -> 
                 if compute_name_company_key(name, company) in emails_have:
                     continue  # poster's recruiter already has an email
             company_name = _job_attr(j, "company")
-            if not company_name:
-                continue
+            if not company_name or is_placeholder_company(company_name):
+                continue  # "Unknown Company" etc. is not a company to search
             lkey = normalize_location_key(_job_attr(j, "location"))
             if not lkey:
                 counts["skipped_no_location"] += 1   # no derivable location → never company-wide
