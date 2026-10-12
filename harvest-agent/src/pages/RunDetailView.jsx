@@ -5,7 +5,7 @@ import { C } from "../theme";
 import ThemeStyles from "../components/ThemeStyles";
 import { SourceChip, StatusPill, Select, fmtDate } from "../components/ui";
 import JobsTable, { PAGE_SIZE_OPTIONS } from "../components/JobsTable";
-import { mapRun, fetchAllJobs } from "../lib/jobsData";
+import { mapRun, fetchAllJobs, jobContact, pocKindLabel, partSourceLabel } from "../lib/jobsData";
 
 // Labels for the Run Detail classification cards / active-filter chip.
 const BUCKET_LABELS = {
@@ -57,7 +57,7 @@ export default function RunDetailView({ runId, onBack, onView }) {
 
   // The classification bucket is driven by the clickable stat cards in the run
   // header ("all" | "verified" | "direct" | "gcc" | "staffing" | "ambiguous").
-  // The rest of the filtering (company/contact/job/POC/search/sort) lives in the
+  // The rest of the filtering (source/company/contact/job/POC/search/sort) lives in the
   // shared JobsTable, which reports its filtered rows back via onFilteredChange
   // for the stats + CSV export below.
   const [bucket, setBucket] = useState("all");
@@ -74,19 +74,32 @@ export default function RunDetailView({ runId, onBack, onView }) {
     return true;
   }, [bucket]);
 
-  const jobStats = useMemo(() => ({
-    total: filteredRows.length,
-    companies: new Set(filteredRows.map((j) => j.company)).size,
-    pocs: filteredRows.filter((j) => j.poc).length,
-    emails: filteredRows.filter((j) => j.email).length,
-    whatsapp: filteredRows.filter((j) => j.whatsapp).length,
-  }), [filteredRows]);
+  // Header stats over the rows currently shown (card bucket + every table filter,
+  // incl. Source). Contact presence comes from jobContact() — the same values the
+  // POC/Email/Mobile cells render — so Naukri/Dice rows and Company-tagged
+  // contacts count exactly like LinkedIn poster contacts.
+  const jobStats = useMemo(() => {
+    const contacts = filteredRows.map(jobContact);
+    return {
+      total: filteredRows.length,
+      companies: new Set(filteredRows.map((j) => j.company).filter((c) => c && c !== "—")).size,
+      pocs: contacts.filter((c) => c.pocName).length,
+      emails: contacts.filter((c) => c.email).length,
+      companyEmails: contacts.filter((c) => c.emailKind === "company").length,
+      whatsapp: contacts.filter((c) => c.phone).length,
+    };
+  }, [filteredRows]);
 
   function exportCsv() {
-    const header = ["Job title", "Company", "Source", "POC", "Posted date", "Email", "Mobile", "Job description"];
-    const lines = filteredRows.map((j) =>
-      [j.title, j.company, j.source, j.poc || "—", j.postedDate || "—", j.email || "—", j.mobile || "—", j.jobDescription || "—"]
-        .map((c) => '"' + String(c).replace(/"/g, '""') + '"').join(","));
+    const header = ["Job title", "Company", "Source", "POC", "POC type", "Posted date", "Email", "Email source", "Mobile", "Mobile source", "Job description"];
+    const lines = filteredRows.map((j) => {
+      const c = jobContact(j);
+      return [
+        j.title, j.company, c.source, c.pocName || "—", pocKindLabel(c.pocKind), j.postedDate || "—",
+        c.email || "—", partSourceLabel(c.emailParts), c.phone || "—", partSourceLabel(c.phoneParts),
+        j.jobDescription || "—",
+      ].map((v) => '"' + String(v).replace(/"/g, '""') + '"').join(",");
+    });
     // Prepend a UTF-8 BOM so Excel detects the encoding — without it Excel reads
     // the file as Windows-1252 and turns the "—" placeholder into "â€"".
     const blob = new Blob([String.fromCharCode(0xFEFF) + [header.join(","), ...lines].join("\n")], { type: "text/csv;charset=utf-8;" });
@@ -174,7 +187,9 @@ export default function RunDetailView({ runId, onBack, onView }) {
                     <span><b style={{ color: C.text }}>{jobStats.total}</b> jobs</span>
                     <span><b style={{ color: C.text }}>{jobStats.companies}</b> companies</span>
                     <span><b style={{ color: C.text }}>{jobStats.pocs}</b> POCs</span>
-                    <span><b style={{ color: C.text }}>{jobStats.emails}</b> emails</span>
+                    <span title={`${jobStats.emails - jobStats.companyEmails} job/recruiter · ${jobStats.companyEmails} company contact`}>
+                      <b style={{ color: C.text }}>{jobStats.emails}</b> emails
+                    </span>
                     <span><b style={{ color: C.text }}>{jobStats.whatsapp}</b> WhatsApp</span>
                     <Select label="Rows per page" value={pageSizeSel} onChange={setPageSizeSel} options={PAGE_SIZE_OPTIONS} />
                     <button className="ha-btn ha-btn-primary" onClick={exportCsv} disabled={filteredRows.length === 0}>

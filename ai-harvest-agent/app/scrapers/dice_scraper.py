@@ -540,7 +540,6 @@ class DiceScraper:
         """
         import re as _re
 
-        _EMAIL_RE   = _re.compile(r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}')
         _PHONE_RE   = _re.compile(r'(?:\+?1[\s\-.]?)?\(?[2-9]\d{2}\)?[\s\-.]?\d{3}[\s\-.]?\d{4}')
         _LI_RE      = _re.compile(r'https?://(?:www\.)?linkedin\.com/in/([a-zA-Z0-9\-_%]+)/?')
 
@@ -578,9 +577,11 @@ class DiceScraper:
                     try:
                         page_text = await self._page.inner_text("body")
                         if not email:
-                            m = _EMAIL_RE.search(page_text)
-                            if m:
-                                found = m.group()
+                            # Shared extractor: same first match, but trimmed of
+                            # text glued onto the TLD ("x@acme.comApply" → "x@acme.com").
+                            from app.core.contact_normalize import find_emails
+                            found = next(iter(find_emails(page_text)), None)
+                            if found:
                                 _JUNK = ("noreply", "no-reply", "dice.com", "example.", "reportfraud",
                                          "fraud@", "abuse@", "careers@", "jobs@", "donotreply")
                                 if not any(x in found.lower() for x in _JUNK):

@@ -5,7 +5,7 @@ import { getJobs, getJobsFacets, ApiError, downloadJsonUrl, downloadExcelUrl } f
 import { C } from "../theme";
 import { Select, StatCard } from "../components/ui";
 import JobsTable, { PAGE_SIZE_OPTIONS } from "../components/JobsTable";
-import { mapApiJob, fetchAllJobs } from "../lib/jobsData";
+import { mapApiJob, fetchAllJobs, jobContact, pocKindLabel, partSourceLabel } from "../lib/jobsData";
 import { useHarvestData } from "../HarvestDataContext";
 import { useTenant } from "../TenantContext";
 
@@ -118,10 +118,18 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
     try {
       const { page, page_size, ...filterParams } = lastParamsRef.current || {};
       const { rows } = await fetchAllJobs(filterParams);
-      const header = ["Job title", "Company", "Source", "Filter status", "Filter reason", "POC", "Posted date", "Email", "Mobile", "WhatsApp", "LinkedIn", "Job description"];
-      const lines = rows.map((j) =>
-        [j.title, j.company, j.source, j.passedFilter ? "Qualified" : "Flagged", j.filterReason || "—", j.poc || "—", j.postedDate || "—", j.email || "—", j.mobile || "—", j.whatsapp || "—", j.linkedin || "—", j.jobDescription || "—"]
-          .map((c) => '"' + String(c).replace(/"/g, '""') + '"').join(","));
+      // Contact columns come from jobContact() — the same values the table cells
+      // show, incl. the Company-tagged contact, for every source.
+      const header = ["Job title", "Company", "Source", "Filter status", "Filter reason", "POC", "POC type", "Posted date", "Email", "Email source", "Mobile", "Mobile source", "WhatsApp", "LinkedIn", "Job description"];
+      const lines = rows.map((j) => {
+        const c = jobContact(j);
+        return [
+          j.title, j.company, c.source, j.passedFilter ? "Qualified" : "Flagged", j.filterReason || "—",
+          c.pocName || "—", pocKindLabel(c.pocKind), j.postedDate || "—",
+          c.email || "—", partSourceLabel(c.emailParts), c.phone || "—", partSourceLabel(c.phoneParts),
+          c.phone || "—", c.linkedin || "—", j.jobDescription || "—",
+        ].map((v) => '"' + String(v).replace(/"/g, '""') + '"').join(",");
+      });
       // Prepend a UTF-8 BOM so Excel detects the encoding — without it Excel reads
       // the file as Windows-1252 and turns the "—" placeholder into "â€"".
       const blob = new Blob([String.fromCharCode(0xFEFF) + [header.join(","), ...lines].join("\n")], { type: "text/csv;charset=utf-8;" });
@@ -206,7 +214,10 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
 
         <div style={{ display: "flex", justifyContent: "space-between", padding: "0 4px", fontSize: 12, color: C.textSoft }}>
           <span>Showing {pageJobs.length} of {pageTotal} matching posting{pageTotal === 1 ? "" : "s"} · {stats.qualified || 0} qualified · {stats.flagged || 0} flagged</span>
-          <span>{stats.with_email || 0} email · {stats.with_phone || 0} WhatsApp · {stats.with_linkedin || 0} LinkedIn</span>
+          {/* with_email/with_phone include the Company-tagged contact (GET /jobs/facets). */}
+          <span title={`Email: ${stats.with_poster_email || 0} job/recruiter · ${stats.with_company_email || 0} company contact`}>
+            {stats.with_email || 0} email · {stats.with_phone || 0} WhatsApp · {stats.with_linkedin || 0} LinkedIn
+          </span>
         </div>
       </div>
     </main>

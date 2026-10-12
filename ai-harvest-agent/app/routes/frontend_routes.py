@@ -40,6 +40,7 @@ from app.services.harvest_run_service import (
     HarvestRunService,
     data_source_mode,
     db_read,
+    job_dict_contact,
     resolve_read,
     scraped_job_view,
 )
@@ -137,20 +138,21 @@ def _load_lead_records() -> list[dict]:
 
 def _job_matches_contact(job: dict, tokens: list[str]) -> bool:
     """Python mirror of the UI's jobMatchesContact() for the JSON read path.
-    Combined-JSON job dicts already carry the merged email_id/contact_number
-    (reports are built via scraped_job_view), so semantics match the DB path's
-    recruiter-merged presence tests. Tokens are OR-combined."""
-    has_email    = bool(job.get("email_id"))
-    has_mobile   = bool(job.get("contact_number"))
-    has_linkedin = bool(job.get("linkedin_profile_url"))
+    Presence comes from job_dict_contact() — the same semantics as the DB
+    path's _contact_presence_exprs(): poster/recruiter values plus the
+    Company-tagged company(+location) contact. Tokens are OR-combined."""
+    c = job_dict_contact(job)
+    has_email, has_mobile, has_linkedin = c["email"], c["mobile"], c["linkedin"]
     checks = {
-        "email":       has_email,
-        "mobile":      has_mobile,
-        "linkedin":    has_linkedin,
-        "no_email":    not has_email,
-        "no_mobile":   not has_mobile,
-        "no_linkedin": not has_linkedin,
-        "none":        not (has_email or has_mobile or has_linkedin),
+        "email":         has_email,
+        "email_poster":  c["email_poster"],
+        "email_company": c["email_company"],
+        "mobile":        has_mobile,
+        "linkedin":      has_linkedin,
+        "no_email":      not has_email,
+        "no_mobile":     not has_mobile,
+        "no_linkedin":   not has_linkedin,
+        "none":          not (has_email or has_mobile or has_linkedin),
     }
     return any(checks.get(t, False) for t in tokens)
 
@@ -191,6 +193,9 @@ def _apply_job_filters(jobs: list[dict], **f: Any) -> list[dict]:
             or keyword in (j.get("source")          or "").lower()
             or keyword in (j.get("email_id")        or "").lower()
             or keyword in (j.get("contact_number")  or "").lower()
+            or keyword in (j.get("company_contact_name")  or "").lower()
+            or keyword in (j.get("company_contact_email") or "").lower()
+            or keyword in (j.get("company_contact_phone") or "").lower()
         ]
     if company:
         result = [j for j in result if company in (j.get("company") or "").lower()]
@@ -199,7 +204,8 @@ def _apply_job_filters(jobs: list[dict], **f: Any) -> list[dict]:
     if job_title:
         result = [j for j in result if (j.get("job_title") or "") == job_title]
     if poc:
-        result = [j for j in result if (j.get("job_poster_name") or "") == poc]
+        # The POC the table shows: poster name, else the company contact's.
+        result = [j for j in result if job_dict_contact(j)["poc_name"] == poc.strip()]
     if contact:
         result = [j for j in result if _job_matches_contact(j, contact)]
     if size_tier:
@@ -246,13 +252,17 @@ def _date_lte(posted: str | None, bound: str) -> bool:
 def _apply_sort(jobs: list[dict], sort_by: str, sort_order: str) -> list[dict]:
     if sort_by not in JOB_SORT_FIELDS:
         sort_by = "posted_date"
-    return sorted(
-        jobs,
-        # str() first: older combined files may hold a non-string in the sort
-        # field (e.g. a numeric posted_date) — .lower() alone would 500 the route.
-        key     = lambda j: str(j.get(sort_by) or "").lower(),
-        reverse = sort_order.lower() == "desc",
-    )
+    if sort_by == "job_poster_name":
+        # The POC column (poster, else Company-tagged contact) — mirrors the DB
+        # path's poc_name_expr() ordering.
+        def key(j: dict) -> str:
+            return job_dict_contact(j)["poc_name"].lower()
+    else:
+        def key(j: dict) -> str:
+            # str() first: older combined files may hold a non-string in the sort
+            # field (e.g. a numeric posted_date) — .lower() alone would 500 the route.
+            return str(j.get(sort_by) or "").lower()
+    return sorted(jobs, key=key, reverse=sort_order.lower() == "desc")
 
 
 def _paginate(items: list, page: int, page_size: int) -> tuple[list, int, int]:
@@ -281,12 +291,12 @@ async def list_jobs(
     page_size:     int = Query(100,  ge=1,  le=500,      description="Results per page (max 500)"),
     sort_by:       str = Query("posted_date",             description="Sort field: posted_date | company | job_title | source | hiring_entity | location | job_poster_name"),
     sort_order:    str = Query("desc",                    description="Sort direction: asc | desc"),
-    keyword:       str = Query("",                        description="Search in job_title, job_description, company, job_poster_name, source, email_id, contact_number"),
+    keyword:       str = Query("",                        description="Search in job_title, job_description, company, job_poster_name, source, email_id, contact_number, company_contact_name/email/phone"),
     company:       str = Query("",                        description="Filter by company name (partial match)"),
     company_exact: str = Query("",                        description="Filter by exact company name (UI dropdown)"),
     job_title:     str = Query("",                        description="Filter by exact job title (UI dropdown)"),
-    poc:           str = Query("",                        description="Filter by exact job poster (POC) name (UI dropdown)"),
-    contact:       str = Query("",                        description="Contact availability — comma-separated tokens, OR-combined: email | mobile | linkedin | no_email | no_mobile | no_linkedin | none"),
+    poc:           str = Query("",                        description="Filter by exact POC name (UI dropdown): the job poster, else the company contact"),
+    contact:       str = Query("",                        description="Contact availability — comma-separated tokens, OR-combined: email | email_poster | email_company | mobile | linkedin | no_email | no_mobile | no_linkedin | none (email/mobile include the company contact)"),
     size_tier:     str = Query("",                        description="Company-size tier: Small | Medium | Large | Enterprise | unknown"),
     country:       str = Query("",                        description="Filter by job-location country (UI dropdown), e.g. India"),
     company_country: str = Query("",                      description="Filter by company HQ country (UI dropdown), e.g. United States"),
@@ -436,20 +446,28 @@ async def job_facets() -> dict:
         def _distinct(key: str) -> list[str]:
             return sorted({j.get(key) or "" for j in jobs} - {""})
 
+        # Same contact semantics as the DB path (poster/recruiter + Company-tagged).
+        contacts = [job_dict_contact(j) for j in jobs]
+
+        def _count(flag: str) -> int:
+            return sum(1 for c in contacts if c[flag])
+
         return {
             "companies":  _distinct("company"),
             "job_titles": _distinct("job_title"),
-            "poc_names":  _distinct("job_poster_name"),
+            "poc_names":  sorted({c["poc_name"] for c in contacts} - {""}),
             "stats": {
                 "total":         len(jobs),
                 "companies":     len({j.get("company") or "" for j in jobs} - {""}),
-                "pocs":          sum(1 for j in jobs if j.get("job_poster_name")),
+                "pocs":          _count("poc_name"),
                 # `is not False` mirrors the UI's `passed_filter !== false`.
                 "qualified":     sum(1 for j in jobs if j.get("passed_filter") is not False),
                 "flagged":       sum(1 for j in jobs if j.get("passed_filter") is False),
-                "with_email":    sum(1 for j in jobs if j.get("email_id")),
-                "with_phone":    sum(1 for j in jobs if j.get("contact_number")),
-                "with_linkedin": sum(1 for j in jobs if j.get("linkedin_profile_url")),
+                "with_email":         _count("email"),
+                "with_poster_email":  _count("email_poster"),
+                "with_company_email": _count("email_company"),
+                "with_phone":         _count("mobile"),
+                "with_linkedin":      _count("linkedin"),
             },
         }
 

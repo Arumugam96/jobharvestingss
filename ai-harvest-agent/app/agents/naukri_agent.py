@@ -44,6 +44,8 @@ Akamai edge denies chromium-headless-shell.
 """
 from __future__ import annotations
 
+import asyncio
+import html as _html
 import json
 import math
 import random
@@ -58,7 +60,14 @@ import structlog
 from playwright.async_api import Page
 
 from app.config import get_settings
-from app.core.contact_normalize import normalize_email, normalize_phone
+from app.core.contact_normalize import (
+    extract_emails,
+    html_contact_text,
+    mailto_addresses,
+    normalize_email,
+    normalize_phone,
+    tel_numbers,
+)
 from app.core.harvest_helpers import env_max_jobs_cap, retry_async
 from app.core.job_url import normalize_job_url
 from app.core.search_keywords import comma_joiner, compose_keyword_query
@@ -66,12 +75,23 @@ from app.core.text_formatting import (
     description_text_to_html,
     format_job_description,
     html_description_to_text,
+    restructure_description_html,
     sanitize_description_html,
 )
 from app.models.harvest_models import FiltersConfig
 from app.scrapers.browser_manager import BrowserManager, PersistentBrowserManager
 from app.scrapers.human import human_scroll
 from app.services import run_guard
+from app.services.jd_llm_enrichment import (
+    GroundedContacts,
+    choose_email,
+    has_contact_signals,
+    is_flat_description,
+    llm_configured,
+    llm_extract_contacts,
+    naukri_llm_settings,
+    llm_restructure_description,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -170,6 +190,13 @@ class NaukriScrapedJob:
     email_id:               str | None = None
     contact_number:         str | None = None
     linkedin_profile_url:   str | None = None
+    # Internal (not persisted): the raw description HTML the text was built
+    # from — contact extraction / LLM grounding read it (mailto: links, tag
+    # boundaries) — and where each contact field came from: "naukri" (Naukri's
+    # own recruiter block), "jd_text" (regex over the description) or "jd_llm"
+    # (grounded LLM extraction). Only "jd_text" values may be replaced by the LLM.
+    description_source_html: str = field(default="", repr=False, compare=False)
+    contact_sources: dict[str, str] = field(default_factory=dict, repr=False, compare=False)
 
     # LinkedIn-compatible aliases — shared post-harvest passes (e.g.
     # company_location_contact_service.discover_company_location_contacts) read
@@ -576,7 +603,10 @@ def job_from_dom_card(d: dict, ref: datetime) -> NaukriScrapedJob | None:
 _RECRUITER_KEYS = ("recruiterDetail", "recruiterDetails", "recruiterProfile",
                    "contactDetails", "recruiter")
 
-_EMAIL_IN_TEXT_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+# Emails come from the shared extractor (app/core/contact_normalize.extract_emails):
+# mailto: targets, then tag-boundary text of the raw HTML, then the formatted
+# text — each match trimmed of text glued onto the domain
+# ("x@infosys.comCTCIndustryTesting" → "x@infosys.com").
 # A phone is only taken from free text when a contact cue sits right before it,
 # so job ids / salary figures are never mistaken for numbers.
 _PHONE_IN_TEXT_RE = re.compile(
@@ -593,45 +623,109 @@ def _clean_email(raw: str | None) -> str | None:
     return email
 
 
-def extract_contacts_from_text(text: str) -> tuple[str | None, str | None]:
-    """(email, phone) present VERBATIM in a job's description text, or None each.
-    Junk/system addresses (report-fraud, no-reply, Naukri's own) are dropped;
-    values go through the shared contact normalizers."""
-    email = None
-    for m in _EMAIL_IN_TEXT_RE.finditer(text or ""):
-        if (email := _clean_email(m.group(0).rstrip("."))):
-            break
+def extract_contacts_from_text(text: str, html: str = "") -> tuple[str | None, str | None]:
+    """(email, phone) present VERBATIM in a job's description, or None each.
+
+    ``text`` is the formatted description; ``html`` (optional) the raw source
+    HTML, whose mailto:/tel: links and tag boundaries are read too, so text from
+    adjacent elements can't glue onto an address. Junk/system addresses
+    (report-fraud, no-reply, Naukri's own) are dropped; values go through the
+    shared contact normalizers."""
+    email = next((e for e in map(_clean_email, extract_emails(text, html)) if e), None)
     phone = None
-    for m in _PHONE_IN_TEXT_RE.finditer(text or ""):
-        if (phone := normalize_phone(m.group(1))):
+    for raw in tel_numbers(html):
+        if (phone := normalize_phone(raw)):
             break
+    if phone is None:
+        for source in (html_contact_text(html), text or ""):
+            for m in _PHONE_IN_TEXT_RE.finditer(source):
+                if (phone := normalize_phone(m.group(1))):
+                    break
+            if phone:
+                break
     return email, phone
 
 
 def _apply_contacts(job: NaukriScrapedJob, name: Any = None, designation: Any = None,
-                    company: Any = None, email: Any = None, phone: Any = None) -> None:
-    """Fill recruiter fields only where empty and only with real values."""
+                    company: Any = None, email: Any = None, phone: Any = None,
+                    source: str = "naukri") -> None:
+    """Fill recruiter fields only where empty and only with real values;
+    record where each filled value came from (job.contact_sources)."""
     if (v := _clean(name)) and not job.recruiter_name:
         job.recruiter_name = v
+        job.contact_sources["name"] = source
     if (v := _clean(designation)) and not job.job_poster_designation:
         job.job_poster_designation = v
+        job.contact_sources["designation"] = source
     if (v := _clean(company)) and not job.recruiter_company:
         job.recruiter_company = v
+        job.contact_sources["company"] = source
     if email and not job.email_id and (e := _clean_email(str(email))):
         job.email_id = e
+        job.contact_sources["email"] = source
     if phone and not job.contact_number and (p := normalize_phone(str(phone))):
         job.contact_number = p
+        job.contact_sources["phone"] = source
+
+
+def _apply_text_contacts(job: NaukriScrapedJob) -> None:
+    """Deterministic contact pass over the job's description (text + raw HTML)."""
+    email, phone = extract_contacts_from_text(job.job_description, job.description_source_html)
+    _apply_contacts(job, email=email, phone=phone, source="jd_text")
+
+
+def apply_llm_contacts(job: NaukriScrapedJob, grounded: GroundedContacts) -> list[str]:
+    """Merge grounded LLM contacts into ``job``; returns the fields changed.
+
+    Values from Naukri's own recruiter block are never touched. The email is
+    reconciled with the deterministic one (choose_email): a shorter verbatim
+    prefix of a glued regex match, or a personal recruiter address over a
+    generic inbox, replaces a regex ("jd_text") value. Phone / name /
+    designation / company only fill empty fields."""
+    changed: list[str] = []
+    if job.contact_sources.get("email") != "naukri":
+        current = job.email_id if job.contact_sources.get("email") == "jd_text" else None
+        if job.email_id is None or current is not None:
+            chosen, origin = choose_email(current, grounded)
+            if chosen and origin == "llm" and chosen != job.email_id:
+                job.email_id = chosen
+                job.contact_sources["email"] = "jd_llm"
+                changed.append("email")
+    for fld, attr, value in (
+        ("phone", "contact_number", grounded.phones[0] if grounded.phones else None),
+        ("name", "recruiter_name", grounded.name),
+        ("designation", "job_poster_designation", grounded.designation),
+        ("company", "recruiter_company", grounded.company),
+    ):
+        if value and not getattr(job, attr):
+            setattr(job, attr, value)
+            job.contact_sources[fld] = "jd_llm"
+            changed.append(fld)
+    return changed
 
 
 def _set_description(job: NaukriScrapedJob, html: str) -> bool:
+    """Set job_description (formatted text) + job_description_html from a
+    description that may be HTML or plain text. Recruiter-authored HTML is
+    first repaired (restructure_description_html: one bullet per line, headings
+    split out, raw newlines kept) so both forms keep the list structure."""
     html = (html or "").strip()
     if not html:
         return False
-    text = html_description_to_text(html) if "<" in html else format_job_description(html)
+    if "<" not in html and "&lt;" in html:
+        html = _html.unescape(html)              # entity-encoded HTML (ld+json)
+    if "<" in html:
+        fixed = restructure_description_html(html)
+        text = html_description_to_text(fixed)
+        rich = sanitize_description_html(fixed)
+    else:
+        text = format_job_description(html)
+        rich = ""                                # plain text: built from the text below
     if not text:
         return False
     job.job_description = text
-    job.job_description_html = sanitize_description_html(html) or description_text_to_html(text)
+    job.job_description_html = rich or description_text_to_html(text)
+    job.description_source_html = html
     return True
 
 
@@ -699,9 +793,9 @@ def apply_detail_json(job: NaukriScrapedJob, payload: dict) -> bool:
                 company=rec.get("companyName") or rec.get("company"),
                 email=rec.get("email") or rec.get("emailId"),
                 phone=rec.get("mobile") or rec.get("phone") or rec.get("contactNumber"),
+                source="naukri",
             )
-    email, phone = extract_contacts_from_text(job.job_description)
-    _apply_contacts(job, email=email, phone=phone)
+    _apply_text_contacts(job)
     return True
 
 
@@ -755,8 +849,7 @@ def apply_ld_json(job: NaukriScrapedJob, ld_texts: list[str]) -> bool:
         job.posted_date = _ist_datetime_to_date(posting.get("datePosted"))
     if (skills := posting.get("skills")) and not job.skills:
         job.skills = _split_skills(skills)
-    email, phone = extract_contacts_from_text(job.job_description)
-    _apply_contacts(job, email=email, phone=phone)
+    _apply_text_contacts(job)
     return True
 
 
@@ -766,8 +859,7 @@ def apply_dom_description(job: NaukriScrapedJob, desc_html: str) -> bool:
         return False
     if job.work_mode == "not_specified":
         job.work_mode = _infer_work_mode(job.location)
-    email, phone = extract_contacts_from_text(job.job_description)
-    _apply_contacts(job, email=email, phone=phone)
+    _apply_text_contacts(job)
     return True
 
 
@@ -802,7 +894,24 @@ class NaukriAgent:
                        detail visit and don't consume max_jobs.
     """
 
-    def __init__(self, already_harvested: set[str] | None = None) -> None:
+    # Consecutive LLM failures (errors / timeouts) after which LLM enrichment is
+    # switched off for the rest of the run — deterministic results stand.
+    _LLM_MAX_FAILURE_STREAK = 3
+
+    def __init__(
+        self,
+        already_harvested: set[str] | None = None,
+        llm_service: Any | None = None,
+    ) -> None:
+        # LLM enrichment (see _schedule_llm_enrichment). llm_service is resolved
+        # lazily from settings on first need unless injected (tests).
+        self._llm_service: Any | None = llm_service
+        self._llm_resolved = llm_service is not None
+        self._llm_off_reason: str | None = None
+        self._llm_tasks: dict[int, asyncio.Task] = {}
+        self._llm_sem: asyncio.Semaphore | None = None
+        self._llm_calls = 0
+        self._llm_failure_streak = 0
         self._already_harvested: set[str] = already_harvested or set()
         self._already_harvested_ids: set[str] = {
             jid for u in self._already_harvested if (jid := naukri_job_id_from_url(u))
@@ -860,6 +969,157 @@ class NaukriAgent:
             logger.exception("agent_failed", source="naukri", error=str(exc))
             return []
 
+    def get_token_usage(self) -> dict:
+        """Cumulative token usage of this run's Naukri LLM enrichment calls
+        (zeroed summary when the LLM was never used)."""
+        if self._llm_service is None or not hasattr(self._llm_service, "get_usage_summary"):
+            from app.services.llm_service import empty_usage_summary
+            return empty_usage_summary()
+        return self._llm_service.get_usage_summary()
+
+    def get_llm_call_log(self) -> list[dict]:
+        """Per-call audit log of this run's Naukri LLM enrichment calls."""
+        if self._llm_service is None or not hasattr(self._llm_service, "get_call_log"):
+            return []
+        return self._llm_service.get_call_log()
+
+    # ── LLM enrichment (on top of the deterministic parse) ──────────────────────
+    #
+    # Placement: each job's LLM work starts as a background task right after its
+    # detail page is parsed, so the call overlaps the next detail visits and the
+    # human-like 2.5–6 s gaps between them (≈ zero added wall time). Before a
+    # batch is handed to on_batch (persisted), its jobs' tasks are awaited with a
+    # hard cap, so the persisted row already carries the LLM result. Bounded by:
+    # per-call timeout (naukri_llm_timeout_s), a concurrency semaphore
+    # (naukri_llm_concurrency), a per-run call cap, and a failure circuit
+    # breaker. Any LLM error leaves the deterministic values in place.
+
+    def _get_llm(self, settings: Any) -> Any | None:
+        if self._llm_off_reason:
+            return None
+        if not self._llm_resolved:
+            self._llm_resolved = True
+            settings = naukri_llm_settings(settings)
+            if not llm_configured(settings):
+                self._llm_off_reason = "llm_not_configured"
+                logger.warning(
+                    "naukri_llm_enrichment_skipped",
+                    reason="no LLM provider configured (EXTRACTION_LLM_MODEL key/URL missing)",
+                    note="deterministic contact extraction / formatting only",
+                )
+                return None
+            from app.services.llm_service import LLMService
+            self._llm_service = LLMService(settings)
+        return self._llm_service
+
+    def _llm_budget_left(self, settings: Any) -> bool:
+        cap = int(getattr(settings, "naukri_llm_max_calls_per_run", 0) or 0)
+        if cap and self._llm_calls >= cap:
+            if self._llm_off_reason is None:
+                self._llm_off_reason = "call_cap_reached"
+                logger.warning("naukri_llm_call_cap_reached", cap=cap)
+            return False
+        return True
+
+    def _schedule_llm_enrichment(self, job: NaukriScrapedJob) -> None:
+        """Start LLM enrichment for ``job`` in the background when it can help:
+        contact extraction when the description shows a contact signal,
+        restructuring when it is a flat run-on blob. No-op otherwise."""
+        try:
+            settings = get_settings()
+            want_contacts = bool(settings.naukri_llm_contact_extraction) and has_contact_signals(
+                job.job_description, job.description_source_html,
+            )
+            want_restructure = bool(settings.naukri_llm_description_restructure) and \
+                is_flat_description(job.job_description)
+            if not (want_contacts or want_restructure):
+                return
+            llm = self._get_llm(settings)
+            if llm is None or not self._llm_budget_left(settings):
+                return
+            if self._llm_sem is None:
+                self._llm_sem = asyncio.Semaphore(max(1, int(settings.naukri_llm_concurrency)))
+            timeout_s = float(settings.naukri_llm_timeout_s)
+            self._llm_tasks[id(job)] = asyncio.create_task(
+                self._llm_enrich(job, llm, want_contacts, want_restructure, timeout_s, settings)
+            )
+        except Exception as exc:  # scheduling must never break the scrape
+            logger.warning("naukri_llm_schedule_failed", url=job.job_url, error=str(exc))
+
+    def _llm_failed(self, exc: BaseException, what: str, ref: str) -> None:
+        self._llm_failure_streak += 1
+        logger.warning(
+            "naukri_llm_enrichment_failed", what=what, job=ref,
+            error=str(exc) or type(exc).__name__, streak=self._llm_failure_streak,
+            note="deterministic result kept",
+        )
+        if self._llm_failure_streak >= self._LLM_MAX_FAILURE_STREAK and self._llm_off_reason is None:
+            self._llm_off_reason = "repeated_failures"
+            logger.warning(
+                "naukri_llm_enrichment_disabled", reason="repeated_failures",
+                streak=self._llm_failure_streak,
+                note="deterministic results stand for the rest of this run",
+            )
+
+    async def _llm_enrich(
+        self, job: NaukriScrapedJob, llm: Any, want_contacts: bool, want_restructure: bool,
+        timeout_s: float, settings: Any,
+    ) -> None:
+        assert self._llm_sem is not None
+        async with self._llm_sem:
+            ref = job.job_url or job.job_id
+            text, src_html = job.job_description, job.description_source_html
+            if want_contacts and not self._llm_off_reason and self._llm_budget_left(settings):
+                self._llm_calls += 1
+                try:
+                    grounded = await llm_extract_contacts(
+                        llm, text,
+                        sources=[text, html_contact_text(src_html), "\n".join(mailto_addresses(src_html))],
+                        link_targets=[f"mailto:{a}" for a in mailto_addresses(src_html)]
+                        + [f"tel:{t}" for t in tel_numbers(src_html)],
+                        job_ref=ref, timeout_s=timeout_s, email_filter=_clean_email,
+                    )
+                    changed = apply_llm_contacts(job, grounded)
+                    self._llm_failure_streak = 0
+                    if changed:
+                        logger.info("naukri_llm_contacts_applied", job=ref, fields=changed)
+                except Exception as exc:
+                    self._llm_failed(exc, "contacts", ref)
+            if want_restructure and not self._llm_off_reason and self._llm_budget_left(settings):
+                self._llm_calls += 1
+                try:
+                    restructured = await llm_restructure_description(
+                        llm, text, job_ref=ref, timeout_s=timeout_s,
+                    )
+                    self._llm_failure_streak = 0
+                    if restructured:
+                        job.job_description = restructured
+                        job.job_description_html = description_text_to_html(restructured)
+                        logger.info("naukri_llm_description_restructured", job=ref)
+                except Exception as exc:
+                    self._llm_failed(exc, "restructure", ref)
+
+    async def _drain_llm(self, jobs: list[NaukriScrapedJob] | None = None) -> None:
+        """Wait (bounded) for the LLM tasks of ``jobs`` (all when None). Tasks
+        still running after the cap are cancelled — their jobs keep the
+        deterministic values. Never raises."""
+        if not self._llm_tasks:
+            return
+        keys = list(self._llm_tasks) if jobs is None else [id(j) for j in jobs if id(j) in self._llm_tasks]
+        tasks = [self._llm_tasks.pop(k) for k in keys]
+        if not tasks:
+            return
+        try:
+            cap_s = max(5.0, float(get_settings().naukri_llm_timeout_s) * 3)
+            _done, pending = await asyncio.wait(tasks, timeout=cap_s)
+            if pending:
+                for t in pending:
+                    t.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+                logger.warning("naukri_llm_drain_cap_hit", cancelled=len(pending), cap_s=cap_s)
+        except Exception as exc:
+            logger.warning("naukri_llm_drain_failed", error=str(exc))
+
     # ── Internal flow ──────────────────────────────────────────────────────────
 
     async def _run(
@@ -891,6 +1151,10 @@ class NaukriAgent:
                 page.remove_listener("response", self._on_response)
             except Exception:
                 pass
+            # Only left over when pagination raised — never leak background tasks.
+            for task in self._llm_tasks.values():
+                task.cancel()
+            self._llm_tasks.clear()
 
         logger.info(
             "naukri_jobs_extracted", total=len(jobs),
@@ -988,6 +1252,9 @@ class NaukriAgent:
         pending: list[NaukriScrapedJob] = []
 
         async def _flush_pending() -> None:
+            # LLM enrichment of these jobs must land before they are persisted.
+            if pending:
+                await self._drain_llm(list(pending))
             if on_batch and pending:
                 batch = list(pending)
                 pending.clear()
@@ -1113,10 +1380,13 @@ class NaukriAgent:
                         await self._fetch_detail(page, job)
                     except Exception as exc:
                         logger.warning("naukri_detail_failed", url=job.job_url, error=str(exc))
-                    if idx < len(to_fetch) - 1:
-                        await _delay(page, settings.naukri_detail_delay_min_ms,
-                                     max(settings.naukri_detail_delay_min_ms,
-                                         settings.naukri_detail_delay_max_ms))
+                # Background LLM enrichment (contacts / flat-description repair);
+                # overlaps the delay below and the next detail visits.
+                self._schedule_llm_enrichment(job)
+                if self._details_enabled and idx < len(to_fetch) - 1:
+                    await _delay(page, settings.naukri_detail_delay_min_ms,
+                                 max(settings.naukri_detail_delay_min_ms,
+                                     settings.naukri_detail_delay_max_ms))
                 all_jobs.append(job)
                 pending.append(job)
                 logger.info("job_card_extracted", source="naukri", title=job.job_title,
@@ -1143,6 +1413,7 @@ class NaukriAgent:
                 await _delay(page, 3_000, 6_000)
 
         await _flush_pending()
+        await self._drain_llm()
         await _progress(phase="done")
         logger.info(
             "pagination_completed", source="naukri", pages_visited=page_num,

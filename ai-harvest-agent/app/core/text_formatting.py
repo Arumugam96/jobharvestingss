@@ -12,8 +12,9 @@ from __future__ import annotations
 
 import re
 from html import escape as _escape
+from typing import Any
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Comment, NavigableString, Tag
 
 _BULLET_PREFIX = re.compile(r"^(?:[•‣▪●○◦*·]|-|\d{1,2}[.)]|\([a-zA-Z0-9]\))\s+")
 # LinkedIn/board scrapes sometimes glue bullet items into one run of text
@@ -226,10 +227,314 @@ def html_description_to_text(html: str) -> str:
         li.insert(0, "• ")
     # Trailing newline after each block element so get_text() (which uses no
     # separator, keeping inline runs intact) still breaks between blocks.
-    for block in soup.find_all(["p", "div", "ul", "ol", "li", "h1", "h2", "h3", "h4", "tr"]):
+    # Every block-level tag counts — a missing one (h5, td, section, dd, …)
+    # glues the next block's first word onto this one's last ("x@acme.comCTC").
+    for block in soup.find_all(_TEXT_BLOCK_TAGS):
         block.append("\n")
+    # Paragraphs (outside list items) and headings are separated from what
+    # follows/precedes by a blank line, as they render.
+    for para in soup.find_all("p"):
+        if para.find_parent("li") is None:
+            para.append("\n")
+    for heading in soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6"]):
+        heading.insert(0, "\n")
+    # Table cells sit side by side: a space keeps "CTC" and "Industry" apart.
+    for cell in soup.find_all(["td", "th"]):
+        cell.append(" ")
 
     return format_job_description(soup.get_text())
+
+
+# Block-level tags that end a line in html_description_to_text.
+_TEXT_BLOCK_TAGS = [
+    "p", "div", "ul", "ol", "li", "h1", "h2", "h3", "h4", "h5", "h6", "tr",
+    "table", "section", "article", "header", "footer", "aside", "nav", "main",
+    "blockquote", "pre", "hr", "dl", "dt", "dd", "address", "figure",
+    "figcaption", "center", "form", "fieldset",
+]
+
+
+# ── Structure repair for authored description HTML (Naukri) ─────────────────────
+
+_STRUCTURE_BLOCK_TAGS = frozenset(_TEXT_BLOCK_TAGS) | {"thead", "tbody", "tfoot", "td", "th", "li"}
+_EMPHASIS_TAGS = frozenset({"strong", "b", "u", "h1", "h2", "h3", "h4", "h5", "h6"})
+_WRAPPER_TAGS = frozenset({"p", "div", "span", "font"})
+_RAW_TEXT_PARENTS = frozenset({"pre", "code", "script", "style", "textarea"})
+_LINE_BULLET_RE = re.compile(r"^\s*(?:[•‣▪●○◦*·]|-)\s+")
+_GLYPHS = "•‣▪●○◦"
+_GLYPH_SPLIT_RE = re.compile(rf"\s*([{_GLYPHS}])\s*")
+_NEWLINE_SEP_RE = re.compile(r"(\s*\n\s*)")
+_HEADING_MAX_CHARS = 80
+
+
+def _seg_text(nodes: list) -> str:
+    raw = "".join(n.get_text() if isinstance(n, Tag) else str(n) for n in nodes)
+    return " ".join(raw.split())
+
+
+def _split_on_br(nodes: list) -> list[list]:
+    """Split a child-node list at <br> tags (blank segments kept, so a double
+    <br> shows up as an empty segment = paragraph break)."""
+    segs: list[list] = [[]]
+    for n in nodes:
+        if isinstance(n, Tag) and n.name == "br":
+            segs.append([])
+        else:
+            segs[-1].append(n)
+    return segs
+
+
+def _is_heading_segment(nodes: list) -> bool:
+    """A line that is a section heading: "Minimum Qualifications:" style, or a
+    short line that is entirely bold/underlined ("<b>Roles and Responsibilities</b>")."""
+    text = _seg_text(nodes)
+    if not text or len(text) > _HEADING_MAX_CHARS:
+        return False
+    if _SECTION_HEADER.match(text):
+        return True
+    significant = [n for n in nodes if not (isinstance(n, NavigableString) and not n.strip())]
+    return (
+        len(significant) == 1 and isinstance(significant[0], Tag)
+        and significant[0].name in _EMPHASIS_TAGS
+        and len(text) <= 60 and not text.endswith((".", ",", ";"))
+    )
+
+
+def _is_bullet_segment(nodes: list) -> bool:
+    return bool(_LINE_BULLET_RE.match(_seg_text(nodes)))
+
+
+def _strip_bullet_glyph(nodes: list) -> list:
+    """Segment with the typed bullet ("- ", "• ") removed from its first text."""
+    out = list(nodes)
+    for i, n in enumerate(out):
+        if isinstance(n, NavigableString):
+            if not n.strip():
+                continue
+            fresh = NavigableString(_LINE_BULLET_RE.sub("", str(n), count=1))
+            n.replace_with(fresh)
+            out[i] = fresh
+            return out
+        if isinstance(n, Tag):
+            target = next((s for s in n.find_all(string=True) if s.strip()), None)
+            if target is None:
+                continue
+            target.replace_with(NavigableString(_LINE_BULLET_RE.sub("", str(target), count=1)))
+            return out
+    return out
+
+
+def _newlines_to_br(root: Tag, soup: BeautifulSoup) -> None:
+    """Authored line breaks typed as raw "\\n" (and bullet glyphs glued into one
+    run) become real <br>s, so they survive HTML's whitespace collapsing.
+    Whitespace-only nodes between tags are left alone; a break at the very
+    start/end of a text node becomes a plain space."""
+    for node in list(root.find_all(string=True)):
+        if isinstance(node, Comment) or not node.strip():
+            continue
+        if node.parent is not None and node.parent.name in _RAW_TEXT_PARENTS:
+            continue
+        text = str(node)
+        if sum(text.count(g) for g in _GLYPHS) >= 2:
+            text = _GLYPH_SPLIT_RE.sub(r"\n\1 ", text)
+        if "\n" not in text:
+            continue
+        tokens = _NEWLINE_SEP_RE.split(text)       # odd indices = separators
+        new: list = []
+        for idx, tok in enumerate(tokens):
+            if idx % 2 == 0:
+                if tok:
+                    new.append(NavigableString(tok))
+                continue
+            at_edge = not any(tokens[0:idx:2]) or not any(tokens[idx + 1::2])
+            if at_edge:
+                new.append(NavigableString(" "))
+                continue
+            new.append(soup.new_tag("br"))
+            if tok.count("\n") >= 2:
+                new.append(soup.new_tag("br"))
+        if new:
+            node.replace_with(*new)
+
+
+def _unwrap_single_wrapper(li: Tag) -> None:
+    """<li><p>a<br>b</p></li> → <li>a<br>b</li> (Word-paste wrappers)."""
+    while True:
+        significant = [c for c in li.contents
+                       if not (isinstance(c, NavigableString) and not c.strip())]
+        if (len(significant) == 1 and isinstance(significant[0], Tag)
+                and significant[0].name in _WRAPPER_TAGS):
+            significant[0].unwrap()
+            continue
+        return
+
+
+def _split_list_items(lst: Tag, soup: BeautifulSoup) -> None:
+    """One <li> holding several <br>-separated lines → one <li> per line.
+
+    Recruiters often paste a whole section into a single bullet, so only the
+    first line renders as a bullet and the next section's heading ("Minimum
+    Qualifications:") runs on as the last line. Each line becomes its own item;
+    a heading line closes the list, is emitted as <h3>, and any lines after it
+    start a fresh list."""
+    for li in lst.find_all("li", recursive=False):
+        _unwrap_single_wrapper(li)
+    if not any(isinstance(c, Tag) and c.name == "br"
+               for li in lst.find_all("li", recursive=False) for c in li.contents):
+        return
+
+    blocks: list[tuple[str, Any]] = []
+    for child in list(lst.contents):
+        if isinstance(child, Tag) and child.name == "li":
+            segs = [s for s in _split_on_br(list(child.contents)) if _seg_text(s)]
+            if len(segs) <= 1:
+                blocks.append(("whole", child))
+                continue
+            for seg in segs:
+                blocks.append(("heading" if _is_heading_segment(seg) else "item", seg))
+        elif isinstance(child, NavigableString) and not child.strip():
+            continue
+        else:
+            blocks.append(("whole", child))
+
+    new_elements: list[Tag] = []
+    current: Tag | None = None
+    for kind, payload in blocks:
+        if kind == "heading":
+            current = None
+            h = soup.new_tag("h3")
+            for n in payload:
+                h.append(n)
+            new_elements.append(h)
+            continue
+        if current is None:
+            current = soup.new_tag(lst.name)
+            new_elements.append(current)
+        if kind == "whole":
+            current.append(payload)
+        else:
+            li = soup.new_tag("li")
+            for n in payload:
+                li.append(n)
+            current.append(li)
+    if new_elements:
+        lst.replace_with(*new_elements)
+
+
+def _rebuild_line_run(nodes: list, soup: BeautifulSoup) -> list[Tag] | None:
+    """<br>-separated lines → paragraphs / <h3> headings / <ul> for typed
+    bullets. None when the run has no heading or typed-bullet line (left as is)."""
+    segs = _split_on_br(nodes)
+    kinds = []
+    for seg in segs:
+        if not _seg_text(seg):
+            kinds.append("blank")
+        elif _is_heading_segment(seg):
+            kinds.append("heading")
+        elif _is_bullet_segment(seg):
+            kinds.append("bullet")
+        else:
+            kinds.append("line")
+    if not any(k in ("heading", "bullet") for k in kinds):
+        return None
+
+    out: list[Tag] = []
+    para: Tag | None = None
+    ul: Tag | None = None
+    for seg, kind in zip(segs, kinds):
+        if kind == "blank":
+            para = ul = None
+            continue
+        if kind == "heading":
+            para = ul = None
+            h = soup.new_tag("h3")
+            for n in seg:
+                h.append(n)
+            out.append(h)
+        elif kind == "bullet":
+            para = None
+            if ul is None:
+                ul = soup.new_tag("ul")
+                out.append(ul)
+            seg = _strip_bullet_glyph(seg)
+            li = soup.new_tag("li")
+            for n in seg:
+                li.append(n)
+            ul.append(li)
+        else:
+            ul = None
+            if para is None:
+                para = soup.new_tag("p")
+                out.append(para)
+            elif para.contents:
+                para.append(soup.new_tag("br"))
+            for n in seg:
+                para.append(n)
+    return out
+
+
+def _has_block_child(tag: Tag) -> bool:
+    return any(isinstance(c, Tag) and c.name in _STRUCTURE_BLOCK_TAGS for c in tag.children)
+
+
+def _split_paragraph_lines(root: Tag, soup: BeautifulSoup) -> None:
+    """Split headings / typed bullets out of <br>-separated <p>/<div> lines and
+    out of bare inline runs sitting directly in the root."""
+    for container in reversed(root.find_all(["p", "div"])):
+        if container.find("br", recursive=False) is None or _has_block_child(container):
+            continue
+        rebuilt = _rebuild_line_run(list(container.contents), soup)
+        if rebuilt:
+            container.replace_with(*rebuilt)
+
+    run: list = []
+
+    def _flush() -> None:
+        if run and any(isinstance(n, Tag) and n.name == "br" for n in run):
+            rebuilt = _rebuild_line_run(list(run), soup)
+            if rebuilt:
+                run[0].insert_before(*rebuilt)
+                for n in run:
+                    if n.parent is not None:
+                        n.extract()
+        run.clear()
+
+    for child in list(root.contents):
+        if isinstance(child, Tag) and child.name in _STRUCTURE_BLOCK_TAGS:
+            _flush()
+        else:
+            run.append(child)
+    _flush()
+
+
+def restructure_description_html(html: str) -> str:
+    """Repair the authoring defects that flatten job-board description HTML.
+
+    Deterministic, content-preserving (only tags are added/moved — no text is
+    changed, beyond dropping a typed "- "/"• " marker that becomes a real
+    bullet). Used for Naukri, whose descriptions are recruiter-authored:
+
+      * raw "\\n" line breaks inside text → <br> (HTML would collapse them);
+      * one <li> holding several <br>-separated lines → one <li> per line, with
+        a heading line ("Minimum Qualifications:") closing the list as <h3>;
+      * in <br>-separated paragraphs, heading lines are split out as <h3> and
+        typed "- "/"• " lines become a real <ul>.
+
+    Returns unsanitized HTML (run sanitize_description_html afterwards), or the
+    input unchanged when it can't be parsed.
+    """
+    if not html or not html.strip():
+        return ""
+    try:
+        soup = BeautifulSoup(html, "lxml")
+    except Exception:
+        return html
+    root = soup.body or soup
+    _newlines_to_br(root, soup)
+    for lst in reversed(root.find_all(["ul", "ol"])):
+        _split_list_items(lst, soup)
+    _split_paragraph_lines(root, soup)
+    return root.decode_contents().strip()
 
 
 # ── Job-title normalization (LinkedIn "verified" a11y artifact) ─────────────────

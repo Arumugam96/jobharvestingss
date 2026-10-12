@@ -369,6 +369,11 @@ class LLMService:
         when the call itself fails before generate_text() can report them back."""
         return self._resolve_extraction_target()
 
+    def provider_chain(self) -> list[tuple[str, str]]:
+        """Public accessor for the ordered (provider, model) failover chain —
+        lets callers check a provider is configured before relying on it."""
+        return self._provider_chain()
+
     def _resolve_extraction_target(self) -> tuple[str, str]:
         """The primary (provider, model) extract_json()/generate_text() call, driven
         by EXTRACTION_LLM_MODEL. Delegates to _resolve_target_string so the primary

@@ -57,29 +57,113 @@ JOB_SORT_FIELDS = {
 }
 
 # Contact-availability tokens accepted by GET /jobs' `contact` filter — mirrors
-# the UI's jobMatchesContact() (harvest-agent/src/HarvestAgent.jsx). Positive
-# tokens match rows that HAVE the channel, no_* tokens rows missing it, "none"
-# rows with no contact at all. Selected tokens are OR-combined.
+# the UI's jobMatchesContact() (harvest-agent/src/components/JobsTable.jsx).
+# Positive tokens match rows that HAVE the channel, no_* tokens rows missing it,
+# "none" rows with no contact at all. Selected tokens are OR-combined.
+# "email"/"mobile" count the poster/recruiter value OR the Company-tagged
+# company(+location) HR contact; "email_poster" / "email_company" split the two.
 CONTACT_FILTER_TOKENS = {
-    "email", "mobile", "linkedin", "no_email", "no_mobile", "no_linkedin", "none",
+    "email", "email_poster", "email_company", "mobile", "linkedin",
+    "no_email", "no_mobile", "no_linkedin", "none",
 }
 
 
-def _contact_presence_exprs():
-    """SQL presence tests for the three contact channels, matching what the UI
-    displays: email/phone are the merged scraped-or-recruiter values (so the
-    statement must outerjoin recruiters), LinkedIn is scraped-only — the same
-    merge scraped_job_view() applies per row."""
-    email = or_(
-        func.coalesce(ScrapedJobORM.email_id, "") != "",
-        func.coalesce(RecruiterORM.official_email_id, "") != "",
+def _txt_expr(col):
+    """NULL-safe trimmed text — NULL/""/whitespace all compare equal to ""."""
+    return func.trim(func.coalesce(col, ""))
+
+
+def _contact_presence_exprs() -> dict[str, Any]:
+    """SQL presence tests per contact channel, matching exactly what the UI's
+    jobContact() (harvest-agent/src/lib/jobsData.js) shows in the jobs table:
+
+    - email_poster  — the job's own scraped email OR its linked recruiter's
+                      enriched email (the merge scraped_job_view() applies), so
+                      the statement must outerjoin RecruiterORM.
+    - email_company — the Company-tagged company(+location) HR contact, counted
+                      only when it isn't a duplicate of a poster address (the UI
+                      dedupes identical values). bulk_insert_scraped_jobs only
+                      attaches it to email-less jobs, so in practice it never
+                      coexists with a poster email.
+    - email         — either of the above.
+    - mobile        — scraped OR recruiter OR company-contact phone.
+    - linkedin      — the scraped poster profile URL only.
+
+    All values compare trimmed and NULL-safe, like the UI's checks."""
+    cc_email = _txt_expr(ScrapedJobORM.company_contact_email)
+    email_poster = or_(
+        _txt_expr(ScrapedJobORM.email_id) != "",
+        _txt_expr(RecruiterORM.official_email_id) != "",
+    )
+    email_company = and_(
+        cc_email != "",
+        cc_email != _txt_expr(ScrapedJobORM.email_id),
+        cc_email != _txt_expr(RecruiterORM.official_email_id),
     )
     phone = or_(
-        func.coalesce(ScrapedJobORM.contact_number, "") != "",
-        func.coalesce(RecruiterORM.contact_number, "") != "",
+        _txt_expr(ScrapedJobORM.contact_number) != "",
+        _txt_expr(RecruiterORM.contact_number) != "",
+        _txt_expr(ScrapedJobORM.company_contact_phone) != "",
     )
-    linkedin = func.coalesce(ScrapedJobORM.linkedin_profile_url, "") != ""
-    return email, phone, linkedin
+    return {
+        "email":         or_(email_poster, cc_email != ""),
+        "email_poster":  email_poster,
+        "email_company": email_company,
+        "mobile":        phone,
+        "linkedin":      _txt_expr(ScrapedJobORM.linkedin_profile_url) != "",
+    }
+
+
+def _contact_token_exprs() -> dict[str, Any]:
+    """CONTACT_FILTER_TOKENS → SQL predicate (statement must outerjoin RecruiterORM)."""
+    p = _contact_presence_exprs()
+    return {
+        **p,
+        "no_email":    not_(p["email"]),
+        "no_mobile":   not_(p["mobile"]),
+        "no_linkedin": not_(p["linkedin"]),
+        "none":        and_(not_(p["email"]), not_(p["mobile"]), not_(p["linkedin"])),
+    }
+
+
+def poc_name_expr():
+    """The POC the UI shows for a job (jobContact().pocName): the poster's name,
+    else the Company-tagged contact's name; trimmed, "" when neither. Backs the
+    POC facet, the `poc` filter, POC sorting and the POC count."""
+    return func.coalesce(
+        func.nullif(_txt_expr(ScrapedJobORM.job_poster_name), ""),
+        _txt_expr(ScrapedJobORM.company_contact_name),
+    )
+
+
+def _txt(value: Any) -> str:
+    return "" if value is None else str(value).strip()
+
+
+def job_dict_contact(job: dict[str, Any]) -> dict[str, Any]:
+    """Python mirror of _contact_presence_exprs()/poc_name_expr() (and the UI's
+    jobContact()) over a scraped_job_view()-shaped dict — used by GET /jobs and
+    GET /jobs/facets on the JSON read path. Older combined files carry only the
+    merged email_id/contact_number, which count as the poster's values.
+
+    Returns {"poc_name", "email", "email_poster", "email_company", "mobile",
+    "linkedin"} — the booleans keyed like CONTACT_FILTER_TOKENS' positive tokens."""
+    poster_emails = {
+        e for e in (_txt(job.get(k)) for k in ("email_scraped", "email_recruiter", "email_id")) if e
+    }
+    company_email = _txt(job.get("company_contact_email"))
+    has_phone = any(
+        _txt(job.get(k))
+        for k in ("phone_scraped", "phone_recruiter", "contact_number", "company_contact_phone")
+    )
+    return {
+        "poc_name":      _txt(job.get("job_poster_name")) or _txt(job.get("company_contact_name")),
+        "email":         bool(poster_emails) or bool(company_email),
+        "email_poster":  bool(poster_emails),
+        "email_company": bool(company_email) and company_email not in poster_emails,
+        "mobile":        has_phone,
+        "linkedin":      bool(_txt(job.get("linkedin_profile_url"))),
+    }
 
 
 def data_source_mode() -> str:
@@ -577,8 +661,9 @@ class HarvestRunService:
         stmt = apply_tenant(stmt, ScrapedJobORM.tenant_id)  # scope to the caller's tenant
         if keyword:
             # Matches everything the UI's free-text search used to cover
-            # client-side (title/company/source/POC/email/phone), plus the
-            # description that this endpoint always searched.
+            # client-side (title/company/source/POC/email/phone, incl. the
+            # Company-tagged contact), plus the description that this endpoint
+            # always searched.
             like = f"%{keyword}%"
             stmt = stmt.where(
                 or_(
@@ -589,6 +674,9 @@ class HarvestRunService:
                     ScrapedJobORM.source.ilike(like),
                     ScrapedJobORM.email_id.ilike(like),
                     ScrapedJobORM.contact_number.ilike(like),
+                    ScrapedJobORM.company_contact_name.ilike(like),
+                    ScrapedJobORM.company_contact_email.ilike(like),
+                    ScrapedJobORM.company_contact_phone.ilike(like),
                 )
             )
         if company:
@@ -598,18 +686,10 @@ class HarvestRunService:
         if job_title:
             stmt = stmt.where(ScrapedJobORM.job_title == job_title)
         if poc:
-            stmt = stmt.where(ScrapedJobORM.job_poster_name == poc)
+            # The POC the table shows: poster name, else the company contact's.
+            stmt = stmt.where(poc_name_expr() == poc.strip())
         if contact:
-            email_p, phone_p, linkedin_p = _contact_presence_exprs()
-            token_exprs = {
-                "email":       email_p,
-                "mobile":      phone_p,
-                "linkedin":    linkedin_p,
-                "no_email":    not_(email_p),
-                "no_mobile":   not_(phone_p),
-                "no_linkedin": not_(linkedin_p),
-                "none":        and_(not_(email_p), not_(phone_p), not_(linkedin_p)),
-            }
+            token_exprs = _contact_token_exprs()
             selected = [token_exprs[t] for t in contact if t in token_exprs]
             if selected:
                 # 1:1 join on the recruiter PK — never duplicates job rows.
@@ -657,7 +737,12 @@ class HarvestRunService:
             await self._db.execute(select(func.count()).select_from(stmt.subquery()))
         ).scalar_one()
 
-        sort_column = getattr(ScrapedJobORM, sort_by if sort_by in JOB_SORT_FIELDS else "posted_date")
+        if sort_by == "job_poster_name":
+            # The UI's POC column (poster, else Company-tagged contact name).
+            sort_column = poc_name_expr()
+        else:
+            sort_field = sort_by if sort_by in JOB_SORT_FIELDS else "posted_date"
+            sort_column = getattr(ScrapedJobORM, sort_field)
         stmt = stmt.order_by(sort_column.desc() if sort_order.lower() == "desc" else sort_column.asc())
         stmt = stmt.offset(max(0, page - 1) * page_size).limit(page_size)
 
@@ -678,11 +763,14 @@ class HarvestRunService:
 
         companies  = await _distinct(ScrapedJobORM.company)
         job_titles = await _distinct(ScrapedJobORM.job_title)
-        poc_names  = await _distinct(ScrapedJobORM.job_poster_name)
+        # The POC the table shows (poster, else the Company-tagged contact), so
+        # every POC cell value is selectable in the POC dropdown.
+        poc_names  = await _distinct(poc_name_expr())
         countries         = await _distinct(ScrapedJobORM.country)
         company_countries = await _distinct(ScrapedJobORM.company_country)
 
-        email_p, phone_p, linkedin_p = _contact_presence_exprs()
+        # Same predicates as the `contact` filter (incl. Company-tagged contacts).
+        presence = _contact_presence_exprs()
 
         def _count_if(expr):
             return func.sum(case((expr, 1), else_=0))
@@ -692,13 +780,15 @@ class HarvestRunService:
                 func.count().label("total"),
                 # nullif drops empty-string companies — COUNT ignores NULLs.
                 func.count(func.distinct(func.nullif(ScrapedJobORM.company, ""))).label("companies"),
-                _count_if(func.coalesce(ScrapedJobORM.job_poster_name, "") != "").label("pocs"),
+                _count_if(poc_name_expr() != "").label("pocs"),
                 # IS NOT FALSE mirrors the UI's `passed_filter !== false`.
                 _count_if(ScrapedJobORM.passed_filter.isnot(False)).label("qualified"),
                 _count_if(ScrapedJobORM.passed_filter.is_(False)).label("flagged"),
-                _count_if(email_p).label("with_email"),
-                _count_if(phone_p).label("with_phone"),
-                _count_if(linkedin_p).label("with_linkedin"),
+                _count_if(presence["email"]).label("with_email"),
+                _count_if(presence["email_poster"]).label("with_poster_email"),
+                _count_if(presence["email_company"]).label("with_company_email"),
+                _count_if(presence["mobile"]).label("with_phone"),
+                _count_if(presence["linkedin"]).label("with_linkedin"),
             )
             .select_from(ScrapedJobORM)
             .outerjoin(RecruiterORM, ScrapedJobORM.recruiter_id == RecruiterORM.id)
@@ -709,7 +799,8 @@ class HarvestRunService:
             key: int(getattr(row, key) or 0)
             for key in (
                 "total", "companies", "pocs", "qualified", "flagged",
-                "with_email", "with_phone", "with_linkedin",
+                "with_email", "with_poster_email", "with_company_email",
+                "with_phone", "with_linkedin",
             )
         }
         return {

@@ -7,9 +7,9 @@ import { getOutreachStatus } from "../api";
 import { C } from "../theme";
 import {
   WhatsAppIcon, LinkedInIcon, SourceChip, SortHeader, PlainHeader,
-  Select, SearchableSelect, MultiSelect, ContactActionBtn, DualContact, CompanySizeCell,
+  Select, SearchableSelect, MultiSelect, ContactActionBtn, DualContact, CompanySizeCell, PocCell,
 } from "./ui";
-import { mapJobToDetail } from "../lib/jobsData";
+import { mapJobToDetail, jobContact, sortSources, SOURCE_ORDER } from "../lib/jobsData";
 
 /* Run detail page */
 // Contact filter options — grouped for a professional dropdown. The option
@@ -30,11 +30,18 @@ const COMPANY_SIZE_FILTER_OPTIONS = [
   { value: "unknown", label: "Unknown" },
 ];
 
+// One token set for both modes: client mode (Run Detail) evaluates it in-memory
+// via jobMatchesContact()/jobContact(); server mode (Harvested Jobs) sends it as
+// GET /jobs' `contact` param, which understands the same tokens with the same
+// semantics (CONTACT_FILTER_TOKENS / _contact_presence_exprs in
+// harvest_run_service.py). Email/Phone include the Company-tagged contact.
 const CONTACT_FILTER_OPTIONS = [
   { group: "With contact" },
-  { value: "email",    label: "Email",    summaryLabel: "Email" },
-  { value: "mobile",   label: "Phone",    summaryLabel: "Phone" },
-  { value: "linkedin", label: "LinkedIn", summaryLabel: "LinkedIn" },
+  { value: "email",         label: "Any email",                     summaryLabel: "Email" },
+  { value: "email_poster",  label: "Poster email (job / recruiter)", summaryLabel: "Poster email" },
+  { value: "email_company", label: "Company email",                 summaryLabel: "Company email" },
+  { value: "mobile",        label: "Phone",                         summaryLabel: "Phone" },
+  { value: "linkedin",      label: "LinkedIn",                      summaryLabel: "LinkedIn" },
   { group: "Without contact" },
   { value: "no_email",    label: "No Email",    summaryLabel: "No Email" },
   { value: "no_mobile",   label: "No Phone",    summaryLabel: "No Phone" },
@@ -45,25 +52,30 @@ const CONTACT_FILTER_OPTIONS = [
 // Positive tokens match rows that HAVE that channel; "no_*" tokens match rows
 // MISSING it; "none" matches rows with no contact at all. Tokens are OR-combined
 // (a row passes if it satisfies any selected one). Empty selection = no filter.
+// Presence comes from jobContact(), i.e. exactly what the Email/Mobile cells show
+// — poster/recruiter AND Company-tagged contacts, for every source.
 function jobMatchesContact(j, contact) {
   if (!contact || contact.length === 0) return true;
-  const has = { email: !!j.email, mobile: !!j.mobile, linkedin: !!j.linkedin };
+  const c = jobContact(j);
+  const has = { email: !!c.email, mobile: !!c.phone, linkedin: !!c.linkedin };
   const none = !has.email && !has.mobile && !has.linkedin;
-  return contact.some((c) =>
-    c === "email" ? has.email
-      : c === "mobile" ? has.mobile
-      : c === "linkedin" ? has.linkedin
-      : c === "no_email" ? !has.email
-      : c === "no_mobile" ? !has.mobile
-      : c === "no_linkedin" ? !has.linkedin
-      : c === "none" ? none
+  return contact.some((t) =>
+    t === "email" ? has.email
+      : t === "email_poster" ? c.hasPosterEmail
+      : t === "email_company" ? c.hasCompanyEmail
+      : t === "mobile" ? has.mobile
+      : t === "linkedin" ? has.linkedin
+      : t === "no_email" ? !has.email
+      : t === "no_mobile" ? !has.mobile
+      : t === "no_linkedin" ? !has.linkedin
+      : t === "none" ? none
       : false);
 }
 
 /**
  * Shared jobs table used by both the Harvested Jobs page (JobsPage) and the
- * run-history per-run view (RunDetailView). Owns the Company/Contact/Job/POC/
- * search filter bar, sorting, and the WhatsApp/Email/LinkedIn contact-action
+ * run-history per-run view (RunDetailView). Owns the Source/Company/Contact/Job/
+ * POC/search filter bar, sorting, and the WhatsApp/Email/LinkedIn contact-action
  * icons (with the LLM Email + LinkedIn composer modals). `preFilter` lets the
  * parent add its own predicate (date range on the Harvested Jobs page; classification
  * bucket in the run view). The filtered+sorted rows are reported back via
@@ -113,6 +125,7 @@ export default function JobsTable({
   const [filters, setFilters] = useState(() =>
     urlState
       ? {
+          source: searchParams.get("source") || "all",
           company: searchParams.get("company") || "all",
           contact: (searchParams.get("contact") || "").split(",").filter(Boolean),
           job: searchParams.get("job") || "all",
@@ -121,7 +134,7 @@ export default function JobsTable({
           country: searchParams.get("country") || "all",
           companyCountry: searchParams.get("companyCountry") || "all",
         }
-      : { company: "all", contact: [], job: "all", poc: "all", size: "all", country: "all", companyCountry: "all" }
+      : { source: "all", company: "all", contact: [], job: "all", poc: "all", size: "all", country: "all", companyCountry: "all" }
   );
   const [query, setQuery] = useState(() => (urlState ? searchParams.get("q") || "" : ""));
   const [sort, setSort] = useState(() =>
@@ -161,10 +174,26 @@ export default function JobsTable({
     () => (serverMode ? (facets?.job_titles || []) : Array.from(new Set(jobs.map((j) => j.title))).sort()),
     [serverMode, facets, jobs]
   );
+  // The POC shown in the table (poster, else the Company-tagged contact) for
+  // every source — from the loaded rows (client mode) or the backend's POC
+  // facet, which uses the same rule (poc_name_expr, server mode).
   const pocNames = useMemo(
-    () => (serverMode ? (facets?.poc_names || []) : Array.from(new Set(jobs.filter((j) => j.poc).map((j) => j.poc))).sort()),
+    () => (serverMode
+      ? (facets?.poc_names || [])
+      : Array.from(new Set(jobs.map((j) => jobContact(j).pocName).filter(Boolean))).sort()),
     [serverMode, facets, jobs]
   );
+  // Source options: the sources actually present in the loaded rows (client
+  // mode); server mode has no source facet, so it lists the known sources —
+  // GET /jobs' `source` param matches case-insensitively. A deep-linked value
+  // that isn't in the list is kept so the select never shows a stale "All".
+  const sourceOptions = useMemo(() => {
+    const list = serverMode
+      ? [...SOURCE_ORDER]
+      : sortSources(Array.from(new Set(jobs.map((j) => jobContact(j).source).filter((s) => s && s !== "—"))));
+    if (filters.source !== "all" && !list.includes(filters.source)) list.push(filters.source);
+    return [{ value: "all", label: "All sources" }, ...list.map((s) => ({ value: s, label: s }))];
+  }, [serverMode, jobs, filters.source]);
   // Job-location country and company-HQ country dropdown options — whole-dataset
   // facets in server mode, distinct-from-loaded-rows in client mode (Run Detail).
   const countries = useMemo(
@@ -180,9 +209,11 @@ export default function JobsTable({
     // Server mode: rows arrive already filtered/sorted/paginated by the backend.
     if (serverMode) return jobs;
     const rows = jobs.filter((j) => {
+      const c = jobContact(j);
+      if (filters.source !== "all" && c.source !== filters.source) return false;
       if (filters.company !== "all" && j.company !== filters.company) return false;
       if (filters.job !== "all" && j.title !== filters.job) return false;
-      if (filters.poc !== "all" && j.poc !== filters.poc) return false;
+      if (filters.poc !== "all" && c.pocName !== filters.poc) return false;
       if (filters.country !== "all" && j.country !== filters.country) return false;
       if (filters.companyCountry !== "all" && j.companyCountry !== filters.companyCountry) return false;
       // Company-size is a display-only filter over the captured band's tier.
@@ -195,7 +226,8 @@ export default function JobsTable({
       if (preFilter && !preFilter(j)) return false;
       if (query.trim()) {
         const q = query.toLowerCase();
-        if (!((j.title + " " + j.company + " " + j.source + " " + (j.poc || "") + " " + (j.email || "") + " " + (j.mobile || "")).toLowerCase().includes(q))) return false;
+        const hay = [j.title, j.company, c.source, c.pocName, ...c.emailParts.map((p) => p.val), ...c.phoneParts.map((p) => p.val)];
+        if (!hay.join(" ").toLowerCase().includes(q)) return false;
       }
       return true;
     });
@@ -204,8 +236,8 @@ export default function JobsTable({
       switch (sort.col) {
         case "title": return a.title.localeCompare(b.title) * dir;
         case "company": return a.company.localeCompare(b.company) * dir;
-        case "poc": return (a.poc || "").localeCompare(b.poc || "") * dir;
-        case "source": return a.source.localeCompare(b.source) * dir;
+        case "poc": return jobContact(a).pocName.localeCompare(jobContact(b).pocName) * dir;
+        case "source": return jobContact(a).source.localeCompare(jobContact(b).source) * dir;
         case "posted": return a.postedDate.localeCompare(b.postedDate) * dir;
         default: return 0;
       }
@@ -251,6 +283,7 @@ export default function JobsTable({
       sort_by: sortByMap[sort.col] || "posted_date",
       sort_order: sort.dir === "asc" ? "asc" : "desc",
       keyword: debouncedQuery.trim(),
+      source: filters.source !== "all" ? filters.source : "",
       company_exact: filters.company !== "all" ? filters.company : "",
       job_title: filters.job !== "all" ? filters.job : "",
       poc: filters.poc !== "all" ? filters.poc : "",
@@ -276,6 +309,7 @@ export default function JobsTable({
   useEffect(() => {
     if (!urlState) return;
     const sp = new URLSearchParams();
+    if (filters.source !== "all") sp.set("source", filters.source);
     if (filters.company !== "all") sp.set("company", filters.company);
     if (filters.contact.length) sp.set("contact", filters.contact.join(","));
     if (filters.job !== "all") sp.set("job", filters.job);
@@ -318,6 +352,8 @@ export default function JobsTable({
   return (
     <>
       <div className="ha-card ha-filterbar" style={{ padding: "11px 14px", gridTemplateColumns: "repeat(4, minmax(0, 1fr))" }}>
+        <Select label="Source" value={filters.source} onChange={(v) => setFilters((f) => ({ ...f, source: v }))}
+          options={sourceOptions} />
         <SearchableSelect label="Company" value={filters.company} onChange={(v) => setFilters((f) => ({ ...f, company: v }))}
           options={[{ value: "all", label: "All" }, ...companies.map((c) => ({ value: c, label: c }))]}
           loading={serverMode && !facets} />
@@ -367,7 +403,11 @@ export default function JobsTable({
                   Loading harvested jobs…
                 </td></tr>
               )}
-              {!loading && pageRows.map((j) => (
+              {!loading && pageRows.map((j) => {
+                // One normalized contact view per row — the cells below read the
+                // same values the filters, run stats and CSV export count.
+                const c = jobContact(j);
+                return (
                 <tr key={j.id} className="ha-row">
                   <td className="ha-td">
                     <span className="ha-link" role="button" tabIndex={0} style={{ cursor: "pointer" }}
@@ -382,19 +422,22 @@ export default function JobsTable({
                     <CompanySizeCell band={j.companySize} tier={j.companySizeTier} />
                   </td>
                   <td className="ha-td" style={{ color: C.text }}>
-                    {j.poc || <span style={{ color: "#94A3B8" }}>—</span>}
+                    <PocCell name={c.pocName} kind={c.pocKind} />
                   </td>
                   <td className="ha-td">
-                    <DualContact scraped={j.emailScraped} recruiter={j.emailRecruiter} company={j.emailCompany} fallback={j.email} link="mailto:" cls="ha-mail" />
+                    <DualContact parts={c.emailParts} link="mailto:" cls="ha-mail" />
                   </td>
                   <td className="ha-td" style={{ whiteSpace: "nowrap" }}>
-                    <DualContact scraped={j.mobileScraped} recruiter={j.mobileRecruiter} company={j.mobileCompany} fallback={j.mobile} link="tel:" cls="ha-tel" />
+                    <DualContact parts={c.phoneParts} link="tel:" cls="ha-tel" />
                   </td>
                   <td className="ha-td ha-td-pin">
                     <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
                       <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
-                        <ContactActionBtn glyph={WhatsAppIcon} title="WhatsApp" available={!!j.whatsapp}
-                          href={j.whatsapp ? "https://wa.me/" + j.whatsapp.replace(/[^0-9]/g, "") : null}
+                        {/* WhatsApp is a plain wa.me link to whatever number the
+                            Mobile cell shows (incl. a Company-tagged one), matching
+                            the run view's phone/WhatsApp count. */}
+                        <ContactActionBtn glyph={WhatsAppIcon} title="WhatsApp" available={!!c.phone}
+                          href={c.phone ? "https://wa.me/" + c.phone.replace(/[^0-9]/g, "") : null}
                           onClick={() => showNoData(j.id, "WhatsApp")} />
                         {(() => {
                           const st = outreachStatus[j.id] || {};
@@ -403,6 +446,9 @@ export default function JobsTable({
                           const emailSentTitle = emailSent
                             ? `Email sent${st.email.followup_count ? ` (+${st.email.followup_count} follow-up${st.email.followup_count > 1 ? "s" : ""})` : ""} — click to follow up`
                             : undefined;
+                          // The composer stays gated on the poster/recruiter email
+                          // (j.email) — outreach recipients are unchanged. A row whose
+                          // only email is the Company-tagged one says so explicitly.
                           return (
                             <>
                               <ContactActionBtn glyph={Mail} title="Email" available={!!j.email}
@@ -412,7 +458,7 @@ export default function JobsTable({
                                     ? setEmailModal({ job: j, followup: true, parentOutreachId: st.email.outreach_id })
                                     : j.email
                                       ? setEmailModal({ job: j, followup: false })
-                                      : showNoData(j.id, "email")
+                                      : showNoData(j.id, c.email ? "poster email" : "email")
                                 } />
                               <ContactActionBtn glyph={LinkedInIcon} title="LinkedIn" available={!!j.linkedin}
                                 sent={liSent} sentTitle={liSent ? "LinkedIn message sent" : undefined}
@@ -428,10 +474,11 @@ export default function JobsTable({
                       )}
                     </div>
                   </td>
-                  <td className="ha-td"><SourceChip source={j.source} /></td>
+                  <td className="ha-td"><SourceChip source={c.source} /></td>
                   <td className="ha-td" style={{ whiteSpace: "nowrap", color: C.textSoft }}>{j.postedDate || "—"}</td>
                 </tr>
-              ))}
+                );
+              })}
               {!loading && filtered.length === 0 && (
                 <tr><td className="ha-td" colSpan={colCount} style={{ textAlign: "center", padding: "48px 16px", color: "#94A3B8" }}>
                   {emptyMessage}

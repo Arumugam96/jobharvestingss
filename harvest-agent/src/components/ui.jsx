@@ -4,6 +4,7 @@ import {
 } from "lucide-react";
 import useCountUp from "../useCountUp";
 import { C, SRC_TONES, STATUS_TONES, SIZE_TIER_STYLE } from "../theme";
+import { contactParts } from "../lib/jobsData";
 
 export const WhatsAppIcon = ({ size = 16 }) => (
   <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor">
@@ -353,30 +354,22 @@ function SrcTag({ variant, children }) {
  * (.ha-contact-val, full value in the tooltip) — so a long email can never
  * spill into the neighbouring Mobile column of the fixed-layout table.
  */
-export function DualContact({ scraped, recruiter, company, fallback, link, cls }) {
-  const s = (scraped || "").trim();
-  const r = (recruiter || "").trim();
-  const c = (company || "").trim();
+export function DualContact({ parts: partsProp, scraped, recruiter, company, fallback, link, cls }) {
   const dash = <span style={{ color: "#94A3B8" }}>—</span>;
   const anchor = (val) => (
     <a className={cls + " ha-contact-val"} href={link + val} title={val}>{val}</a>
   );
 
-  // Distinct, present values in priority order (dedupe identical strings).
-  const parts = [];
-  if (s) parts.push({ variant: "job", label: "Job", val: s });
-  if (r && r !== s) parts.push({ variant: "recruiter", label: "Recruiter", val: r });
-  if (c && c !== s && c !== r) parts.push({ variant: "company", label: "Company", val: c });
+  // Distinct, present values in priority order — the same contactParts() the
+  // filters/stats/CSV use (via jobContact), so a shown value is always counted.
+  // Callers pass precomputed `parts` (jobContact(j).emailParts / .phoneParts) or
+  // the raw scraped/recruiter/company/fallback values.
+  const parts = partsProp || contactParts(scraped, recruiter, company, fallback);
+  if (parts.length === 0) return dash;
 
-  // JSON read-path rows carry only the merged value (no split source fields) —
-  // fall back to it so they still render a single unlabeled contact.
-  if (parts.length === 0) {
-    const f = (fallback || "").trim();
-    return f ? anchor(f) : dash;
-  }
-
-  // A lone scraped/recruiter value stays unlabeled; the Company source always
-  // keeps its tag, and any multi-source cell labels every line.
+  // A lone scraped/recruiter (or unlabeled JSON fallback) value stays unlabeled;
+  // the Company source always keeps its tag, and any multi-source cell labels
+  // every line.
   const showLabels = parts.length > 1 || parts[0].variant === "company";
   if (!showLabels) return anchor(parts[0].val);
 
@@ -388,6 +381,20 @@ export function DualContact({ scraped, recruiter, company, fallback, link, cls }
           {anchor(p.val)}
         </div>
       ))}
+    </div>
+  );
+}
+
+// POC table cell. The job poster renders as plain text; when only the inferred
+// company(+location) HR contact is known, its name keeps the amber Company tag —
+// the same treatment the Email/Mobile cells give that contact.
+export function PocCell({ name, kind }) {
+  if (!name) return <span style={{ color: "#94A3B8" }}>—</span>;
+  if (kind !== "company") return name;
+  return (
+    <div className="ha-contact-item">
+      <SrcTag variant="company">Company</SrcTag>
+      <span className="ha-contact-val" title={name}>{name}</span>
     </div>
   );
 }

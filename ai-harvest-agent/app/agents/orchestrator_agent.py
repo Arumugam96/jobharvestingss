@@ -142,6 +142,15 @@ _SOURCE_DISPLAY = {"naukri": "Naukri", "linkedin": "LinkedIn", "dice": "Dice"}
 
 # ── Converters: source-specific dataclass → UnifiedJob ────────────────────────
 
+def _merge_token_usage(a: dict, b: dict) -> dict:
+    """Sum two LLMService.get_usage_summary() dicts provider-by-provider."""
+    out: dict = {}
+    for provider in set(a) | set(b):
+        pa, pb = a.get(provider) or {}, b.get(provider) or {}
+        out[provider] = {k: int(pa.get(k, 0) or 0) + int(pb.get(k, 0) or 0) for k in set(pa) | set(pb)}
+    return out
+
+
 def _naukri_to_unified(j: "NaukriScrapedJob") -> UnifiedJob:  # type: ignore[name-defined]
     # Naukri's own consultant flag is the strongest Staffing-vs-Direct signal
     # there is (see BusinessFilterService._infer_hiring_entity): True => posted by
@@ -674,6 +683,9 @@ class OrchestratorAgent:
         # coroutine raises — the LinkedInAgent instance is created before any
         # of its login/scrape work that could fail.
         linkedin_agent_holder: dict[str, LinkedInAgent] = {}
+        # Same for the NaukriAgent — its (grounded) LLM enrichment calls are
+        # merged into the run's token usage + llm_calls audit below.
+        naukri_agent_holder: dict[str, Any] = {}
         # The LLMUnavailableError LinkedIn stopped on (if any) — held here, not
         # raised, so the other sources keep running.
         linkedin_outage: dict[str, LLMUnavailableError] = {}
@@ -807,6 +819,7 @@ class OrchestratorAgent:
                     await _start("naukri")
                     try:
                         agent = NaukriAgent(already_harvested=self._already_harvested)
+                        naukri_agent_holder["agent"] = agent
 
                         # Incremental persist, exactly like LinkedIn: the agent hands
                         # us every N freshly-scraped jobs; count them for the live
@@ -1036,6 +1049,13 @@ class OrchestratorAgent:
             if "agent" in linkedin_agent_holder
             else []
         )
+        if "agent" in naukri_agent_holder:
+            try:
+                naukri_agent = naukri_agent_holder["agent"]
+                token_usage = _merge_token_usage(token_usage, naukri_agent.get_token_usage())
+                llm_calls = list(llm_calls) + list(naukri_agent.get_llm_call_log())
+            except Exception as exc:  # audit merge must never fail the run
+                logger.warning("orchestrator_naukri_llm_usage_merge_failed", error=str(exc))
         reenrich_queue = (
             linkedin_agent_holder["agent"].get_reenrich_queue()
             if "agent" in linkedin_agent_holder

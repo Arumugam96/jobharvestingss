@@ -159,6 +159,24 @@ class Settings(BaseSettings):
     # Human-like randomized gap between consecutive Naukri detail-page visits.
     naukri_detail_delay_min_ms: int = 2_500
     naukri_detail_delay_max_ms: int = 6_000
+    # LLM enrichment on top of the deterministic parse (app/services/jd_llm_enrichment.py),
+    # via the configured EXTRACTION_LLM_MODEL chain. Every LLM contact is grounded
+    # against the description text (never stored unless written there); a
+    # restructured description is kept only if no word changed. Skipped with one
+    # warning when no LLM provider is configured; an LLM error never loses a job.
+    #   contact extraction — only for descriptions showing a contact signal
+    #   restructure        — only for flat, run-on descriptions
+    naukri_llm_contact_extraction: bool = True
+    naukri_llm_description_restructure: bool = True
+    naukri_llm_timeout_s: float = 45.0        # per LLM call
+    naukri_llm_concurrency: int = 2           # LLM calls in flight alongside the detail loop
+    naukri_llm_max_calls_per_run: int = 1000  # cost backstop (0 = unlimited)
+    # Provider for THIS pass only (same strings as EXTRACTION_LLM_MODEL, e.g.
+    # "claude", "claude-sonnet-…", "ollama", "openrouter/<id>"). Empty = inherit
+    # EXTRACTION_LLM_MODEL / EXTRACTION_FALLBACK_MODEL. Lets contact accuracy use
+    # a stronger model while the rest of the app stays on a local LLM.
+    naukri_llm_model: str = ""
+    naukri_llm_fallback_model: str = ""
 
     # ---------------       DICE Configurations     -------------
     dice_email:    str = ""

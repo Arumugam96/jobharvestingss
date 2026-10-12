@@ -10,6 +10,20 @@ import pytest
 import pytest_asyncio
 
 
+# ── No real LLM calls from the Naukri harvester in tests ──────────────────────
+
+@pytest.fixture(autouse=True)
+def _naukri_llm_enrichment_off(monkeypatch):
+    """Naukri LLM enrichment defaults ON in settings and would reach whatever
+    provider the developer's .env configures. Tests that exercise it inject a
+    fake LLM and switch the flags back on explicitly."""
+    from app.config import get_settings
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "naukri_llm_contact_extraction", False)
+    monkeypatch.setattr(settings, "naukri_llm_description_restructure", False)
+
+
 # ── In-memory SQLite for tests ────────────────────────────────────────────────
 
 TEST_DB_URL = "sqlite+aiosqlite:///:memory:"
