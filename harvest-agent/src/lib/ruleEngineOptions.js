@@ -104,6 +104,20 @@ export const withSavedOption = (options, saved) => {
   return [...options, typeof options[0] === "object" ? { value: saved, label: String(saved) } : saved];
 };
 
+// filters.max_jobs — per-source, per-run cap (backend: int, 0 = no limit, ≤ 5000).
+export const MAX_JOBS_LIMIT = 5000;
+
+// `input` is the field's edited text, or null when untouched on this page — then
+// `current` (the server's value at save time) is kept so out-of-band edits survive.
+export const parseMaxJobs = (input, current) => {
+  const x = input == null || String(input).trim() === "" ? NaN : Number(input);
+  // Negative is invalid, not "0 = no limit" — keep the current value instead.
+  if (Number.isNaN(x) || x < 0) return current ?? 500;
+  if (x === 0) return 0;
+  // A fraction like 0.5 must not floor to 0 (= no limit).
+  return Math.min(MAX_JOBS_LIMIT, Math.max(1, Math.floor(x)));
+};
+
 export const fmtRunDate = (iso) => {
   if (!iso) return "—";
   const d = new Date(iso);

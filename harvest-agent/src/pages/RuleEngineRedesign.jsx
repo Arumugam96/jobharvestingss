@@ -16,7 +16,7 @@ import { GLASS, GLASS_FALLBACK, GLASS_INPUT, GLASS_INPUT_FOCUS, GLASS_MODAL } fr
 import {
   JOB_TYPES, WORK_MODES, DOMAINS, HIRING_ENTITIES, GCC_MODES, SEARCH_WINDOWS,
   LINKEDIN_ACCOUNTS, TIMEZONES, CURRENCIES, normalizeGccMode, gccLocked,
-  withSavedOption, fmtRunDate, nowLabel,
+  withSavedOption, fmtRunDate, nowLabel, MAX_JOBS_LIMIT, parseMaxJobs,
 } from "../lib/ruleEngineOptions";
 
 /*
@@ -24,8 +24,8 @@ import {
  * features.ruleEngineRedesign (client_us today); internal/client_in keep the
  * classic RuleEngineConfig. Same backend contract: loads the full
  * HarvestConfig via GET /harvest-config, edits the fields it owns, and PUTs
- * the merged object back so untouched fields (browser, notifications,
- * filters.verification, filters.max_jobs) survive.
+ * them merged onto a fresh GET so untouched fields (browser, notifications,
+ * filters.verification) survive — including edits made after page load.
  *
  * Full parity with the classic page (design per the approved mockup,
  * https://claude.ai/code/artifact/4a1c1b8e-1fe2-4969-869e-04202c77437f):
@@ -100,6 +100,9 @@ export default function RuleEngineRedesign() {
   const [salaryMax, setSalaryMax] = useState("");
   const [currency, setCurrency] = useState("USD");
   const [includeUndisclosed, setIncludeUndisclosed] = useState(true);
+  // Per-source cap (filters.max_jobs). null = not edited on this page, so a save
+  // keeps the server's current value (e.g. one set by hand in harvest_config.json).
+  const [maxJobsInput, setMaxJobsInput] = useState(null);
 
   // Run/status state (mirrors the classic page)
   const [lastSaved, setLastSaved] = useState("—");
@@ -199,6 +202,7 @@ export default function RuleEngineRedesign() {
     setSalaryMax(cfg.filters?.salary_max == null ? "" : String(cfg.filters.salary_max));
     setCurrency(cfg.filters?.salary_currency || "USD");
     setIncludeUndisclosed(cfg.filters?.include_undisclosed_salary ?? true);
+    setMaxJobsInput(null);
     setDirty(false);
   }
 
@@ -213,12 +217,16 @@ export default function RuleEngineRedesign() {
   const tzLabel = tzOptions.find((t) => t.value === timezone)?.label || timezone;
   const windowLabel = SEARCH_WINDOWS.find((w) => w.value === Number(searchWindow))?.label || `${searchWindow}h`;
 
-  function buildPayload() {
+  // `base` is the config to merge onto — the server's CURRENT config at save time
+  // (see handleSave), so fields this page doesn't edit aren't reverted to their
+  // page-load values.
+  function buildPayload(base = config) {
     return {
-      ...config, // preserves browser, notifications, and anything else unowned
-      sources: { ...config.sources, ...sources, linkedin_account: linkedinAccount },
+      ...base, // preserves browser, notifications, and anything else unowned
+      sources: { ...base.sources, ...sources, linkedin_account: linkedinAccount },
       filters: {
-        ...config.filters, // preserves max_jobs + verification
+        ...base.filters, // preserves verification
+        max_jobs: parseMaxJobs(maxJobsInput, base.filters?.max_jobs),
         keyword: keyword.trim(),
         location: location.trim(),
         job_type: jobType,
@@ -232,7 +240,7 @@ export default function RuleEngineRedesign() {
         salary_currency: currency,
         include_undisclosed_salary: includeUndisclosed,
       },
-      schedule: { ...config.schedule, frequency, run_time: runTime, timezone, enabled: scheduleEnabled },
+      schedule: { ...base.schedule, frequency, run_time: runTime, timezone, enabled: scheduleEnabled },
     };
   }
 
@@ -243,10 +251,15 @@ export default function RuleEngineRedesign() {
     setSaving(true);
     setSaveError("");
     try {
+      // Re-read before merging: Run always saves first, and merging onto the
+      // page-load snapshot silently reverted out-of-band edits (filters.max_jobs).
+      // No snapshot fallback: if the re-read fails, the save fails.
+      const latest = await getHarvestConfig();
       // Adopt the PUT response as the new merge target — the backend may
       // normalize fields (e.g. gcc_mode via _reconcile_gcc).
-      const saved = await saveHarvestConfig(buildPayload());
+      const saved = await saveHarvestConfig(buildPayload(latest));
       setConfig(saved);
+      setMaxJobsInput(null);
       setLastSaved(nowLabel());
       setDirty(false);
       setAttempted(false);
@@ -646,7 +659,7 @@ export default function RuleEngineRedesign() {
 
           <section className="rr-card rr-rise rr-span">
             <div className="rr-card-h"><span>Search</span></div>
-            <div className="rr-fgrid rr-fgrid--3">
+            <div className="rr-fgrid rr-fgrid--4">
               <label className="rr-fld"><span>Keyword</span>
                 <input className="rr-inp" placeholder="e.g. AI Engineer" value={keyword} onChange={(e) => markDirty(setKeyword)(e.target.value)} />
               </label>
@@ -660,10 +673,19 @@ export default function RuleEngineRedesign() {
                   {SEARCH_WINDOWS.map((w) => <option key={w.value} value={w.value}>{w.label}</option>)}
                 </select>
               </label>
+              <label className="rr-fld"><span>Max jobs per source (each run)</span>
+                <input className="rr-inp" type="number" min="0" max={MAX_JOBS_LIMIT} step="1"
+                  value={maxJobsInput ?? String(config?.filters?.max_jobs ?? "")}
+                  onChange={(e) => markDirty(setMaxJobsInput)(e.target.value)} />
+              </label>
             </div>
             <div className="rr-info">
               <Info size={14} />
               <span>Rule stored in <code>harvest_config.search_window_hours</code>. The agent skips any posting older than now − N hours.</span>
+            </div>
+            <div className="rr-info">
+              <Info size={14} />
+              <span>Each enabled source stops after <b>max jobs</b> new jobs (<code>0</code> = no limit). <code>LINKEDIN_TEST_MAX_JOBS</code> / <code>NAUKRI_TEST_MAX_JOBS</code> in <code>.env</code> can lower it further.</span>
             </div>
           </section>
 

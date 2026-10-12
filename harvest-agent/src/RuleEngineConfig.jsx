@@ -15,6 +15,7 @@ import {
   JOB_TYPES, WORK_MODES, HIRING_ENTITIES, GCC_MODES, SEARCH_WINDOWS,
   LINKEDIN_ACCOUNTS, TIMEZONES, CURRENCIES, fmtRunDate, nowLabel,
   IT_JOB_CATEGORIES, NON_IT_JOB_CATEGORIES, COMPANY_SIZE_RANGES,
+  MAX_JOBS_LIMIT, parseMaxJobs,
 } from "./lib/ruleEngineOptions";
 import SearchableMultiSelect from "./components/SearchableMultiSelect";
 import { makeStallWatch, STALL_WARN_MSG } from "./stallWatch";
@@ -156,6 +157,9 @@ export default function RuleEngineConfig({
   const [salaryMax, setSalaryMax] = useState("");
   const [currency, setCurrency] = useState(DEFAULT_CONFIG.filters.salary_currency);
   const [includeUndisclosed, setIncludeUndisclosed] = useState(DEFAULT_CONFIG.filters.include_undisclosed_salary);
+  // Per-source cap (filters.max_jobs). null = not edited on this page, so a save
+  // keeps the server's current value (e.g. one set by hand in harvest_config.json).
+  const [maxJobsInput, setMaxJobsInput] = useState(null);
 
   const [lastSaved, setLastSaved] = useState("—");
   const [lastRun, setLastRun] = useState("—");
@@ -251,6 +255,7 @@ export default function RuleEngineConfig({
     setRunTime(config.schedule.run_time || "09:00");
     setTimezone(config.schedule.timezone || "Asia/Kolkata");
     setScheduleEnabled(!!config.schedule.enabled);
+    setMaxJobsInput(null);
     setDirty(false);
   }
 
@@ -269,12 +274,16 @@ export default function RuleEngineConfig({
   const markDirty = () => setDirty(true);
   const setSource = (key, val) => { setSources((s) => ({ ...s, [key]: val })); markDirty(); };
 
-  function buildPayload() {
+  // `base` is the config to merge onto — the server's CURRENT config at save time
+  // (see handleSave), so fields this page doesn't edit aren't reverted to their
+  // page-load values.
+  function buildPayload(base = loadedConfig) {
     return {
-      ...loadedConfig,
+      ...base,
       sources: { ...sources, linkedin_account: linkedinAccount },
       filters: {
-        ...loadedConfig.filters,
+        ...base.filters,
+        max_jobs: parseMaxJobs(maxJobsInput, base.filters?.max_jobs),
         keyword: keyword.trim(),
         location: location.trim(),
         job_type: jobType,
@@ -302,7 +311,7 @@ export default function RuleEngineConfig({
         salary_currency: currency,
         include_undisclosed_salary: includeUndisclosed,
       },
-      schedule: { ...loadedConfig.schedule, frequency, run_time: runTime, timezone, enabled: scheduleEnabled },
+      schedule: { ...base.schedule, frequency, run_time: runTime, timezone, enabled: scheduleEnabled },
     };
   }
 
@@ -312,8 +321,13 @@ export default function RuleEngineConfig({
     setSaving(true);
     setSaveError("");
     try {
-      const saved = await saveHarvestConfig(buildPayload());
+      // Re-read before merging: Run always saves first, and merging onto the
+      // page-load snapshot silently reverted out-of-band edits (filters.max_jobs).
+      // No snapshot fallback: if the re-read fails, the save fails.
+      const latest = await getHarvestConfig();
+      const saved = await saveHarvestConfig(buildPayload(latest));
       setLoadedConfig(saved);
+      setMaxJobsInput(null);
       setLastSaved(nowLabel());
       setDirty(false);
       setAttempted(false);
@@ -718,6 +732,17 @@ export default function RuleEngineConfig({
                       <small>Run the harvest automatically on the schedule above.</small>
                     </span>
                     <Toggle on={scheduleEnabled} onChange={(v) => { setScheduleEnabled(v); markDirty(); }} label="Automatic scheduled runs" />
+                  </div>
+                  <div className="rec-field rec-field--full" style={{ marginTop: 14 }}>
+                    <label>Max jobs per source (each run)</label>
+                    <input className="rec-input" type="number" min="0" max={MAX_JOBS_LIMIT} step="1"
+                      aria-label="Max jobs per source"
+                      value={maxJobsInput ?? String(loadedConfig.filters?.max_jobs ?? "")}
+                      onChange={(e) => { setMaxJobsInput(e.target.value); markDirty(); }} />
+                  </div>
+                  <div className="rec-note rec-note--info">
+                    <Info size={16} />
+                    <span>Each enabled source stops after this many new jobs. <code>0</code> = no limit. <code>LINKEDIN_TEST_MAX_JOBS</code> / <code>NAUKRI_TEST_MAX_JOBS</code> in <code>.env</code> can lower it further.</span>
                   </div>
                   {/* <div className="rec-field-row" style={{ marginTop: 14 }}>
                     <div className="rec-field">

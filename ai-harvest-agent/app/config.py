@@ -67,7 +67,7 @@ class Settings(BaseSettings):
     anthropic_max_tokens: int = 8096
     anthropic_temperature: float = 0.0
 
-    # ── HTML extraction LLM provider ──────────────────────────────────────────────
+    # ── Local LLM provider ──────────────────────────────────────────────
     extraction_llm_model: str = "claude"
     extraction_fallback_model: str = ""
     local_llm_url:        str = "http://localhost:11434"
@@ -214,8 +214,8 @@ class Settings(BaseSettings):
     # mailjet_api_key: str = Field(default="", validation_alias=AliasChoices("MJ_APIKEY_PUBLIC", "MAILJET_API_KEY"))
     # mailjet_secret_key: str = Field(default="", validation_alias=AliasChoices("MJ_APIKEY_PRIVATE", "MAILJET_SECRET_KEY"))
     # mailjet_timeout_seconds: int = 30
-    # mailjet_max_attempts: int = 2
-    # mailjet_retry_backoff_seconds: float = 0.5
+    mailjet_max_attempts: int = 2
+    mailjet_retry_backoff_seconds: float = 0.5
     # mailjet_webhook_token: str = ""
     brevo_webhook_token: str = ""
     # Shared secret guarding the Brevo INBOUND-parse webhook (prospect replies), in the
@@ -253,10 +253,10 @@ class Settings(BaseSettings):
     graph_mailbox_folder: str = "inbox"
     graph_poll_interval_seconds: int = 1800
     graph_max_messages_per_poll: int = 50
+    
+    # ── Automated end-of-harvest outreach ────────────────────────────────────────
     public_base_url: str = ""
     outreach_track_engagement: bool = True
-
-    # ── Automated end-of-harvest outreach ────────────────────────────────────────
     outreach_auto_send_on_harvest: bool = True
     outreach_auto_reply_to: str = ""
     outreach_extra_reply_to: str = ""

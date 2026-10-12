@@ -1,20 +1,31 @@
 """Prompts + templates for recruiter outreach generation
 (app/services/outreach_service.py).
 
-The outreach email is a short, personal note: a greeting, three brief lines
-(reference the posting → a general, conversational mention of how Sightspectrum
-can help with their contract IT hiring → a low-pressure CTA), then a deterministic
-closing (sign-off and optional website link). The middle lines are LLM-generated
-and kept deliberately general and varied — no fixed marketing offer or quantified
-claims (candidate counts, turnaround windows, pricing) — so the mail reads as 1:1
-correspondence rather than a promotional blast; when LLM generation fails,
-render_email_fallback builds an equivalent plain template from the job context.
+The initial outreach email is a short BDE-style note:
 
-Two audiences steer only the phrasing (not the fixed claims):
+    Hi <First>,
+
+    I'm <Name>, a <Role> at SightSpectrum. I noticed your <Platform> posting for
+    <Job Title> at <Company> and wanted to connect.
+
+    <contract IT staffing value + audience ask (vendor onboarding / priority roles)>
+
+    <short, low-pressure question>
+
+then a deterministic closing (contact block, website link, sign-off). The greeting,
+the "I'm <Name>, a <Role> at SightSpectrum." intro and the closing are added by code
+(append_closing); the LLM writes only the body — the job-reference sentence that
+continues the intro's paragraph, the value/ask paragraph and the closing question —
+kept general and varied, with no quantified claims (candidate counts, turnaround
+windows, pricing), so the mail reads as 1:1 correspondence rather than a promotional
+blast. When LLM generation fails, render_email_fallback builds the same shape from
+the job context.
+
+Audiences steer the phrasing and the ask:
   * active client  — a company already on ss_active_clients.json
-  * new client     — everyone else
-The user prompt sends a concise per-audience positioning note (_AUDIENCE)
-describing how the message should differ for an active client vs. a new prospect.
+  * new client     — everyone else ("unknown" when the company can't be identified)
+The initial-email prompt sends the per-audience ask (_EMAIL_ASK); follow-ups send
+the broader positioning note (_AUDIENCE).
 
 Everything is plain text (bodies contain no markdown/HTML); email_service renders
 the HTML part (job-title link, mailto reach-out, website link) at send time.
@@ -77,6 +88,24 @@ _AUDIENCE = {
     ),
 }
 
+# Per-audience ask for the INITIAL email only (build_email_prompt) — what the value
+# paragraph should ask for. Follow-ups keep the broader _AUDIENCE note above.
+_EMAIL_ASK = {
+    "active": (
+        "This company is an existing SightSpectrum client. Acknowledge the existing "
+        "partnership briefly and invite them to share their priority/upcoming "
+        "requirements. Do NOT ask about vendor onboarding."
+    ),
+    "new": (
+        "This company is a new prospect. Ask about their vendor onboarding process and "
+        "potential collaboration."
+    ),
+    "unknown": (
+        "The company could not be identified. Ask about their vendor onboarding process "
+        "and potential collaboration."
+    ),
+}
+
 # For an "unknown" company (nothing to personalize) — a generic stand-in so no
 # "{company}" placeholder leaks into the text.
 _GENERIC_COMPANY = "your organization"
@@ -94,8 +123,20 @@ OFFER_LINE = (
 # Low-pressure CTA line — the fallback uses this verbatim; the LLM writes its own
 # closing question from the intent described in the system prompt.
 CTA_LINE = "Would it help if I shared a few relevant profiles, or would a quick call be easier?"
-# Hardcoded sender title in the sign-off (spelling per business template).
-SENDER_TITLE = "Busssiness Development Executive, SightSpectrum"
+# Value/ask + CTA lines for the INITIAL-email fallback (render_email_fallback) only —
+# OFFER_LINE / CTA_LINE above stay as the follow-up fallback's lines.
+INTRO_OFFER_NEW = (
+    "We provide skilled contract IT professionals to support your hiring needs, and I'd "
+    "be happy to learn about your vendor onboarding process and explore potential "
+    "collaboration."
+)
+INTRO_OFFER_ACTIVE = (
+    "As your existing staffing partner, we'd be glad to support your current requirements "
+    "with skilled contract IT professionals; please feel free to share your priority roles."
+)
+INTRO_CTA = "Would you be available for a brief call?"
+# Hardcoded sender title in the sign-off.
+SENDER_TITLE = "Business Development Executive, SightSpectrum"
 # Company name used in the intro line and the email signature.
 COMPANY_NAME = "SightSpectrum"
 # Role-only fallback title (no company) for the intro + signature when a sender isn't
@@ -177,19 +218,63 @@ def _build_sign_off(sender_email: str) -> str:
     return "\n".join(lines)
 
 
+# A leading sentence that is ONLY a self-introduction, which the model may write despite
+# instructions: "I'm Hari from SightSpectrum." / "I'm Hari, a BDE at SightSpectrum." /
+# "My name is Hari Prasath." Deliberately tight — the sentence must end right after
+# "SightSpectrum" (or the bare name) and must not mention "your …", so a sentence that
+# also carries the posting reference (and the job title email_service links) never matches,
+# nor does "SightSpectrum Pvt. Ltd." / "sightspectrum.com" (no mid-abbreviation cuts).
+_SELF_INTRO_RE = re.compile(
+    r"^(?:"
+    r"(?:I['’]?m|I am|This is)\s+(?:(?!\byour\b)[^.!?\n]){0,80}?\b(?:from|at|with)\s+SightSpectrum"
+    r"|My name is\s+[A-Za-z][\w'’-]*(?:\s+[A-Za-z][\w'’-]*)?"
+    r")\s*[.!](?:\s+|$)",
+    re.IGNORECASE,
+)
+
+
+def _strip_self_intro(paragraph: str) -> str:
+    """Drop a leading model-written self-introduction sentence from `paragraph`, so the
+    deterministic intro merged in front of it isn't duplicated ("I'm Hari, … I'm Hari
+    from SightSpectrum."). Only a sentence that is purely a self-intro is removed (see
+    _SELF_INTRO_RE); anything else is returned unchanged — a duplicated intro is a safer
+    failure than losing the job-title sentence."""
+    text = (paragraph or "").strip()
+    m = _SELF_INTRO_RE.match(text)
+    return text[m.end():].lstrip() if m else text
+
+
+def _merge_intro(intro: str, text: str) -> str:
+    """Merge the intro into the first paragraph of `text` (after dropping any model
+    self-intro there): "I'm <First>, a <Role> at SightSpectrum. I noticed your …".
+    Later paragraphs are kept as-is; with no remaining text the intro stands alone."""
+    rest = (text or "").strip()
+    while rest:
+        first, _, remaining = rest.partition("\n\n")
+        first = _strip_self_intro(first)
+        remaining = remaining.strip()
+        if first:
+            merged = f"{intro} {first}"
+            return f"{merged}\n\n{remaining}" if remaining else merged
+        rest = remaining  # the paragraph was only a self-intro — merge with the next
+    return intro
+
+
 def _insert_after_greeting(body: str, intro: str) -> str:
-    """Place the deterministic intro line right after the greeting. `body` has already been
-    through _greeting_on_own_line, so any greeting is isolated as the first paragraph; split
-    on the first blank line and inject the intro between the greeting and the rest. When the
-    body has no recognizable greeting, the intro simply leads."""
+    """Place the deterministic intro right after the greeting, merged into the first
+    paragraph of the pitch (the posting-reference sentence) so the two read as one
+    opening paragraph. `body` has already been through _greeting_on_own_line, so any
+    greeting is isolated as the first paragraph; split on the first blank line and merge
+    the intro into the rest. When the body has no recognizable greeting, the merged intro
+    simply leads. Only initial emails pass an intro — follow-ups are unaffected."""
     if not intro:
         return body
     parts = body.split("\n\n", 1)
     if parts and _GREETING_RE.match(parts[0].strip()):
         greeting = parts[0]
         rest = parts[1] if len(parts) == 2 else ""
-        return f"{greeting}\n\n{intro}\n\n{rest}" if rest else f"{greeting}\n\n{intro}"
-    return f"{intro}\n\n{body}" if body else intro
+        return f"{greeting}\n\n{_merge_intro(intro, rest)}"
+    return _merge_intro(intro, body)
 
 
 def _ensure_greeting(body: str, greeting: str) -> str:
@@ -218,10 +303,11 @@ def append_closing(
 
         Hi <name>,
 
-        <intro>                          (when given — deterministic self-intro +
-                                          posting reference, right after the greeting)
+        <intro> <first pitch paragraph>  (when given — the deterministic self-intro is
+                                          merged into the pitch's opening paragraph,
+                                          i.e. the posting reference)
 
-        <pitch body>
+        <rest of the pitch body>
 
         <contact_block>                  (when given — the automated-send desk
                                           "reach out to us" name/phone block)
@@ -249,40 +335,59 @@ def append_closing(
 
 
 EMAIL_SYSTEM_PROMPT = """
-You write short, natural emails for Sightspectrum, an IT staffing company.
+You write short, natural outreach emails for SightSpectrum, an IT staffing company.
 
 CONTEXT:
-You're writing to a recruiter, talent acquisition professional, or hiring manager who posted an IT job. The purpose is to start a conversation about contract IT hiring.
+You're writing to a recruiter, talent acquisition professional, or hiring manager who posted an IT job. The purpose is to start a conversation about contract IT staffing.
 
-HOW TO WRITE:
-Write like a busy recruiter sending a quick, personal work email between meetings. Be straightforward, relaxed, and professional. Use everyday English, natural contractions, and simple sentences.
+WHAT THE APPLICATION ADDS (do NOT write these):
+The application automatically adds the greeting ("Hi <Name>,") and the sender's introduction ("I'm <Name>, a <Role> at SightSpectrum.") before your text, and the contact details, website link and sign-off after it. Your body continues the same paragraph straight after that introduction.
 
-The email should feel like something a person would actually type, not a carefully written marketing message. Don't try too hard to sound clever, friendly, or persuasive. Simple and genuine is better than polished and generic.
+WHAT TO WRITE — the BODY only, as 3 short paragraphs separated by a blank line, about 45–85 words in total:
 
-WHAT TO INCLUDE:
+P1. One sentence referencing the opening. Use the EXACT job title provided in the context (preserve its wording and capitalization; don't shorten, rephrase, or reorder it), the company name, and the platform exactly as given in the context's "Job posting source" (e.g. your Naukri posting, your LinkedIn posting, your Dice posting). Never assume LinkedIn; if the source is unknown, say "your job posting" and don't name any platform. If the company is unknown, leave it out. Vary the verb (noticed / came across / saw) and how the sentence ends (e.g. "and wanted to connect", "and wanted to introduce our IT staffing services").
+P2. One or two sentences saying SightSpectrum provides skilled contract IT professionals to support their hiring needs, followed by the ask given in the "Ask —" line of the request.
+P3. One short, low-pressure question, e.g. whether they'd be available for a brief call or a quick discussion next week. Don't start it with "Thanks" or "Thank you".
 
-1.Reference the specific job opening: Begin with a relevant, natural reference to the job posting. Use the EXACT job title provided in the context, preserving its wording and capitalization without shortening, rephrasing, or reordering it. Name the platform the job was posted on exactly as given in the context's "Job posting source" (e.g. their Naukri posting, their LinkedIn post, their Dice posting). Never assume LinkedIn; if the source is unknown, don't name any platform.
-2.Establish professional relevance: detailed explaination how Sightspectrum supports contract IT hiring by connecting hiring teams with candidates whose skills and experience align with the role. Keep the statement factual and relevant to the hiring need.
-3.Invite further discussion: Close with a concise, courteous, low-pressure question that offers a practical next step.
+STYLE REFERENCES (style reference — do not copy verbatim; vary wording). Each shows a BODY only, for a sample job "Senior Data Engineer" at "Acme Corp" — always use the real job title, company and platform from the context:
 
+Reference 1 (new prospect, Naukri):
+I noticed your Naukri posting for Senior Data Engineer at Acme Corp and wanted to connect.
 
-IMPORTANT:
-The application automatically adds the greeting and sender introduction before the body. It also adds the sign-off, website, and opt-out notice afterward. Do not generate any of these yourself.
+We provide skilled contract IT professionals to support your hiring needs. I'd be happy to learn about your vendor onboarding process and explore potential collaboration.
+
+Would you be available for a brief call?
+
+Reference 2 (new prospect, LinkedIn):
+I came across your LinkedIn posting for Senior Data Engineer at Acme Corp and wanted to introduce our IT staffing services.
+
+SightSpectrum provides qualified contract IT professionals to help organizations meet their technical hiring needs. I'd welcome the opportunity to understand your vendor onboarding process and explore how we could support your current and future staffing requirements.
+
+Would you be available for a brief discussion next week?
+
+Reference 3 (existing client, Dice):
+I saw your Dice posting for Senior Data Engineer at Acme Corp and wanted to connect.
+
+As your existing staffing partner, we'd be glad to support this role with skilled contract IT professionals. Please feel free to share your priority requirements with us.
+
+Would a quick call this week work for you?
 
 HUMAN WRITING:
 
-* Vary how you begin. Don't always start with "I saw your posting".
-* Write naturally rather than following the same sentence structure in every email.
-* Use contractions when they fit.
+* Write like a person sending a quick, genuine work email — simple, relaxed, and professional. Everyday English and natural contractions are fine.
+* Vary the wording and sentence structure between emails; don't reuse the references word for word.
 * Don't repeat the job title unnecessarily.
 * Avoid corporate language, generic pleasantries, exaggerated enthusiasm, and sales pitches.
-* Avoid phrases like "I hope this email finds you well", "I wanted to reach out", "Moreover", "Furthermore", and "In today's fast-paced market".
-* Don't use awkward synonyms just to make the message different.
-* Don't deliberately add spelling or grammar mistakes.
+* Avoid phrases like "I hope this email finds you well", "Moreover", "Furthermore", and "In today's fast-paced market".
 * Don't invent personal connections, previous conversations, candidate details, or company facts.
-* Don't claim candidates are pre-screened, available, or qualified unless the supplied context confirms it.
-* Don't mention fees, discounts, guarantees, deadlines, or urgency.
-* Never output bracketed placeholders.
+* Don't claim candidates are pre-screened, available, or qualified for this specific role unless the supplied context confirms it.
+
+DON'T:
+* Don't write a greeting or salutation.
+* Don't introduce yourself or name the sender — no "I'm … from SightSpectrum", no "My name is …".
+* Don't add a sign-off, signature, phone number, URL, or email address.
+* Never output bracketed placeholders such as [Name], [Job Title], or [Company Name].
+* Don't mention candidate counts, fees, discounts, guarantees, deadlines, or urgency.
 
 SUBJECT:
 Write a short, relevant subject line connected to the actual job. Keep it natural and specific, without clickbait or promotional wording.
@@ -529,7 +634,10 @@ def _platform_context_line(job: dict) -> str:
     )
 
 
-def _job_context(job: dict, include_description: bool = True) -> str:
+def _job_context(job: dict, include_description: bool = True, greet: bool = True) -> str:
+    """Recipient/role context block for the user prompts. `greet=False` (the initial
+    email, whose greeting is added deterministically by append_closing) tells the model
+    NOT to write a greeting; the follow-up and LinkedIn prompts keep the default."""
     company = (job.get("company") or "").strip() or "the company"
     title = (job.get("job_title") or "").strip()
     poster = (job.get("job_poster_name") or "").strip()
@@ -553,7 +661,12 @@ def _job_context(job: dict, include_description: bool = True) -> str:
             f"paraphrase, shorten, reorder, or change capitalization): {title}"
         )
     lines.append(_platform_context_line(job))
-    if poster:
+    if not greet:
+        lines.append(
+            f"Recipient name: {poster or 'unknown'} — the greeting is added automatically; "
+            "do not write one, do NOT invent a name and do NOT leave a bracketed placeholder"
+        )
+    elif poster:
         first_name = poster.split()[0]
         lines.append(
             f"Recipient name: {poster} — open the message by greeting them by "
@@ -594,36 +707,39 @@ def build_greeting(job: dict) -> str:
 def build_intro(sender_email: str, job: dict) -> str:
     """Deterministic self-introduction, placed right after the greeting:
 
-        I'm <First>, a <Role Title> with SightSpectrum.
+        I'm <First>, a <Role Title> at SightSpectrum.
 
     The name/title come from resolve_identity(sender_email) so the intro matches the
-    sign-off/signature. The posting reference is NOT hard-coded here anymore — the LLM
-    writes it as its first body line (using the exact job title, which
-    email_service._outreach_body_to_html then links to the posting). When no first name
+    sign-off/signature. The posting reference is NOT hard-coded here — the LLM writes it
+    as the first body sentence (using the exact job title, which
+    email_service._outreach_body_to_html then links to the posting), and append_closing
+    merges this intro in front of it as one opening paragraph. When no first name
     resolves (a role mailbox), drops the personal "I'm <name>" opener for a neutral variant.
     `job` is accepted for call-site compatibility but is no longer used."""
     identity = resolve_identity(sender_email)
     first = identity["first"]
     role = identity["title"]
     if first:
-        return f"I'm {first}, {_article(role)} {role} with {COMPANY_NAME}."
+        return f"I'm {first}, {_article(role)} {role} at {COMPANY_NAME}."
     return f"I'm reaching out from {COMPANY_NAME}."
 
 
 def build_email_prompt(client_type: str, tone: str, job: dict, sender_email: str = "") -> str:
     """User prompt for email generation. It supplies only the per-request
-    variables — `client_type` picks the audience positioning and `tone` the
-    style (both only lightly steer phrasing of the fixed three lines), and `job`
-    the personalization context. `sender_email` is unused here (the sign-off is
-    appended deterministically by append_closing); it's kept for signature
-    compatibility with the caller. The email's structure, fixed offer, greeting,
-    sign-off, and output rules live in EMAIL_SYSTEM_PROMPT."""
+    variables — `client_type` picks the audience ask (_EMAIL_ASK: vendor onboarding for
+    new/unknown prospects, priority requirements for active clients), `tone` the style
+    (lightly steers phrasing), and `job` the personalization context (with greet=False —
+    the greeting is deterministic). `sender_email` is unused here (the greeting, intro
+    and sign-off are added by append_closing); it's kept for signature compatibility
+    with the caller. The body structure and output rules live in EMAIL_SYSTEM_PROMPT."""
     tone_instr = TONE_INSTRUCTIONS.get(tone, TONE_INSTRUCTIONS["Formal"])
     audience = _AUDIENCE.get(client_type, _AUDIENCE["new"])
+    ask = _EMAIL_ASK.get(client_type, _EMAIL_ASK["new"])
     return (
         f"Audience — {audience}\n\n"
+        f"Ask — {ask}\n\n"
         f"Tone: {tone} — {tone_instr}\n\n"
-        f"Recipient / role context:\n{_job_context(job, include_description=False)}\n\n"
+        f"Recipient / role context:\n{_job_context(job, include_description=False, greet=False)}\n\n"
         f"Write the outreach email BODY only, following the structure and rules in "
         f"the system instructions. "
         f'Return ONLY JSON: {{"subject": "...", "body": "..."}}'
@@ -644,14 +760,14 @@ def build_email_subject(job: dict) -> str:
 def render_email_fallback(
     client_type: str, job: dict, sender_email: str = "", deck_url: str = "", contact_block: str = ""
 ) -> tuple[str, str]:
-    """Deterministic fallback used when LLM generation fails — builds the same fixed
-    structure the LLM path assembles (greeting + self-intro + posting reference + offer
-    + CTA) directly from the job context, with the same closing appended. Since the posting
-    reference is no longer part of build_intro, the fallback writes it here as the first body
-    line. For an existing ("active") client the offer line carries a brief partnership nod;
-    the fixed claims are unchanged. `client_type` other than "active" is treated as a
-    new/unknown prospect. `contact_block` (automated sends) is placed above the sign-off,
-    mirroring the LLM path."""
+    """Deterministic fallback used when LLM generation fails — builds the same shape the
+    LLM path assembles (greeting + self-intro merged with the posting reference + offer/ask
+    + CTA) directly from the job context, with the same closing appended. The posting
+    reference is written here as the first body line; append_closing merges the intro in
+    front of it. An existing ("active") client gets the partnership/priority-roles line
+    (INTRO_OFFER_ACTIVE); any other `client_type` is treated as a new/unknown prospect and
+    gets the vendor-onboarding line (INTRO_OFFER_NEW). `contact_block` (automated sends)
+    is placed above the sign-off, mirroring the LLM path."""
     company = (job.get("company") or "").strip() or _GENERIC_COMPANY
     title = (job.get("job_title") or "").strip()
 
@@ -661,16 +777,12 @@ def render_email_fallback(
     # stays verbatim so email_service._outreach_body_to_html links it to the posting.
     posting = posting_phrase(job)
     reference = (
-        f"I came across {posting} for {title} at {company}."
+        f"I noticed {posting} for {title} at {company} and wanted to connect."
         if title
-        else f"I came across {posting} at {company} and wanted to reach out about your IT hiring."
+        else f"I noticed {posting} at {company} and wanted to connect."
     )
-    offer = (
-        f"As your empaneled Sightspectrum partner, {OFFER_LINE[0].lower()}{OFFER_LINE[1:]}"
-        if client_type == "active"
-        else OFFER_LINE
-    )
-    body = "\n\n".join([reference, offer, CTA_LINE])
+    offer = INTRO_OFFER_ACTIVE if client_type == "active" else INTRO_OFFER_NEW
+    body = "\n\n".join([reference, offer, INTRO_CTA])
     intro = build_intro(sender_email, job)
     return build_email_subject(job), append_closing(
         body, sender_email, deck_url, contact_block, intro=intro, greeting=greeting,
