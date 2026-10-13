@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useState } from "react";
 import {
   SlidersHorizontal, LayoutList, History, Send, BarChart3, Radar, UserSearch, LogOut,
   ChevronsLeft, ChevronsRight, Contact,
@@ -12,8 +12,8 @@ import { useTenant } from "../TenantContext";
  * Collapsible rail: rests at 72px (icons only). Hovering (or keyboard focus) PEEKS
  * it open to 240px; that peek collapses again when the pointer/focus leaves. Clicking
  * a NAV OPTION commits it open, so it then stays open while you work in the main page
- * — main-page clicks never close it — persisted in localStorage under
- * "ha.sidebar.pinned" so it survives a reload. When open, the top chevron points left
+ * — main-page clicks never close it — for the rest of this page load; every reload or
+ * refresh starts collapsed. When open, the top chevron points left
  * ("«") and closes the rail. Expansion is IN-FLOW — the `ha-sb-slot` wrapper's width
  * animates, so the main page slides with the sidebar rather than being overlaid. The
  * aside itself is sticky inside the slot and simply fills it.
@@ -69,28 +69,26 @@ function sidebarVars(accent, isClient) {
   };
 }
 
-const LS_PINNED = "ha.sidebar.pinned";
+// The "keep the rail open" latch, held for THIS page load only. Module scope (not
+// localStorage) so it survives the Sidebar remounting — e.g. coming back from a
+// full-page job/run detail view — while a reload or refresh always starts collapsed.
+let committedThisLoad = false;
 
 export default function Sidebar({ activePage, onNavigate = () => {}, jobsCount, runsCount, onLogout, railCollapsed = false }) {
   const { tenant, theme, isClient, hasFeature } = useTenant();
 
-  // `committed` = the persisted "keep the rail open" choice. Turned ON when the
-  // user clicks a nav option (or the open button), OFF by the close button — so
-  // navigating keeps the rail open, while a plain hover does NOT latch it. Persisted
-  // under the same localStorage key so the choice survives a reload.
-  const [committed, setCommitted] = useState(() => {
-    try { return localStorage.getItem(LS_PINNED) === "1"; } catch { return false; }
-  });
-  useEffect(() => {
-    try { localStorage.setItem(LS_PINNED, committed ? "1" : "0"); } catch { /* storage unavailable */ }
-  }, [committed]);
+  // `committed` = the "keep the rail open" choice. Turned ON when the user clicks a
+  // nav option (or the open button), OFF by the close button — so navigating keeps
+  // the rail open, while a plain hover does NOT latch it. Resets on reload.
+  const [committed, setCommittedState] = useState(committedThisLoad);
+  const setCommitted = (value) => { committedThisLoad = value; setCommittedState(value); };
 
   // `peeking` = transient hover/focus peek. The rail is open when either is set; a
   // peek collapses when the pointer/focus leaves, but a committed rail does not — so
   // a click anywhere in the main page never closes it.
   const [peeking, setPeeking] = useState(false);
   // On a full-bleed console page (railCollapsed, e.g. Recruiter Contacts) the rail
-  // rests collapsed regardless of the persisted latch — it still PEEKS open on
+  // rests collapsed regardless of the latch — it still PEEKS open on
   // hover/focus so the nav stays reachable, and the saved choice is untouched for
   // every other page.
   const open = railCollapsed ? peeking : (committed || peeking);

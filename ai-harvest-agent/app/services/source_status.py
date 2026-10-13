@@ -77,11 +77,14 @@ def _now_iso() -> str:
 PROGRESS_KEYS: tuple[str, ...] = (
     "phase", "reported_total", "listed", "skipped", "target", "cap", "done",
     "in_batch", "batch_size", "batches", "page", "total_pages", "window_hours",
+    "resume_at",
 )
 # Keys whose change is just "one more job extracted" — throttled like a message.
 # Any other progress key changing (phase, listing totals, …) is emitted at once.
 TICK_KEYS = frozenset({"done", "in_batch"})
-PROGRESS_PHASES = ("listing", "details", "done")
+# cooling_down       — paused after a rate-limit/CAPTCHA (resume_at = epoch seconds)
+# waiting_for_human  — a CAPTCHA must be solved in the Live Browser (resume_at = deadline)
+PROGRESS_PHASES = ("listing", "details", "cooling_down", "waiting_for_human", "done")
 
 
 def _entry(state: str = "pending", message: str = "") -> dict[str, Any]:

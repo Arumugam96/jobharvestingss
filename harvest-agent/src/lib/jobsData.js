@@ -40,7 +40,7 @@ const clean = (v) => (v == null ? "" : String(v).trim());
  * Distinct, present values for one contact channel in display priority order:
  * the value scraped from the job post ("Job"), the enriched recruiter record's
  * ("Recruiter"), then the inferred company(+job-location) HR contact
- * ("Company"). Identical strings are deduped. Older JSON-read rows carry only
+ * ("Apollo Resolved"). Identical strings are deduped. Older JSON-read rows carry only
  * the merged poster value (no split fields) — it stands in for Job/Recruiter
  * (labeled "Contact" when shown next to a Company value). Mirrored server-side
  * by job_dict_contact()/_contact_presence_exprs() in harvest_run_service.py.
@@ -56,7 +56,7 @@ export function contactParts(scraped, recruiter, company, fallback) {
     const f = clean(fallback);
     if (f) parts.push({ variant: "contact", label: "Contact", val: f });
   }
-  if (c && !parts.some((p) => p.val === c)) parts.push({ variant: "company", label: "Company", val: c });
+  if (c && !parts.some((p) => p.val === c)) parts.push({ variant: "company", label: "Apollo Resolved", val: c });
   return parts;
 }
 
@@ -100,7 +100,7 @@ export function jobContact(j) {
 }
 
 // CSV label for a POC kind / the source tag of a channel's primary value.
-export const pocKindLabel = (kind) => (kind === "poster" ? "Job poster" : kind === "company" ? "Company" : "—");
+export const pocKindLabel = (kind) => (kind === "poster" ? "Job poster" : kind === "company" ? "Apollo Resolved" : "—");
 export const partSourceLabel = (parts) => (parts.length && parts[0].label) || "—";
 
 /* ── API job → table row shape ─────────────────────────────────────────── */
@@ -132,7 +132,7 @@ function mapApiJobFields(j) {
     mobileRecruiter: j.phone_recruiter || null,
     // Inferred HR contact found by (company + job location) via Apollo, attached
     // only to jobs with no scraped-poster and no enriched-recruiter email. Shown
-    // inline with a "Company" tag in the table; its own section in the detail view.
+    // inline with an "Apollo Resolved" tag in the table; its own section in the detail view.
     emailCompany: j.company_contact_email || null,
     mobileCompany: j.company_contact_phone || null,
     companyContactName: j.company_contact_name || null,

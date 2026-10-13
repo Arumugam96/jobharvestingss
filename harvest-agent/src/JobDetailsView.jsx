@@ -268,7 +268,7 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
         {hasCompanyContact && (
           <section className="ha-section ha-poc ha-enriched">
             <div className="ha-label">
-              <Building2 size={14} /> Company / Location Enriched
+              <Building2 size={14} /> Apollo Resolved
               <span className="ha-en-badge">{ccSourceLabel}</span>
             </div>
             <div className="ha-poc-body">

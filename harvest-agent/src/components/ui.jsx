@@ -393,7 +393,7 @@ export function PocCell({ name, kind }) {
   if (kind !== "company") return name;
   return (
     <div className="ha-contact-item">
-      <SrcTag variant="company">Company</SrcTag>
+      <SrcTag variant="company">Apollo Resolved</SrcTag>
       <span className="ha-contact-val" title={name}>{name}</span>
     </div>
   );

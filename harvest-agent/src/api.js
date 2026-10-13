@@ -161,9 +161,36 @@ export function setupLinkedinSession(account = "1") {
   return request("/linkedin-setup-session", { method: "POST", body: JSON.stringify({ account }) });
 }
 
-/** POST /naukri-setup-session — opens a Chrome window for one-time manual Naukri login. Blocks up to 10 min. */
+/** POST /naukri-setup-session — opens a Chrome window for one-time manual Naukri login. Blocks up to 10 min.
+ * Legacy (jobseeker session) — the Rule Engine pages now use the Naukri RECRUITER
+ * session calls below; kept exported for any other caller. */
 export function setupNaukriSession() {
   return request("/naukri-setup-session", { method: "POST" });
+}
+
+// ── Naukri RECRUITER session (dedicated Chrome profile on the server) ─────────
+
+/** GET /naukri-recruiter/status — last known recruiter-session state, cheap (no
+ * browser launch). Returns {profile_dir, profile_exists, legacy_session_file_exists,
+ * login_window_open, last_check, logged_in}; `last_check` is the last verify/login
+ * result ({checked_at, method, logged_in, landed_url, state?, error?, …}) or null. */
+export function getNaukriRecruiterStatus() {
+  return request("/naukri-recruiter/status");
+}
+
+/** POST /naukri-recruiter/login — open a HEADED recruit.naukri.com login window in
+ * the background (the human logs in via the Live Browser). Returns immediately with
+ * {status: "started"|"busy", message, timeout_s}; poll getNaukriRecruiterStatus()
+ * until `logged_in` (or `login_window_open` goes false). timeoutS: 60..1800. */
+export function startNaukriRecruiterLogin(timeoutS = 600) {
+  return request("/naukri-recruiter/login", { method: "POST", body: JSON.stringify({ timeout_s: timeoutS }) });
+}
+
+/** POST /naukri-recruiter/verify — briefly launches the recruiter profile and checks
+ * recruit.naukri.com. Returns {status: "ready"|"action_required"|"busy"|"failed", …}.
+ * Launches a browser — call only from an explicit user action, never on page load. */
+export function verifyNaukriRecruiter() {
+  return request("/naukri-recruiter/verify", { method: "POST" });
 }
 
 // ── Health ───────────────────────────────────────────────────────────────────

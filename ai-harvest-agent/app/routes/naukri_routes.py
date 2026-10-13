@@ -249,134 +249,56 @@ async def run_naukri_agent() -> Any:
 @router.post("/naukri-setup-session", status_code=status.HTTP_200_OK)
 async def setup_naukri_session() -> Any:
     """
-    Opens Chrome with the dedicated harvest agent profile directory.
-    Log in to Naukri / recruit.naukri.com manually in the browser window that appears.
-    Close the browser when done — the session is persisted in the profile
-    directory and all future /run-naukri-agent calls will reuse it.
+    Connect the Naukri RECRUITER session (the one recruiter-mode harvests run in).
 
-    Profile directory: data/chrome_profile (configurable in harvest_config.json)
-    Times out after 10 minutes.
+    Delegates to the recruiter session flow (app/agents/naukri_recruiter_agent.py,
+    same as POST /naukri-recruiter/login): opens a HEADED window on
+    recruit.naukri.com in the DEDICATED recruiter profile
+    (settings.naukri_recruiter_profile_dir) — on the server, watch/use it in the
+    Live Browser view. Log in yourself and complete any OTP / Naukri Recruiter app
+    approval; nothing is typed for you (NAUKRI_EMAIL / NAUKRI_PASSWORD are not
+    used) and nothing is written to the LinkedIn harvest profile.
+
+    Blocks until the login is confirmed or 10 minutes pass. Joins the window if
+    one is already open.
     """
-    from app.scrapers.browser_manager import PersistentBrowserManager
+    from app.agents.naukri_recruiter_agent import (
+        read_status,
+        recruiter_profile_dir,
+        start_login_window,
+        wait_for_login_window,
+    )
 
-    config         = _config_svc.load()
-    chrome_profile = config.browser.chrome_profile
-
-    async def _open_for_login() -> str:
-        import os
-        naukri_email    = os.environ.get("NAUKRI_EMAIL", "")
-        naukri_password = os.environ.get("NAUKRI_PASSWORD", "")
-
-        async with PersistentBrowserManager(
-            profile_dir = chrome_profile,
-            headless    = False,
-        ) as pbm:
-            page = await pbm.new_page()
-            await page.goto(
-                "https://recruit.naukri.com/",
-                wait_until = "domcontentloaded",
-                timeout    = 30_000,
-            )
-            await page.wait_for_timeout(2_000)
-
-            _LOGIN_PATHS = ("/recruit/login", "/nlogin/login", "/nlogin/")
-            current_url  = page.url
-
-            # Auto-fill credentials if on a login page and creds are available
-            if naukri_email and naukri_password and any(p in current_url for p in _LOGIN_PATHS):
-                logger.info(
-                    "naukri_setup_autofill",
-                    email   = naukri_email,
-                    profile = chrome_profile,
-                )
-                _EMAIL_SELS = [
-                    'input[type="email"]',
-                    'input[name="username"]',
-                    'input[name="emailId"]',
-                    'input[id*="email" i]',
-                    'input[placeholder*="email" i]',
-                    'input[placeholder*="username" i]',
-                ]
-                _PASS_SELS = [
-                    'input[type="password"]',
-                    'input[name="password"]',
-                    'input[id*="password" i]',
-                    'input[placeholder*="password" i]',
-                ]
-                _SUBMIT_SELS = [
-                    'button[type="submit"]',
-                    'input[type="submit"]',
-                    'button:has-text("Login")',
-                    'button:has-text("Sign in")',
-                    'button:has-text("Log in")',
-                    '.loginBtn',
-                    '[class*="loginBtn"]',
-                ]
-
-                # Fill email
-                for sel in _EMAIL_SELS:
-                    try:
-                        el = page.locator(sel).first
-                        if await el.count() > 0:
-                            await el.click()
-                            await el.fill(naukri_email)
-                            logger.info("naukri_autofill_email_entered")
-                            break
-                    except Exception:
-                        continue
-
-                # Fill password
-                for sel in _PASS_SELS:
-                    try:
-                        el = page.locator(sel).first
-                        if await el.count() > 0:
-                            await el.click()
-                            await el.fill(naukri_password)
-                            logger.info("naukri_autofill_password_entered")
-                            break
-                    except Exception:
-                        continue
-
-                # Click submit
-                for sel in _SUBMIT_SELS:
-                    try:
-                        btn = page.locator(sel).first
-                        if await btn.count() > 0:
-                            await btn.click()
-                            logger.info("naukri_autofill_submitted")
-                            await page.wait_for_timeout(4_000)
-                            break
-                    except Exception:
-                        continue
-            else:
-                logger.info(
-                    "naukri_setup_browser_opened",
-                    msg     = "Naukri login page opened — waiting for manual login or already authenticated.",
-                    profile = chrome_profile,
-                )
-
-            # Wait for navigation away from login (up to 10 min for manual completion)
-            for _ in range(300):   # 300 × 2 s = 10 min
-                await page.wait_for_timeout(2_000)
-                url = page.url
-                if not any(p in url for p in _LOGIN_PATHS):
-                    logger.info("naukri_setup_login_detected", url=url)
-                    break
-            else:
-                raise RuntimeError("Setup timed out — login not completed within 10 minutes")
-
-        return chrome_profile
-
+    timeout_s = 600
+    started_at = datetime.now(timezone.utc)
+    started = start_login_window(timeout_s=timeout_s)
+    logger.info("naukri_setup_session_login_window", started=started,
+                profile=str(recruiter_profile_dir()))
     try:
-        if needs_proactor():
-            profile: str = await run_in_proactor(_open_for_login)
+        # The window itself gives up after timeout_s; allow for browser launch.
+        finished = await wait_for_login_window(timeout_s + 60)
+        if not finished:
+            return _err("Failed to set up Naukri session",
+                        "Setup timed out — login not completed within 10 minutes")
+        last = read_status().get("last_check") or {}
+        fresh = False
+        try:
+            fresh = datetime.fromisoformat(str(last.get("checked_at"))) >= started_at
+        except (TypeError, ValueError):
+            fresh = False
+        if fresh and last.get("logged_in"):
+            return {
+                "status":  "ready",
+                "message": "Naukri recruiter session saved.",
+                "profile": str(recruiter_profile_dir()),
+            }
+        if last.get("state") == "error":
+            reason = last.get("error") or "Recruiter login window failed"
+        elif last.get("state") == "timed_out":
+            reason = "Setup timed out — login not completed within 10 minutes"
         else:
-            profile = await _open_for_login()
-        return {
-            "status":   "ready",
-            "message":  "Naukri session saved in Chrome profile. Future /run-naukri-agent calls will reuse it.",
-            "profile":  profile,
-        }
+            reason = "Login was not completed in the recruiter window"
+        return _err("Failed to set up Naukri session", str(reason))
     except Exception as exc:
         logger.error("naukri_setup_session_failed", error=str(exc))
         return _err("Failed to set up Naukri session", str(exc))

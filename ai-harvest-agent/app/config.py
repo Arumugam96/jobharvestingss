@@ -147,7 +147,11 @@ class Settings(BaseSettings):
     # account's persistent profile, full bundled Chromium) with LinkedIn and
     # Naukri as two concurrent tabs. "isolated": Naukri gets its own fresh
     # cookie-less guest browser (Naukri-only worker / host without the profile).
-    naukri_browser_mode: Literal["shared", "isolated"] = "shared"
+    # "recruiter": Naukri gets its own browser on the logged-in RECRUITER profile
+    # (naukri_recruiter_profile_dir) — www.naukri.com job pages browsed with the
+    # recruiter session; the run checks the session first and refuses to fall
+    # back to a guest silently.
+    naukri_browser_mode: Literal["shared", "isolated", "recruiter"] = "shared"
     # Dedicated persistent Chrome profile for the Naukri RECRUITER session
     # (app/agents/naukri_recruiter_agent.py). Deliberately separate from the
     # LinkedIn/harvest profile so recruiter cookies never reach the guest
@@ -156,9 +160,27 @@ class Settings(BaseSettings):
     # Per-job detail pass (description HTML, employment type, work mode, industry,
     # company website, recruiter contact when Naukri shows one). Off ⇒ listing-only.
     naukri_fetch_details: bool = True
-    # Human-like randomized gap between consecutive Naukri detail-page visits.
-    naukri_detail_delay_min_ms: int = 2_500
-    naukri_detail_delay_max_ms: int = 6_000
+    # Human-like randomized gap between consecutive Naukri detail-page visits
+    # (~45 s average). The adaptive governor multiplies it after each
+    # CAPTCHA/block and eases back after a clean streak.
+    naukri_detail_delay_min_ms: int = 30_000
+    naukri_detail_delay_max_ms: int = 60_000
+    naukri_backoff_max_multiplier: float = 4.0     # cap on the adaptive slow-down
+    naukri_backoff_clean_streak: int = 10          # clean detail pages before easing back one step
+    # A longer "coffee break" every N detail pages.
+    naukri_break_every_details: int = 18           # 0 = never
+    naukri_break_min_s: int = 180
+    naukri_break_max_s: int = 300
+    # On a blocked detail page: cool down, then retry that job once.
+    naukri_block_cooldown_min_s: int = 120
+    naukri_block_cooldown_max_s: int = 300
+    # Circuit breaker: after N consecutive blocks pause details, then probe one.
+    naukri_breaker_threshold: int = 3
+    naukri_breaker_pause_min_s: int = 600
+    naukri_breaker_pause_max_s: int = 900
+    # Human-in-the-loop: when blocks persist on a manual run, wait this long for
+    # someone to solve the CAPTCHA in the Live Browser (0 = never wait).
+    naukri_human_wait_s: int = 600
     # LLM enrichment on top of the deterministic parse (app/services/jd_llm_enrichment.py),
     # via the configured EXTRACTION_LLM_MODEL chain. Every LLM contact is grounded
     # against the description text (never stored unless written there); a

@@ -1,10 +1,11 @@
 import React, { useEffect, useRef, useState } from "react";
 import {
-  Play, Save, Loader2, Clock, Info, CheckCircle2, AlertTriangle, Eye, Check,
+  Play, Save, Loader2, Clock, Info, CheckCircle2, AlertTriangle, Eye, Check, RefreshCw,
 } from "lucide-react";
 import {
   getHarvestConfig, saveHarvestConfig, runHarvestAgent, getHarvestStatus, getActiveRun,
-  getRunHistory, getRunHistoryEntry, setupLinkedinSession, setupNaukriSession, ApiError,
+  getRunHistory, getRunHistoryEntry, setupLinkedinSession, ApiError,
+  getNaukriRecruiterStatus, startNaukriRecruiterLogin, verifyNaukriRecruiter,
 } from "../api";
 import LiveBrowserView from "../components/LiveBrowserView";
 import StopHarvestButton from "../components/StopHarvestModal";
@@ -68,6 +69,151 @@ function Chip({ active, onClick, children, disabled, title }) {
   );
 }
 
+/* ── Naukri RECRUITER session ────────────────────────────────────────────────
+   Naukri harvests run inside a logged-in Naukri RECRUITER session (a dedicated
+   Chrome profile on the server). The Connect card shows the REAL state from
+   GET /naukri-recruiter/status (cheap, no browser launch) so it survives
+   reloads. Connect opens a headed login window in the background (POST
+   /naukri-recruiter/login) that the user completes in the Live Browser; we poll
+   status every few seconds until it reports logged_in, the window closes without
+   a login, or ~10.5 min pass. Re-check (POST /naukri-recruiter/verify) launches
+   a browser briefly, so it only ever runs from the explicit button.
+   (Mirrored in RuleEngineConfig.jsx / pages/RuleEngineRedesign.jsx.) */
+const NAUKRI_POLL_MS = 3000;
+const NAUKRI_LOGIN_MAX_MS = 630000; // 600 s login-window timeout + slack
+// Harvest failure reasons that mean "reconnect the Naukri recruiter session".
+const NAUKRI_RECONNECT_RE = /recruiter session expired|recruiter login window is open/i;
+
+function useNaukriRecruiter(liveViewSource, setLiveViewSource) {
+  const [rec, setRec] = useState({
+    status: null, loading: true, error: "", connecting: false, checking: false, message: "",
+  });
+  const alive = useRef(true);
+  const pollTimer = useRef(null);
+  const deadline = useRef(0);
+  const baseline = useRef(null); // last_check.checked_at when this login started
+
+  const patch = (p) => { if (alive.current) setRec((s) => ({ ...s, ...p })); };
+  const stopPoll = () => { clearTimeout(pollTimer.current); pollTimer.current = null; };
+  const closeLive = () => setLiveViewSource((v) => (v === "naukri" ? null : v));
+
+  const refresh = async () => {
+    try {
+      const status = await getNaukriRecruiterStatus();
+      patch({ status, loading: false, error: "" });
+      return status;
+    } catch (err) {
+      patch({ loading: false, error: err instanceof ApiError ? err.message : "Could not reach the harvest backend." });
+      return null;
+    }
+  };
+
+  const poll = () => {
+    stopPoll();
+    pollTimer.current = setTimeout(async () => {
+      const st = await refresh();
+      if (!alive.current) return;
+      const lc = (st && st.last_check) || {};
+      // A logged_in left over from an earlier check doesn't count while the window
+      // is still open — only once it closes, or when THIS login wrote "done".
+      const freshDone = lc.method === "login" && lc.state === "done" && lc.checked_at !== baseline.current;
+      if (st && st.logged_in && (!st.login_window_open || freshDone)) {
+        patch({ connecting: false, message: "Connected (recruiter) — the session is saved for future runs." });
+        closeLive();
+        return;
+      }
+      if (st && !st.login_window_open) {
+        patch({
+          connecting: false,
+          message: lc.state === "error" && lc.error
+            ? `Login failed — ${lc.error}`
+            : "Login not completed — click Connect to try again.",
+        });
+        closeLive();
+        return;
+      }
+      if (Date.now() >= deadline.current) {
+        patch({ connecting: false, message: "Login not confirmed after 10 minutes — click Re-check, or Connect to try again." });
+        return;
+      }
+      poll();
+    }, NAUKRI_POLL_MS);
+  };
+
+  const watchLogin = () => {
+    deadline.current = Date.now() + NAUKRI_LOGIN_MAX_MS;
+    patch({ connecting: true });
+    poll();
+  };
+
+  useEffect(() => {
+    alive.current = true;
+    refresh().then((st) => {
+      // Reloaded mid-login: keep following the open window (live view stays closed).
+      if (alive.current && st && st.login_window_open) {
+        baseline.current = st.last_check?.checked_at ?? null;
+        watchLogin();
+      }
+    });
+    return () => { alive.current = false; stopPoll(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const connect = async () => {
+    stopPoll();
+    baseline.current = rec.status?.last_check?.checked_at ?? null;
+    patch({ connecting: true, message: "Opening the Naukri recruiter login window…" });
+    try {
+      const res = await startNaukriRecruiterLogin(600);
+      if (!alive.current) return;
+      // "busy" = a login window is already open — join it instead of failing.
+      setRec((s) => ({
+        ...s,
+        message: res.status === "busy" ? "A login window is already open — finish logging in below." : "",
+        status: { ...(s.status || {}), login_window_open: true },
+      }));
+      setLiveViewSource("naukri");
+      watchLogin();
+    } catch (err) {
+      patch({ connecting: false, message: err instanceof ApiError ? err.message : "Could not reach the harvest backend." });
+    }
+  };
+
+  const recheck = async () => {
+    patch({ checking: true, message: "Re-checking the recruiter session…" });
+    let message = "";
+    try {
+      const res = await verifyNaukriRecruiter();
+      if (res.status === "busy") message = res.message || "A login window is open — finish it first.";
+      else if (res.status === "failed") message = `Re-check failed — ${res.message || "unknown error"}`;
+      // ready / action_required: the refreshed status line says it all.
+    } catch (err) {
+      message = err instanceof ApiError ? err.message : "Could not reach the harvest backend.";
+    }
+    await refresh();
+    patch({ checking: false, message });
+  };
+
+  const s = rec.status;
+  const connected = !!(s && s.logged_in && !s.login_window_open);
+  let line;
+  if (rec.message) line = rec.message;
+  else if (!s) line = rec.loading ? "Checking…" : `Couldn't check the Naukri session — ${rec.error || "unknown error"}`;
+  else if (s.login_window_open) {
+    line = liveViewSource === "naukri"
+      ? "Login window open — finish logging in below"
+      : "Login window open — reopen the Live Browser to finish logging in";
+  } else if (s.logged_in) {
+    const at = s.last_check?.checked_at;
+    line = `Connected (recruiter)${at ? ` · last checked ${fmtRunDate(at)}` : ""}`;
+  } else line = "Logged out — click Connect";
+
+  return {
+    ...rec, connected, line, connect, recheck,
+    reopen: () => setLiveViewSource("naukri"),
+  };
+}
+
 export default function RuleEngineRedesign() {
   const { refreshAll, harvestRunning, setHarvestRunning } = useHarvestData();
 
@@ -127,8 +273,10 @@ export default function RuleEngineRedesign() {
     "1": { loading: false, message: "" },
     "2": { loading: false, message: "" },
   });
-  const [naukriSetup, setNaukriSetup] = useState({ loading: false, message: "" });
   const [liveViewSource, setLiveViewSource] = useState(null); // "linkedin" | "naukri" | "harvest" | null
+  // Naukri recruiter session card (see useNaukriRecruiter above).
+  const naukri = useNaukriRecruiter(liveViewSource, setLiveViewSource);
+  const naukriCardRef = useRef(null);
 
   // Daily cap of 0 = unlimited (the run overlay's "of N daily cap" line).
   // The animated Jobs saved / Daily cap / Remaining figures live in LiveHarvestCard.
@@ -420,27 +568,42 @@ export default function RuleEngineRedesign() {
     }
   };
 
-  const handleNaukriSetup = async () => {
-    setNaukriSetup({ loading: true, message: "Log in below — this is the live browser. Waiting up to 10 minutes…" });
-    setLiveViewSource("naukri");
-    try {
-      const res = await setupNaukriSession();
-      setNaukriSetup({ loading: false, message: res.status === "ready" ? (res.message || "Naukri session saved.") : (res.reason || res.message || "Could not confirm login.") });
-    } catch (err) {
-      setNaukriSetup({ loading: false, message: err instanceof ApiError ? err.message : "Could not reach the harvest backend." });
-    } finally {
-      setLiveViewSource(null);
-    }
+  const goToNaukriConnect = () => {
+    setOverlayOpen(false);
+    setTab("sources");
+    setTimeout(() => naukriCardRef.current?.scrollIntoView({ behavior: "smooth", block: "center" }), 50);
   };
 
   // The backend pauses a running harvest waiting for a manual LinkedIn login —
   // pulse the Watch button so the user knows to open the live browser.
   // The LinkedIn row's own message carries the login prompt too (the run-level
   // message is shared by every source and can be overwritten by Naukri/Dice).
+  // (Naukri recruiter-session failures mention "login" too — they're surfaced by
+  // the reconnect banner below, not as a "log in now" prompt.)
   const needsLogin = runState === "running" && (
-    /log ?in/i.test(runMessage || "") ||
+    (/log ?in/i.test(runMessage || "") && !NAUKRI_RECONNECT_RE.test(runMessage || "")) ||
     (sourceStatus?.linkedin?.state === "running" && /log ?in/i.test(sourceStatus.linkedin.message || ""))
   );
+  // Naukri paused on a persistent CAPTCHA, waiting for a human to solve it in
+  // the Live Browser (phase waiting_for_human, resume_at = deadline).
+  const naukriEntry = sourceStatus?.naukri;
+  const naukriNeedsHuman = runState === "running" && naukriEntry?.phase === "waiting_for_human"
+    && !["done", "failed", "skipped"].includes(naukriEntry?.state);
+  const watchAttention = needsLogin || naukriNeedsHuman;
+  const watchLabel = naukriNeedsHuman ? "Solve CAPTCHA — Watch Live Browser"
+    : needsLogin ? "Log in now — Watch Live Browser" : "Watch Live Browser";
+  const watchTitle = naukriNeedsHuman ? "Naukri needs you to solve a CAPTCHA — click to open the live browser"
+    : needsLogin ? "LinkedIn needs you to log in — click to open the live browser" : undefined;
+  // Connect / Re-check open the same recruiter Chrome profile the harvest uses —
+  // keep them off while Naukri is harvesting (Re-check: while any run is live).
+  const naukriHarvesting = (runState === "running" || harvestRunning)
+    && ["running", "pending"].includes(naukriEntry?.state);
+  // Naukri failed because the recruiter session expired / its login window was
+  // open — point the user at the Connect card.
+  const naukriSessionIssue = runState !== "idle"
+    ? ([naukriEntry?.reason, naukriEntry?.error, naukriEntry?.message, runMessage]
+        .find((t) => typeof t === "string" && NAUKRI_RECONNECT_RE.test(t)) || "")
+    : "";
   const gccIsLocked = gccLocked(hiringEntity);
 
   if (loading) {
@@ -459,7 +622,7 @@ export default function RuleEngineRedesign() {
         <LiveBrowserView
           title={
             liveViewSource === "linkedin" ? "LinkedIn login — live browser" :
-            liveViewSource === "naukri" ? "Naukri login — live browser" :
+            liveViewSource === "naukri" ? "Naukri recruiter login — live browser" :
             "Harvest in progress — live browser"
           }
           onClose={() => setLiveViewSource(null)}
@@ -497,11 +660,11 @@ export default function RuleEngineRedesign() {
           {saveError && <span className="rr-validation"><AlertTriangle size={14} /> {saveError}</span>}
           {(runState === "running" || harvestRunning) && (
             <button
-              className={"rr-btn rr-watch" + (needsLogin ? " rr-watch-attn" : "")}
+              className={"rr-btn rr-watch" + (watchAttention ? " rr-watch-attn" : "")}
               onClick={() => setLiveViewSource("harvest")}
-              title={needsLogin ? "LinkedIn needs you to log in — click to open the live browser" : undefined}
+              title={watchTitle}
             >
-              <Eye size={15} /> {needsLogin ? "Log in now — Watch Live Browser" : "Watch Live Browser"}
+              <Eye size={15} /> {watchLabel}
             </button>
           )}
           <StopHarvestButton
@@ -538,7 +701,19 @@ export default function RuleEngineRedesign() {
             maxPerDay={maxPerDay}
             live={runState === "running"}
             windowHours={searchWindow}
+            onOpenLiveBrowser={() => setLiveViewSource("harvest")}
           />
+        </div>
+      )}
+
+      {naukriSessionIssue && (
+        <div className="rr-err rr-err-act">
+          <AlertTriangle size={15} />
+          <span>
+            <b>Naukri was not harvested:</b> {naukriSessionIssue}. Reconnect the recruiter session
+            with <b>Connect</b> on the Naukri card (Connect Accounts), then run again.
+          </span>
+          <button type="button" className="rr-acct-btn" onClick={goToNaukriConnect}>Go to Naukri Connect</button>
         </div>
       )}
 
@@ -644,15 +819,30 @@ export default function RuleEngineRedesign() {
                 </div>
               );
             })}
-            <div className="rr-acct">
+            {/* Naukri recruiter account — real state from /naukri-recruiter/status */}
+            <div className="rr-acct rr-acct--wrap" ref={naukriCardRef}>
               <span className="rr-src-ic" style={{ background: "#6D28D9" }}>N</span>
               <span className="rr-acct-tx">
-                <b>Naukri.com</b>
-                <small>{naukriSetup.message || "Open a live browser to log in; the session is saved for future runs."}</small>
+                <b>Naukri.com — Recruiter</b>
+                <small className={naukri.connected && !naukri.message ? "rr-acct-ok" : undefined}>
+                  {(naukri.loading && !naukri.status) || naukri.checking ? <Loader2 className="rr-spin" size={11} /> : null}
+                  {naukri.line}
+                </small>
               </span>
-              <button className="rr-acct-btn" disabled={naukriSetup.loading} onClick={handleNaukriSetup}>
-                {naukriSetup.loading ? <Loader2 className="rr-spin" size={13} /> : null}
-                {naukriSetup.loading ? "Waiting for login…" : "Connect via Live Browser"}
+              <button className="rr-acct-btn rr-acct-btn--ghost" onClick={naukri.recheck}
+                disabled={naukri.checking || naukri.connecting || harvestRunning}
+                title={harvestRunning ? "Available when the harvest finishes"
+                  : "Open the recruiter profile briefly and confirm it is still logged in"}>
+                <RefreshCw className={naukri.checking ? "rr-spin" : undefined} size={13} />
+                {naukri.checking ? "Checking…" : "Re-check"}
+              </button>
+              <button className="rr-acct-btn"
+                disabled={naukri.checking || (naukriHarvesting && !naukri.connecting)}
+                onClick={naukri.connecting ? naukri.reopen : naukri.connect}
+                title={naukri.connecting ? "Login in progress — click to reopen the Live Browser"
+                  : naukriHarvesting ? "Naukri is harvesting right now — connect after it finishes" : undefined}>
+                {naukri.connecting ? <Loader2 className="rr-spin" size={13} /> : null}
+                {naukri.connecting ? "Waiting for login…" : "Connect via Live Browser"}
               </button>
             </div>
           </section>
@@ -810,8 +1000,9 @@ export default function RuleEngineRedesign() {
             </div>
             <div className="rr-run-foot">
               {runState === "running" && (
-                <button className="rr-btn rr-watch" onClick={() => setLiveViewSource("harvest")}>
-                  <Eye size={15} /> Watch Live Browser
+                <button className={"rr-btn rr-watch" + (watchAttention ? " rr-watch-attn" : "")}
+                  onClick={() => setLiveViewSource("harvest")} title={watchTitle}>
+                  <Eye size={15} /> {watchLabel}
                 </button>
               )}
               <StopHarvestButton
@@ -942,6 +1133,15 @@ const CSS = `
 .rr-acct-btn{display:inline-flex;align-items:center;gap:7px;border:1px solid #2563EB;background:linear-gradient(160deg, rgba(255,255,255,.9), rgba(255,255,255,.65));box-shadow:inset 0 1px 0 rgba(255,255,255,.75);color:#2563EB;font-size:12.5px;font-weight:600;padding:7px 13px;border-radius:8px;cursor:pointer;transition:.15s;white-space:nowrap;font-family:inherit;}
 .rr-acct-btn:hover:not(:disabled){background:rgba(239,246,255,.92);}
 .rr-acct-btn:disabled{opacity:.7;cursor:default;}
+.rr-acct--wrap{flex-wrap:wrap;}
+.rr-acct-tx small.rr-acct-ok{color:#047857;font-weight:600;}
+.rr-acct-tx small .rr-spin{vertical-align:-1px;margin-right:5px;}
+.rr-acct-btn--ghost{border-color:#CBD5E1;color:#475569;}
+.rr-acct-btn--ghost:hover:not(:disabled){background:rgba(241,245,249,.92);}
+.rr-err-act{display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
+.rr-err-act > svg{flex:none;}
+.rr-err-act > span{flex:1;min-width:220px;}
+.rr-err-act .rr-acct-btn{border-color:#B91C1C;color:#B91C1C;}
 
 /* Live progress cards */
 .rr-live{margin-top:22px;}

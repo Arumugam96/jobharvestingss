@@ -176,6 +176,11 @@ _LAUNCH_ARGS: list[str] = [
     "--disable-gpu",
 ]
 
+# Playwright launches Chromium with --enable-automation by default, which shows
+# the "Chrome is being controlled by automated test software" bar (current
+# Chrome ignores --disable-infobars, so that flag alone no longer hides it).
+IGNORE_DEFAULT_ARGS: list[str] = ["--enable-automation"]
+
 _STEALTH_SCRIPTS: list[str] = [
     # Hide navigator.webdriver
     "Object.defineProperty(navigator,'webdriver',{ get:()=>undefined });",
@@ -280,6 +285,7 @@ class BrowserManager:
             headless = self._headless,
             slow_mo  = self._slow_mo,
             args     = _LAUNCH_ARGS,
+            ignore_default_args = IGNORE_DEFAULT_ARGS,
         )
         if self._channel:
             launch_kwargs["channel"] = self._channel
@@ -366,10 +372,17 @@ class PersistentBrowserManager:
         headless:    bool = False,
         slow_mo:     int  = 0,
         channel:     str | None = "chromium",
+        locale:      str  = "en-US",
+        timezone_id: str  = "Europe/London",
     ) -> None:
         self._profile_dir: Path              = Path(profile_dir)
         self._headless:    bool              = headless
         self._slow_mo:     int               = slow_mo
+        # Context locale / timezone. Defaults keep the LinkedIn profile's
+        # long-standing fingerprint; the Naukri recruiter browser passes
+        # en-IN / Asia/Kolkata like a real Indian visitor.
+        self._locale:      str               = locale
+        self._timezone_id: str               = timezone_id
         # "chromium" (default) → Playwright's full bundled Chromium, in its new
         # headless mode when headless=True. None → Playwright's default, which for
         # headless=True is chromium-headless-shell — Naukri's Akamai edge answers
@@ -442,6 +455,7 @@ class PersistentBrowserManager:
                 user_data_dir       = str(self._profile_dir),
                 headless            = self._headless,
                 slow_mo             = self._slow_mo,
+                ignore_default_args = IGNORE_DEFAULT_ARGS,
                 args                = [
                     "--disable-blink-features=AutomationControlled",
                     "--no-first-run",
@@ -464,8 +478,8 @@ class PersistentBrowserManager:
                 # version, so use the current fallback UA (still far better than
                 # the old stale Chrome/124).
                 user_agent          = _build_user_agent(None),
-                locale              = "en-US",
-                timezone_id         = "Europe/London",
+                locale              = self._locale,
+                timezone_id         = self._timezone_id,
                 color_scheme        = "light",
                 java_script_enabled = True,
             )

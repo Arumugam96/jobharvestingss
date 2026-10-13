@@ -30,6 +30,13 @@ How a session gets in (all need a human once)
                       /naukri-extract-session) is imported into the profile on verify.
 
 Status is persisted (no cookie VALUES) at data/sessions/naukri_recruiter_status.json.
+
+Recruiter-mode job harvest (NAUKRI_BROWSER_MODE=recruiter)
+──────────────────────────────────────────────────────────
+The www.naukri.com job harvest runs in THIS profile (recruiter_harvest_browser)
+so job pages are browsed with the recruiter session cookies. The harvest first
+calls check_recruiter_session(); a dead session fails ONLY the Naukri source with
+SESSION_EXPIRED_MSG — it never falls back to guest browsing.
 """
 from __future__ import annotations
 
@@ -37,10 +44,13 @@ import asyncio
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 import structlog
+
+if TYPE_CHECKING:
+    from app.scrapers.browser_manager import PersistentBrowserManager
 
 logger = structlog.get_logger(__name__)
 
@@ -60,7 +70,36 @@ _LOGIN_MARKERS = (
 )
 _RECRUITER_HOSTS = ("recruit.naukri.com", "resdex.naukri.com", "rms.naukri.com")
 
+# A login form RENDERED on the page (same selectors premium_naukri_agent's
+# _verify_naukri_session uses). Hidden matches (e.g. a closed change-password
+# modal on the dashboard) don't count — only elements with a layout box.
+LOGIN_FORM_SELECTORS = (
+    'input[type="password"]',
+    "form#loginform",
+    ".loginPage",
+    '[class*="loginForm"]',
+)
+_LOGIN_FORM_JS = """(sels) => sels.some((sel) => {
+    let nodes;
+    try { nodes = document.querySelectorAll(sel); } catch (e) { return false; }
+    return Array.from(nodes).some((el) => {
+        const st = window.getComputedStyle(el);
+        return st.visibility !== "hidden" && st.display !== "none"
+            && el.getClientRects().length > 0;
+    });
+})"""
+
+# Messages the harvest reports when recruiter mode can't run (shown verbatim on
+# the Naukri source in the Rule Engine "Live Harvest" card).
+SESSION_EXPIRED_MSG = "Naukri recruiter session expired — reconnect via Connect in the Rule Engine"
+LOGIN_WINDOW_OPEN_MSG = "Naukri recruiter login window is open — finish or close it, then retry"
+
 _login_task: asyncio.Task | None = None
+
+
+class NaukriRecruiterSessionError(RuntimeError):
+    """The recruiter session a recruiter-mode Naukri harvest needs is missing or
+    expired, or the login window currently holds the recruiter profile."""
 
 
 def recruiter_profile_dir() -> Path:
@@ -81,6 +120,41 @@ def is_recruiter_url(url: str) -> bool:
     except ValueError:
         return False
     return host.endswith(_RECRUITER_HOSTS) and not is_login_url(url)
+
+
+def recruiter_harvest_browser(headless: bool = False, slow_mo: int = 0) -> "PersistentBrowserManager":
+    """The recruiter profile as a browser: full bundled Chromium (Akamai denies
+    chromium-headless-shell) with an Indian locale/timezone like a real visitor.
+    Used by the recruiter-mode harvest AND the login/verify flows, so the session
+    is minted and used under the same fingerprint."""
+    from app.scrapers.browser_manager import PersistentBrowserManager
+
+    return PersistentBrowserManager(
+        profile_dir=recruiter_profile_dir(), headless=headless, slow_mo=slow_mo,
+        channel="chromium", locale="en-IN", timezone_id="Asia/Kolkata",
+    )
+
+
+def login_window_open() -> bool:
+    """True while the background headed login window (start_login_window) runs.
+    It holds the recruiter profile, so a harvest must not start meanwhile."""
+    return bool(_login_task and not _login_task.done())
+
+
+async def login_form_visible(page: Any) -> bool:
+    """True if a login form is rendered on `page`. An evaluation error (page
+    mid-navigation, closed tab) counts as visible — never report "logged in"
+    for a page we couldn't inspect."""
+    try:
+        return bool(await page.evaluate(_LOGIN_FORM_JS, list(LOGIN_FORM_SELECTORS)))
+    except Exception as exc:
+        logger.debug("naukri_recruiter_login_form_check_failed", error=str(exc))
+        return True
+
+
+async def is_logged_in_page(page: Any) -> bool:
+    """A recruiter-area URL (not a login/landing page) with no login form shown."""
+    return is_recruiter_url(page.url) and not await login_form_visible(page)
 
 
 def validate_autologin_url(url: str) -> str:
@@ -135,7 +209,7 @@ def read_status() -> dict[str, Any]:
         "profile_dir": str(profile),
         "profile_exists": profile.exists(),
         "legacy_session_file_exists": LEGACY_SESSION_PATH.exists(),
-        "login_window_open": bool(_login_task and not _login_task.done()),
+        "login_window_open": login_window_open(),
         "last_check": last or None,
         "logged_in": bool(last.get("logged_in")),
     }
@@ -166,7 +240,33 @@ async def _check_page(page: Any, url: str = RECRUITER_HOME) -> tuple[bool, str, 
         title = (await page.title())[:120]
     except Exception:
         pass
-    return is_recruiter_url(landed), landed, title
+    return await is_logged_in_page(page), landed, title
+
+
+async def check_recruiter_session(page: Any) -> tuple[bool, str]:
+    """Harvest pre-check on an already-open recruiter-profile tab: load
+    recruit.naukri.com, decide logged-in (recruiter URL + no login form), record
+    the result in the status file and return (logged_in, landed_url). Never
+    raises — any error is (False, "<reason>")."""
+    try:
+        logged_in, landed, title = await _check_page(page)
+    except Exception as exc:
+        reason = f"recruiter session check failed: {str(exc)[:200] or type(exc).__name__}"
+        logger.warning("naukri_recruiter_precheck_failed", error=str(exc))
+        _write_status({"checked_at": _now(), "method": "harvest_precheck", "logged_in": False,
+                       "state": "error", "error": reason})
+        return False, reason
+    cookies: dict[str, Any] = {}
+    try:
+        cookies = summarize_cookies(await page.context.cookies())
+    except Exception:
+        pass
+    _write_status({
+        "checked_at": _now(), "method": "harvest_precheck", "logged_in": logged_in,
+        "landed_url": landed.split("?")[0], "title": title, **cookies,
+    })
+    logger.info("naukri_recruiter_precheck", logged_in=logged_in, landed=landed.split("?")[0])
+    return logged_in, landed
 
 
 class NaukriRecruiterAgent:
@@ -178,11 +278,7 @@ class NaukriRecruiterAgent:
     async def verify(self, import_legacy: bool = True) -> dict[str, Any]:
         """Open the recruiter profile, load recruit.naukri.com and record whether
         it stays logged in. Safe to call any time (read-only on Naukri's side)."""
-        from app.scrapers.browser_manager import PersistentBrowserManager
-
-        async with PersistentBrowserManager(
-            profile_dir=recruiter_profile_dir(), headless=self._headless,
-        ) as pbm:
+        async with recruiter_harvest_browser(headless=self._headless) as pbm:
             imported = await _import_legacy_cookies(pbm.context) if import_legacy else 0
             page = await pbm.acquire_page(label="naukri-recruiter")
             logged_in, landed, title = await _check_page(page)
@@ -201,11 +297,7 @@ class NaukriRecruiterAgent:
     ) -> dict[str, Any]:
         """HEADED window on the recruiter login; a human logs in (incl. OTP / QR);
         poll until a recruiter page is reached or timeout. No credential autofill."""
-        from app.scrapers.browser_manager import PersistentBrowserManager
-
-        async with PersistentBrowserManager(
-            profile_dir=recruiter_profile_dir(), headless=False,
-        ) as pbm:
+        async with recruiter_harvest_browser(headless=False) as pbm:
             page = await pbm.acquire_page(label="naukri-recruiter-login")
             await page.goto(start_url, wait_until="domcontentloaded", timeout=40_000)
             _write_status({"checked_at": _now(), "method": "login", "logged_in": False,
@@ -213,8 +305,11 @@ class NaukriRecruiterAgent:
             logged_in = False
             waited = 0
             while waited < timeout_s:
-                if any(is_recruiter_url(p.url) for p in pbm.context.pages if not p.is_closed()):
-                    logged_in = True
+                for p in pbm.context.pages:
+                    if not p.is_closed() and await is_logged_in_page(p):
+                        logged_in = True
+                        break
+                if logged_in:
                     break
                 await asyncio.sleep(2)
                 waited += 2
@@ -236,12 +331,8 @@ class NaukriRecruiterAgent:
 
     async def autologin(self, url: str) -> dict[str, Any]:
         """Navigate the recruiter profile to a Launcher-issued auto-login URL, then verify."""
-        from app.scrapers.browser_manager import PersistentBrowserManager
-
         safe = validate_autologin_url(url)
-        async with PersistentBrowserManager(
-            profile_dir=recruiter_profile_dir(), headless=self._headless,
-        ) as pbm:
+        async with recruiter_harvest_browser(headless=self._headless) as pbm:
             page = await pbm.acquire_page(label="naukri-recruiter-autologin")
             await page.goto(safe, wait_until="domcontentloaded", timeout=40_000)
             await page.wait_for_timeout(5_000)
@@ -279,4 +370,16 @@ def start_login_window(timeout_s: int = 600) -> bool:
                            "state": "error", "error": str(exc)[:300]})
 
     _login_task = asyncio.ensure_future(_run())
+    return True
+
+
+async def wait_for_login_window(timeout_s: float, poll_s: float = 2.0) -> bool:
+    """Wait (polling, no browser) until the background login window finishes.
+    True if it finished within `timeout_s`; the outcome is in read_status()."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_s
+    while login_window_open():
+        if loop.time() >= deadline:
+            return False
+        await asyncio.sleep(poll_s)
     return True

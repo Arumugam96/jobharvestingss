@@ -1,7 +1,10 @@
 import React from "react";
+import { AlertTriangle, Eye, Hourglass } from "lucide-react";
 import { GLASS, GLASS_FALLBACK } from "../theme";
 import useCountUp from "../useCountUp";
-import { SOURCE_META, STATE_META, sourceEntries } from "./SourceProgress";
+import {
+  SOURCE_META, STATE_META, sourceEntries, pauseOf, useCountdown, fmtCountdown,
+} from "./SourceProgress";
 
 /*
  * Live Harvest card — the Rule Engine's progress area while a harvest runs
@@ -19,7 +22,11 @@ import { SOURCE_META, STATE_META, sourceEntries } from "./SourceProgress";
  * its `sources` entry (app/services/source_status.py PROGRESS_KEYS):
  *   corner number   reported_total (the site's own count for the window), else
  *                   `listed` with a "+" while listing is still going
- *   phase stepper   Listing → Details → Done
+ *   phase stepper   Listing → Details → Done (a cooling_down / waiting_for_human
+ *                   pause keeps the current step lit, amber, plus a pause chip)
+ *   pause banner    cooling_down: "resumes in m:ss" live countdown to resume_at;
+ *                   waiting_for_human: "solve the CAPTCHA" + countdown to the
+ *                   deadline + an Open Live Browser button (onOpenLiveBrowser)
  *   funnel          Found / Already harvested / To fetch | Target (cap) / Saved
  *   detail bar      done / target
  *   batch meter     batch_size segments, one lit per extracted job, cleared on
@@ -67,10 +74,54 @@ function FailDetail({ entry }) {
   return <div className="lh-err" title={entry.error || entry.reason}>{detail}</div>;
 }
 
+const srcMeta = (srcKey) =>
+  SOURCE_META[srcKey] || { name: srcKey, glyph: (srcKey || "?").slice(0, 1).toUpperCase(), tint: "#64748B" };
+
+/** Paused-lane banner: rate-limit cool-down countdown, or the "solve the CAPTCHA
+ * in the Live Browser" call to action with the human-wait deadline. */
+function PauseBanner({ srcKey, entry, onOpenLiveBrowser }) {
+  const left = useCountdown(entry.resume_at);
+  const who = String(srcMeta(srcKey).name || "").replace(/\.com$| Jobs$/, "");
+  if (entry.phase === "cooling_down") {
+    return (
+      <div className="lh-pause is-cooling" role="status">
+        <Hourglass size={15} aria-hidden="true" />
+        <span className="lh-pause-tx">
+          <b>
+            {left == null ? "Cooling down (rate limit)"
+              : left > 0 ? <>Cooling down (rate limit) — resumes in <span className="lh-cd">{fmtCountdown(left)}</span></>
+                : "Resuming…"}
+          </b>
+          <small>{who} is pacing itself after a rate limit and carries on automatically.</small>
+        </span>
+      </div>
+    );
+  }
+  return (
+    <div className="lh-pause is-human" role="alert">
+      <AlertTriangle size={16} aria-hidden="true" />
+      <span className="lh-pause-tx">
+        <b>{who} needs you — solve the CAPTCHA in the Live Browser</b>
+        <small>
+          {left == null ? "The harvest is paused until it's solved."
+            : left > 0 ? <>Waiting up to <span className="lh-cd">{fmtCountdown(left)}</span> more</>
+              : "Wait time is up — the harvester will continue or stop shortly."}
+        </small>
+      </span>
+      {onOpenLiveBrowser && (
+        <button type="button" className="lh-pause-btn" onClick={onOpenLiveBrowser}>
+          <Eye size={14} /> Open Live Browser
+        </button>
+      )}
+    </div>
+  );
+}
+
 function LaneHead({ srcKey, entry, windowHours, corner, cornerLabel }) {
-  const meta = SOURCE_META[srcKey] || { name: srcKey, glyph: (srcKey || "?").slice(0, 1).toUpperCase(), tint: "#64748B" };
+  const meta = srcMeta(srcKey);
   const win = windowLabel(entry.window_hours ?? windowHours);
   const cap = n(entry.cap);
+  const pause = pauseOf(entry);
   return (
     <div className="lh-lane-h">
       <span className="lh-glyph" style={{ background: meta.tint }} aria-hidden="true">{meta.glyph}</span>
@@ -78,7 +129,8 @@ function LaneHead({ srcKey, entry, windowHours, corner, cornerLabel }) {
         <b>{meta.name}</b>
         <div className="lh-chips">
           <StateChip state={entry.state} />
-          {win && <span className="lh-chip">{win}</span>}
+          {pause && <span className={"lh-chip " + pause.cls}><pause.Icon size={11} />{pause.label}</span>}
+          {win &&<span className="lh-chip">{win}</span>}
           {cap != null && hasProgress(entry) && <span className="lh-chip">Cap {fmt(cap)}</span>}
         </div>
       </div>
@@ -103,7 +155,7 @@ function CompactLane({ srcKey, entry, windowHours }) {
   );
 }
 
-function ProgressLane({ srcKey, entry, windowHours }) {
+function ProgressLane({ srcKey, entry, windowHours, onOpenLiveBrowser }) {
   const state = entry.state || "pending";
   const running = state === "running";
   const phase = entry.phase || null;
@@ -128,6 +180,8 @@ function ProgressLane({ srcKey, entry, windowHours }) {
     || (reported != null && listed >= reported)
     || (totalPages != null && page != null && page >= totalPages && phase !== "listing");
   const terminal = state === "done" || state === "failed" || state === "skipped";
+  // cooling_down / waiting_for_human are pauses WITHIN Listing/Details, not steps.
+  const pause = pauseOf(entry);
   const win = windowLabel(entry.window_hours ?? windowHours);
 
   // Corner number: the site's own count, else what we've listed so far.
@@ -140,16 +194,22 @@ function ProgressLane({ srcKey, entry, windowHours }) {
 
   // Phase stepper. Naukri (and LinkedIn page-by-page) alternate listing and
   // details, so Listing stays "now" until the listing is exhausted.
-  const listingCls = listingDone ? "done" : (running ? "now" : "");
+  // While paused, the step we were in stays lit ("now paused"): Listing until any
+  // detail page was fetched, Details from then on (or once listing is exhausted).
+  const pausedIn = pause ? (listingDone || doneN > 0 ? "details" : "listing") : null;
+  const listingCls = listingDone ? "done"
+    : (running || pause ? "now" + (pausedIn === "listing" ? " paused" : "") : "");
   const detailsCls = phase === "done" || state === "done" ? "done"
-    : phase === "details" ? "now" : (doneN > 0 ? "done" : "");
+    : phase === "details" ? "now"
+      : pausedIn === "details" ? "now paused" : (doneN > 0 ? "done" : "");
   const doneCls = state === "done" ? "done" : (phase === "done" && running ? "now" : "");
   const listingSub = totalPages != null && page != null
     ? `page ${page} of ${fmt(totalPages)}`
     : `${page ?? 1} page${(page ?? 1) === 1 ? "" : "s"} · ${fmt(listed)} cards`;
   const detailsSub = phase === "details"
     ? (totalPages != null && !listingDone ? "per page" : "opening each job")
-    : `${fmt(doneN)} fetched`;
+    : pausedIn === "details" ? `paused · ${fmt(doneN)} fetched`
+      : `${fmt(doneN)} fetched`;
   const doneSub = state === "done" ? `${fmt(entry.count ?? 0)} saved`
     : phase === "done" && running ? "post-processing" : "";
 
@@ -166,10 +226,12 @@ function ProgressLane({ srcKey, entry, windowHours }) {
       <LaneHead srcKey={srcKey} entry={entry} windowHours={windowHours} corner={corner} cornerLabel={cornerLabel} />
 
       <ol className="lh-phases" aria-label="Phase">
-        <li className={listingCls}>Listing<small>{listingSub}</small></li>
+        <li className={listingCls}>Listing<small>{pausedIn === "listing" ? `paused · ${listingSub}` : listingSub}</small></li>
         <li className={detailsCls}>Details<small>{detailsSub}</small></li>
         <li className={doneCls}>Done<small>{doneSub || " "}</small></li>
       </ol>
+
+      {pause && <PauseBanner srcKey={srcKey} entry={entry} onOpenLiveBrowser={onOpenLiveBrowser} />}
 
       <div className="lh-funnel">
         <div>
@@ -222,10 +284,12 @@ function ProgressLane({ srcKey, entry, windowHours }) {
  * @param windowHours  fallback "Past Nh" when an entry has no window_hours
  * @param showSummary  render the Jobs saved / Daily cap / Remaining strip
  * @param bare         drop the card chrome (inside an existing card/modal)
+ * @param onOpenLiveBrowser  optional () => void — adds an "Open Live Browser" button
+ *                    to a lane waiting for a human (CAPTCHA); omitted → no button
  */
 export default function LiveHarvestCard({
   sources, saved = 0, maxPerDay = 0, live = false, windowHours = null,
-  showSummary = true, bare = false, title,
+  showSummary = true, bare = false, title, onOpenLiveBrowser,
 }) {
   const unlimited = !(Number(maxPerDay) > 0);
   const savedCount = useCountUp(saved);
@@ -254,7 +318,7 @@ export default function LiveHarvestCard({
       {entries.length > 0 ? (
         <div className={"lh-lanes c" + cols}>
           {entries.map(([key, entry]) => (hasProgress(entry)
-            ? <ProgressLane key={key} srcKey={key} entry={entry} windowHours={windowHours} />
+            ? <ProgressLane key={key} srcKey={key} entry={entry} windowHours={windowHours} onOpenLiveBrowser={onOpenLiveBrowser} />
             : <CompactLane key={key} srcKey={key} entry={entry} windowHours={windowHours} />))}
         </div>
       ) : (
@@ -314,6 +378,8 @@ const CSS = `
 .lh-chip.is-done{background:#ECFDF5;color:#047857;border-color:#86EFAC;}
 .lh-chip.is-failed{background:#FEF2F2;color:#B91C1C;border-color:#FCA5A5;}
 .lh-chip.is-skipped{background:#F8FAFC;color:#64748B;border-color:#E2E8F0;}
+.lh-chip.is-cooling{background:#FFF7ED;color:#C2410C;border-color:#FED7AA;}
+.lh-chip.is-human{background:#F59E0B;color:#1E293B;border-color:#F59E0B;}
 .lh-dot{width:6px;height:6px;border-radius:99px;background:currentColor;}
 .lh-found{text-align:right;flex:none;line-height:1.05;}
 .lh-found b{display:block;font-size:26px;font-weight:800;font-variant-numeric:tabular-nums;letter-spacing:-.03em;color:#1E1B2E;}
@@ -323,7 +389,21 @@ const CSS = `
 .lh-phases li{font-size:11px;font-weight:600;color:#9A96B5;padding-top:6px;border-top:3px solid #ECEAF6;min-width:0;}
 .lh-phases li.done{color:#6B6785;border-top-color:#7C5CFC;}
 .lh-phases li.now{color:#6D28D9;border-top-color:#6D28D9;}
+.lh-phases li.now.paused{color:#B45309;border-top-color:#F59E0B;}
 .lh-phases li small{display:block;font-weight:500;color:#9A96B5;font-size:10.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+
+.lh-pause{display:flex;align-items:center;gap:10px;border-radius:10px;padding:9px 12px;font-size:12.5px;min-width:0;}
+.lh-pause > svg{flex:none;}
+.lh-pause-tx{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px;}
+.lh-pause-tx b{font-weight:700;}
+.lh-pause-tx small{font-size:11.5px;opacity:.85;}
+.lh-cd{font-variant-numeric:tabular-nums;}
+.lh-pause.is-cooling{background:#FFF7ED;border:1px solid #FED7AA;color:#9A3412;}
+.lh-pause.is-human{background:#FFFBEB;border:1px solid #F59E0B;color:#92400E;animation:lhAttn 1.4s ease-in-out infinite;}
+.lh-pause-btn{flex:none;display:inline-flex;align-items:center;gap:6px;border:1px solid #F59E0B;background:#F59E0B;color:#1E293B;font:inherit;font-size:12px;font-weight:700;padding:6px 11px;border-radius:8px;cursor:pointer;white-space:nowrap;}
+.lh-pause-btn:hover{background:#D97706;border-color:#D97706;}
+@keyframes lhAttn{0%,100%{box-shadow:0 0 0 0 rgba(245,158,11,.5)}50%{box-shadow:0 0 0 5px rgba(245,158,11,0)}}
+@container lh (max-width: 420px){.lh-pause{flex-wrap:wrap;}}
 
 .lh-funnel{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));border:1px solid #E6E3F3;border-radius:10px;overflow:hidden;background:rgba(255,255,255,.6);}
 .lh-funnel div{padding:7px 9px;display:flex;flex-direction:column;gap:1px;min-width:0;}
@@ -349,6 +429,6 @@ const CSS = `
 .lh-msg{font-size:12px;color:#6B6785;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-top:1px dashed #E6E3F3;padding-top:8px;}
 .lh-lane.is-compact .lh-msg{border-top:0;padding-top:0;}
 
-@media (prefers-reduced-motion: reduce){.lh-live i{animation:none;}.lh-bar i,.lh-segs i{transition:none;}}
+@media (prefers-reduced-motion: reduce){.lh-live i,.lh-pause.is-human{animation:none;}.lh-bar i,.lh-segs i{transition:none;}}
 ${GLASS_FALLBACK(".lh-card:not(.lh-bare)")}
 `;

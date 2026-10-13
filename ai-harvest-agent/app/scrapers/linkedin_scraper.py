@@ -68,6 +68,7 @@ from playwright.async_api import (
 )
 
 from app.models.linkedin import LinkedInSearchConfig
+from app.scrapers.browser_manager import IGNORE_DEFAULT_ARGS
 
 logger = structlog.get_logger(__name__)
 
@@ -854,6 +855,7 @@ class LinkedInScraper:
             headless = self._config.headless,
             slow_mo  = self._config.slow_mo_ms,
             args     = _Stealth.launch_args(),
+            ignore_default_args = IGNORE_DEFAULT_ARGS,
         )
 
         self._context = await self._browser.new_context(

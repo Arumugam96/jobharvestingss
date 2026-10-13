@@ -1,5 +1,5 @@
-import React from "react";
-import { CheckCircle2, XCircle, Loader2, Clock, MinusCircle } from "lucide-react";
+import React, { useEffect, useState } from "react";
+import { CheckCircle2, XCircle, Loader2, Clock, MinusCircle, Hourglass, Hand } from "lucide-react";
 import { GLASS, GLASS_FALLBACK } from "../theme";
 import useCountUp from "../useCountUp";
 
@@ -7,7 +7,9 @@ import useCountUp from "../useCountUp";
  * Live per-source harvest progress — one compact row per ENABLED source, fed by
  * GET /harvest-status `sources`:
  *   { naukri: { state, count, message, reason, error, updated_at }, ... }
- * state ∈ pending | running | done | failed | skipped. Each source keeps its own
+ * state ∈ pending | running | done | failed | skipped. A running entry may also be
+ * PAUSED (`phase` cooling_down | waiting_for_human, `resume_at` = epoch seconds of
+ * the cooldown end / human-wait deadline) — see PAUSE_META. Each source keeps its own
  * latest message, so Naukri and LinkedIn no longer overwrite each other, and
  * each count rises live as batches are scraped. A LinkedIn LLM outage shows here
  * as LinkedIn "Failed · LLM unavailable" while Naukri/Dice carry on.
@@ -33,6 +35,46 @@ export const STATE_META = {
   skipped: { label: "Skipped", Icon: MinusCircle,  cls: "is-skipped" },
 };
 
+// A running source may pause inside Listing/Details (app/services/source_status.py
+// PROGRESS_PHASES): a rate-limit cool-down, or a CAPTCHA a human must solve in the
+// Live Browser. Shared with LiveHarvestCard.
+export const PAUSE_META = {
+  cooling_down:      { label: "Cooling down", Icon: Hourglass, cls: "is-cooling" },
+  waiting_for_human: { label: "Needs you",    Icon: Hand,      cls: "is-human" },
+};
+
+/** PAUSE_META entry when `entry` is a still-running source paused in a cool-down /
+ * human wait; null otherwise (terminal states never count as paused). */
+export function pauseOf(entry) {
+  if (!entry || !PAUSE_META[entry.phase]) return null;
+  const st = entry.state || "running";
+  return st === "done" || st === "failed" || st === "skipped" ? null : PAUSE_META[entry.phase];
+}
+
+/** Whole seconds left until `resumeAt` (epoch SECONDS), re-rendering every second
+ * while counting; null when there is no deadline (0/null/invalid). */
+export function useCountdown(resumeAt) {
+  const target = Number(resumeAt) > 0 ? Number(resumeAt) * 1000 : 0;
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!target) return undefined;
+    setNow(Date.now());
+    const id = setInterval(() => {
+      const t = Date.now();
+      setNow(t);
+      if (t >= target) clearInterval(id);
+    }, 1000);
+    return () => clearInterval(id);
+  }, [target]);
+  return target ? Math.max(0, Math.ceil((target - now) / 1000)) : null;
+}
+
+/** 185 → "3:05". */
+export function fmtCountdown(sec) {
+  const s = Math.max(0, Math.floor(Number(sec) || 0));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
 /** Normalise `status.sources` → [[key, entry], ...]; [] when absent/malformed. */
 export function sourceEntries(sources) {
   if (!sources || typeof sources !== "object" || Array.isArray(sources)) return [];
@@ -43,6 +85,12 @@ function SourceRow({ srcKey, entry }) {
   const meta = SOURCE_META[srcKey] || { name: srcKey, glyph: (srcKey || "?").slice(0, 1).toUpperCase(), tint: "#64748B" };
   const st = STATE_META[entry.state] || STATE_META.pending;
   const count = useCountUp(entry.count ?? 0);
+  const pause = pauseOf(entry);
+  const left = useCountdown(pause ? entry.resume_at : null);
+  const pauseText = !pause ? ""
+    : entry.phase === "cooling_down"
+      ? (left == null ? "Cooling down (rate limit)" : left > 0 ? `Cooling down (rate limit) — resumes in ${fmtCountdown(left)}` : "Resuming…")
+      : `Solve the CAPTCHA in the Live Browser${left != null ? (left > 0 ? ` — ${fmtCountdown(left)} left` : " — time's up") : ""}`;
   const failed = entry.state === "failed";
   const detail = failed
     ? [entry.reason, entry.error && entry.error !== entry.reason ? entry.error : ""].filter(Boolean).join(" — ")
@@ -57,7 +105,14 @@ function SourceRow({ srcKey, entry }) {
             <st.Icon size={12} className={entry.state === "running" ? "sp-spin" : undefined} />
             {st.label}
           </span>
+          {pause && (
+            <span className={"sp-badge " + pause.cls}>
+              <pause.Icon size={12} />
+              {pause.label}
+            </span>
+          )}
         </span>
+        {pause && <span className={"sp-pause " + pause.cls}>{pauseText}</span>}
         <span className="sp-msg" title={entry.message || ""}>{entry.message || "—"}</span>
         {failed && detail && (
           <span className="sp-err" title={entry.error || entry.reason}>{detail}</span>
@@ -108,6 +163,11 @@ const CSS = `
 .sp-badge.is-done{background:#ECFDF5;color:#047857;border-color:#86EFAC;}
 .sp-badge.is-failed{background:#FEF2F2;color:#B91C1C;border-color:#FCA5A5;}
 .sp-badge.is-skipped{background:#F8FAFC;color:#64748B;border-color:#E2E8F0;}
+.sp-badge.is-cooling{background:#FFF7ED;color:#C2410C;border-color:#FED7AA;}
+.sp-badge.is-human{background:#F59E0B;color:#1E293B;border-color:#F59E0B;}
+.sp-pause{font-size:12px;font-weight:600;font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.sp-pause.is-cooling{color:#C2410C;}
+.sp-pause.is-human{color:#B45309;}
 .sp-msg{font-size:12px;color:#64748B;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .sp-err{font-size:12px;font-weight:600;color:#B91C1C;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .sp-count{flex:none;display:flex;flex-direction:column;align-items:flex-end;line-height:1.05;}

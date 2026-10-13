@@ -14,11 +14,17 @@ incremental flush → post-harvest company / contact passes)
    wfhType / ctcFilter / k). Fallback: parse the DOM cards in ONE page.evaluate.
 3. Skip jobs already seen this run (jobId) or already harvested in earlier runs
    (normalized URL / jobId) BEFORE any detail visit — skips don't use max_jobs.
-4. Detail pass per job: the job page fetches ``GET /jobapi/v4/job/{jobId}``
-   (captured the same way) → full description HTML, employment type, wfhType,
-   industry, company website, consultant flag. Fallbacks: the page's
-   ``application/ld+json`` JobPosting, then the ``[class*='dang-inner-html']``
-   description container.
+4. Detail pass per job, opened like a click-through (a new tab of the same
+   context, Referer = the results page): the job page fetches
+   ``GET /jobapi/v4/job/{jobId}`` (captured the same way) → full description
+   HTML, employment type, wfhType, industry, company website, consultant flag.
+   Fallbacks: the page's ``application/ld+json`` JobPosting, then the
+   ``[class*='dang-inner-html']`` description container. Visits are slow and
+   adaptive (NaukriRateGovernor: 30–60 s gaps × a back-off multiplier, periodic
+   breaks); a reCAPTCHA wall → cooldown + one retry, repeated walls → circuit
+   breaker pause / half-open probe, optionally a human solving it in the Live
+   Browser (wait_for_human). CAPTCHAs are never solved automatically, and a job
+   whose detail can't be fetched is kept with its listing data.
 5. Flush jobs to the caller every settings.harvest_persist_batch_size jobs.
 6. Post-harvest (each pass isolated so none can lose jobs): shared company
    enrichment (Apollo, budget-capped) and the company+location HR-contact pass.
@@ -50,7 +56,9 @@ import json
 import math
 import random
 import re
-from dataclasses import dataclass, field
+import shutil
+import time
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -880,6 +888,204 @@ async def _delay(page: Page, lo: int, hi: int) -> None:
     await page.wait_for_timeout(random.randint(lo, hi))
 
 
+# ── Rate governor / circuit breaker (detail-page pacing) ─────────────────────
+#
+# www.naukri.com answers a too-fast stream of job-detail visits with a full-page
+# reCAPTCHA wall (a request-rate threshold: clean pages in between, a wall every
+# few minutes). Nothing here solves CAPTCHAs — the run slows down, cools off,
+# and (when the caller allows it) asks a human to tick the box in the Live
+# Browser. Every wait is cooperative: ≤ _WAIT_CHUNK_S slices that end early on a
+# user stop.
+
+_WAIT_CHUNK_S       = 2.0        # max single sleep inside a cooperative wait
+_HUMAN_POLL_S       = 3.0        # how often a human-held CAPTCHA tab is re-checked
+_HUMAN_WAIT_SPACING = 30 * 60    # at most one human wait per run per 30 min
+
+
+def _wall_time() -> float:
+    """Epoch seconds for progress ``resume_at`` (module-level so tests can pin it)."""
+    return time.time()
+
+
+def _monotonic() -> float:
+    """Monotonic clock for the human-wait spacing (patchable in tests)."""
+    return time.monotonic()
+
+
+async def _sleep_chunk(page: Any | None, seconds: float) -> None:
+    """One slice of a cooperative wait: the page clock when there is a live
+    page (keeps Playwright's loop serviced), asyncio.sleep otherwise / when the
+    page is gone. Module-level so tests can patch it out."""
+    if seconds <= 0:
+        return
+    if page is not None:
+        try:
+            await page.wait_for_timeout(int(seconds * 1000))
+            return
+        except Exception:
+            pass
+    await asyncio.sleep(seconds)
+
+
+class NaukriRateGovernor:
+    """Adaptive gap between detail visits.
+
+    gap        uniform[min_ms, max(min_ms, max_ms)] × multiplier
+    on_block   multiplier doubles (capped at max_multiplier)
+    on_clean   after ``clean_streak`` consecutive clean pages: one step back
+               (multiplier ÷ 2, floor 1.0)
+    breaks     every ``break_every`` detail visits (0 = off) a longer break of
+               uniform[break_min_s, break_max_s]
+    """
+
+    def __init__(
+        self,
+        min_ms: int,
+        max_ms: int,
+        max_multiplier: float = 4.0,
+        clean_streak: int = 10,
+        break_every: int = 0,
+        break_min_s: float = 0.0,
+        break_max_s: float = 0.0,
+        rng: random.Random | None = None,
+    ) -> None:
+        self.min_ms = max(0, int(min_ms))
+        self.max_ms = max(self.min_ms, int(max_ms))
+        self.max_multiplier = max(1.0, float(max_multiplier))
+        self.clean_streak = max(1, int(clean_streak))
+        self.break_every = max(0, int(break_every))
+        self.break_min_s = max(0.0, float(break_min_s))
+        self.break_max_s = max(self.break_min_s, float(break_max_s))
+        self._rng = rng or random.Random()
+        self.multiplier = 1.0
+        self.clean = 0            # consecutive clean detail pages
+        self.visits = 0           # detail page loads this run (incl. retries)
+        self.since_break = 0      # detail page loads since the last rest
+
+    @classmethod
+    def from_settings(cls, settings: Any) -> "NaukriRateGovernor":
+        return cls(
+            min_ms         = settings.naukri_detail_delay_min_ms,
+            max_ms         = settings.naukri_detail_delay_max_ms,
+            max_multiplier = settings.naukri_backoff_max_multiplier,
+            clean_streak   = settings.naukri_backoff_clean_streak,
+            break_every    = settings.naukri_break_every_details,
+            break_min_s    = settings.naukri_break_min_s,
+            break_max_s    = settings.naukri_break_max_s,
+        )
+
+    def next_gap_s(self) -> float:
+        return self._rng.uniform(self.min_ms, self.max_ms) / 1000.0 * self.multiplier
+
+    def note_visit(self) -> None:
+        self.visits += 1
+        self.since_break += 1
+
+    def on_clean(self) -> None:
+        self.clean += 1
+        if self.clean >= self.clean_streak:
+            self.clean = 0
+            if self.multiplier > 1.0:
+                self.multiplier = max(1.0, self.multiplier / 2)
+
+    def on_block(self) -> None:
+        self.clean = 0
+        self.multiplier = min(self.multiplier * 2, self.max_multiplier)
+
+    def break_due(self) -> bool:
+        return self.break_every > 0 and self.since_break >= self.break_every
+
+    def break_s(self) -> float:
+        return self._rng.uniform(self.break_min_s, self.break_max_s)
+
+    def rested(self) -> None:
+        """A break / cooldown / breaker pause just happened — restart the break count."""
+        self.since_break = 0
+
+
+class NaukriCircuitBreaker:
+    """CLOSED → (``threshold`` consecutive blocks) → OPEN → pause → HALF_OPEN →
+    one probe: success → CLOSED, block → OPEN again with the pause doubled
+    (capped at 2 × pause_max_s)."""
+
+    CLOSED, OPEN, HALF_OPEN = "closed", "open", "half_open"
+
+    def __init__(
+        self,
+        threshold: int,
+        pause_min_s: float,
+        pause_max_s: float,
+        rng: random.Random | None = None,
+    ) -> None:
+        self.threshold = max(1, int(threshold))
+        self.pause_min_s = max(0.0, float(pause_min_s))
+        self.pause_max_s = max(self.pause_min_s, float(pause_max_s))
+        self._rng = rng or random.Random()
+        self.state = self.CLOSED
+        self.consecutive = 0      # consecutive blocked detail loads (retries count)
+        self.reopens = 0          # HALF_OPEN probes that failed since the last CLOSED
+        self.trips = 0            # transitions into OPEN this run
+
+    @classmethod
+    def from_settings(cls, settings: Any) -> "NaukriCircuitBreaker":
+        return cls(
+            threshold   = settings.naukri_breaker_threshold,
+            pause_min_s = settings.naukri_breaker_pause_min_s,
+            pause_max_s = settings.naukri_breaker_pause_max_s,
+        )
+
+    def would_trip(self) -> bool:
+        """Whether one more block would open the breaker."""
+        return self.state == self.HALF_OPEN or self.consecutive + 1 >= self.threshold
+
+    def on_block(self) -> bool:
+        """Record a blocked load. True when this block (newly) opened the breaker."""
+        self.consecutive += 1
+        if self.state == self.HALF_OPEN:
+            self.state = self.OPEN
+            self.reopens += 1
+            self.trips += 1
+            return True
+        if self.state == self.CLOSED and self.consecutive >= self.threshold:
+            self.state = self.OPEN
+            self.trips += 1
+            return True
+        return False
+
+    def on_success(self) -> None:
+        self.state = self.CLOSED
+        self.consecutive = 0
+        self.reopens = 0
+
+    def half_open(self) -> None:
+        if self.state == self.OPEN:
+            self.state = self.HALF_OPEN
+
+    def pause_s(self) -> float:
+        base = self._rng.uniform(self.pause_min_s, self.pause_max_s) * (2 ** self.reopens)
+        return min(base, 2 * self.pause_max_s)
+
+
+@dataclass
+class NaukriBlockStats:
+    """Per-run block / recovery counters (the ``naukri_block_summary`` log)."""
+    detail_blocks: int = 0
+    srp_blocks: int = 0
+    retries_ok: int = 0
+    retries_failed: int = 0
+    breaker_trips: int = 0
+    breaks: int = 0
+    human_waits: int = 0
+    human_solved: int = 0
+    cooldown_seconds_total: float = 0.0
+    final_multiplier: float = 1.0
+
+    def as_log(self) -> dict[str, Any]:
+        out = asdict(self)
+        out["cooldown_seconds_total"] = int(round(self.cooldown_seconds_total))
+        return out
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Naukri Agent
 # ══════════════════════════════════════════════════════════════════════════════
@@ -902,7 +1108,12 @@ class NaukriAgent:
         self,
         already_harvested: set[str] | None = None,
         llm_service: Any | None = None,
+        wait_for_human: bool = False,
     ) -> None:
+        # When the circuit breaker trips, hold the CAPTCHA tab open in the Live
+        # Browser and wait (bounded, settings.naukri_human_wait_s) for a person
+        # to tick the box before falling back to the timed pause.
+        self._human_wait_enabled = bool(wait_for_human)
         # LLM enrichment (see _schedule_llm_enrichment). llm_service is resolved
         # lazily from settings on first need unless injected (tests).
         self._llm_service: Any | None = llm_service
@@ -925,7 +1136,25 @@ class NaukriAgent:
         self._v3_by_page: dict[int, tuple[str, dict]] = {}
         self._v4_by_id: dict[str, dict] = {}
         self._details_enabled = True
-        self._detail_block_streak = 0
+        # Detail-pass pacing / block recovery state (re-armed per run in
+        # _paginate_and_collect; built here too so helpers work stand-alone).
+        self._reset_pacing(get_settings())
+        # The current run's progress / status sinks (set by _paginate_and_collect)
+        # so waits deep in the detail pass can report cooling_down / waiting_for_human.
+        self._progress_cb: Callable[..., Awaitable[None]] | None = None
+        self._status_cb: StatusCallback | None = None
+        # Results-page URL the detail tabs are opened "from" (Referer).
+        self._srp_url: str | None = None
+
+    def _reset_pacing(self, settings: Any) -> None:
+        self._governor = NaukriRateGovernor.from_settings(settings)
+        self._breaker = NaukriCircuitBreaker.from_settings(settings)
+        self._block_stats = NaukriBlockStats()
+        self._last_human_wait_at: float | None = None
+        # Set right before a detail load whose block would trip the breaker while
+        # a human wait is possible: _fetch_detail then hands the challenged tab
+        # back (on _PageBlocked.tab) instead of closing it.
+        self._hold_blocked_tab = False
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -937,7 +1166,9 @@ class NaukriAgent:
     ) -> list[NaukriScrapedJob]:
         """Standalone run (/run-naukri-agent and the legacy orchestrator.run()).
         Browser per settings.naukri_browser_mode: "shared" → the configured
-        persistent Chrome profile; "isolated" → a fresh guest context."""
+        persistent Chrome profile; "isolated" → a fresh guest context;
+        "recruiter" → the logged-in Naukri recruiter profile (never falls back
+        to guest: an invalid session returns [])."""
         settings = get_settings()
         mode = settings.naukri_browser_mode
         logger.info(
@@ -952,6 +1183,24 @@ class NaukriAgent:
             if mode == "isolated":
                 async with naukri_guest_browser(headless=headless, slow_mo=slow_mo) as bm:
                     page = await bm.new_page()
+                    jobs = await self._run(page, filters)
+            elif mode == "recruiter":
+                # Lazy: the recruiter-profile helpers live with the recruiter agent.
+                from app.agents.naukri_recruiter_agent import (
+                    check_recruiter_session,
+                    login_window_open,
+                    recruiter_harvest_browser,
+                )
+                if login_window_open():
+                    # The profile is locked by the interactive login window.
+                    logger.warning("naukri_recruiter_session_invalid", reason="login window open")
+                    return []
+                async with recruiter_harvest_browser(headless=headless, slow_mo=slow_mo) as rbm:
+                    page = await rbm.acquire_page(label="naukri")
+                    ok, detail = await check_recruiter_session(page)
+                    if not ok:
+                        logger.warning("naukri_recruiter_session_invalid", reason=detail)
+                        return []
                     jobs = await self._run(page, filters)
             else:
                 from app.services.config_service import ConfigService
@@ -987,7 +1236,7 @@ class NaukriAgent:
     #
     # Placement: each job's LLM work starts as a background task right after its
     # detail page is parsed, so the call overlaps the next detail visits and the
-    # human-like 2.5–6 s gaps between them (≈ zero added wall time). Before a
+    # governed 30–60 s gaps between them (≈ zero added wall time). Before a
     # batch is handed to on_batch (persisted), its jobs' tasks are awaited with a
     # hard cap, so the persisted row already carries the LLM result. Bounded by:
     # per-call timeout (naukri_llm_timeout_s), a concurrency semaphore
@@ -1151,6 +1400,8 @@ class NaukriAgent:
                 page.remove_listener("response", self._on_response)
             except Exception:
                 pass
+            self._progress_cb = None
+            self._status_cb = None
             # Only left over when pagination raised — never leak background tasks.
             for task in self._llm_tasks.values():
                 task.cancel()
@@ -1229,8 +1480,11 @@ class NaukriAgent:
         on_progress: ProgressCallback | None = None,
     ) -> list[NaukriScrapedJob]:
         """Page through the SRP collecting jobs (listing + detail) until the cap,
-        the end of results, a block/CAPTCHA, a filter loss, or a user stop."""
+        the end of results, an unrecoverable block/CAPTCHA, a filter loss, or a
+        user stop. Detail visits are paced by the rate governor; blocks cool down
+        and retry (see _detail_with_recovery)."""
         settings = get_settings()
+        self._reset_pacing(settings)
         safety_cap = f.max_jobs if f.max_jobs > 0 else 5_000
         test_cap = env_max_jobs_cap(_TEST_MAX_JOBS_ENV)
         if test_cap is not None:
@@ -1288,6 +1542,10 @@ class NaukriAgent:
             except Exception as exc:  # progress reporting must never break a scrape
                 logger.debug("naukri_progress_callback_failed", error=str(exc))
 
+        # Waits inside the detail pass report through the same sinks.
+        self._progress_cb = _progress
+        self._status_cb = on_status
+
         logger.info(
             "search_started", source="naukri", keyword=_keyword_for(f), location=f.location,
             work_mode=f.work_mode, job_type=f.job_type, max_jobs=f.max_jobs,
@@ -1295,12 +1553,16 @@ class NaukriAgent:
         )
         await _status(on_status, "Naukri: searching…")
 
+        srp_retried_page: int | None = None   # results page already retried after a block
         while len(all_jobs) < safety_cap and page_num <= _MAX_PAGES:
             if run_guard.is_stop_requested():
                 logger.info("naukri_pagination_stopped_by_user", page=page_num, collected=len(all_jobs))
                 break
             if total_pages is not None and page_num > total_pages:
                 logger.info("naukri_results_exhausted", page=page_num, total_pages=total_pages)
+                break
+            # No Naukri request at all while the breaker is OPEN.
+            if not await self._breaker_pause_if_open(page, resume_phase="listing"):
                 break
 
             await _progress(phase="listing", page=page_num)
@@ -1312,8 +1574,17 @@ class NaukriAgent:
                 logger.warning("naukri_filter_lost_stopping", page=page_num, collected=len(all_jobs))
                 break
             except _PageBlocked as exc:
-                logger.warning("naukri_page_blocked", page=page_num, reason=str(exc), collected=len(all_jobs))
-                break
+                self._block_stats.srp_blocks += 1
+                self._governor.on_block()
+                retried = srp_retried_page == page_num
+                logger.warning("naukri_page_blocked", page=page_num, reason=str(exc),
+                               collected=len(all_jobs), retried=retried)
+                # One recovery (human wait or cooldown) + retry per results page;
+                # a second block on the same page ends pagination.
+                if retried or not await self._recover_srp_block(page, page_num):
+                    break
+                srp_retried_page = page_num
+                continue
             except Exception as exc:
                 if page_num == 1:
                     logger.error("naukri_navigation_failed", page=page_num, error=str(exc))
@@ -1371,22 +1642,21 @@ class NaukriAgent:
             )
 
             # Phase B: per-job detail (isolated per job), then incremental flush.
+            # Each detail visit is preceded by the governed gap (or a break); a
+            # blocked visit cools down / retries inside _detail_with_recovery. A
+            # job whose detail never loads is still kept with its listing data.
             for idx, job in enumerate(to_fetch):
                 if run_guard.is_stop_requested():
                     logger.info("naukri_detail_loop_stopped_by_user", collected=len(all_jobs))
                     break
                 if self._details_enabled:
-                    try:
-                        await self._fetch_detail(page, job)
-                    except Exception as exc:
-                        logger.warning("naukri_detail_failed", url=job.job_url, error=str(exc))
+                    if not await self._pace_before_detail(page):
+                        logger.info("naukri_detail_loop_stopped_by_user", collected=len(all_jobs))
+                        break
+                    await self._detail_with_recovery(page, job)
                 # Background LLM enrichment (contacts / flat-description repair);
-                # overlaps the delay below and the next detail visits.
+                # overlaps the next gap and detail visits.
                 self._schedule_llm_enrichment(job)
-                if self._details_enabled and idx < len(to_fetch) - 1:
-                    await _delay(page, settings.naukri_detail_delay_min_ms,
-                                 max(settings.naukri_detail_delay_min_ms,
-                                     settings.naukri_detail_delay_max_ms))
                 all_jobs.append(job)
                 pending.append(job)
                 logger.info("job_card_extracted", source="naukri", title=job.job_title,
@@ -1407,18 +1677,27 @@ class NaukriAgent:
             if run_guard.is_stop_requested():
                 break
             page_num += 1
-            if page_num % 10 == 0:
-                await _delay(page, 8_000, 14_000)
-            else:
-                await _delay(page, 3_000, 6_000)
+            if len(all_jobs) >= safety_cap or (total_pages is not None and page_num > total_pages):
+                continue                              # loop ends — no pointless wait
+            gap_s = random.uniform(8.0, 14.0) if page_num % 10 == 0 else random.uniform(3.0, 6.0)
+            if not self._details_enabled:
+                # No detail gaps to slow the run down — pace the results pages
+                # with the governor instead of going full speed.
+                gap_s = max(gap_s, self._governor.next_gap_s())
+            if not await self._wait(page, gap_s):
+                break
 
         await _flush_pending()
         await self._drain_llm()
-        await _progress(phase="done")
+        await _progress(phase="done", resume_at=0)
+        self._block_stats.final_multiplier = self._governor.multiplier
+        block_summary = self._block_stats.as_log()
         logger.info(
             "pagination_completed", source="naukri", pages_visited=page_num,
             total_jobs=len(all_jobs), skipped_already_harvested=self._skipped_already_harvested,
+            **block_summary,
         )
+        logger.info("naukri_block_summary", **block_summary)
         return all_jobs
 
     async def _load_results_page(
@@ -1436,6 +1715,7 @@ class NaukriAgent:
                 retries=3, delay_s=3.0,
             )
             await self._raise_if_blocked(page, page_num)
+            self._srp_url = page.url or search_url
             v3 = await self._await_capture(page, lambda: self._v3_by_page.get(page_num), 15_000)
             req_url = v3[0] if v3 else page.url
             missing = missing_search_filters(req_url, f, page_num)
@@ -1490,34 +1770,350 @@ class NaukriAgent:
         logger.info("naukri_cards_found", page=page_num, count=len(jobs), method=method)
         return jobs, req_url
 
-    async def _fetch_detail(self, page: Page, job: NaukriScrapedJob) -> None:
-        """Enrich `job` from its detail page: v4 JSON → ld+json → DOM fallback."""
-        if job.job_id:
-            self._v4_by_id.pop(job.job_id, None)
-        await retry_async(
-            lambda: page.goto(job.job_url, wait_until="domcontentloaded", timeout=30_000),
-            retries=2, delay_s=2.0,
+    # ── Detail pass: pacing, block recovery, human-in-the-loop ─────────────────
+    #
+    # Contract with the Live Harvest card (on_progress payload):
+    #   phase="cooling_down"      a timed pause (pacing break, block cooldown,
+    #                             breaker pause); resume_at = epoch s it ends
+    #   phase="waiting_for_human" a CAPTCHA tab is held open in the Live Browser;
+    #                             resume_at = the wait's deadline
+    #   back to "details" / "listing" with resume_at=0 when the pause ends.
+
+    async def _emit_progress(self, message: str | None = None, **fields: Any) -> None:
+        cb = self._progress_cb
+        if cb is None:
+            return
+        try:
+            await cb(message, **fields)
+        except Exception as exc:  # progress reporting must never break a scrape
+            logger.debug("naukri_progress_callback_failed", error=str(exc))
+
+    async def _wait(
+        self,
+        page: Any | None,
+        seconds: float,
+        *,
+        phase: str | None = None,
+        message: str | None = None,
+        resume_phase: str = "details",
+        cooldown: bool = False,
+    ) -> bool:
+        """Cooperative wait of ``seconds`` in ≤ _WAIT_CHUNK_S slices, ending early
+        on a user stop. With ``phase`` it reports that phase (+ resume_at) first
+        and ``resume_phase`` (resume_at=0) when the wait completes. ``cooldown``
+        counts the time towards the block summary. False when stopped."""
+        total = max(0.0, float(seconds or 0))
+        if phase:
+            await self._emit_progress(message, phase=phase, resume_at=int(_wall_time() + total))
+        waited = 0.0
+        stopped = False
+        while waited < total:
+            if run_guard.is_stop_requested():
+                stopped = True
+                break
+            chunk = min(_WAIT_CHUNK_S, total - waited)
+            await _sleep_chunk(page, chunk)
+            waited += chunk
+        if cooldown:
+            self._block_stats.cooldown_seconds_total += waited
+        stopped = stopped or run_guard.is_stop_requested()
+        if phase and not stopped:
+            await self._emit_progress(
+                _RESUME_MESSAGES.get(resume_phase), phase=resume_phase, resume_at=0,
+            )
+        return not stopped
+
+    async def _pace_before_detail(self, page: Page) -> bool:
+        """The governed gap before a detail visit (none before the run's first),
+        or a longer pacing break every naukri_break_every_details visits. False
+        when the user stopped the run during the wait."""
+        gov = self._governor
+        if gov.visits == 0:
+            return not run_guard.is_stop_requested()
+        if gov.break_due():
+            secs = gov.break_s()
+            gov.rested()
+            self._block_stats.breaks += 1
+            logger.info("naukri_pacing_break", after_details=gov.visits, seconds=int(secs),
+                        multiplier=gov.multiplier)
+            return await self._wait(
+                page, secs, phase="cooling_down",
+                message=f"Naukri: pacing break — resuming in ~{int(secs)}s",
+            )
+        return await self._wait(page, gov.next_gap_s())
+
+    def _human_wait_possible(self) -> bool:
+        """A human may be asked to solve a CAPTCHA: opted in by the caller,
+        naukri_human_wait_s > 0, and no other human wait in the last 30 min."""
+        if not self._human_wait_enabled:
+            return False
+        if int(get_settings().naukri_human_wait_s or 0) <= 0:
+            return False
+        last = self._last_human_wait_at
+        return last is None or _monotonic() - last >= _HUMAN_WAIT_SPACING
+
+    async def _breaker_pause_if_open(self, page: Page, resume_phase: str = "details") -> bool:
+        """While the breaker is OPEN: pause (cooling_down), then HALF_OPEN so the
+        next detail load is the probe. False when stopped during the pause."""
+        br = self._breaker
+        if br.state != br.OPEN:
+            return True
+        secs = br.pause_s()
+        logger.warning("naukri_circuit_pause", seconds=int(secs), reopens=br.reopens,
+                       multiplier=self._governor.multiplier)
+        ok = await self._wait(
+            page, secs, phase="cooling_down",
+            message=f"Naukri: rate-limited repeatedly — pausing, resuming in ~{int(secs)}s",
+            resume_phase=resume_phase, cooldown=True,
+        )
+        if not ok:
+            return False
+        self._governor.rested()
+        br.half_open()
+        logger.info("naukri_circuit_half_open")
+        return True
+
+    async def _cooldown(self, page: Page, resume_phase: str, **log: Any) -> bool:
+        """The post-block cooldown (uniform naukri_block_cooldown_min/max_s)."""
+        settings = get_settings()
+        lo = max(0, int(settings.naukri_block_cooldown_min_s))
+        secs = random.uniform(lo, max(lo, int(settings.naukri_block_cooldown_max_s)))
+        logger.info("naukri_block_cooldown", seconds=int(secs), **log)
+        ok = await self._wait(
+            page, secs, phase="cooling_down",
+            message=f"Naukri: rate-limited — cooling down, resuming in ~{int(secs)}s",
+            resume_phase=resume_phase, cooldown=True,
+        )
+        if ok:
+            self._governor.rested()
+        return ok
+
+    async def _detail_with_recovery(self, page: Page, job: NaukriScrapedJob) -> None:
+        """One job's detail visit with block recovery. Never raises; on give-up
+        the job keeps its listing data.
+
+        blocked        → cooldown → retry the same job once
+        breaker trips  → (human wait when allowed) → timed pause at the next
+                         attempt → HALF_OPEN probe (this job's retry, or the next job)
+        """
+        retried = False
+        while True:
+            if run_guard.is_stop_requested():
+                return
+            if not await self._breaker_pause_if_open(page):
+                return
+            self._hold_blocked_tab = self._human_wait_possible() and self._breaker.would_trip()
+            self._governor.note_visit()
+            blocked: _PageBlocked | None = None
+            try:
+                await self._fetch_detail(page, job)
+            except _PageBlocked as exc:
+                blocked = exc
+            except Exception as exc:
+                logger.warning("naukri_detail_failed", url=job.job_url, error=str(exc))
+                if retried:
+                    self._block_stats.retries_failed += 1
+                return
+            finally:
+                self._hold_blocked_tab = False
+
+            if blocked is None:
+                was = self._breaker.state
+                self._governor.on_clean()
+                self._breaker.on_success()
+                if was != NaukriCircuitBreaker.CLOSED:
+                    logger.info("naukri_circuit_closed", probe_job_id=job.job_id)
+                if retried:
+                    self._block_stats.retries_ok += 1
+                    logger.info("naukri_detail_retry_ok", job_id=job.job_id)
+                return
+
+            tab = blocked.tab
+            self._block_stats.detail_blocks += 1
+            self._governor.on_block()
+            tripped = self._breaker.on_block()
+            logger.warning(
+                "naukri_detail_blocked", url=job.job_url, job_id=job.job_id, reason=str(blocked),
+                streak=self._breaker.consecutive, retry=retried,
+                multiplier=self._governor.multiplier, breaker=self._breaker.state,
+            )
+            solved = False
+            if tripped:
+                self._block_stats.breaker_trips += 1
+                logger.warning("naukri_circuit_open", consecutive_blocks=self._breaker.consecutive,
+                               trips=self._breaker.trips, reopens=self._breaker.reopens)
+                if tab is not None and self._human_wait_possible():
+                    solved = await self._await_human_solve(tab, label=job.job_id or job.job_url)
+                    if solved:
+                        try:
+                            await self._extract_detail(tab, job)
+                        except Exception as exc:
+                            logger.warning("naukri_detail_failed", url=job.job_url, error=str(exc))
+                        # Human cleared the wall — CLOSED again; the governor
+                        # stays slowed down.
+                        self._breaker.on_success()
+            await self._discard_tab(page, tab)
+            if solved:
+                return
+            if retried:
+                self._block_stats.retries_failed += 1
+                logger.warning("naukri_detail_gave_up", url=job.job_url, job_id=job.job_id,
+                               note="kept with listing data")
+                return
+            # Tripped: the breaker pause runs at the top of the next attempt.
+            if not tripped and not await self._cooldown(page, "details", job_id=job.job_id):
+                return
+            retried = True
+
+    async def _recover_srp_block(self, page: Page, page_num: int) -> bool:
+        """A results page was blocked: a human wait when allowed (the SRP tab is
+        the challenged tab), else / then a cooldown. True → retry the page."""
+        if self._human_wait_possible():
+            if await self._await_human_solve(page, label=f"p{page_num}", resume_phase="listing"):
+                return True
+            if run_guard.is_stop_requested():
+                return False
+        return await self._cooldown(page, "listing", srp_page=page_num)
+
+    async def _await_human_solve(self, tab: Any, *, label: str, resume_phase: str = "details") -> bool:
+        """Hold the challenged tab in front in the Live Browser and poll (every
+        _HUMAN_POLL_S) until it is no longer blocked — a person ticking the box
+        makes Naukri load the real page — for at most naukri_human_wait_s.
+        True when solved; False on timeout / stop. Never solves anything itself."""
+        limit_s = float(max(0, int(get_settings().naukri_human_wait_s or 0)))
+        self._last_human_wait_at = _monotonic()
+        self._block_stats.human_waits += 1
+        msg = (
+            "Naukri needs you — solve the CAPTCHA in the Live Browser "
+            f"(waiting up to {max(1, math.ceil(limit_s / 60))} min)"
         )
         try:
-            await self._raise_if_blocked(page, 0)
-            self._detail_block_streak = 0
-        except _PageBlocked as exc:
-            self._detail_block_streak += 1
-            logger.warning("naukri_detail_blocked", url=job.job_url, reason=str(exc),
-                           streak=self._detail_block_streak)
-            if self._detail_block_streak >= 3:
-                self._details_enabled = False
-                logger.warning("naukri_detail_pass_disabled", reason="repeated blocks")
-            return
+            await tab.bring_to_front()
+        except Exception:
+            pass
+        logger.warning("naukri_waiting_for_human", label=label, wait_s=int(limit_s),
+                       url=getattr(tab, "url", ""))
+        await _status(self._status_cb, msg)
+        await self._emit_progress(msg, phase="waiting_for_human",
+                                  resume_at=int(_wall_time() + limit_s))
+        waited = 0.0
+        clean_polls = 0
+        while waited < limit_s and not run_guard.is_stop_requested():
+            slept = 0.0
+            while slept < _HUMAN_POLL_S and waited < limit_s:
+                if run_guard.is_stop_requested():
+                    break
+                chunk = min(_WAIT_CHUNK_S, _HUMAN_POLL_S - slept, limit_s - waited)
+                await _sleep_chunk(tab, chunk)
+                slept += chunk
+                waited += chunk
+            if run_guard.is_stop_requested():
+                break
+            # Two clean checks in a row, so a blank mid-navigation frame isn't
+            # mistaken for a solved challenge.
+            if await self._block_reason(tab) is None:
+                clean_polls += 1
+                if clean_polls >= 2:
+                    self._block_stats.human_solved += 1
+                    logger.info("naukri_captcha_solved_by_human", label=label, waited_s=int(waited))
+                    await self._emit_progress(
+                        _RESUME_MESSAGES.get(resume_phase), phase=resume_phase, resume_at=0,
+                    )
+                    return True
+            else:
+                clean_polls = 0
+        logger.warning("naukri_human_wait_timeout", label=label, waited_s=int(waited),
+                       stopped=run_guard.is_stop_requested())
+        return False
 
+    # ── Detail page: click-through tab + extraction ────────────────────────────
+
+    async def _fetch_detail(self, page: Page, job: NaukriScrapedJob) -> None:
+        """Enrich `job` from its detail page, opened like a click-through from
+        the results page: a NEW tab of the same context with the SRP as Referer
+        (falls back to the SRP tab itself if a tab can't be opened); a short
+        reading scroll; then v4 JSON → ld+json → DOM. The SRP tab stays put.
+
+        Raises _PageBlocked on a CAPTCHA / bot wall — with the challenged tab
+        left open on ``exc.tab`` when self._hold_blocked_tab is set (human wait),
+        otherwise the tab is closed."""
+        if job.job_id:
+            self._v4_by_id.pop(job.job_id, None)
+        referer = self._srp_url or (page.url or None)
+        tab = await self._open_detail_tab(page)
+        target = tab if tab is not None else page
+        held = False
+        try:
+            await retry_async(lambda: self._goto(target, job.job_url, referer), retries=2, delay_s=2.0)
+            try:
+                await self._raise_if_blocked(target, 0, job_id=job.job_id)
+            except _PageBlocked as exc:
+                if self._hold_blocked_tab:
+                    exc.tab = target
+                    held = True
+                raise
+            await self._reading_scroll(target)
+            await self._extract_detail(target, job)
+        finally:
+            if tab is not None and not held:
+                await self._close_tab(tab)
+
+    @staticmethod
+    async def _goto(target: Any, url: str, referer: str | None) -> Any:
+        kwargs: dict[str, Any] = {"wait_until": "domcontentloaded", "timeout": 30_000}
+        if referer:
+            kwargs["referer"] = referer
+        return await target.goto(url, **kwargs)
+
+    async def _open_detail_tab(self, page: Page) -> Any | None:
+        """A new tab in the SRP's context with the response capture attached;
+        None when one can't be opened (caller falls back to the SRP tab)."""
+        try:
+            tab = await page.context.new_page()
+        except Exception as exc:
+            logger.debug("naukri_detail_tab_open_failed", error=str(exc), note="same-tab fallback")
+            return None
+        try:
+            tab.on("response", self._on_response)
+        except Exception:
+            pass
+        return tab
+
+    async def _close_tab(self, tab: Any) -> None:
+        try:
+            tab.remove_listener("response", self._on_response)
+        except Exception:
+            pass
+        try:
+            await tab.close()
+        except Exception as exc:
+            logger.debug("naukri_detail_tab_close_failed", error=str(exc))
+
+    async def _discard_tab(self, page: Page, tab: Any | None) -> None:
+        """Close a held detail tab — never the SRP tab itself."""
+        if tab is None or tab is page:
+            return
+        await self._close_tab(tab)
+
+    @staticmethod
+    async def _reading_scroll(target: Any) -> None:
+        """A few small, slow scroll steps — someone skimming the job page."""
+        try:
+            await human_scroll(target, max_rounds=3, step_min=250, step_max=600,
+                               pause_lo=600, pause_hi=1_500)
+        except Exception:
+            pass
+
+    async def _extract_detail(self, target: Any, job: NaukriScrapedJob) -> None:
+        """v4 JSON (captured on ``target``) → ld+json → DOM description."""
         payload = None
         if job.job_id:
-            payload = await self._await_capture(page, lambda: self._v4_by_id.get(job.job_id), 10_000)
+            payload = await self._await_capture(target, lambda: self._v4_by_id.get(job.job_id), 10_000)
         if payload and apply_detail_json(job, payload):
             logger.debug("naukri_detail_source", source="v4_json", job_id=job.job_id)
             return
         try:
-            fb = await page.evaluate(_DETAIL_FALLBACK_JS)
+            fb = await target.evaluate(_DETAIL_FALLBACK_JS)
         except Exception as exc:
             logger.debug("naukri_detail_fallback_eval_failed", error=str(exc))
             return
@@ -1530,21 +2126,29 @@ class NaukriAgent:
 
     # ── Block / CAPTCHA detection ──────────────────────────────────────────────
 
-    async def _raise_if_blocked(self, page: Page, page_num: int) -> None:
-        url = page.url or ""
+    async def _block_reason(self, page: Any) -> str | None:
+        """Why ``page`` is a wall rather than content, or None. No side effects
+        (also used to poll a human-held CAPTCHA tab)."""
+        url = getattr(page, "url", "") or ""
         title = ""
         try:
             title = await page.title()
         except Exception:
             pass
         if any(p in url for p in ("/challenge", "/authwall", "/nlogin/login")):
-            await self._save_captcha_artifacts(page, page_num)
-            raise _PageBlocked(f"redirected to {url}")
+            return f"redirected to {url}"
         if "access denied" in title.lower():
-            raise _PageBlocked("Access Denied (edge bot wall)")
+            return "Access Denied (edge bot wall)"
         if await self._is_hard_captcha(page):
-            await self._save_captcha_artifacts(page, page_num)
-            raise _PageBlocked("captcha")
+            return "captcha"
+        return None
+
+    async def _raise_if_blocked(self, page: Page, page_num: int, job_id: str | None = None) -> None:
+        reason = await self._block_reason(page)
+        if reason is None:
+            return
+        await self._save_captcha_artifacts(page, page_num, job_id=job_id, reason=reason)
+        raise _PageBlocked(reason)
 
     async def _is_hard_captcha(self, page: Page) -> bool:
         """Detect an explicit user-facing CAPTCHA challenge in the main frame."""
@@ -1570,24 +2174,41 @@ class NaukriAgent:
             pass
         return False
 
-    async def _save_captcha_artifacts(self, page: Page, page_num: int) -> dict:
-        """Save screenshot + HTML when blocked. Returns paths dict."""
+    async def _save_captcha_artifacts(
+        self, page: Page, page_num: int, job_id: str | None = None, reason: str = "captcha",
+    ) -> dict:
+        """Save a timestamped screenshot + HTML of the wall
+        (naukri_captcha_<UTC yyyymmdd_HHMMSS>_<jobid|p{page}>.png/.html) plus a
+        latest-copy naukri_captcha.png/.html. Returns the paths dict."""
         paths: dict = {}
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        tag = re.sub(r"[^A-Za-z0-9_-]", "", job_id or "")[:40] or f"p{page_num}"
+        stem = f"naukri_captcha_{ts}_{tag}"
         try:
             _DEBUG_SCREENSHOT.mkdir(parents=True, exist_ok=True)
-            ss_path = _DEBUG_SCREENSHOT / "naukri_captcha.png"
+            ss_path = _DEBUG_SCREENSHOT / f"{stem}.png"
             await page.screenshot(path=str(ss_path), full_page=False)
             paths["screenshot"] = str(ss_path.resolve())
+            try:
+                shutil.copyfile(ss_path, _DEBUG_SCREENSHOT / "naukri_captcha.png")
+            except Exception:
+                pass
         except Exception as exc:
             logger.debug("captcha_screenshot_failed", error=str(exc))
         try:
             _DEBUG_HTML.mkdir(parents=True, exist_ok=True)
-            html_path = _DEBUG_HTML / "naukri_captcha.html"
+            html_path = _DEBUG_HTML / f"{stem}.html"
             html_path.write_text(await page.content(), encoding="utf-8")
             paths["html"] = str(html_path.resolve())
+            try:
+                shutil.copyfile(html_path, _DEBUG_HTML / "naukri_captcha.html")
+            except Exception:
+                pass
         except Exception as exc:
             logger.debug("captcha_html_failed", error=str(exc))
-        logger.warning("naukri_captcha_detected", page_number=page_num, url=page.url, **paths)
+        event = "naukri_access_denied" if reason.lower().startswith("access denied") else "naukri_captcha_detected"
+        logger.warning(event, page_number=page_num, job_id=job_id, reason=reason,
+                       url=getattr(page, "url", ""), **paths)
         return paths
 
     # ── Overlay dismissal ──────────────────────────────────────────────────────
@@ -1629,7 +2250,20 @@ class NaukriAgent:
 
 
 class _PageBlocked(RuntimeError):
-    """The page is a CAPTCHA / bot wall / gated redirect, not content."""
+    """The page is a CAPTCHA / bot wall / gated redirect, not content.
+
+    ``tab`` — the challenged tab, left open for a human wait (see
+    NaukriAgent._fetch_detail); None when it was already closed."""
+
+    def __init__(self, reason: str, tab: Any | None = None) -> None:
+        super().__init__(reason)
+        self.tab = tab
+
+
+_RESUME_MESSAGES = {
+    "details": "Naukri: resuming detail pages",
+    "listing": "Naukri: resuming results pages",
+}
 
 
 async def _status(cb: StatusCallback | None, msg: str) -> None:

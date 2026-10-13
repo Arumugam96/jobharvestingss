@@ -37,9 +37,9 @@ const COMPANY_SIZE_FILTER_OPTIONS = [
 // harvest_run_service.py). Email/Phone include the Company-tagged contact.
 const CONTACT_FILTER_OPTIONS = [
   { group: "With contact" },
-  { value: "email",         label: "Any email",                     summaryLabel: "Email" },
+  { value: "email",         label: "Email",                         summaryLabel: "Email" },
   { value: "email_poster",  label: "Poster email (job / recruiter)", summaryLabel: "Poster email" },
-  { value: "email_company", label: "Company email",                 summaryLabel: "Company email" },
+  { value: "email_company", label: "Apollo Resolved email",         summaryLabel: "Apollo Resolved email" },
   { value: "mobile",        label: "Phone",                         summaryLabel: "Phone" },
   { value: "linkedin",      label: "LinkedIn",                      summaryLabel: "LinkedIn" },
   { group: "Without contact" },

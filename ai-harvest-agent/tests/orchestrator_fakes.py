@@ -142,8 +142,10 @@ def install_source_fakes(monkeypatch, *, linkedin: str = "outage", naukri: str =
             return list(reenrich_queue)
 
     class FakeNaukriAgent:
-        def __init__(self, already_harvested: set[str] | None = None) -> None:
-            pass
+        def __init__(self, already_harvested: set[str] | None = None, **kwargs: Any) -> None:
+            # e.g. wait_for_human — recorded so tests can assert what the
+            # orchestrator passed.
+            state["naukri_kwargs"] = dict(kwargs)
 
         async def _run(self, page, f, on_status=None, on_batch=None, on_progress=None):
             try:

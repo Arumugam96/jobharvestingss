@@ -49,6 +49,7 @@ from playwright.async_api import (
 from app.config import get_settings
 from app.core.linkedin_geo import resolve_geo
 from app.models.harvest_models import FiltersConfig
+from app.scrapers.browser_manager import IGNORE_DEFAULT_ARGS
 
 logger = structlog.get_logger(__name__)
 
@@ -371,6 +372,7 @@ class LinkedInFormScraper:
             headless = False,
             slow_mo  = 0,
             args     = _LAUNCH_ARGS,
+            ignore_default_args = IGNORE_DEFAULT_ARGS,
         )
         ctx_kwargs: dict = dict(
             viewport            = {"width": 1366, "height": 900},

@@ -757,11 +757,18 @@ class OrchestratorAgent:
         # in its own fresh cookie-less browser (see naukri_guest_browser), and the
         # persistent profile isn't launched at all when Naukri is the only source
         # — for a Naukri-only worker / a host without the LinkedIn profile.
+        # NAUKRI_BROWSER_MODE=recruiter: like isolated (no Naukri tab in the
+        # LinkedIn profile), but Naukri's own browser is the logged-in RECRUITER
+        # profile (recruiter_harvest_browser). The session is checked first; a dead
+        # session fails only Naukri — never a silent fallback to guest browsing.
         from app.config import get_settings
-        naukri_isolated = (
-            "naukri" in enabled and get_settings().naukri_browser_mode == "isolated"
-        )
+        naukri_mode = get_settings().naukri_browser_mode
+        naukri_recruiter = "naukri" in enabled and naukri_mode == "recruiter"
+        naukri_isolated = "naukri" in enabled and naukri_mode in ("isolated", "recruiter")
         shared_sources = [s for s in enabled if not (s == "naukri" and naukri_isolated)]
+        # A human can only clear a Naukri CAPTCHA in a HEADED browser (visible in
+        # the noVNC Live Browser), and only when the run asked to wait for one.
+        naukri_wait_for_human = bool(wait_for_login) and not config.browser.headless
 
         # Launch the shared browser under the SELECTED LinkedIn account's Chrome
         # profile so account "2" reuses its own saved session (account "1"/default
@@ -774,8 +781,9 @@ class OrchestratorAgent:
         try:
             async with AsyncExitStack() as browser_stack:
                 # Open one independent tab per shared source — they share cookies but
-                # each has its own navigation state. An isolated Naukri gets no tab
-                # here (pages["naukri"] stays None -> it opens its own guest browser).
+                # each has its own navigation state. An isolated / recruiter Naukri
+                # gets no tab here (pages["naukri"] stays None -> it opens its own
+                # guest / recruiter-profile browser).
                 pages: dict[str, Any] = {s: None for s in enabled}
                 if shared_sources:
                     linkedin_profile = account_profile_dir(
@@ -796,6 +804,7 @@ class OrchestratorAgent:
                         "orchestrator_browser_layout",
                         mode="single_browser_tabs", tabs=shared_sources,
                         own_browser=["naukri"] if naukri_isolated else [],
+                        naukri_mode=naukri_mode,
                         headless=config.browser.headless,
                     )
                 else:
@@ -812,13 +821,30 @@ class OrchestratorAgent:
                         NaukriScrapedJob,
                         naukri_guest_browser,
                     )
+                    from app.agents.naukri_recruiter_agent import (
+                        LOGIN_WINDOW_OPEN_MSG,
+                        SESSION_EXPIRED_MSG,
+                        NaukriRecruiterSessionError,
+                        check_recruiter_session,
+                        login_window_open,
+                        recruiter_harvest_browser,
+                    )
                     if await _skip_if_stopped("naukri"):
                         return "Naukri", []
-                    logger.info("orchestrator_dispatching", source="naukri",
-                                browser_mode="isolated" if page is None else "shared")
+                    logger.info(
+                        "orchestrator_dispatching", source="naukri",
+                        browser_mode=(
+                            "recruiter" if naukri_recruiter
+                            else "isolated" if page is None else "shared"
+                        ),
+                        wait_for_human=naukri_wait_for_human,
+                    )
                     await _start("naukri")
                     try:
-                        agent = NaukriAgent(already_harvested=self._already_harvested)
+                        agent = NaukriAgent(
+                            already_harvested=self._already_harvested,
+                            wait_for_human=naukri_wait_for_human,
+                        )
                         naukri_agent_holder["agent"] = agent
 
                         # Incremental persist, exactly like LinkedIn: the agent hands
@@ -839,7 +865,25 @@ class OrchestratorAgent:
                                 on_progress=_progress_for("naukri"),
                             )
 
-                        if page is None:
+                        if naukri_recruiter:
+                            # The login window holds the recruiter profile (and a
+                            # half-finished login would be a dead session anyway).
+                            if login_window_open():
+                                raise NaukriRecruiterSessionError(LOGIN_WINDOW_OPEN_MSG)
+                            async with recruiter_harvest_browser(
+                                headless = config.browser.headless,
+                                slow_mo  = config.browser.slow_mo_ms,
+                            ) as recruiter:
+                                rpage = await recruiter.acquire_page(label="naukri-recruiter")
+                                ok, landed = await check_recruiter_session(rpage)
+                                if not ok:
+                                    logger.warning(
+                                        "orchestrator_naukri_recruiter_session_expired",
+                                        landed=(landed or "").split("?")[0],
+                                    )
+                                    raise NaukriRecruiterSessionError(SESSION_EXPIRED_MSG)
+                                scraped = await _run_on(rpage)
+                        elif page is None:
                             async with naukri_guest_browser(
                                 headless = config.browser.headless,
                                 slow_mo  = config.browser.slow_mo_ms,
@@ -852,6 +896,15 @@ class OrchestratorAgent:
                         logger.info("batch_saved", source="Naukri", count=len(unified))
                         await _finish("naukri", len(unified))
                         return "Naukri", unified
+                    except NaukriRecruiterSessionError as exc:
+                        logger.warning(
+                            "orchestrator_naukri_recruiter_unavailable", error=str(exc),
+                            note="Naukri skipped (no guest fallback); other sources are retained",
+                        )
+                        await tracker.fail(
+                            "naukri", REASON_LOGIN_REQUIRED, error=str(exc), message=str(exc),
+                        )
+                        return "Naukri", []
                     except Exception as exc:
                         logger.exception(
                             "orchestrator_naukri_error", error=str(exc),

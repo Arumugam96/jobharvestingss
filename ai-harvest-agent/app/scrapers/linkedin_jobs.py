@@ -22,6 +22,8 @@ from typing import Optional
 
 from playwright.async_api import Browser, Page, Playwright, async_playwright
 
+from app.scrapers.browser_manager import IGNORE_DEFAULT_ARGS
+
 
 # ── Data model ────────────────────────────────────────────────────────────────
 
@@ -89,6 +91,7 @@ async def scrape_linkedin_jobs(
                 "--disable-blink-features=AutomationControlled",
                 "--no-sandbox",
             ],
+            ignore_default_args=IGNORE_DEFAULT_ARGS,
         )
         context = await browser.new_context(
             viewport={"width": 1280, "height": 900},
