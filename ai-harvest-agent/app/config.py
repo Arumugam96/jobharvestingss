@@ -157,6 +157,19 @@ class Settings(BaseSettings):
     # LinkedIn/harvest profile so recruiter cookies never reach the guest
     # Naukri job-harvest tab. Relative paths anchor at the ai-harvest-agent root.
     naukri_recruiter_profile_dir: str = "data/naukri_recruiter_profile"
+    # How POST /naukri-recruiter/login signs in (app/services/naukri_launcher.py):
+    # "launcher" runs the official Naukri Launcher (Linux AppImage) on the Live
+    # Browser display and opens the auto-login URL it hands off in the recruiter
+    # profile; "browser" opens recruit.naukri.com in the recruiter profile (blocked
+    # for accounts Naukri has moved to Launcher-only login). "auto" = launcher when
+    # the AppImage is present on a Linux host, else browser.
+    naukri_recruiter_login_mode: Literal["auto", "launcher", "browser"] = "auto"
+    # The AppImage (downloaded from Naukri's Linux link) and where it is unpacked.
+    # The Launcher's own config (incl. its install id) lives under data/ so it
+    # survives image rebuilds.
+    naukri_launcher_appimage: str = "data/naukri_launcher/naukri-launcher.AppImage"
+    naukri_launcher_install_dir: str = "/opt/naukri-launcher"
+    naukri_launcher_config_dir: str = "data/naukri_launcher/config"
     # Per-job detail pass (description HTML, employment type, work mode, industry,
     # company website, recruiter contact when Naukri shows one). Off ⇒ listing-only.
     naukri_fetch_details: bool = True
@@ -165,6 +178,11 @@ class Settings(BaseSettings):
     # CAPTCHA/block and eases back after a clean streak.
     naukri_detail_delay_min_ms: int = 30_000
     naukri_detail_delay_max_ms: int = 60_000
+    # How long a detail page is "read" once loaded (random scrolls down / back
+    # up). Spent ON the job page and deducted from the gap above, so the
+    # visit rate is unchanged — the time just moves from the SRP to the JD.
+    naukri_detail_dwell_min_s: int = 12
+    naukri_detail_dwell_max_s: int = 25
     naukri_backoff_max_multiplier: float = 4.0     # cap on the adaptive slow-down
     naukri_backoff_clean_streak: int = 10          # clean detail pages before easing back one step
     # A longer "coffee break" every N detail pages.

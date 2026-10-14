@@ -3,7 +3,8 @@ Naukri RECRUITER session routes (see app/agents/naukri_recruiter_agent.py).
 
   GET  /naukri-recruiter/status     last known session state (no browser launch)
   POST /naukri-recruiter/verify     open the recruiter profile, check recruit.naukri.com
-  POST /naukri-recruiter/login      open a HEADED login window (human completes login/OTP)
+  POST /naukri-recruiter/login      open a HEADED login window (human completes login/OTP) —
+                                    the Naukri Launcher when available (login mode)
   POST /naukri-recruiter/autologin  open a Launcher-issued naukri.com auto-login URL
 
 None of these type credentials or kill any Chrome; all use the dedicated
@@ -24,6 +25,7 @@ from app.agents.naukri_recruiter_agent import (
     validate_autologin_url,
 )
 from app.core.proactor import needs_proactor, run_in_proactor
+from app.services.naukri_launcher import use_launcher
 
 logger = structlog.get_logger(__name__)
 
@@ -67,8 +69,20 @@ async def recruiter_login(body: LoginRequest | None = None) -> Any:
     timeout_s = body.timeout_s if body else 600
     if not start_login_window(timeout_s=timeout_s):
         return {"status": "busy", "message": "A recruiter login window is already open."}
+    if use_launcher():
+        return {
+            "status": "started",
+            "mode": "launcher",
+            "message": (
+                "The Naukri Launcher is opening (server: watch it in the Live Browser view). "
+                "Log in inside the Launcher with your credentials and OTP; the session is "
+                "picked up automatically. Poll GET /naukri-recruiter/status."
+            ),
+            "timeout_s": timeout_s,
+        }
     return {
         "status": "started",
+        "mode": "browser",
         "message": (
             "A browser window is opening on recruit.naukri.com (server: watch it in the Live "
             "Browser view). Log in yourself, complete any OTP / Naukri Recruiter app approval, "

@@ -52,6 +52,11 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
     firstFetchRef.current = true;
     setPageLoading(!quiet);
     setPageError("");
+    // The URL search these params belong to. JobsTable syncs the URL in an
+    // effect that runs right after the one calling us, so read it a microtask
+    // later (once that effect flush is done) — still well before the response.
+    let requestSearch = null;
+    Promise.resolve().then(() => { requestSearch = window.location.search; });
     try {
       const res = await getJobs(params);
       if (seq !== seqRef.current) return; // superseded by a newer request
@@ -60,15 +65,20 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
       setPageTotal(res.total || 0);
       setPageLoading(false);
       // Cache this exact view so returning to it is instant. Keyed by the URL
-      // search (filters/page/sort) + the date range that produced these rows.
-      jobsViewRef.current = {
-        ...(jobsViewRef.current || {}),
-        search: window.location.search,
-        jobs: mapped,
-        total: res.total || 0,
-        dateFrom: params.date_from || "",
-        dateTo: params.date_to || "",
-      };
+      // search (filters/page/sort) + the date range that produced these rows —
+      // skipped if the URL moved on meanwhile (debounced keyword typed further,
+      // page reset pending, navigated away), so rows never land under another
+      // view's key.
+      if (requestSearch === window.location.search) {
+        jobsViewRef.current = {
+          ...(jobsViewRef.current || {}),
+          search: requestSearch,
+          jobs: mapped,
+          total: res.total || 0,
+          dateFrom: params.date_from || "",
+          dateTo: params.date_to || "",
+        };
+      }
     } catch (err) {
       if (seq !== seqRef.current) return;
       setPageError(

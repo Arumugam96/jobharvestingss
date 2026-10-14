@@ -1155,6 +1155,8 @@ class NaukriAgent:
         # a human wait is possible: _fetch_detail then hands the challenged tab
         # back (on _PageBlocked.tab) instead of closing it.
         self._hold_blocked_tab = False
+        # Wall time the previous detail tab was open; deducted from the next gap.
+        self._last_detail_s = 0.0
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -1825,8 +1827,10 @@ class NaukriAgent:
 
     async def _pace_before_detail(self, page: Page) -> bool:
         """The governed gap before a detail visit (none before the run's first),
-        or a longer pacing break every naukri_break_every_details visits. False
-        when the user stopped the run during the wait."""
+        or a longer pacing break every naukri_break_every_details visits. Time
+        already spent reading the previous detail page counts towards the gap
+        (a short 3–6 s floor stays on the SRP). False when the user stopped the
+        run during the wait."""
         gov = self._governor
         if gov.visits == 0:
             return not run_guard.is_stop_requested()
@@ -1840,7 +1844,11 @@ class NaukriAgent:
                 page, secs, phase="cooling_down",
                 message=f"Naukri: pacing break — resuming in ~{int(secs)}s",
             )
-        return await self._wait(page, gov.next_gap_s())
+        spent, self._last_detail_s = self._last_detail_s, 0.0
+        gap = gov.next_gap_s()
+        if spent > 0:
+            gap = max(random.uniform(3.0, 6.0), gap - spent)
+        return await self._wait(page, gap)
 
     def _human_wait_possible(self) -> bool:
         """A human may be asked to solve a CAPTCHA: opted in by the caller,
@@ -2031,8 +2039,9 @@ class NaukriAgent:
     async def _fetch_detail(self, page: Page, job: NaukriScrapedJob) -> None:
         """Enrich `job` from its detail page, opened like a click-through from
         the results page: a NEW tab of the same context with the SRP as Referer
-        (falls back to the SRP tab itself if a tab can't be opened); a short
-        reading scroll; then v4 JSON → ld+json → DOM. The SRP tab stays put.
+        (falls back to the SRP tab itself if a tab can't be opened); wait for
+        the page to finish loading, a randomized reading dwell (scrolls down and
+        back up); then v4 JSON → ld+json → DOM. The SRP tab stays put.
 
         Raises _PageBlocked on a CAPTCHA / bot wall — with the challenged tab
         left open on ``exc.tab`` when self._hold_blocked_tab is set (human wait),
@@ -2043,6 +2052,7 @@ class NaukriAgent:
         tab = await self._open_detail_tab(page)
         target = tab if tab is not None else page
         held = False
+        started = time.monotonic()
         try:
             await retry_async(lambda: self._goto(target, job.job_url, referer), retries=2, delay_s=2.0)
             try:
@@ -2052,8 +2062,10 @@ class NaukriAgent:
                     exc.tab = target
                     held = True
                 raise
-            await self._reading_scroll(target)
+            await self._settle_detail(target)
+            await self._reading_dwell(target)
             await self._extract_detail(target, job)
+            self._last_detail_s = time.monotonic() - started
         finally:
             if tab is not None and not held:
                 await self._close_tab(tab)
@@ -2096,11 +2108,61 @@ class NaukriAgent:
         await self._close_tab(tab)
 
     @staticmethod
-    async def _reading_scroll(target: Any) -> None:
-        """A few small, slow scroll steps — someone skimming the job page."""
+    async def _settle_detail(target: Any) -> None:
+        """Let the job page finish loading after domcontentloaded: the load
+        event, the description container, then a short look at the top of the
+        page. Best-effort — extraction still runs if any of it times out."""
         try:
-            await human_scroll(target, max_rounds=3, step_min=250, step_max=600,
-                               pause_lo=600, pause_hi=1_500)
+            await target.wait_for_load_state("load", timeout=15_000)
+        except Exception:
+            pass
+        try:
+            await target.wait_for_selector("[class*='dang-inner-html']", timeout=8_000)
+        except Exception:
+            pass
+        await _delay(target, 1_500, 3_000)
+
+    @staticmethod
+    async def _reading_dwell(target: Any) -> None:
+        """Read the job page for a random naukri_detail_dwell_min/max_s: small
+        wheel scrolls down with uneven pauses, the odd glance back up, pointer
+        drift — and back up near the top at the end. Ends early on a user stop.
+        The budget is counted from the pauses themselves (no clock reads)."""
+        settings = get_settings()
+        lo = max(0, int(settings.naukri_detail_dwell_min_s))
+        budget_ms = int(random.uniform(lo, max(lo, int(settings.naukri_detail_dwell_max_s))) * 1000)
+        spent = 0
+        while spent < budget_ms and not run_guard.is_stop_requested():
+            try:
+                geo = await target.evaluate(
+                    "() => ({h: document.body.scrollHeight, "
+                    "top: (document.scrollingElement||document.documentElement).scrollTop, "
+                    "ch: window.innerHeight})"
+                ) or {}
+            except Exception:
+                geo = {}
+            at_bottom = (int(geo.get("top") or 0) + int(geo.get("ch") or 0)) >= int(geo.get("h") or 0) - 80
+            up = at_bottom or random.random() < 0.15
+            step = random.randint(150, 400) if up else random.randint(180, 520)
+            try:
+                if random.random() < 0.3:
+                    await target.mouse.move(random.randint(200, 900), random.randint(150, 650),
+                                            steps=random.randint(4, 10))
+                await target.mouse.wheel(0, -step if up else step)
+            except Exception:
+                try:
+                    await target.evaluate("(dy) => window.scrollBy(0, dy)", -step if up else step)
+                except Exception:
+                    pass
+            pause = random.randint(900, 2_800)
+            try:
+                await target.wait_for_timeout(pause)
+            except Exception:
+                pass
+            spent += pause
+        # Drift back towards the top, where a reader would look for "Apply".
+        try:
+            await target.evaluate("() => window.scrollTo({top: 0, behavior: 'smooth'})")
         except Exception:
             pass
 

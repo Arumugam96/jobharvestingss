@@ -1,0 +1,7 @@
+#!/bin/sh
+# The container's "default browser". The Naukri Launcher opens its one-time
+# auto-login URL through xdg-open; record it for app/services/naukri_launcher.py,
+# which opens it in the Naukri recruiter profile. Nothing is opened here.
+f="${NAUKRI_LAUNCHER_HANDOFF:-/app/data/sessions/naukri_launcher_handoff.url}"
+mkdir -p "$(dirname "$f")"
+printf '%s\n' "$1" >> "$f"

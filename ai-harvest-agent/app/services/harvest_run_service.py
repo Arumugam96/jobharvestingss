@@ -10,6 +10,7 @@ what the frontend-facing GET endpoints read from.
 from __future__ import annotations
 
 import math
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, TypeVar
@@ -68,9 +69,15 @@ CONTACT_FILTER_TOKENS = {
 }
 
 
+# Characters _txt_expr() trims. Plain SQL trim() strips only ASCII spaces, but
+# the UI (JS .trim()) and _txt() also treat tabs/newlines/NBSP/zero-width
+# space/BOM as blank. Two-arg trim(string, chars) is valid on SQLite and Postgres.
+_TRIM_CHARS = " \t\n\r\x0b\x0c\u00a0\u200b\ufeff"
+
+
 def _txt_expr(col):
     """NULL-safe trimmed text — NULL/""/whitespace all compare equal to ""."""
-    return func.trim(func.coalesce(col, ""))
+    return func.trim(func.coalesce(col, ""), _TRIM_CHARS)
 
 
 def _contact_presence_exprs() -> dict[str, Any]:
@@ -136,8 +143,12 @@ def poc_name_expr():
     )
 
 
+# str.strip() covers \s and NBSP but not zero-width space / BOM (see _TRIM_CHARS).
+_EDGE_BLANK_RE = re.compile(r"^[\s\u200b\ufeff]+|[\s\u200b\ufeff]+$")
+
+
 def _txt(value: Any) -> str:
-    return "" if value is None else str(value).strip()
+    return "" if value is None else _EDGE_BLANK_RE.sub("", str(value))
 
 
 def job_dict_contact(job: dict[str, Any]) -> dict[str, Any]:
@@ -659,11 +670,18 @@ class HarvestRunService:
         _format_posted(); not independently verified for Naukri/Dice)."""
         stmt = select(ScrapedJobORM)
         stmt = apply_tenant(stmt, ScrapedJobORM.tenant_id)  # scope to the caller's tenant
+        token_exprs = _contact_token_exprs()
+        selected = [token_exprs[t] for t in (contact or []) if t in token_exprs]
+        if keyword or selected:
+            # Both the keyword search and the contact predicates read the linked
+            # recruiter's email/phone. Joined once; 1:1 on the recruiter PK —
+            # never duplicates job rows.
+            stmt = stmt.outerjoin(RecruiterORM, ScrapedJobORM.recruiter_id == RecruiterORM.id)
         if keyword:
             # Matches everything the UI's free-text search used to cover
             # client-side (title/company/source/POC/email/phone, incl. the
-            # Company-tagged contact), plus the description that this endpoint
-            # always searched.
+            # recruiter's enriched email/phone and the Company-tagged contact),
+            # plus the description that this endpoint always searched.
             like = f"%{keyword}%"
             stmt = stmt.where(
                 or_(
@@ -674,6 +692,8 @@ class HarvestRunService:
                     ScrapedJobORM.source.ilike(like),
                     ScrapedJobORM.email_id.ilike(like),
                     ScrapedJobORM.contact_number.ilike(like),
+                    RecruiterORM.official_email_id.ilike(like),
+                    RecruiterORM.contact_number.ilike(like),
                     ScrapedJobORM.company_contact_name.ilike(like),
                     ScrapedJobORM.company_contact_email.ilike(like),
                     ScrapedJobORM.company_contact_phone.ilike(like),
@@ -688,14 +708,8 @@ class HarvestRunService:
         if poc:
             # The POC the table shows: poster name, else the company contact's.
             stmt = stmt.where(poc_name_expr() == poc.strip())
-        if contact:
-            token_exprs = _contact_token_exprs()
-            selected = [token_exprs[t] for t in contact if t in token_exprs]
-            if selected:
-                # 1:1 join on the recruiter PK — never duplicates job rows.
-                stmt = stmt.outerjoin(
-                    RecruiterORM, ScrapedJobORM.recruiter_id == RecruiterORM.id
-                ).where(or_(*selected))
+        if selected:
+            stmt = stmt.where(or_(*selected))  # RecruiterORM joined above
         if size_tier:
             # company_size stores the canonical "<band> employees" string (or "");
             # the replace() folds legacy en-dash rows onto BAND_TO_TIER's hyphen keys.
@@ -743,7 +757,10 @@ class HarvestRunService:
         else:
             sort_field = sort_by if sort_by in JOB_SORT_FIELDS else "posted_date"
             sort_column = getattr(ScrapedJobORM, sort_field)
-        stmt = stmt.order_by(sort_column.desc() if sort_order.lower() == "desc" else sort_column.asc())
+        stmt = stmt.order_by(
+            sort_column.desc() if sort_order.lower() == "desc" else sort_column.asc(),
+            ScrapedJobORM.id,  # unique tiebreaker so OFFSET/LIMIT pages are stable
+        )
         stmt = stmt.offset(max(0, page - 1) * page_size).limit(page_size)
 
         result = await self._db.execute(stmt)

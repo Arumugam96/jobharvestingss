@@ -89,3 +89,6 @@ ai-harvest-agent/docs/images/linkedin_workflow.png
 ai-harvest-agent/data/master/ambiguous_companies.json
 ai-harvest-agent/check_mailjet.py
 ai-harvest-agent/check_claude_llm.py
+ai-harvest-agent/data/naukri_launcher/
+ai-harvest-agent/data/naukri_recruiter_profile/
+ai-harvest-agent/tests/

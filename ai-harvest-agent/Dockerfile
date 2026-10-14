@@ -1,5 +1,8 @@
 FROM python:3.11-slim-bookworm
 
+# libgtk-3-0 … libxtst6 + squashfs-tools: the Naukri Launcher (Electron AppImage,
+# app/services/naukri_launcher.py) links against GTK/desktop libs, and is unpacked
+# with unsquashfs because containers have no FUSE.
 RUN rm -rf /var/lib/apt/lists/* \
     && apt-get clean \
     && sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
@@ -26,6 +29,12 @@ RUN rm -rf /var/lib/apt/lists/* \
     x11vnc \
     supervisor \
     websockify \
+    libgtk-3-0 \
+    libnotify4 \
+    libxss1 \
+    libsecret-1-0 \
+    libxtst6 \
+    squashfs-tools \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -42,6 +51,9 @@ RUN playwright install chromium
 
 COPY . .
 COPY supervisord.conf /etc/supervisor/conf.d/harvest.conf
+# Records the Naukri Launcher's auto-login hand-off (see the script). sed strips
+# CRLF in case the checkout converted line endings on Windows.
+RUN sed -i 's/\r$//' docker/xdg-open && install -m 0755 docker/xdg-open /usr/local/bin/xdg-open
 
 ENV DISPLAY=:99
 

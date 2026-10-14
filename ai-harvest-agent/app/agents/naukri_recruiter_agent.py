@@ -22,7 +22,11 @@ How a session gets in (all need a human once)
                       the login page is left, then records the result. Works only
                       if the account is NOT restricted to Launcher-only /
                       whitelisted-IP access.
-2. Launcher URL       POST /naukri-recruiter/autologin {url} navigates the recruiter
+   Launcher login     For Launcher-only accounts the same call runs the official
+                      Naukri Launcher instead (app/services/naukri_launcher.py,
+                      NAUKRI_RECRUITER_LOGIN_MODE): the human logs in inside it and
+                      its auto-login hand-off is opened in this profile.
+2. Launcher URL      POST /naukri-recruiter/autologin {url} navigates the recruiter
                       profile to a Launcher-issued naukri.com auto-login URL (one-time
                       secureToken) — only useful if the user can obtain that URL
                       before their default browser consumes it.
@@ -356,7 +360,11 @@ def start_login_window(timeout_s: int = 600) -> bool:
     async def _run() -> None:
         from app.core.proactor import needs_proactor, run_in_proactor
 
+        from app.services.naukri_launcher import launcher_login, use_launcher
+
         def _factory():
+            if use_launcher():
+                return launcher_login(timeout_s=timeout_s)
             return NaukriRecruiterAgent(headless=False).interactive_login(timeout_s=timeout_s)
 
         try:
