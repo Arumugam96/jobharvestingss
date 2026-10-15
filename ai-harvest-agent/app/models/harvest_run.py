@@ -209,6 +209,8 @@ class LlmCallType:
     EMAIL_GENERATION = "email_generation"
     EMAIL_FOLLOWUP = "email_followup"
     LINKEDIN_GENERATION = "linkedin_generation"
+    RESDEX_REQUIREMENTS = "resdex_requirements"
+    RESDEX_PROFILE_EXTRACT = "resdex_profile_extract"
 
 
 class LlmCallORM(Base):
@@ -304,6 +306,13 @@ class CompanyORM(Base):
     # every run either.
     apollo_attempted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     apollo_enriched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Apollo organization id (company_enrichment_service.resolve_apollo_org) — resolving
+    # it costs a credit (organizations/enrich, mixed_companies/search), so it's cached
+    # here once and reused by every location / run / feature that searches this
+    # company's people. apollo_org_resolved_at stamps every resolve attempt (hit or
+    # miss) so a company Apollo doesn't know isn't re-billed within apollo_recheck_days.
+    apollo_org_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    apollo_org_resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -351,6 +360,48 @@ class CompanyLocationContactORM(Base):
     # re-searched every run.
     apollo_attempted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     hr_contact_attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class CompanyLocationCandidateORM(Base):
+    """The HR shortlist behind a CompanyLocationContactORM row — up to
+    company_contact_shortlist_size people per (company, job-location), from Apollo's
+    FREE people search (id / name / title; email locked).
+
+    Outreach rotates through them in ``rank`` order, one person per company+location
+    per day, wrapping back to the first after the last (the pointer is the most
+    recent ``last_emailed_at``). An email is revealed — the only Apollo credit spent —
+    only when the rotation reaches that person; ``no_email`` marks a reveal that
+    found nothing so it's never paid for twice. The rotation's current pick is
+    copied onto the parent row's hr_contact_* fields, which bulk_insert_scraped_jobs
+    attaches to email-less jobs. Global (not tenant-scoped), like the parent row.
+    """
+    __tablename__ = "company_location_candidates"
+    __table_args__ = (
+        UniqueConstraint(
+            "company_key", "location_key", "apollo_person_id",
+            name="uq_company_location_candidates_person",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    company_key: Mapped[str] = mapped_column(String(600), nullable=False, index=True)
+    location_key: Mapped[str] = mapped_column(String(300), nullable=False)
+    apollo_person_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    name: Mapped[str] = mapped_column(String(300), nullable=False, default="")
+    title: Mapped[str] = mapped_column(String(300), nullable=False, default="")
+    # 0 = first in the rotation (recruiters / talent acquisition rank highest).
+    rank: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # False once a shortlist refresh no longer returns this person (likely left).
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    email: Mapped[str] = mapped_column(String(320), nullable=False, default="")
+    email_status: Mapped[str] = mapped_column(String(40), nullable=False, default="")
+    revealed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    no_email: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    last_emailed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

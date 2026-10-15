@@ -199,6 +199,78 @@ def _run_to_history_entry(run: HarvestRunORM) -> dict[str, Any]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Naukri recruiter pre-flight (Resdex) — one background check at harvest start
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Strong refs so a fire-and-forget pre-flight task isn't garbage-collected mid-run.
+_preflight_tasks: set[asyncio.Task] = set()
+
+RECRUITER_PREFLIGHT_REASON = (
+    "Resdex candidate search (after this harvest) needs the Naukri recruiter login"
+)
+
+
+def _should_preflight_recruiter(enabled: list[str]) -> bool:
+    """One recruiter-session check at harvest start, so a logged-out Resdex session
+    is flagged while the (long) harvest runs instead of at the end. Only when Resdex
+    is on; skipped for a recruiter-mode Naukri harvest (its own pre-check covers
+    it), while the login window holds the recruiter profile, and when a
+    "Naukri recruiter login needed" request is already pending."""
+    settings = get_settings()
+    if not settings.resdex_enabled:
+        return False
+    if "naukri" in enabled and settings.naukri_browser_mode == "recruiter":
+        return False
+    from app.agents.naukri_recruiter_agent import login_window_open
+    from app.services import login_required
+
+    if login_window_open():
+        return False
+    if login_required.pending(login_required.SOURCE_NAUKRI_RECRUITER) is not None:
+        return False
+    return True
+
+
+async def _recruiter_preflight() -> None:
+    """Headless verify of the recruiter profile; logged out → raise the global
+    "Naukri recruiter login needed" request. Never raises."""
+    try:
+        from app.agents.naukri_recruiter_agent import NaukriRecruiterAgent, login_window_open
+        from app.services import login_required
+
+        if login_window_open():
+            return
+
+        def _factory():
+            return NaukriRecruiterAgent(headless=True).verify(import_legacy=False)
+
+        result = await run_in_proactor(_factory) if needs_proactor() else await _factory()
+        logged_in = bool((result or {}).get("logged_in"))
+        logger.info("naukri_recruiter_preflight", logged_in=logged_in)
+        if not logged_in:
+            login_required.raise_login_required(
+                login_required.SOURCE_NAUKRI_RECRUITER, reason=RECRUITER_PREFLIGHT_REASON,
+            )
+    except Exception as exc:
+        logger.warning("naukri_recruiter_preflight_failed", error=str(exc))
+
+
+def _start_recruiter_preflight(enabled: list[str]) -> asyncio.Task | None:
+    """Fire the pre-flight in the background when it applies — never awaited by the
+    harvest, never raises into it. Returns the task (tests) or None."""
+    try:
+        if not _should_preflight_recruiter(enabled):
+            return None
+        task = asyncio.create_task(_recruiter_preflight(), name="naukri-recruiter-preflight")
+        _preflight_tasks.add(task)
+        task.add_done_callback(_preflight_tasks.discard)
+        return task
+    except Exception as exc:
+        logger.warning("naukri_recruiter_preflight_not_started", error=str(exc))
+        return None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Background harvest task
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -231,6 +303,10 @@ async def _run_harvest_background_impl(
     """Runs the full harvest in a background asyncio task, updating JobTracker."""
     log = logger.bind(job_id=job_id, run_id=run_id, sources=enabled)
     log.info("harvest_background_start")
+
+    # Resdex pre-flight: one non-blocking recruiter-session check in the background
+    # so a logout is surfaced (global login banner) while this long run proceeds.
+    _start_recruiter_preflight(enabled)
 
     # Per-source live status (GET /harvest-status `sources`): every enabled source
     # starts "pending"; the orchestrator's SourceStatusTracker then reports each
@@ -299,21 +375,29 @@ async def _run_harvest_background_impl(
     marshal_to_main = needs_proactor()
     saved_counter = {"n": 0}
 
-    async def _do_write(coro) -> None:
+    async def _do_write(coro):
         # On Windows --reload, run_all runs on a proactor worker thread; the
         # asyncpg pool is bound to the main loop, so marshal DB writes back to it.
         # On Linux/EC2 (needs_proactor False) run_all is on the main loop already.
         if marshal_to_main:
-            await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(coro, main_loop))
-        else:
-            await coro
+            return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(coro, main_loop))
+        return await coro
 
     async def _persist(unified: list) -> None:
         if not run_pk or not unified:
             return
         try:
             dicts = [j.to_dict() for j in unified]
-            await _do_write(db_write(lambda db: HarvestRunService(db).bulk_insert_scraped_jobs(run_pk, dicts)))
+
+            async def _insert(db) -> bool:
+                await HarvestRunService(db).bulk_insert_scraped_jobs(run_pk, dicts)
+                return True
+
+            # db_write swallows DB errors (→ None): only count rows that landed,
+            # so "N jobs saved" never runs ahead of the database.
+            if await _do_write(db_write(_insert)) is not True:
+                log.warning("harvest_incremental_persist_not_saved", batch=len(dicts))
+                return
             saved_counter["n"] += len(dicts)
             n = saved_counter["n"]
             msg = f"Harvesting… {n} jobs saved so far"

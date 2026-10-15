@@ -239,6 +239,51 @@ _STEALTH_SCRIPTS: list[str] = [
     })();""",
 ]
 
+# ── Locale-consistent language fingerprint ───────────────────────────────────
+# The historic stealth list hard-codes an en-US language list. A context launched
+# with an explicit non-default locale (the Naukri recruiter profile: en-IN) gets a
+# navigator.languages — and a matching Accept-Language header — that agree with
+# that locale instead. The default locale keeps the exact historic scripts.
+_DEFAULT_LOCALE = "en-US"
+_DEFAULT_LANGUAGES_SCRIPT = next(s for s in _STEALTH_SCRIPTS if "navigator,'languages'" in s)
+_LOCALE_LANGUAGES: dict[str, list[str]] = {
+    "en-IN": ["en-IN", "en-GB", "en"],
+}
+
+
+def locale_languages(locale: str | None) -> list[str] | None:
+    """navigator.languages for `locale`, or None for the default (en-US / unset),
+    which keeps the historic hard-coded list."""
+    loc = (locale or "").strip()
+    if not loc or loc == _DEFAULT_LOCALE:
+        return None
+    if loc in _LOCALE_LANGUAGES:
+        return list(_LOCALE_LANGUAGES[loc])
+    base = loc.split("-")[0]
+    return [loc, base] if base and base != loc else [loc]
+
+
+def stealth_scripts(locale: str | None = None) -> list[str]:
+    """The stealth init scripts for a context with `locale` — identical to
+    _STEALTH_SCRIPTS unless a non-default locale is passed, in which case only
+    the navigator.languages entry is swapped for one following that locale."""
+    langs = locale_languages(locale)
+    if langs is None:
+        return list(_STEALTH_SCRIPTS)
+    quoted = ",".join(f"'{lang}'" for lang in langs)
+    script = f"Object.defineProperty(navigator,'languages',{{get:()=>[{quoted}]}});"
+    return [script if s is _DEFAULT_LANGUAGES_SCRIPT else s for s in _STEALTH_SCRIPTS]
+
+
+def accept_language_header(locale: str | None) -> str | None:
+    """An Accept-Language value matching stealth_scripts(locale)'s languages
+    (Chrome-style q-values), or None for the default locale (no extra header)."""
+    langs = locale_languages(locale)
+    if langs is None:
+        return None
+    parts = [langs[0]] + [f"{lang};q={max(0.1, 1 - 0.1 * i):.1f}" for i, lang in enumerate(langs[1:], 1)]
+    return ",".join(parts)
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # BrowserManager
@@ -380,7 +425,9 @@ class PersistentBrowserManager:
         self._slow_mo:     int               = slow_mo
         # Context locale / timezone. Defaults keep the LinkedIn profile's
         # long-standing fingerprint; the Naukri recruiter browser passes
-        # en-IN / Asia/Kolkata like a real Indian visitor.
+        # en-IN / Asia/Kolkata like a real Indian visitor. A non-default locale
+        # also drives navigator.languages + Accept-Language (stealth_scripts /
+        # accept_language_header); en-US keeps the historic hard-coded list.
         self._locale:      str               = locale
         self._timezone_id: str               = timezone_id
         # "chromium" (default) → Playwright's full bundled Chromium, in its new
@@ -450,6 +497,12 @@ class PersistentBrowserManager:
             persistent_kwargs: dict[str, Any] = {}
             if self._channel:
                 persistent_kwargs["channel"] = self._channel
+            # Non-default locale (the en-IN recruiter profile): an Accept-Language
+            # that agrees with the locale-following navigator.languages below.
+            # The default locale sends no extra header (historic behaviour).
+            accept_language = accept_language_header(self._locale)
+            if accept_language:
+                persistent_kwargs["extra_http_headers"] = {"Accept-Language": accept_language}
             self._context = await self._pw.chromium.launch_persistent_context(
                 **persistent_kwargs,
                 user_data_dir       = str(self._profile_dir),
@@ -484,7 +537,7 @@ class PersistentBrowserManager:
                 java_script_enabled = True,
             )
 
-            for script in _STEALTH_SCRIPTS:
+            for script in stealth_scripts(self._locale):
                 await self._context.add_init_script(script)
 
             logger.info(

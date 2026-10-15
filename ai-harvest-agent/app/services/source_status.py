@@ -49,6 +49,7 @@ TERMINAL_STATES = frozenset({"done", "failed", "skipped"})
 REASON_LLM_UNAVAILABLE = "LLM unavailable"
 REASON_LOGIN_REQUIRED = "Login required"
 REASON_ERROR = "Error"
+REASON_BLOCKED = "Blocked by Naukri"
 
 OnChange = Callable[[dict[str, dict[str, Any]]], Awaitable[None]]
 

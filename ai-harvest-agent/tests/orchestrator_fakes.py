@@ -8,6 +8,8 @@ no Playwright, network or LLM. ``install_source_fakes`` wires them in.
 LinkedIn modes:  "ok" | "outage" (2 jobs via on_batch, then LLMUnavailableError)
 Naukri modes:    "ok" | "gated" (waits until LinkedIn has failed, then finishes)
                  | "error" (RuntimeError) | "off"
+                 | "blocked" (NaukriStoppedEarly before any job)
+                 | "partial_blocked" (2 jobs, then stopped_early = blocked)
 """
 from __future__ import annotations
 
@@ -16,7 +18,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from app.agents.linkedin_agent import LinkedInScrapedJob
-from app.agents.naukri_agent import NaukriScrapedJob
+from app.agents.naukri_agent import STOP_BLOCKED, NaukriScrapedJob, NaukriStoppedEarly
 from app.core.exceptions import LLMUnavailableError
 from app.services.llm_service import empty_usage_summary
 
@@ -146,6 +148,7 @@ def install_source_fakes(monkeypatch, *, linkedin: str = "outage", naukri: str =
             # e.g. wait_for_human — recorded so tests can assert what the
             # orchestrator passed.
             state["naukri_kwargs"] = dict(kwargs)
+            self.stopped_early: str | None = None
 
         async def _run(self, page, f, on_status=None, on_batch=None, on_progress=None):
             try:
@@ -155,7 +158,12 @@ def install_source_fakes(monkeypatch, *, linkedin: str = "outage", naukri: str =
                     await on_progress({**NK_LISTING, "done": 2, "in_batch": 2})
                 if naukri == "error":
                     raise RuntimeError("Naukri search filters not applied")
+                if naukri == "blocked":
+                    raise NaukriStoppedEarly(STOP_BLOCKED)
                 await on_batch([nk_job(1), nk_job(2)])
+                if naukri == "partial_blocked":
+                    self.stopped_early = STOP_BLOCKED
+                    return [nk_job(1), nk_job(2)]
                 if naukri == "gated":
                     # Still mid-scrape when LinkedIn's LLM dies — must NOT be cancelled.
                     await asyncio.wait_for(state["linkedin_failed"].wait(), timeout=5)
@@ -259,4 +267,7 @@ def install_route_fakes(monkeypatch) -> dict:
     monkeypatch.setattr(route, "_history_svc", _History())
     monkeypatch.setattr(outreach_mod, "run_auto_outreach_after_harvest", _outreach)
     monkeypatch.setattr(JobTracker, "_persist", classmethod(lambda cls: None))
+    # The Resdex recruiter pre-flight would launch a real browser when the
+    # developer's .env has RESDEX_ENABLED=true — off unless a test opts in.
+    monkeypatch.setattr(route, "_start_recruiter_preflight", lambda enabled: None)
     return {"service": RecordingRunService, "outreach": outreach_calls, "history": history}

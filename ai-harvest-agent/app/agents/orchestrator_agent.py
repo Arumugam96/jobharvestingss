@@ -47,6 +47,7 @@ from app.models.unified_job import UnifiedJob
 from app.services import run_guard
 from app.services.business_filter_service import BusinessFilterService
 from app.services.source_status import (
+    REASON_BLOCKED,
     REASON_ERROR,
     REASON_LLM_UNAVAILABLE,
     REASON_LOGIN_REQUIRED,
@@ -817,8 +818,10 @@ class OrchestratorAgent:
 
                 async def _harvest_naukri(page: Any) -> tuple[str, list[UnifiedJob]]:
                     from app.agents.naukri_agent import (
+                        STOP_BLOCKED,
                         NaukriAgent,
                         NaukriScrapedJob,
+                        NaukriStoppedEarly,
                         naukri_guest_browser,
                     )
                     from app.agents.naukri_recruiter_agent import (
@@ -881,6 +884,16 @@ class OrchestratorAgent:
                                         "orchestrator_naukri_recruiter_session_expired",
                                         landed=(landed or "").split("?")[0],
                                     )
+                                    # A real logout (not a failed check, which
+                                    # returns a reason instead of a URL) → global
+                                    # "Naukri recruiter login needed" banner.
+                                    if (landed or "").startswith("http"):
+                                        from app.services import login_required
+                                        login_required.raise_login_required(
+                                            login_required.SOURCE_NAUKRI_RECRUITER,
+                                            reason="Naukri recruiter session expired — "
+                                                   "this harvest skipped Naukri",
+                                        )
                                     raise NaukriRecruiterSessionError(SESSION_EXPIRED_MSG)
                                 scraped = await _run_on(rpage)
                         elif page is None:
@@ -894,8 +907,26 @@ class OrchestratorAgent:
                         unified = [_naukri_to_unified(j) for j in scraped]
                         logger.info("orchestrator_source_done", source="naukri", count=len(unified))
                         logger.info("batch_saved", source="Naukri", count=len(unified))
-                        await _finish("naukri", len(unified))
+                        stopped_early = getattr(agent, "stopped_early", None)
+                        if stopped_early and not run_guard.is_stop_requested():
+                            # Gave up mid-run (blocked / browser lost) but kept jobs.
+                            await tracker.done(
+                                "naukri", len(unified),
+                                message=f"{len(unified)} jobs — stopped early "
+                                        f"({'blocked' if stopped_early == STOP_BLOCKED else 'browser/network lost'})",
+                            )
+                        else:
+                            await _finish("naukri", len(unified))
                         return "Naukri", unified
+                    except NaukriStoppedEarly as exc:
+                        # Blocked / browser lost before ANY job — a failure, not "0 results".
+                        logger.warning("orchestrator_naukri_stopped_early", reason=exc.reason)
+                        await tracker.fail(
+                            "naukri",
+                            REASON_BLOCKED if exc.reason == STOP_BLOCKED else REASON_ERROR,
+                            error=str(exc), message=str(exc),
+                        )
+                        return "Naukri", []
                     except NaukriRecruiterSessionError as exc:
                         logger.warning(
                             "orchestrator_naukri_recruiter_unavailable", error=str(exc),
@@ -925,6 +956,9 @@ class OrchestratorAgent:
                     scraped_so_far: list[LinkedInScrapedJob] = []
                     try:
                         agent   = LinkedInAgent(already_harvested=self._already_harvested)
+                        # Which account's profile this run uses — the agent tags
+                        # its global "LinkedIn login needed" request with it.
+                        agent.login_account = str(config.sources.linkedin_account or "1")
                         linkedin_agent_holder["agent"] = agent
 
                         # Per-page incremental persist: the agent hands us each page's

@@ -473,6 +473,14 @@ async def setup_linkedin_session(body: SetupSessionRequest | None = None) -> Any
             result: dict = await run_in_proactor(_open_for_login)
         else:
             result = await _open_for_login()
+        # Logged in (fresh or reused) → settle any global "LinkedIn login needed"
+        # request for this account.
+        try:
+            from app.services import login_required
+            login_required.clear(login_required.SOURCE_LINKEDIN, account,
+                                 kind=login_required.KIND_LOGIN)
+        except Exception as exc:
+            logger.debug("linkedin_login_required_clear_failed", error=str(exc))
         return {
             "status":  "ready",
             "message": "LinkedIn session active. Future /run-linkedin-agent calls will reuse it automatically.",

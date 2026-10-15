@@ -97,6 +97,13 @@ class Settings(BaseSettings):
     apollo_daily_cap: int = 100
     company_contact_fallback: bool = True
     company_contact_reveal_cap: int = 5
+    # HR shortlist per (company, location) — free Apollo search, revealed lazily as
+    # outreach rotates through it (one person per company+location per day).
+    company_contact_shortlist_size: int = 10
+    # Only shortlist people whose email Apollo marks verified.
+    company_contact_verified_only: bool = True
+    # Auto-outreach skips a company for this many days after anyone there replied.
+    outreach_company_reply_pause_days: int = 30
 
     # ── Recruiter Contact Finder (app/services/recruiter_finder_service.py) ───────
     recruiter_finder_daily_cap: int = 50
@@ -170,6 +177,59 @@ class Settings(BaseSettings):
     naukri_launcher_appimage: str = "data/naukri_launcher/naukri-launcher.AppImage"
     naukri_launcher_install_dir: str = "/opt/naukri-launcher"
     naukri_launcher_config_dir: str = "data/naukri_launcher/config"
+
+    # ---------   Resdex candidate matching (app/services/resdex_match_service.py) ---
+    # Before automatic outreach, each recruiter/job-posting-email job (LinkedIn /
+    # Naukri) gets a Resdex search in the recruiter profile: JD → LLM requirements
+    # → Boolean query + filters → 2-3 candidates, stored and shown on the job
+    # detail page. Off by default; RESDEX_INCLUDE_IN_EMAIL additionally puts an
+    # anonymised candidate card into the email (keep it off for a shadow period).
+    resdex_enabled: bool = False
+    resdex_include_in_email: bool = False
+    resdex_sources: str = "LinkedIn,Naukri"
+    # Also search for jobs whose only contact is the Apollo company+location HR
+    # contact (no recruiter/job-posting email) — more searches, e.g. while testing.
+    resdex_include_company_contacts: bool = False
+    # Also search for jobs with NO email at all (no recruiter and no Apollo contact).
+    # Candidates are stored for the job detail page only — such jobs are never
+    # emailed. Useful while testing, when few harvested jobs carry an email.
+    resdex_include_jobs_without_email: bool = False
+    resdex_candidates_per_job: int = 3
+    resdex_min_skill_coverage: float = 0.6     # share of mandatory skills a pick must show
+    resdex_active_within_months: int = 3       # Resdex "active in" filter (0 = off)
+    resdex_max_searches_per_job: int = 3       # relaxation ladder T1..T3
+    # Open the picked candidates' full profiles for richer extraction — spends
+    # Resdex profile-view credits, so off by default (search-result cards only).
+    resdex_open_profiles: bool = False
+    # Hard per-UTC-day caps (DB-enforced, account-wide, fail CLOSED). 0 = unlimited.
+    resdex_daily_search_cap: int = 100
+    resdex_daily_candidate_cap: int = 100
+    resdex_reuse_days: int = 14                # reuse a job_url's recent search instead of re-searching
+    resdex_delay_min_ms: int = 30_000          # human-like gap between searches
+    resdex_delay_max_ms: int = 45_000
+    # Anti-automation pacing (app/agents/resdex_candidate_agent.py): after results
+    # load, scroll the list and dwell a random 5-15 s like a recruiter reading it;
+    # every N searches in a batch take a longer 2-4 min break (0 = never).
+    resdex_results_dwell_min_s: float = 5.0
+    resdex_results_dwell_max_s: float = 15.0
+    resdex_break_every_searches: int = 10
+    resdex_break_min_s: float = 120.0
+    resdex_break_max_s: float = 240.0
+    # A CAPTCHA / bot wall during a batch is held open in the Live Browser for a
+    # human to solve, for at most this long; unsolved → the batch stops.
+    resdex_human_wait_s: int = 600
+    # Global "login needed" requests (app/services/login_required.py): how long a
+    # run that can pause (the Resdex step after an expired recruiter session)
+    # waits for a person to log in via the Live Browser before carrying on
+    # without that source. 0 = never wait.
+    login_wait_s: int = 600
+    resdex_llm_timeout_s: float = 45.0
+    # Provider for the Resdex LLM passes only ("" = inherit EXTRACTION_LLM_MODEL).
+    resdex_llm_model: str = ""
+
+    @property
+    def resdex_source_list(self) -> list[str]:
+        return [s.strip() for s in self.resdex_sources.split(",") if s.strip()]
     # Per-job detail pass (description HTML, employment type, work mode, industry,
     # company website, recruiter contact when Naukri shows one). Off ⇒ listing-only.
     naukri_fetch_details: bool = True
@@ -196,6 +256,9 @@ class Settings(BaseSettings):
     naukri_breaker_threshold: int = 3
     naukri_breaker_pause_min_s: int = 600
     naukri_breaker_pause_max_s: int = 900
+    # Give up on the run once this many pause-then-probe attempts fail in a row
+    # (a hard block) instead of pausing ever longer; collected jobs are kept.
+    naukri_max_failed_probes: int = 3
     # Human-in-the-loop: when blocks persist on a manual run, wait this long for
     # someone to solve the CAPTCHA in the Live Browser (0 = never wait).
     naukri_human_wait_s: int = 600

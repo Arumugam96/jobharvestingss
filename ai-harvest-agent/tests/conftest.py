@@ -13,6 +13,17 @@ import pytest_asyncio
 # ── No real LLM calls from the Naukri harvester in tests ──────────────────────
 
 @pytest.fixture(autouse=True)
+def _login_required_state_isolated(monkeypatch, tmp_path):
+    """The global login-needed registry persists to data/sessions/login_required.json
+    — the real (bind-mounted) data dir. Any test path that raises a request (e.g.
+    an orchestrator recruiter-mode precheck fake) must not leak a banner into the
+    running app, so every test gets its own state file."""
+    import app.services.login_required as lr
+
+    monkeypatch.setattr(lr, "STATE_PATH", tmp_path / "login_required.json")
+
+
+@pytest.fixture(autouse=True)
 def _naukri_llm_enrichment_off(monkeypatch):
     """Naukri LLM enrichment defaults ON in settings and would reach whatever
     provider the developer's .env configures. Tests that exercise it inject a
@@ -38,6 +49,7 @@ async def engine():
     import app.models.recruiter  # noqa: F401 — registers recruiters (scraped_jobs.recruiter_id FK target) on Base.metadata
     import app.models.recruiter_finder  # noqa: F401 — registers recruiter_finder_usage/jobs/items on Base.metadata
     import app.models.outreach  # noqa: F401 — registers email_outreach on Base.metadata
+    import app.models.resdex  # noqa: F401 — registers resdex_searches / resdex_candidates / resdex_daily_usage
 
     eng = create_async_engine(TEST_DB_URL, echo=False)
     async with eng.begin() as conn:

@@ -29,6 +29,7 @@ import app.models.recruiter  # noqa: F401 — registers recruiters on Base.metad
 import app.models.recruiter_finder  # noqa: F401 — registers recruiter_finder_usage/jobs/items on Base.metadata
 import app.models.outreach  # noqa: F401 — registers email_outreach on Base.metadata
 import app.models.outreach_reply  # noqa: F401 — registers outreach_replies on Base.metadata
+import app.models.resdex  # noqa: F401 — registers resdex_searches / resdex_candidates / resdex_daily_usage on Base.metadata
 import app.models.suppression  # noqa: F401 — registers email_suppressions on Base.metadata
 import app.models.tenant  # noqa: F401 — registers tenants on Base.metadata
 from app.models.harvest import Base
@@ -39,6 +40,7 @@ from app.routes.linkedin_routes import router as linkedin_agent_router
 from app.routes.linkedin_feed_routes import router as linkedin_feed_router
 from app.routes.naukri_routes import router as naukri_agent_router
 from app.routes.naukri_recruiter_routes import router as naukri_recruiter_router
+from app.routes.login_required_routes import router as login_required_router
 from app.routes.dice_routes import router as dice_agent_router
 from app.routes.run_harvest_agent import router as run_harvest_agent_router
 from app.routes.frontend_routes import router as frontend_router
@@ -172,6 +174,26 @@ def _ensure_llm_calls_columns(sync_conn) -> None:
             logger.info("llm_calls_run_id_nullable")
 
 
+def _ensure_companies_columns(sync_conn) -> None:
+    """One-time, idempotent ADD COLUMN backfill for columns added to the
+    pre-existing companies table (the cached Apollo organization id). Mirrors the
+    other _ensure_* helpers — create_all never alters an existing table. Mirrored
+    in alembic 0022."""
+    inspector = sa_inspect(sync_conn)
+    if "companies" not in inspector.get_table_names():
+        return  # brand-new DB — create_all already made this table from the model
+    existing_cols = {c["name"] for c in inspector.get_columns("companies")}
+    ts_type = "TIMESTAMPTZ" if sync_conn.dialect.name == "postgresql" else "TIMESTAMP"
+    pending = [
+        ("apollo_org_id",          "ALTER TABLE companies ADD COLUMN apollo_org_id VARCHAR(64) NOT NULL DEFAULT ''"),
+        ("apollo_org_resolved_at", f"ALTER TABLE companies ADD COLUMN apollo_org_resolved_at {ts_type}"),
+    ]
+    for name, ddl in pending:
+        if name not in existing_cols:
+            sync_conn.execute(sa_text(ddl))
+            logger.info("companies_column_added", column=name)
+
+
 def _ensure_harvest_runs_columns(sync_conn) -> None:
     """One-time, idempotent ADD COLUMN backfill for columns added to the
     pre-existing harvest_runs table. Mirrors the other _ensure_* helpers —
@@ -245,6 +267,11 @@ def _ensure_email_outreach_columns(sync_conn) -> None:
     sync_conn.execute(sa_text(
         "CREATE INDEX IF NOT EXISTS ix_email_outreach_job_url ON email_outreach (job_url)"
     ))
+    # Recipient lookup for the one-initial-email-per-address-per-day guard
+    # (auto_outreach_service / outreach_log_service.recipient_emailed_since). Alembic 0020.
+    sync_conn.execute(sa_text(
+        "CREATE INDEX IF NOT EXISTS ix_email_outreach_to_email_lower ON email_outreach (lower(to_email))"
+    ))
 
 
 def _ensure_recruiter_finder_jobs_columns(sync_conn) -> None:
@@ -316,6 +343,8 @@ _TENANT_CONTENT_TABLES = [
     # Recruiter Contact Finder (recruiter_finder_usage is a standalone counter scoped
     # by explicit tenant_id in SQL, like apollo_daily_usage — so NOT listed here).
     "recruiter_finder_jobs", "recruiter_finder_items", "recruiter_finder_reveal_log",
+    # Resdex candidate matching (resdex_daily_usage is a global counter — not listed).
+    "resdex_searches", "resdex_candidates",
 ]
 
 
@@ -441,6 +470,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # runs) and source_status (per-source live status) — same idempotent
         # ADD COLUMN treatment.
         await conn.run_sync(_ensure_harvest_runs_columns)
+        # companies gained the cached Apollo organization id (apollo_org_id +
+        # apollo_org_resolved_at) — same idempotent ADD COLUMN treatment.
+        await conn.run_sync(_ensure_companies_columns)
         # email_outreach gained channel + follow-up threading (outreach_kind,
         # parent_outreach_id) + provider_message_id — same idempotent treatment.
         await conn.run_sync(_ensure_email_outreach_columns)
@@ -627,6 +659,7 @@ def create_app() -> FastAPI:
     app.include_router(harvest_agent_router, dependencies=protected)          # POST /run-harvest  +  management endpoints
     app.include_router(naukri_agent_router, dependencies=protected)           # POST /run-naukri-agent  +  results endpoints
     app.include_router(naukri_recruiter_router, dependencies=protected)       # /naukri-recruiter/* (recruiter session status/verify/login)
+    app.include_router(login_required_router, dependencies=protected)         # /login-required (global "log in via Live Browser" banner)
     app.include_router(dice_agent_router, dependencies=protected)             # POST /run-dice-agent  +  dice results endpoints
     app.include_router(prospect_intelligence_router, dependencies=protected)  # POST /run-prospect-intelligence
     app.include_router(recruiter_discovery_router, dependencies=protected)    # POST /run-recruiter-discovery

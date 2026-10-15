@@ -8,14 +8,13 @@ Design mirrors the existing httpx idiom in
 ``tenacity`` retry with exponential backoff, ``raise_for_status``, typed
 exceptions, and structlog. No new heavy dependencies.
 
-Credits: ONLY email/phone reveals cost Apollo credits (we're on the Basic plan).
-The search / listing calls — organizations/enrich, mixed_companies/search,
-mixed_people/api_search — resolve orgs and list people WITHOUT revealing contact
-info, so they are free and are NOT gated by the credit cap. Only the reveal calls
-(people/match, people/bulk_match) reserve against the per-UTC-day cap
-(app/services/apollo_budget.py) and emit an ``apollo_credits_used`` log line.
-Callers are responsible for gating/caching (see
-``apollo_enrichment.apollo_contact_fallback``).
+Credits: the reveal calls (people/match, people/bulk_match) cost a credit per person,
+and so do the organization lookups — organizations/enrich (1 per company) and
+mixed_companies/search (1 per page). All of them reserve against the per-UTC-day cap
+(app/services/apollo_budget.py) before the request. Only the people listing
+(mixed_people/api_search) is free and ungated. Callers are responsible for
+gating/caching (see ``apollo_enrichment.apollo_contact_fallback`` for reveals and
+``company_enrichment_service.resolve_apollo_org``, which caches the org id per company).
 
 Phone reveal note: Apollo returns phone numbers *asynchronously* via a webhook,
 not in the match response, and it *requires* a ``webhook_url`` param whenever
@@ -312,12 +311,14 @@ class ApolloClient:
         organization (id + size/HQ/industry), the fallback when a domain-based
         organizations/enrich yields no id. When a ``domain`` is given, prefer the
         result whose primary_domain matches it; otherwise take the first. Returns None
-        when Apollo finds no organization. Company search reveals no contact info and
-        costs no Apollo credit, so it is NOT gated by the credit cap."""
+        when Apollo finds no organization or the daily cap is reached. Costs 1 credit
+        per page, so it reserves against the daily cap like the reveals."""
         if not self.enabled:
             raise ApolloAPIError("Apollo is not configured (APOLLO_API_KEY is empty)")
         company_name = (company_name or "").strip()
         if not company_name:
+            return None
+        if not await self._reserve_credit("mixed_companies/search"):
             return None
 
         data = await self._request(
@@ -352,6 +353,7 @@ class ApolloClient:
         person_locations: list[str] | None = None,
         per_page: int = 10,
         page: int = 1,
+        email_statuses: list[str] | None = None,
     ) -> list[ApolloPersonResult]:
         """POST /mixed_people/api_search — list a company's people filtered by title
         and (crucially) ``person_locations``, so the result is LOCATION-SPECIFIC. The
@@ -360,7 +362,10 @@ class ApolloClient:
 
         ``page`` selects the result page (Apollo caps ``per_page`` at 100). Listing
         reveals NO emails and costs NO Apollo credit, so it is NOT gated by the credit
-        cap — only the reveal calls (match_person_by_id) are. Page freely."""
+        cap — only the reveal calls (match_person_by_id) are. Page freely.
+
+        ``email_statuses`` narrows Apollo's contact_email_status filter (e.g.
+        ["verified"]); default: verified + likely to engage + unverified."""
         if not self.enabled:
             raise ApolloAPIError("Apollo is not configured (APOLLO_API_KEY is empty)")
         organization_ids = [o for o in (organization_ids or []) if o]
@@ -371,7 +376,7 @@ class ApolloClient:
             "organization_ids": organization_ids,
             "person_titles": titles,
             "include_similar_titles": True,
-            "contact_email_status": ["verified", "likely to engage", "unverified"],
+            "contact_email_status": email_statuses or ["verified", "likely to engage", "unverified"],
             "page": page,
             "per_page": per_page,
         }
@@ -395,13 +400,15 @@ class ApolloClient:
         """GET-style POST /organizations/enrich — company-level enrichment keyed
         on a **domain** (Apollo has no LinkedIn-company-URL lookup). Returns an
         ApolloOrgResult with size/industry/location, or None when Apollo finds no
-        organization for the domain. Does NOT reveal any person contact, so it never
-        spends an Apollo credit and is NOT gated by the credit cap.
+        organization for the domain or the daily cap is reached. Costs 1 credit per
+        company, so it reserves against the daily cap like the reveals.
         """
         if not self.enabled:
             raise ApolloAPIError("Apollo is not configured (APOLLO_API_KEY is empty)")
         domain = (domain or "").strip()
         if not domain:
+            return None
+        if not await self._reserve_credit("organizations/enrich"):
             return None
         data = await self._request("/organizations/enrich", params={"domain": domain})
         org = data.get("organization") or data.get("org")
@@ -459,9 +466,10 @@ class ApolloClient:
 
     async def _reserve_credit(self, endpoint: str, cost: int = 1) -> bool:
         """Reserve ``cost`` credit-calls against the global per-UTC-day Apollo cap
-        BEFORE issuing a credit-spending request. Called ONLY by the reveal endpoints
-        (people/match, people/bulk_match) — the search/enrich lookups are free and
-        never reserve. Returns False when the day's budget is exhausted (caller
+        BEFORE issuing a credit-spending request. Called by the reveal endpoints
+        (people/match, people/bulk_match) and the organization lookups
+        (organizations/enrich, mixed_companies/search) — only the people listing is
+        free and never reserves. Returns False when the day's budget is exhausted (caller
         short-circuits to its empty value). Best-effort (fails open on DB error) — see
         app/services/apollo_budget.py. Imported lazily to keep the client importable
         without a DB session."""

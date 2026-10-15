@@ -503,7 +503,9 @@ function SinglePanel({ onSpent }) {
     try {
       const r = await finderCandidates({ company, location, personas });
       setCompanyDomain(r.company_domain || "");
-      if (r.status === "unconfigured") { setError(r.message || "Apollo is not configured."); setCandidates([]); }
+      if (r.status === "unconfigured" || r.status === "over_budget") {
+        setError(r.message || "Apollo is not configured."); setCandidates([]);
+      }
       else setCandidates(r.candidates || []);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not reach the harvest backend.");

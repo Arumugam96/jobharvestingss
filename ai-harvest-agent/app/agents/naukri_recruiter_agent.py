@@ -197,6 +197,16 @@ def _write_status(data: dict[str, Any]) -> dict[str, Any]:
         STATUS_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
     except Exception as exc:
         logger.warning("naukri_recruiter_status_write_failed", error=str(exc))
+    if data.get("logged_in"):
+        # Any successful login / verify / launcher hand-off / harvest pre-check
+        # settles a pending global "Naukri recruiter login needed" request.
+        try:
+            from app.services import login_required
+
+            login_required.clear(login_required.SOURCE_NAUKRI_RECRUITER,
+                                 kind=login_required.KIND_LOGIN)
+        except Exception as exc:
+            logger.debug("naukri_recruiter_login_required_clear_failed", error=str(exc))
     return data
 
 

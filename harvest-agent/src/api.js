@@ -110,6 +110,14 @@ export function getJob(id) {
   return request(`/jobs/${encodeURIComponent(id)}`);
 }
 
+/** GET /jobs/{id}/outreach-detail — the job detail page's Resdex candidates (latest
+ * search: status, Boolean query, filters, candidate profiles) plus every outreach
+ * email sent for the job (initial + follow-ups, with delivery status and which
+ * candidates each included). Returns { job_id, job_url, resdex: {...}|null, emails: [...] }. */
+export function getJobOutreachDetail(jobId) {
+  return request(`/jobs/${encodeURIComponent(jobId)}/outreach-detail`);
+}
+
 /** GET /harvest-config — current Rule Engine configuration. */
 export function getHarvestConfig() {
   return request("/harvest-config");
@@ -191,6 +199,33 @@ export function startNaukriRecruiterLogin(timeoutS = 600) {
  * Launches a browser — call only from an explicit user action, never on page load. */
 export function verifyNaukriRecruiter() {
   return request("/naukri-recruiter/verify", { method: "POST" });
+}
+
+// ── Global "login needed" requests (any login-based source) ──────────────────
+
+/** GET /login-required — pending "a human must log in" requests, cheap (reads one
+ * small file server-side, never a browser). Returns {items: [{source, account, kind
+ * ("login"|"human_needed"), label, reason, since, waiting_until, action: {type}}],
+ * now, login_wait_s}. */
+export function getLoginRequired() {
+  return request("/login-required");
+}
+
+/** POST /login-required/open — "Open Live Browser to log in": starts that source's
+ * existing login flow (Naukri recruiter login window / LinkedIn setup session) or,
+ * when a run's own browser is waiting, just says to watch the Live Browser. Returns
+ * {status: "started"|"live_browser"|"busy"|"failed", open_live_browser, message}. */
+export function openLoginRequired({ source, account, kind } = {}) {
+  return request("/login-required/open", {
+    method: "POST", body: JSON.stringify({ source, account: account || null, kind: kind || null }),
+  });
+}
+
+/** POST /login-required/dismiss — hide a request (it returns if a run raises it again). */
+export function dismissLoginRequired({ source, account, kind } = {}) {
+  return request("/login-required/dismiss", {
+    method: "POST", body: JSON.stringify({ source, account: account || null, kind: kind || null }),
+  });
 }
 
 // ── Health ───────────────────────────────────────────────────────────────────

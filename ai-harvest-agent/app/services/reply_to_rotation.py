@@ -42,9 +42,8 @@ _TZ_ALIASES = {"IST": "Asia/Kolkata", "UTC": "UTC", "GMT": "Europe/London"}
 _DEFAULT_TZ = "Asia/Kolkata"
 
 
-def _today() -> date:
-    """Current date in the harvest schedule's timezone. Falls back to the schedule
-    default, then to the naive local date if the timezone can't be resolved."""
+def _schedule_tz():
+    """The harvest schedule's timezone (default Asia/Kolkata); None if unresolvable."""
     tz_name = _DEFAULT_TZ
     try:
         tz_name = (ConfigService().load().schedule.timezone or _DEFAULT_TZ).strip()
@@ -52,9 +51,24 @@ def _today() -> date:
         pass  # config unreadable — use the default tz
     tz_name = _TZ_ALIASES.get(tz_name.upper(), tz_name)
     try:
-        return datetime.now(pytz.timezone(tz_name)).date()
+        return pytz.timezone(tz_name)
     except Exception:
-        return datetime.now().date()
+        return None
+
+
+def _today() -> date:
+    """Current date in the harvest schedule's timezone. Falls back to the schedule
+    default, then to the naive local date if the timezone can't be resolved."""
+    tz = _schedule_tz()
+    return datetime.now(tz).date() if tz else datetime.now().date()
+
+
+def day_start() -> datetime:
+    """Midnight that began "today" in the harvest schedule's timezone, as an aware
+    datetime — the boundary for the one-email-per-day outreach limits."""
+    tz = _schedule_tz() or pytz.UTC
+    now = datetime.now(tz)
+    return tz.localize(datetime(now.year, now.month, now.day))
 
 
 def rotation_index() -> int:

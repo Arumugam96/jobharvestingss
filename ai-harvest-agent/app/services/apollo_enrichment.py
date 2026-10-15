@@ -24,8 +24,8 @@ import structlog
 
 from app.config import Settings
 from app.core.company_size import band_from_employee_count
-from app.core.hr_titles import HR_TITLES
-from app.services.apollo_client import ApolloAPIError, ApolloClient
+from app.core.hr_titles import HR_TITLES, hr_title_tier
+from app.services.apollo_client import ApolloAPIError, ApolloClient, ApolloPersonResult
 
 logger = structlog.get_logger(__name__)
 
@@ -313,3 +313,75 @@ async def apollo_company_contact_fallback(
         company=company_name, location=location_terms, people=len(people), revealed=revealed,
     )
     return CompanyContactResult(attempted=True, company_domain=resolved_domain, matched=True)
+
+
+# ── Company + location HR shortlist (free) ───────────────────────────────────────
+
+@dataclass
+class HrShortlistResult:
+    people: list[ApolloPersonResult]   # ranked best-first, at most `size`; emails LOCKED
+    company_domain: str = ""
+    attempted: bool = False            # True once a real search was issued (hit or miss)
+    cap_reached: bool = False          # daily cap blocked the org resolve — retry later
+
+
+async def apollo_hr_shortlist(
+    *,
+    settings: Settings,
+    company_name: str,
+    location_terms: str,
+    domain: str = "",
+    size: int = 10,
+    verified_only: bool = True,
+    client: ApolloClient | None = None,
+) -> HrShortlistResult:
+    """The top ``size`` HR / talent-acquisition people at a (company, location) —
+    ids, names and titles only. The people search is free; the org resolve costs a
+    credit but is cached per company (resolve_apollo_org), so a company is paid for
+    once across all its locations. Emails are revealed later, one person at a
+    time, by the rotation (company_location_contact_service). Ranked by
+    hr_title_tier (recruiters first), keeping Apollo's order within a tier.
+    ``verified_only`` asks Apollo for people with a verified email only.
+    ``location_terms`` is REQUIRED — never a company-wide search. Never raises."""
+    if not settings.apollo_api_key or not company_name.strip() or not location_terms.strip():
+        return HrShortlistResult(people=[])
+
+    from app.services.company_enrichment_service import resolve_apollo_org
+
+    client = client or ApolloClient(settings)
+    dom = (domain or "").strip()
+    try:
+        res = await resolve_apollo_org(
+            settings, company_name=company_name, domain=dom, guess_domain=True, client=client,
+        )
+    except ApolloAPIError as exc:
+        logger.warning("apollo_hr_shortlist_org_failed", company=company_name, error=str(exc))
+        return HrShortlistResult(people=[], attempted=True)
+    if res.cap_reached:
+        return HrShortlistResult(people=[], company_domain=dom, cap_reached=True)
+    org = res.org
+    if org is None or not org.id:
+        return HrShortlistResult(people=[], company_domain=dom, attempted=True)
+
+    resolved_domain = org.domain or dom or ""
+    try:
+        people = await client.search_people(
+            [org.id], HR_TITLES, person_locations=[location_terms], per_page=25,
+            email_statuses=["verified"] if verified_only else None,
+        )
+    except ApolloAPIError as exc:
+        logger.warning("apollo_hr_shortlist_people_failed", company=company_name, error=str(exc))
+        return HrShortlistResult(people=[], company_domain=resolved_domain, attempted=True)
+
+    seen: set[str] = set()
+    unique = []
+    for p in people:
+        if p.id and p.id not in seen:
+            seen.add(p.id)
+            unique.append(p)
+    ranked = sorted(unique, key=lambda p: hr_title_tier(p.title))[: max(1, size)]
+    logger.info(
+        "apollo_hr_shortlist", company=company_name, location=location_terms,
+        found=len(people), kept=len(ranked),
+    )
+    return HrShortlistResult(people=ranked, company_domain=resolved_domain, attempted=True)

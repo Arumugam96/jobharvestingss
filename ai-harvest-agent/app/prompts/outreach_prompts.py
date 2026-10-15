@@ -296,7 +296,7 @@ def _ensure_greeting(body: str, greeting: str) -> str:
 
 def append_closing(
     pitch: str, sender_email: str, deck_url: str = "", contact_block: str = "", intro: str = "",
-    greeting: str = "",
+    greeting: str = "", candidate_block: str = "",
 ) -> str:
     """Append the deterministic closing to an LLM- or template-generated pitch, in
     this order (blocks separated by blank lines):
@@ -308,6 +308,10 @@ def append_closing(
                                           i.e. the posting reference)
 
         <rest of the pitch body>
+
+        <candidate_block>                (when given — the anonymised Resdex matching-
+                                          profiles card, resdex_match_service.
+                                          format_candidate_block)
 
         <contact_block>                  (when given — the automated-send desk
                                           "reach out to us" name/phone block)
@@ -325,7 +329,10 @@ def append_closing(
     )
     url = (deck_url or "").strip()
     contact = (contact_block or "").strip()
+    candidates = (candidate_block or "").strip()
     blocks = [body] if body else []
+    if candidates:
+        blocks.append(candidates)
     if contact:
         blocks.append(contact)
     if url:
@@ -724,22 +731,37 @@ def build_intro(sender_email: str, job: dict) -> str:
     return f"I'm reaching out from {COMPANY_NAME}."
 
 
-def build_email_prompt(client_type: str, tone: str, job: dict, sender_email: str = "") -> str:
+# Extra prompt line, only when a Resdex candidate card follows the body (the card itself
+# is deterministic — the model must not describe or invent the profiles).
+CANDIDATES_CONTEXT_LINE = (
+    "Matching candidate profiles are included below the message — mention briefly that "
+    "you've included a few relevant profiles; do not describe them."
+)
+
+
+def build_email_prompt(
+    client_type: str, tone: str, job: dict, sender_email: str = "",
+    candidates_included: bool = False,
+) -> str:
     """User prompt for email generation. It supplies only the per-request
     variables — `client_type` picks the audience ask (_EMAIL_ASK: vendor onboarding for
     new/unknown prospects, priority requirements for active clients), `tone` the style
     (lightly steers phrasing), and `job` the personalization context (with greet=False —
     the greeting is deterministic). `sender_email` is unused here (the greeting, intro
     and sign-off are added by append_closing); it's kept for signature compatibility
-    with the caller. The body structure and output rules live in EMAIL_SYSTEM_PROMPT."""
+    with the caller. The body structure and output rules live in EMAIL_SYSTEM_PROMPT.
+    `candidates_included` adds CANDIDATES_CONTEXT_LINE after the role context (a Resdex
+    candidate card follows the body); False leaves the prompt text unchanged."""
     tone_instr = TONE_INSTRUCTIONS.get(tone, TONE_INSTRUCTIONS["Formal"])
     audience = _AUDIENCE.get(client_type, _AUDIENCE["new"])
     ask = _EMAIL_ASK.get(client_type, _EMAIL_ASK["new"])
+    candidates = f"{CANDIDATES_CONTEXT_LINE}\n\n" if candidates_included else ""
     return (
         f"Audience — {audience}\n\n"
         f"Ask — {ask}\n\n"
         f"Tone: {tone} — {tone_instr}\n\n"
         f"Recipient / role context:\n{_job_context(job, include_description=False, greet=False)}\n\n"
+        f"{candidates}"
         f"Write the outreach email BODY only, following the structure and rules in "
         f"the system instructions. "
         f'Return ONLY JSON: {{"subject": "...", "body": "..."}}'
@@ -758,7 +780,8 @@ def build_email_subject(job: dict) -> str:
 
 
 def render_email_fallback(
-    client_type: str, job: dict, sender_email: str = "", deck_url: str = "", contact_block: str = ""
+    client_type: str, job: dict, sender_email: str = "", deck_url: str = "",
+    contact_block: str = "", candidate_block: str = "",
 ) -> tuple[str, str]:
     """Deterministic fallback used when LLM generation fails — builds the same shape the
     LLM path assembles (greeting + self-intro merged with the posting reference + offer/ask
@@ -767,7 +790,8 @@ def render_email_fallback(
     front of it. An existing ("active") client gets the partnership/priority-roles line
     (INTRO_OFFER_ACTIVE); any other `client_type` is treated as a new/unknown prospect and
     gets the vendor-onboarding line (INTRO_OFFER_NEW). `contact_block` (automated sends)
-    is placed above the sign-off, mirroring the LLM path."""
+    is placed above the sign-off, mirroring the LLM path; `candidate_block` (Resdex
+    matching profiles) sits between the body and the contact block."""
     company = (job.get("company") or "").strip() or _GENERIC_COMPANY
     title = (job.get("job_title") or "").strip()
 
@@ -786,6 +810,7 @@ def render_email_fallback(
     intro = build_intro(sender_email, job)
     return build_email_subject(job), append_closing(
         body, sender_email, deck_url, contact_block, intro=intro, greeting=greeting,
+        candidate_block=candidate_block,
     )
 
 

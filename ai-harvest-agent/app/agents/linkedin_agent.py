@@ -1131,6 +1131,38 @@ class LinkedInAgent:
         # date ("3 days ago") on a multi-hour run resolves against the same
         # reference point instead of drifting as the run progresses.
         self._harvest_started_at = datetime.now(timezone.utc)
+        # LinkedIn account ("1"/"2") whose profile this run uses — set by the
+        # orchestrator; tags the global "LinkedIn login needed" request.
+        self.login_account: str | None = None
+
+    # ── Global "login needed" requests (app/services/login_required.py) ─────────
+
+    def _flag_login_required(self, reason: str, *, waiting: bool) -> None:
+        """waiting=True: this run's own browser sits on the login page (watch the
+        Live Browser); False: nobody is waiting — log in via the setup flow."""
+        try:
+            from app.services import login_required as lr
+
+            account = getattr(self, "login_account", None) or "1"
+            lr.raise_login_required(
+                lr.SOURCE_LINKEDIN, account=account, reason=reason,
+                waiting_s=_LOGIN_WAIT_TIMEOUT_S if waiting else None,
+                action={"type": lr.ACTION_LIVE_BROWSER} if waiting else None,
+            )
+            if not waiting:
+                lr.set_waiting(lr.SOURCE_LINKEDIN, account, None,
+                               action=lr.default_action(lr.SOURCE_LINKEDIN, account, lr.KIND_LOGIN))
+        except Exception as exc:
+            logger.debug("linkedin_login_required_flag_failed", error=str(exc))
+
+    def _clear_login_required(self) -> None:
+        try:
+            from app.services import login_required as lr
+
+            lr.clear(lr.SOURCE_LINKEDIN, getattr(self, "login_account", None) or "1",
+                     kind=lr.KIND_LOGIN)
+        except Exception as exc:
+            logger.debug("linkedin_login_required_clear_failed", error=str(exc))
 
     def _get_llm_service(self) -> "LLMService":
         """Lazily build an LLMService from Settings if one wasn't injected —
@@ -1403,6 +1435,9 @@ class LinkedInAgent:
                 )
                 if not wait_for_login:
                     logger.info("linkedin_jobs_returned", count=0, reason="authwall")
+                    self._flag_login_required(
+                        "LinkedIn session expired — this harvest skipped LinkedIn", waiting=False,
+                    )
                     raise LinkedInLoginError(f"LinkedIn redirected to a gated page: {current_url}")
                 await self._wait_for_manual_login(page, search_url, on_status)
                 return
@@ -1418,6 +1453,7 @@ class LinkedInAgent:
         cookies = await page.context.cookies()
         if any(c["name"] == "li_at" for c in cookies):
             logger.debug("linkedin_authenticated", url=current_url, cookie_count=len(cookies))
+            self._clear_login_required()
             return
 
         await _screenshot(page, "linkedin_no_li_at_cookie")
@@ -1428,6 +1464,10 @@ class LinkedInAgent:
                    "Call POST /linkedin-setup-session to log in.",
         )
         if not wait_for_login:
+            self._flag_login_required(
+                "LinkedIn session is not authenticated — this harvest skipped LinkedIn",
+                waiting=False,
+            )
             raise LinkedInLoginError(
                 "LinkedIn session is not authenticated (no li_at cookie). "
                 "Call POST /linkedin-setup-session to log in."
@@ -1454,6 +1494,9 @@ class LinkedInAgent:
                 f"(waiting up to {wait_minutes} minutes)…"
             )
         logger.info("linkedin_waiting_for_manual_login", timeout_s=_LOGIN_WAIT_TIMEOUT_S)
+        self._flag_login_required(
+            "LinkedIn requires login — the harvest is waiting in the Live Browser", waiting=True,
+        )
 
         try:
             await page.goto("https://www.linkedin.com/login", wait_until="domcontentloaded", timeout=20_000)
@@ -1470,6 +1513,7 @@ class LinkedInAgent:
                 continue
             if any(c["name"] == "li_at" for c in cookies):
                 logger.info("linkedin_manual_login_detected", waited_s=waited)
+                self._clear_login_required()
                 if on_status:
                     await on_status("Login detected — resuming harvest…")
                 try:
@@ -1481,6 +1525,10 @@ class LinkedInAgent:
                 return
 
         logger.error("linkedin_manual_login_timeout", timeout_s=_LOGIN_WAIT_TIMEOUT_S)
+        self._flag_login_required(
+            f"LinkedIn login not completed within {wait_minutes} minutes — the harvest "
+            "skipped LinkedIn", waiting=False,
+        )
         raise LinkedInLoginError(
             f"Timed out after {wait_minutes} minutes waiting for manual LinkedIn login."
         )
@@ -1715,11 +1763,10 @@ class LinkedInAgent:
 
         from app.config import get_settings
         from app.core.company_domain import infer_company_domain
-        from app.core.company_size import band_from_employee_count
         from app.core.dependencies import get_session_factory
         from app.agents.prospect_intelligence_agent import _extract_linkedin_contact_info, _infer_department
-        from app.services.apollo_client import ApolloClient
         from app.services.apollo_enrichment import apollo_contact_fallback
+        from app.services.company_enrichment_service import resolve_apollo_org
         from app.services.recruiter_service import link_recruiter_jobs_by_url, save_enrichment, upsert_recruiter
 
         settings = get_settings()
@@ -1862,9 +1909,10 @@ class LinkedInAgent:
                         contact_info["phone"] = apollo_result.phone
 
                     # Opt-in path (b): the people-match returned no company size —
-                    # spend an extra credit on organizations/enrich (keyed on a
-                    # derived domain) to fill company size / HQ location. Gated by
-                    # settings.apollo_enrich_company so default runs never do this.
+                    # resolve the company's Apollo org (a credit, but cached per
+                    # company — resolve_apollo_org) to fill company size / HQ
+                    # location. Gated by settings.apollo_enrich_company so default
+                    # runs never do this.
                     if (
                         settings.apollo_enrich_company
                         and apollo_result.matched
@@ -1872,14 +1920,18 @@ class LinkedInAgent:
                     ):
                         domain = apollo_result.company_domain or infer_company_domain(company_name)[0]
                         if domain:
+                            org, size_band = None, ""
                             try:
-                                org = await ApolloClient(settings).enrich_organization(domain)
+                                res = await resolve_apollo_org(
+                                    settings, company_name=company_name,
+                                    domain=apollo_result.company_domain, guess_domain=True,
+                                )
+                                org, size_band = res.org, res.size_band
                             except Exception as exc:
-                                org = None
                                 logger.debug("apollo_org_enrich_failed", domain=domain, error=str(exc))
                             if org:
-                                if org.size:
-                                    apollo_result.company_size_band = band_from_employee_count(org.size)
+                                if size_band:
+                                    apollo_result.company_size_band = size_band
                                 if org.country and not apollo_result.company_country:
                                     apollo_result.company_country = org.country
                                 if org.state and not apollo_result.company_state:

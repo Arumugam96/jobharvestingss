@@ -369,6 +369,36 @@ async def thread_messages(
     return list((await db.execute(stmt)).scalars().all())
 
 
+async def emails_for_job(
+    db: AsyncSession,
+    job_id: str | None,
+    job_url: str | None,
+    *,
+    limit: int = 100,
+) -> list[EmailOutreachORM]:
+    """Every EMAIL send attempt (initial + follow-ups, sent + failed) for one job,
+    newest first — the job detail page's "Outreach email" panel.
+
+    Matched by ``job_id`` OR the normalized ``job_url``: auto-outreach rows carry
+    the normalized job_url (stable across replace_run_jobs re-inserts), manual
+    sends from the Jobs UI carry only the job_id. Tenant-scoped. Read-only."""
+    preds = []
+    if job_id:
+        preds.append(EmailOutreachORM.job_id == job_id)
+    key = normalize_job_url(job_url)
+    if key:
+        preds.append(EmailOutreachORM.job_url == key)
+    if not preds:
+        return []
+    stmt = (
+        apply_tenant(select(EmailOutreachORM), EmailOutreachORM.tenant_id)
+        .where(EmailOutreachORM.channel == "email", or_(*preds))
+        .order_by(EmailOutreachORM.created_at.desc())
+        .limit(limit)
+    )
+    return list((await db.execute(stmt)).scalars().all())
+
+
 def _parse_day(raw: str | None, *, end: bool = False) -> datetime | None:
     """Parse a 'YYYY-MM-DD' filter value to a UTC datetime — start-of-day, or the
     start of the NEXT day when `end` (so `created_at < end` is inclusive)."""
@@ -581,6 +611,56 @@ async def posting_already_emailed(db: AsyncSession, job_url: str | None) -> Emai
         .limit(1)
     )
     return (await db.execute(stmt)).scalar_one_or_none()
+
+
+# ── Recipient-level guards (auto-outreach) ─────────────────────────────────────
+# Deliberately NOT tenant-scoped: they protect the PERSON on the other end, who
+# must not be emailed twice in a day (or after replying) just because two tenants
+# harvested the same company.
+
+def _utc(dt: datetime) -> datetime:
+    """Aware → UTC (SQLite compares stored UTC strings; Postgres doesn't care)."""
+    return dt.astimezone(timezone.utc) if dt.tzinfo else dt
+
+
+async def recipient_emailed_since(db: AsyncSession, email: str, since: datetime) -> bool:
+    """True when a successfully-sent INITIAL email went to ``email`` (any job, any
+    tenant) at or after ``since``."""
+    addr = (email or "").strip().lower()
+    if not addr:
+        return False
+    stmt = select(EmailOutreachORM.id).where(
+        EmailOutreachORM.channel == "email",
+        EmailOutreachORM.outreach_kind == "initial",
+        EmailOutreachORM.status == "sent",
+        func.lower(EmailOutreachORM.to_email) == addr,
+        func.coalesce(EmailOutreachORM.sent_at, EmailOutreachORM.created_at) >= _utc(since),
+    ).limit(1)
+    return (await db.execute(stmt)).first() is not None
+
+
+async def recipient_has_replied(db: AsyncSession, email: str) -> bool:
+    """True when ``email`` ever replied to any of our sends (any tenant)."""
+    addr = (email or "").strip().lower()
+    if not addr:
+        return False
+    stmt = select(EmailOutreachORM.id).where(
+        func.lower(EmailOutreachORM.to_email) == addr,
+        EmailOutreachORM.replied_at.isnot(None),
+    ).limit(1)
+    return (await db.execute(stmt)).first() is not None
+
+
+async def companies_replied_since(db: AsyncSession, since: datetime) -> set[str]:
+    """Normalized company keys (company_service.normalize_company_key) of every
+    company where someone replied to one of our sends at or after ``since``."""
+    from app.services.company_service import normalize_company_key
+
+    stmt = select(EmailOutreachORM.company).where(
+        EmailOutreachORM.replied_at.isnot(None),
+        EmailOutreachORM.replied_at >= _utc(since),
+    ).distinct()
+    return {k for (c,) in (await db.execute(stmt)).all() if (k := normalize_company_key(c or ""))}
 
 
 async def get_by_id(db: AsyncSession, outreach_id: str) -> EmailOutreachORM | None:

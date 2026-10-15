@@ -41,12 +41,15 @@ from app.models.recruiter_finder import (
 )
 from app.services import recruiter_finder_budget
 from app.services.apollo_client import ApolloAPIError, ApolloClient
+from app.services.company_enrichment_service import resolve_apollo_org
 from app.services.harvest_run_service import db_read, db_write
 from app.services.recruiter_service import save_finder_contact
 
 logger = structlog.get_logger(__name__)
 
 _STATUS_COUNTERS = ("completed", "not_found", "ambiguous", "failed")
+# Resolving the company to an Apollo org costs a credit (account-wide daily cap).
+_ORG_CAP_MSG = "Daily Apollo credit cap reached — try again tomorrow."
 
 
 def _now():
@@ -150,11 +153,10 @@ async def _company_lookup(
     are bounded by ``reveal_cap`` so a company with many empty roles can't balloon Apollo
     usage."""
     company, domain, location = item["company"], item["domain"], item["location"]
-    org = None
-    if domain:
-        org = await client.enrich_organization(domain)
-    if org is None or not org.id:
-        org = await client.search_organization(company, domain=domain)
+    res = await resolve_apollo_org(get_settings(), company_name=company, domain=domain, client=client)
+    if res.cap_reached:
+        return _blank_outcome("failed", error=_ORG_CAP_MSG)
+    org = res.org
     if org is None or not org.id:
         return _blank_outcome("not_found")
 
@@ -202,11 +204,10 @@ async def _company_lookup_many(
     budget is exhausted mid-run. Returns (results, fallback_status, budget_exhausted);
     ``fallback_status`` is only meaningful when ``results`` is empty."""
     company, domain, location = item["company"], item["domain"], item["location"]
-    org = None
-    if domain:
-        org = await client.enrich_organization(domain)
-    if org is None or not org.id:
-        org = await client.search_organization(company, domain=domain)
+    res = await resolve_apollo_org(get_settings(), company_name=company, domain=domain, client=client)
+    if res.cap_reached:
+        return [], "over_budget", True
+    org = res.org
     if org is None or not org.id:
         return [], "not_found", False
     domain_out = org.domain or domain or ""
@@ -700,8 +701,8 @@ async def list_company_candidates(
 ) -> dict:
     """List a company's persona candidates (LOCKED emails) for the browse table.
     Paginates search_people over up to 5 free pages (per_page=100) — reveals nothing,
-    so it spends NO credit: listing is free and ungated (neither the per-tenant Finder
-    budget nor the account-wide cap). ``personas`` (the multi-select "Who to look up" input — known
+    so listing is free and ungated. Only resolving the company to an Apollo org costs a
+    credit (account-wide cap), and that is cached per company (resolve_apollo_org). ``personas`` (the multi-select "Who to look up" input — known
     persona labels and/or free-text titles) takes precedence over the single ``persona``.
     Returns ``{status, company_domain, total, candidates: [...]}``."""
     settings = get_settings()
@@ -710,11 +711,11 @@ async def list_company_candidates(
                 "message": "Apollo is not configured (set APOLLO_API_KEY)."}
 
     client = ApolloClient(settings)
-    org = None
-    if domain:
-        org = await client.enrich_organization(domain)
-    if org is None or not org.id:
-        org = await client.search_organization(company, domain=domain)
+    res = await resolve_apollo_org(settings, company_name=company, domain=domain, client=client)
+    if res.cap_reached:
+        return {"status": "over_budget", "company_domain": domain or "", "total": 0,
+                "candidates": [], "message": _ORG_CAP_MSG}
+    org = res.org
     if org is None or not org.id:
         return {"status": "not_found", "company_domain": domain or "", "total": 0, "candidates": []}
 

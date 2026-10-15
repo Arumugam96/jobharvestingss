@@ -14,6 +14,22 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from app.services.apollo_client import ApolloClient, ApolloOrgResult, ApolloPersonResult
 
 
+@pytest.fixture(autouse=True)
+def _no_org_cache_db(monkeypatch):
+    """resolve_apollo_org's company cache isn't under test here (see
+    test_apollo_org_cache.py) — keep it off the process-wide session factory, which
+    would reach whatever DB the developer's .env points at. Cache unavailable →
+    the resolver falls back to a direct (fake) Apollo lookup. Its pre-flight budget
+    read likewise defaults to unlimited; tests that exercise the cap override it."""
+    def _unavailable(settings):
+        raise RuntimeError("org cache disabled in this module")
+
+    async def _unlimited(*a, **k):
+        return None
+    monkeypatch.setattr("app.services.company_enrichment_service.get_session_factory", _unavailable)
+    monkeypatch.setattr("app.services.apollo_budget.remaining_today", _unlimited)
+
+
 # ── Fakes ─────────────────────────────────────────────────────────────────────
 
 def _fake_settings(**over):
@@ -122,32 +138,52 @@ async def test_reveal_methods_short_circuit_when_capped(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_free_lookups_ignore_the_credit_cap(monkeypatch) -> None:
-    """Search/enrich calls reveal no contact and cost no Apollo credit, so they must
-    run even when the daily cap is exhausted — they never reserve against it."""
+async def test_org_lookups_reserve_against_the_cap_people_listing_is_free(monkeypatch) -> None:
+    """organizations/enrich and mixed_companies/search cost Apollo credits, so a denied
+    cap skips them (no request, None). The people listing is free and still runs."""
     client = ApolloClient(_fake_settings())
+    reserved: list[str] = []
+    requested: list[str] = []
 
-    async def _denied(*a, **k):  # cap exhausted — must be irrelevant to free lookups
+    async def _denied(endpoint, cost=1):  # cap exhausted
+        reserved.append(endpoint)
         return False
 
     async def _fake_request(path, *, params=None, json=None):
-        if path == "/mixed_companies/search":
-            return {"organizations": [{"id": "o1", "name": "Acme", "primary_domain": "acme.com"}]}
+        requested.append(path)
         if path == "/mixed_people/api_search":
             return {"people": [{"id": "p1", "name": "A", "title": "HR"}]}
-        if path == "/organizations/enrich":
-            return {"organization": {"id": "o1", "name": "Acme", "primary_domain": "acme.com"}}
         raise AssertionError(f"unexpected path {path}")
 
     monkeypatch.setattr(client, "_reserve_credit", _denied)
     monkeypatch.setattr(client, "_request", _fake_request)
 
-    org = await client.search_organization("Acme")
-    assert org is not None and org.id == "o1"
+    assert await client.search_organization("Acme") is None
+    assert await client.enrich_organization("acme.com") is None
     people = await client.search_people(["o1"], ["HR"])
     assert len(people) == 1 and people[0].id == "p1"
-    org2 = await client.enrich_organization("acme.com")
-    assert org2 is not None and org2.id == "o1"
+    assert reserved == ["mixed_companies/search", "organizations/enrich"]
+    assert requested == ["/mixed_people/api_search"]
+
+
+async def test_org_lookups_spend_when_the_cap_allows(monkeypatch) -> None:
+    client = ApolloClient(_fake_settings())
+
+    async def _allowed(endpoint, cost=1):
+        return True
+
+    async def _fake_request(path, *, params=None, json=None):
+        if path == "/mixed_companies/search":
+            return {"organizations": [{"id": "o1", "name": "Acme", "primary_domain": "acme.com"}]}
+        if path == "/organizations/enrich":
+            return {"organization": {"id": "o1", "name": "Acme", "primary_domain": "acme.com"}}
+        raise AssertionError(f"unexpected path {path}")
+
+    monkeypatch.setattr(client, "_reserve_credit", _allowed)
+    monkeypatch.setattr(client, "_request", _fake_request)
+
+    assert (await client.search_organization("Acme")).id == "o1"
+    assert (await client.enrich_organization("acme.com")).id == "o1"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -322,7 +358,7 @@ async def test_cache_negative_respects_cooldown(db_session) -> None:
 @pytest.mark.asyncio
 async def test_discovery_searches_per_company_location(engine, monkeypatch) -> None:
     import app.services.company_location_contact_service as svc
-    from app.services.apollo_enrichment import CompanyContactResult
+    from app.services.apollo_enrichment import HrShortlistResult
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
     monkeypatch.setattr(svc, "get_session_factory", lambda settings: factory)
@@ -333,14 +369,18 @@ async def test_discovery_searches_per_company_location(engine, monkeypatch) -> N
 
     seen_locations = []
 
-    async def _fake_fallback(*, settings, company_name, location_terms, domain="",
-                             attempted_at=None, **kw):
+    async def _fake_shortlist(*, settings, company_name, location_terms, **kw):
         seen_locations.append((company_name, location_terms))
-        return CompanyContactResult(
-            name="HR " + location_terms, title="Recruiter",
-            email=f"hr+{len(seen_locations)}@acme.com", matched=True, attempted=True,
+        n = len(seen_locations)
+        return HrShortlistResult(
+            people=[_person(id=f"hr{n}", name="HR " + location_terms, title="Recruiter")],
+            company_domain="acme.com", attempted=True,
         )
-    monkeypatch.setattr(svc, "apollo_company_contact_fallback", _fake_fallback)
+    monkeypatch.setattr(svc, "apollo_hr_shortlist", _fake_shortlist)
+    fake = _FakeApollo(reveals={
+        "hr1": _person(id="hr1", email="hr+1@acme.com", email_status="verified"),
+        "hr2": _person(id="hr2", email="hr+2@acme.com", email_status="verified"),
+    })
 
     def _job(company, location):
         return types.SimpleNamespace(
@@ -358,9 +398,10 @@ async def test_discovery_searches_per_company_location(engine, monkeypatch) -> N
     ]
 
     settings = _fake_settings()
-    result = await svc.discover_company_location_contacts(jobs, settings)
+    result = await svc.discover_company_location_contacts(jobs, settings, client=fake)
 
     assert result["searched"] == 2            # two distinct (company, location) pairs
+    assert result["revealed"] == 2 and fake.reveal_calls == ["hr1", "hr2"]
     assert result["skipped_no_location"] == 1  # the Remote job
     assert {loc for _, loc in seen_locations} == {
         "Bengaluru, Karnataka, India", "Chennai, Tamil Nadu, India",

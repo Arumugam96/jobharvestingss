@@ -10,6 +10,7 @@ import Sidebar from "./components/Sidebar";
 import ThemeStyles from "./components/ThemeStyles";
 import IntroSplash from "./components/IntroSplash";
 import NotificationBell from "./components/NotificationBell";
+import LoginRequiredBanner from "./components/LoginRequiredBanner";
 import { getJob } from "./api";
 import { mapApiJob, mapJobToDetail } from "./lib/jobsData";
 import { HarvestDataProvider, useHarvestData } from "./HarvestDataContext";
@@ -214,6 +215,9 @@ export default function HarvestAgent({ onLogout }) {
       {/* One-time post-login intro splash — dissolves into the app (Harvested
           Jobs) rendering underneath. Plays once per login; skips on reduced motion. */}
       <IntroSplash />
+      {/* App-wide "login needed → Open Live Browser" banner (every page, detail
+          views included) — polls only our cheap GET /login-required. */}
+      <LoginRequiredBanner />
       <Routes>
         {/* Full-page detail views — own root/chrome, no shared sidebar (as before). */}
         <Route path="/jobs/:jobId" element={<JobDetailRoute />} />

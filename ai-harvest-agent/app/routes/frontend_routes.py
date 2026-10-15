@@ -7,6 +7,8 @@ GET /jobs                  — paginated, filtered, sorted job list
 GET /jobs/{id}             — single job by id (DB primary key, or an md5
                               hash of job_url when read from the JSON
                               fallback — see _job_id())
+GET /jobs/{id}/outreach-detail — Resdex candidates + outreach emails for a job
+                              (DB only)
 GET /lead-intelligence     — recruiter intelligence records (paginated)
 GET /lead-intelligence/{id}— single recruiter profile
 GET /download/json         — harvest JSON report, generated from the DB
@@ -520,6 +522,162 @@ async def get_job(job_id: str) -> dict:
             detail      = f"Job '{job_id}' not found. Run a harvest first or check the id.",
         )
     return job
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# GET /jobs/{id}/outreach-detail
+# ══════════════════════════════════════════════════════════════════════════════
+# A separate path segment, so it neither shadows nor is shadowed by
+# GET /jobs/{job_id} (a path param never matches across "/"). Kept off
+# scraped_job_view / GET /jobs so the list view gets no extra queries.
+
+def _iso(dt: Any) -> str | None:
+    return dt.isoformat() if dt is not None else None
+
+
+def _resdex_candidate_view(c: Any) -> dict:
+    return {
+        "id":                  c.id,
+        "rank":                c.rank,
+        "candidate_name":      c.candidate_name,
+        "headline":            c.headline,
+        "current_designation": c.current_designation,
+        "current_company":     c.current_company,
+        "previous_roles":      c.previous_roles or [],
+        "experience_text":     c.experience_text,
+        "experience_years":    c.experience_years,
+        "location":            c.location,
+        "preferred_locations": c.preferred_locations or [],
+        "skills":              c.skills or [],
+        "education":           c.education,
+        "notice_period":       c.notice_period,
+        "ctc":                 c.ctc,
+        "last_active":         c.last_active,
+        "profile_url":         c.profile_url,
+        "matched_skills":      c.matched_skills or [],
+        "skill_coverage":      c.skill_coverage,
+        "extraction_method":   c.extraction_method,
+        "outreach_id":         c.outreach_id,
+        "emailed":             bool(c.outreach_id),
+    }
+
+
+def _resdex_search_view(s: Any) -> dict:
+    return {
+        "status":        s.status,
+        "searched_at":   _iso(s.created_at),
+        "requirements":  s.requirements,
+        "boolean_query": s.boolean_query,
+        "filters":       s.filters,
+        "tier":          s.tier,
+        "searches_used": s.searches_used,
+        "result_count":  s.result_count,
+        "error":         s.error,
+        "candidates":    [_resdex_candidate_view(c) for c in (s.candidates or [])],
+    }
+
+
+def _outreach_email_view(e: Any, included: list[Any]) -> dict:
+    return {
+        "id":            e.id,
+        # The email row's OWN job / recruiter ids — the /mail/:id thread page
+        # loads by these (an auto send matched here by job_url may carry the id
+        # of an earlier run's copy of this job).
+        "job_id":        e.job_id,
+        "recruiter_id":  e.recruiter_id,
+        "outreach_kind": e.outreach_kind or "initial",
+        "to_email":      e.to_email,
+        "from_email":    e.from_email,
+        "subject":       e.subject,
+        "body":          e.body,
+        "body_html":     e.body_html,
+        "status":        e.status,
+        "error_message": e.error_message,
+        "created_at":    _iso(e.created_at),
+        "sent_at":       _iso(e.sent_at),
+        "delivery_status": e.delivery_status,
+        "delivered_at":  _iso(e.delivered_at),
+        "opened_at":     _iso(e.opened_at),
+        "bounced_at":    _iso(e.bounced_at),
+        "replied_at":    _iso(e.replied_at),
+        "sent_by":       e.sent_by,
+        "candidate_ids": [c.id for c in included],
+        # Rank/name of each included candidate, so the UI can label them even
+        # when they came from an older search than the one shown under "resdex".
+        "candidates_included": [
+            {"id": c.id, "rank": c.rank, "candidate_name": c.candidate_name} for c in included
+        ],
+    }
+
+
+async def _job_outreach_detail(db: Any, job_id: str) -> dict:
+    """One read session: the job, its latest Resdex search (+ candidates) and its
+    email sends. Returns {"job": None} when the job isn't visible to the tenant."""
+    from sqlalchemy import select
+
+    from app.core.job_url import normalize_job_url
+    from app.core.tenant_context import apply_tenant
+    from app.models.resdex import ResdexCandidateORM, ResdexSearchORM
+    from app.services.outreach_log_service import emails_for_job
+
+    job = await HarvestRunService(db).get_scraped_job_by_id(job_id)
+    if job is None:
+        return {"job": None}
+
+    key = normalize_job_url(job.job_url)
+    search = None
+    if key:
+        search = (await db.execute(
+            apply_tenant(select(ResdexSearchORM), ResdexSearchORM.tenant_id)
+            .where(ResdexSearchORM.job_url == key)
+            .order_by(ResdexSearchORM.created_at.desc())
+            .limit(1)
+        )).scalar_one_or_none()
+
+    emails = await emails_for_job(db, job.id, job.job_url)
+    by_email: dict[str, list[Any]] = {}
+    email_ids = [e.id for e in emails]
+    if email_ids:
+        stamped = (await db.execute(
+            apply_tenant(select(ResdexCandidateORM), ResdexCandidateORM.tenant_id)
+            .where(ResdexCandidateORM.outreach_id.in_(email_ids))
+            .order_by(ResdexCandidateORM.rank.asc())
+        )).scalars().all()
+        for c in stamped:
+            by_email.setdefault(c.outreach_id, []).append(c)
+
+    return {
+        "job":     job,
+        "job_url": job.job_url,
+        "resdex":  _resdex_search_view(search) if search is not None else None,
+        "emails":  [_outreach_email_view(e, by_email.get(e.id, [])) for e in emails],
+    }
+
+
+@router.get(
+    "/jobs/{job_id}/outreach-detail",
+    status_code = status.HTTP_200_OK,
+    summary     = "Job outreach detail",
+    description = (
+        "Resdex candidates matched for the job (latest search, with the query and "
+        "filters used) plus every outreach email sent for it (initial + follow-ups)."
+    ),
+    responses   = {404: {"description": "Job not found"}, 503: {"description": "Database unavailable"}},
+)
+async def get_job_outreach_detail(job_id: str) -> dict:
+    """Database only — Resdex searches and email sends live solely in the DB,
+    so there is no JSON-fallback variant of this read."""
+    result = await db_read(lambda db: _job_outreach_detail(db, job_id))
+    if result is None:
+        raise HTTPException(status_code=503, detail="Database unavailable.")
+    if result["job"] is None:
+        raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
+    return {
+        "job_id":  job_id,
+        "job_url": result["job_url"],
+        "resdex":  result["resdex"],
+        "emails":  result["emails"],
+    }
 
 
 # ══════════════════════════════════════════════════════════════════════════════

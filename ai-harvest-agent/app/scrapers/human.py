@@ -140,3 +140,56 @@ async def human_scroll(
         rounds += 1
 
     return rounds
+
+
+async def human_type(page: Any, text: str, delay_lo: int = 60, delay_hi: int = 140) -> None:
+    """Type into the focused element key by key with a per-key jitter and an
+    occasional short pause (a thinking beat), instead of an instant fill.
+    Raises like ``page.keyboard.type`` would — callers rely on the text landing."""
+    for i, ch in enumerate(text):
+        await page.keyboard.type(ch, delay=random.randint(delay_lo, delay_hi))
+        if i and i % random.randint(12, 24) == 0:
+            await _sleep(page, 150, 450)
+
+
+async def human_click_or_click(page: Any, element: Any) -> None:
+    """``human_click`` (gradual pointer move + click near the centre), then a
+    plain ``element.click()`` if it reports no click was issued — that last
+    attempt RAISES like Playwright would, so a missing element still surfaces."""
+    if not await human_click(page, element):
+        await element.click()
+
+
+async def human_read_dwell(
+    page: Any, total_s: float, *, rounds: int = 3, container: Any = None,
+) -> int:
+    """Look through a results list like a person: ``rounds`` short downward
+    scrolls (a step or two of ``human_scroll`` each) separated by reading
+    pauses, spending about ``total_s`` seconds in all. Never clicks anything.
+    Best-effort — never raises. Returns the number of scroll steps performed."""
+    import time
+
+    # Budget = total_s minus the reading beats requested minus the wall time the
+    # scrolls took (their own pauses), so the total holds on any page clock.
+    left = max(0.0, float(total_s))
+    n = max(1, int(rounds))
+    steps = 0
+    for i in range(n):
+        if left <= 0:
+            break
+        # A reading beat before each scroll: a jittered share of what's left.
+        beat = min(left, left / (n - i + 1) * random.uniform(0.6, 1.4))
+        await _sleep(page, int(beat * 1000), int(beat * 1000))
+        left -= beat
+        started = time.monotonic()
+        try:
+            steps += await human_scroll(
+                page, container, max_rounds=random.randint(1, 2),
+                step_min=250, step_max=650, pause_lo=250, pause_hi=700,
+            )
+        except Exception:
+            pass
+        left -= time.monotonic() - started
+    if left > 0:
+        await _sleep(page, int(left * 1000), int(left * 1000))
+    return steps

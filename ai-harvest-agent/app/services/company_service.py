@@ -53,6 +53,65 @@ async def get_companies_by_keys(db: AsyncSession, keys: set[str]) -> dict[str, C
     return {c.company_key: c for c in result.scalars()}
 
 
+async def _get_or_create_company(db: AsyncSession, company_key: str, company_name: str) -> CompanyORM:
+    """The cache row for ``company_key``, inserted when missing (race-safe: a
+    concurrent insert of the same key is re-read instead of failing)."""
+    result = await db.execute(select(CompanyORM).where(CompanyORM.company_key == company_key))
+    row = result.scalar_one_or_none()
+    if row is None:
+        row = CompanyORM(id=str(uuid.uuid4()), company_key=company_key, company_name=company_name)
+        try:
+            async with db.begin_nested():
+                db.add(row)
+                await db.flush()
+        except IntegrityError:
+            row = (await db.execute(
+                select(CompanyORM).where(CompanyORM.company_key == company_key)
+            )).scalar_one()
+    return row
+
+
+async def record_apollo_org(
+    db: AsyncSession,
+    *,
+    company_key: str,
+    company_name: str,
+    org_id: str,
+    domain: str = "",
+    company_size: str = "",
+    company_country: str = "",
+    company_state: str = "",
+    company_industry: str = "",
+) -> None:
+    """Cache one Apollo organization resolve attempt — ``org_id`` "" records a miss.
+    Always stamps apollo_org_resolved_at (the miss cooldown); the org's details ride
+    along for free and fill the same non-empty-wins fields as the company pass. Does
+    NOT touch apollo_enriched_at — that is the company pass's own cooldown clock."""
+    row = await _get_or_create_company(db, company_key, company_name)
+    for field, value in (
+        ("apollo_org_id", org_id), ("domain", domain), ("company_size", company_size),
+        ("company_country", company_country), ("company_state", company_state),
+        ("company_industry", company_industry),
+    ):
+        if value:
+            setattr(row, field, value)
+    row.apollo_org_resolved_at = datetime.now(timezone.utc)
+    await db.flush()
+
+
+def apollo_org_resolve_due(row: CompanyORM | None, recheck_days: int) -> bool:
+    """A paid Apollo org lookup is due unless the org id is already cached, or the
+    last attempt (a miss) was within the recheck cooldown."""
+    if row is not None and row.apollo_org_id:
+        return False
+    last = row.apollo_org_resolved_at if row is not None else None
+    if last is None:
+        return True
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - last) >= timedelta(days=recheck_days)
+
+
 async def upsert_company_enrichment(
     db: AsyncSession,
     *,
@@ -68,18 +127,7 @@ async def upsert_company_enrichment(
     """Insert-or-update one company cache row. Only overwrites a field with a
     non-empty value (never erases a previous hit with a later miss)."""
     now = datetime.now(timezone.utc)
-    result = await db.execute(select(CompanyORM).where(CompanyORM.company_key == company_key))
-    row = result.scalar_one_or_none()
-    if row is None:
-        row = CompanyORM(id=str(uuid.uuid4()), company_key=company_key, company_name=company_name)
-        try:
-            async with db.begin_nested():
-                db.add(row)
-                await db.flush()
-        except IntegrityError:
-            row = (await db.execute(
-                select(CompanyORM).where(CompanyORM.company_key == company_key)
-            )).scalar_one()
+    row = await _get_or_create_company(db, company_key, company_name)
 
     def _set(field: str, value: str) -> None:
         if value:

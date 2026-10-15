@@ -95,6 +95,7 @@ class OutreachService:
     async def generate_email(
         self, job: dict, client_type: str, tone: str, regenerate: bool = False,
         sender_email: str = "", deck_url: str = "", contact_block: str = "",
+        candidate_block: str = "",
     ) -> EmailDraft:
         """`sender_email` is the address the recipient is invited to reply to
         (the logged-in user). It's appended — as a reach-out line above the
@@ -104,8 +105,17 @@ class OutreachService:
         deck (in place of the old file attachment); when empty, no deck line.
         `contact_block` (automated end-of-harvest sends) is the desk "reach out to
         us" name/phone block, placed above the sign-off by append_closing so the
-        stored body matches what the recruiter receives; manual sends leave it empty."""
-        prompt = outreach_prompts.build_email_prompt(client_type, tone, job, sender_email)
+        stored body matches what the recruiter receives; manual sends leave it empty.
+        `candidate_block` (automated sends with Resdex matches) is the deterministic,
+        anonymised matching-profiles card placed between the body and the contact block;
+        when set, the prompt also asks the model to mention it briefly. Empty → prompt
+        and body are exactly what they were without it."""
+        if candidate_block.strip():
+            prompt = outreach_prompts.build_email_prompt(
+                client_type, tone, job, sender_email, candidates_included=True,
+            )
+        else:
+            prompt = outreach_prompts.build_email_prompt(client_type, tone, job, sender_email)
         if regenerate:
             prompt += "\n\nProduce a distinctly different variation from any previous version."
 
@@ -125,13 +135,17 @@ class OutreachService:
                 greeting = outreach_prompts.build_greeting(job)
                 body = outreach_prompts.append_closing(
                     pitch, sender_email, deck_url, contact_block, intro=intro, greeting=greeting,
+                    candidate_block=candidate_block,
                 )
                 return EmailDraft(subject=subject, body=body, fallback_used=False, meta=meta)
             # Model responded but not with usable JSON — mark the audit row and fall back.
             meta.success = False
             meta.error_message = meta.error_message or "unparseable LLM JSON"
 
-        subject, body = outreach_prompts.render_email_fallback(client_type, job, sender_email, deck_url, contact_block)
+        subject, body = outreach_prompts.render_email_fallback(
+            client_type, job, sender_email, deck_url, contact_block,
+            candidate_block=candidate_block,
+        )
         return EmailDraft(subject=subject, body=body, fallback_used=True, meta=meta)
 
     async def generate_followup_email(

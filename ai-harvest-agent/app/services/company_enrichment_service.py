@@ -1,6 +1,7 @@
 """Company-level enrichment pass (size + HQ location), shared by every harvest agent.
 
-Browser-free: one Apollo ``organizations/enrich`` lookup per unique company, cached
+Browser-free: one Apollo organization resolve per unique company (``resolve_apollo_org``
+— also the shared, cached org-id lookup behind every Apollo people search), cached
 on CompanyORM (app/services/company_service.py) so bulk_insert_scraped_jobs applies
 it to ALL of that company's jobs. Extracted from LinkedInAgent._enrich_companies /
 _run_company_waterfall so the Naukri agent can run the exact same pass.
@@ -15,13 +16,16 @@ currently disabled — LinkedIn passes no hook, i.e. the historical "apollo_only
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 from urllib.parse import urlparse
 
 import structlog
 
 from app.core.company_domain import infer_company_domain, is_placeholder_company
+from app.core.dependencies import get_session_factory
 from app.services import run_guard
+from app.services.apollo_client import ApolloClient, ApolloOrgResult
 
 logger = structlog.get_logger(__name__)
 
@@ -62,6 +66,112 @@ def domain_from_website(url: str | None) -> str:
     return host
 
 
+# ── Apollo organization resolve (cached per company) ────────────────────────────
+
+@dataclass
+class OrgResolution:
+    org: ApolloOrgResult | None = None  # None: unknown to Apollo, or deferred by the cap
+    cap_reached: bool = False           # daily cap blocked the lookup — nothing cached, retry later
+    attempted: bool = False             # a paid Apollo lookup was issued by this call
+    size_band: str = ""                 # "<band> employees" (canonical; also served from cache)
+
+
+def _org_from_row(row: Any) -> ApolloOrgResult:
+    """A cached CompanyORM row as the ApolloOrgResult callers expect (no employee
+    count — the row keeps only the size band)."""
+    return ApolloOrgResult(
+        id=row.apollo_org_id, name=row.company_name or None, domain=row.domain or None,
+        industry=row.company_industry or None, state=row.company_state or None,
+        country=row.company_country or None,
+    )
+
+
+async def resolve_apollo_org(
+    settings: Any,
+    *,
+    company_name: str,
+    domain: str = "",
+    guess_domain: bool = False,
+    client: ApolloClient | None = None,
+) -> OrgResolution:
+    """The Apollo organization for a company — needed before any people search.
+
+    Resolving costs a credit (organizations/enrich by domain, then
+    mixed_companies/search by name when that finds no id), so the result is cached on
+    CompanyORM by company key and reused by every location, run and feature: a hit
+    forever, a miss for apollo_recheck_days. Both lookups reserve against the daily
+    cap inside ApolloClient; a cap denial returns ``cap_reached`` and caches nothing.
+
+    ``domain`` is the caller's known domain. When it disagrees with the cached row's
+    domain the cache is bypassed (two companies whose names normalize alike) and the
+    fresh result is not written over the other company's id. ``guess_domain`` lets
+    the enrich lookup use a domain inferred from the name when none is known — never
+    used for that conflict check. Raises ApolloAPIError like the client, so callers
+    keep their existing error handling."""
+    from app.services import apollo_budget
+    from app.services.company_service import (
+        apollo_org_resolve_due,
+        get_companies_by_keys,
+        normalize_company_key,
+        record_apollo_org,
+    )
+
+    key = normalize_company_key(company_name)
+    dom = (domain or "").strip().lower()
+
+    row = None
+    if key:
+        try:
+            async with get_session_factory(settings)() as db:
+                row = (await get_companies_by_keys(db, {key})).get(key)
+        except Exception as exc:
+            logger.warning("apollo_org_cache_read_failed", company=company_name, error=str(exc))
+    domain_conflict = bool(row is not None and dom and row.domain and row.domain.lower() != dom)
+    if row is not None and not domain_conflict and not apollo_org_resolve_due(row, settings.apollo_recheck_days):
+        logger.info("apollo_org_cache_hit", company=company_name, found=bool(row.apollo_org_id))
+        if not row.apollo_org_id:
+            return OrgResolution()
+        return OrgResolution(org=_org_from_row(row), size_band=row.company_size or "")
+
+    async def _budget_left() -> bool:
+        remaining = await apollo_budget.remaining_today()
+        return remaining is None or remaining > 0
+
+    if not await _budget_left():
+        return OrgResolution(cap_reached=True)
+
+    client = client or ApolloClient(settings)
+    lookup_dom = dom or (infer_company_domain(company_name)[0] if guess_domain else "")
+    org = await client.enrich_organization(lookup_dom) if lookup_dom else None
+    if org is None or not org.id:
+        org = await client.search_organization(company_name, domain=lookup_dom)
+    if org is None or not org.id:
+        org = None
+        # A None can also be the cap denying the lookup — only a real miss is cached.
+        if not await _budget_left():
+            return OrgResolution(cap_reached=True, attempted=True)
+
+    from app.core.company_size import band_from_employee_count
+    size_band = band_from_employee_count(org.size) if org else ""
+    if key and not (domain_conflict and row.apollo_org_id):
+        try:
+            async with get_session_factory(settings)() as db:
+                await record_apollo_org(
+                    db, company_key=key, company_name=company_name,
+                    org_id=(org.id if org else ""),
+                    domain=((org.domain or "") if org else ""),
+                    company_size=size_band,
+                    company_country=((org.country or "") if org else ""),
+                    company_state=((org.state or "") if org else ""),
+                    company_industry=((org.industry or "") if org else ""),
+                )
+                await db.commit()
+        except Exception as exc:
+            logger.warning("apollo_org_cache_write_failed", company=company_name, error=str(exc))
+    logger.info("apollo_org_resolved", company=company_name, found=bool(org))
+    return OrgResolution(org=org, attempted=True, size_band=size_band)
+
+
 async def run_company_waterfall(
     settings: Any,
     *,
@@ -84,18 +194,22 @@ async def run_company_waterfall(
     out = {"company_size": seed_size or "", "company_country": "", "company_state": "",
            "company_industry": "", "domain": "", "apollo_attempted": False}
 
-    out["domain"] = domain_from_website(company_url) or infer_company_domain(company_name)[0]
+    site_domain = domain_from_website(company_url)
+    out["domain"] = site_domain or infer_company_domain(company_name)[0]
     if settings.apollo_enrich_company and settings.apollo_api_key and out["domain"]:
         try:
-            from app.core.company_size import band_from_employee_count
-            from app.services.apollo_client import ApolloClient
-            out["apollo_attempted"] = True
-            org = await ApolloClient(settings).enrich_organization(out["domain"])
+            # Shared, cached org resolve — a company already resolved by any feature
+            # costs nothing here.
+            res = await resolve_apollo_org(
+                settings, company_name=company_name, domain=site_domain, guess_domain=True,
+            )
+            out["apollo_attempted"] = not res.cap_reached
+            org = res.org
             if org:
                 for f, v in (("company_country", org.country or ""),
                              ("company_state", org.state or ""),
                              ("company_industry", org.industry or ""),
-                             ("company_size", band_from_employee_count(org.size))):
+                             ("company_size", res.size_band)):
                     if v:
                         out[f] = v  # Apollo preferred → overwrite
                 if org.domain:
@@ -129,7 +243,6 @@ async def enrich_companies(
     skipped), honours the recheck cooldown (settings.apollo_recheck_days — a company
     already holding size + country is skipped), the per-run `cap`, and a cooperative
     stop. Writes ONLY the CompanyORM cache. Best-effort; returns a counts summary."""
-    from app.core.dependencies import get_session_factory
     from app.services.company_service import (
         company_needs_enrichment,
         get_companies_by_keys,
