@@ -594,9 +594,13 @@ export default function RuleEngineRedesign() {
     : needsLogin ? "Log in now — Watch Live Browser" : "Watch Live Browser";
   const watchTitle = naukriNeedsHuman ? "Naukri needs you to solve a CAPTCHA — click to open the live browser"
     : needsLogin ? "LinkedIn needs you to log in — click to open the live browser" : undefined;
-  // Connect / Re-check open the same recruiter Chrome profile the harvest uses —
-  // keep them off while Naukri is harvesting (Re-check: while any run is live).
-  const naukriHarvesting = (runState === "running" || harvestRunning)
+  // Connect / Re-check open the recruiter Chrome profile — keep Connect off while
+  // Naukri is harvesting IN that profile (NAUKRI_BROWSER_MODE=recruiter). A guest
+  // (shared / isolated) Naukri harvest never touches it, so you can log in mid-run
+  // ready for the Resdex step. Re-check stays off while any run is live.
+  const naukriUsesRecruiterProfile = !["shared", "isolated"].includes(naukri.status?.browser_mode);
+  const naukriHarvesting = naukriUsesRecruiterProfile
+    && (runState === "running" || harvestRunning)
     && ["running", "pending"].includes(naukriEntry?.state);
   // Naukri failed because the recruiter session expired / its login window was
   // open — point the user at the Connect card.

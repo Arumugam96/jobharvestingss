@@ -211,7 +211,11 @@ def _write_status(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def read_status() -> dict[str, Any]:
-    """Last known state — no browser launch."""
+    """Last known state — no browser launch. `browser_mode` tells the UI whether
+    the Naukri job harvest itself holds this profile ("recruiter") — in shared /
+    isolated mode it doesn't, so Connect stays usable during a harvest."""
+    from app.config import get_settings
+
     last: dict[str, Any] = {}
     if STATUS_PATH.exists():
         try:
@@ -224,6 +228,7 @@ def read_status() -> dict[str, Any]:
         "profile_exists": profile.exists(),
         "legacy_session_file_exists": LEGACY_SESSION_PATH.exists(),
         "login_window_open": login_window_open(),
+        "browser_mode": get_settings().naukri_browser_mode,
         "last_check": last or None,
         "logged_in": bool(last.get("logged_in")),
     }

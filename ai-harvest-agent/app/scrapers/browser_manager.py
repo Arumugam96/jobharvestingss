@@ -162,6 +162,10 @@ _LAUNCH_ARGS: list[str] = [
     "--disable-setuid-sandbox",
     "--disable-dev-shm-usage",
     "--disable-infobars",
+    # Suppresses the "You are using an unsupported command-line flag:
+    # --disable-setuid-sandbox" bar (Chrome's bad-flags prompt) that the
+    # container-required sandbox flags otherwise show in every headed window.
+    "--test-type",
     "--disable-background-timer-throttling",
     "--disable-backgrounding-occluded-windows",
     "--disable-renderer-backgrounding",
@@ -514,6 +518,7 @@ class PersistentBrowserManager:
                     "--no-first-run",
                     "--no-default-browser-check",
                     "--disable-infobars",
+                    "--test-type",   # hides the bad-flags bar — see _LAUNCH_ARGS
                     "--disable-background-timer-throttling",
                     "--disable-backgrounding-occluded-windows",
                     "--disable-renderer-backgrounding",
