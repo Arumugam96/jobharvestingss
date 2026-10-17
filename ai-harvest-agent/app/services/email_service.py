@@ -277,6 +277,8 @@ def _outreach_body_to_html(
     job_url: str = "",
     show_unsub: bool = False,
     logo_available: bool = False,
+    candidate_block: str = "",
+    candidate_html: str = "",
 ) -> str:
     """Render the plain-text outreach body as HTML: preserve line breaks; turn any
     http(s) URL (the deck link) into a clickable link; turn any line containing an
@@ -294,12 +296,27 @@ def _outreach_body_to_html(
     the inline logo when it's actually attached to the message.
 
     When `show_unsub` is True, a subtle plain, link-free unsubscribe message is placed
-    ABOVE the sign-off so the signature stays last (Mailjet/Brevo own the opt-out now)."""
+    ABOVE the sign-off so the signature stays last (Mailjet/Brevo own the opt-out now).
+
+    `candidate_block` + `candidate_html` (automated sends with Resdex matches): the
+    plain-text candidate block exactly as it appears in `body`
+    (resdex_match_service.format_candidate_block) and its HTML cards
+    (render_candidate_cards_html). Those body lines are replaced by the cards; when the
+    block isn't found verbatim in `body`, the body renders line by line as usual."""
     url = (job_url or "").strip()
     matcher = _title_matcher(job_title) if url else None
     title_linked = False
 
-    all_lines = (body or "").split("\n")
+    text = body or ""
+    all_lines = text.split("\n")
+    # Line range (inclusive) of the candidate block, to be drawn as cards instead.
+    cards_start = cards_end = -1
+    block = (candidate_block or "").strip()
+    if block and candidate_html:
+        pos = text.find(block)
+        if pos == 0 or (pos > 0 and text[pos - 1] == "\n"):
+            cards_start = text.count("\n", 0, pos)
+            cards_end = cards_start + block.count("\n")
     # Split off the sign-off ("Regards, …"): everything from that line down is replaced by
     # the formatted signature card. The lines above keep the normal per-line rendering.
     signoff_start = next(
@@ -311,7 +328,11 @@ def _outreach_body_to_html(
 
     out_lines: list[str] = []
     website_url = ""  # first URL in the body = the "More about us" deck link (for the signature)
-    for line in body_lines:
+    for n, line in enumerate(body_lines):
+        if cards_start <= n <= cards_end:
+            if n == cards_start:
+                out_lines.append(candidate_html)
+            continue
         if not website_url:
             um = _BODY_URL_RE.search(line)
             if um:
@@ -391,6 +412,8 @@ def render_outreach_email_html(
     *,
     show_unsub: bool = True,
     logo_available: bool | None = None,
+    candidate_block: str = "",
+    candidate_html: str = "",
 ) -> str:
     """The exact HTML part an outreach send builds from its plain-text body — the
     single render source shared by send_email_with_attachments (as_html) and the
@@ -403,11 +426,15 @@ def render_outreach_email_html(
     condition under which the send attaches it); the send path passes the actual
     attach state so the HTML never points at a missing image. The stored body_html
     keeps the cid: reference — the image bytes are NOT persisted per row; the UI
-    swaps the cid for its bundled copy of the logo when displaying the log."""
+    swaps the cid for its bundled copy of the logo when displaying the log.
+
+    `candidate_block`/`candidate_html` draw the Resdex candidate block as profile
+    cards (see _outreach_body_to_html)."""
     if logo_available is None:
         logo_available = LOGO_PATH.is_file()
     return _outreach_body_to_html(
-        body, job_title, job_url, show_unsub=show_unsub, logo_available=logo_available
+        body, job_title, job_url, show_unsub=show_unsub, logo_available=logo_available,
+        candidate_block=candidate_block, candidate_html=candidate_html,
     )
 
 
@@ -695,6 +722,8 @@ class EmailSender:
         job_url: str = "",
         custom_id: str | None = None,
         is_automation: bool = False,
+        candidate_block: str = "",
+        candidate_html: str = "",
     ) -> str | None:
         """Generic Mailjet send with attachments — same transport/credentials as
         send_otp. Attachments come as file paths and/or as in-memory
@@ -727,7 +756,11 @@ class EmailSender:
         `is_automation` (end-of-harvest auto-outreach only) appends AUTOMATION_CONTACT_BLOCK
         — a "reach out to us" name/phone line — directly below the body's closing
         website/deck line (and above the unsubscribe footer), in both the plain-text
-        and HTML parts. Manual sends leave it False, so their body is unchanged."""
+        and HTML parts. Manual sends leave it False, so their body is unchanged.
+
+        `candidate_block`/`candidate_html` (auto-outreach with Resdex matches): the HTML
+        part draws the plain-text candidate block as profile cards; the text part keeps
+        the block as written."""
         settings = self._settings
         paths = attachment_paths or []
         blobs = attachment_blobs or []
@@ -813,6 +846,7 @@ class EmailSender:
             message["HTMLPart"] = render_outreach_email_html(
                 body_for_render, job_title, job_url,
                 show_unsub=bool(custom_id), logo_available=logo_bytes is not None,
+                candidate_block=candidate_block, candidate_html=candidate_html,
             )
             if logo_bytes is not None:
                 message.setdefault("InlinedAttachments", []).append({

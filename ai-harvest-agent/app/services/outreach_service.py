@@ -106,8 +106,8 @@ class OutreachService:
         `contact_block` (automated end-of-harvest sends) is the desk "reach out to
         us" name/phone block, placed above the sign-off by append_closing so the
         stored body matches what the recruiter receives; manual sends leave it empty.
-        `candidate_block` (automated sends with Resdex matches) is the deterministic,
-        anonymised matching-profiles card placed between the body and the contact block;
+        `candidate_block` (automated sends with Resdex matches) is the deterministic
+        matching-profiles block placed between the body and the contact block;
         when set, the prompt also asks the model to mention it briefly. Empty → prompt
         and body are exactly what they were without it."""
         if candidate_block.strip():

@@ -68,6 +68,7 @@ from app.services.resdex_match_service import (
     format_candidate_block,
     mark_candidates_sent,
     prepare_resdex_candidates,
+    render_candidate_cards_html,
 )
 from app.services.suppression_service import is_suppressed
 
@@ -383,11 +384,18 @@ async def run_auto_outreach_after_harvest(
                     sender_email=reply_to, deck_url=deck_url,
                     contact_block=AUTOMATION_CONTACT_BLOCK,
                 )
-                # Resdex matches (pre-pass above) → anonymised candidate card between
-                # the body and the contact block. Only passed when non-empty so the
-                # call is unchanged for every other email.
+                # Resdex matches (pre-pass above) → candidate block between the body and
+                # the contact block: labelled text in the body (text part + stored body),
+                # drawn as profile cards in the HTML part. Only passed when non-empty so
+                # the call is unchanged for every other email.
                 cands = (resdex.get(job_url) or []) if settings.resdex_include_in_email else []
-                candidate_block = format_candidate_block(cands) if cands else ""
+                candidate_block = (
+                    format_candidate_block(cands, job_title=target["job_title"]) if cands else ""
+                )
+                candidate_html = (
+                    render_candidate_cards_html(cands, job_title=target["job_title"])
+                    if cands else ""
+                )
                 if candidate_block:
                     gen_kwargs["candidate_block"] = candidate_block
                 draft = await outreach.generate_email(
@@ -409,6 +417,8 @@ async def run_auto_outreach_after_harvest(
                         job_url=target["job_url"],
                         custom_id=outreach_id,
                         is_automation=False,  # contact block already in draft.body (append_closing)
+                        candidate_block=candidate_block,
+                        candidate_html=candidate_html,
                     )
                 except Exception as exc:  # Mailjet/config failure — log the failed row
                     send_status, error_message = "failed", str(exc)
@@ -427,7 +437,8 @@ async def run_auto_outreach_after_harvest(
                     subject=draft.subject,
                     body=full_body,
                     body_html=render_outreach_email_html(
-                        full_body, target["job_title"], target["job_url"]
+                        full_body, target["job_title"], target["job_url"],
+                        candidate_block=candidate_block, candidate_html=candidate_html,
                     ),
                     fallback_used=draft.fallback_used,
                     status=send_status,

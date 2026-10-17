@@ -20,12 +20,14 @@ emailed are searched:
 
 Never raises — a Resdex problem (session expired, cap, LLM down, parse failure)
 only means the email goes out exactly as it would without Resdex.
-format_candidate_block() renders the anonymised email card (no name, contacts,
-URL, employer or CTC).
+format_candidate_block() renders the plain-text candidate block for the email and
+render_candidate_cards_html() the matching HTML cards (name, role, experience,
+location, notice, skills — never contacts, URL, employer or CTC).
 """
 from __future__ import annotations
 
 import asyncio
+import html as html_lib
 import inspect
 import re
 import uuid
@@ -682,53 +684,264 @@ def _years(cand: dict) -> str:
     return (cand.get("experience_text") or "").strip()
 
 
+_NAME_MAX = 60
+_NOTICE_PREFIX_RE = re.compile(r"^notice(?:\s+period)?\s*[:\-]\s*", re.I)
+
+
 def _notice(cand: dict) -> str:
+    """The notice-period value without a leading "Notice:"/"Notice period:" label
+    (the block supplies its own label): "Notice: 30 days" → "30 days"."""
     n = " ".join((cand.get("notice_period") or "").split())
-    if not n:
+    return _NOTICE_PREFIX_RE.sub("", n) or n
+
+
+def _display_name(cand: dict) -> str:
+    """The candidate's name, whitespace-collapsed; an ALL-CAPS / all-lower Resdex
+    name is title-cased. "" when missing or when it looks like a contact detail."""
+    name = " ".join((cand.get("candidate_name") or "").split())
+    if not name or _CONTACTISH_RE.search(name):
         return ""
-    return n if n.lower().startswith("notice") else f"Notice: {n}"
+    if name.isupper() or name.islower():
+        name = name.title()
+    return _truncate(name, _NAME_MAX)
 
 
-def _display_skills(cand: dict) -> list[str]:
-    out: list[str] = []
+def _initials(name: str) -> str:
+    words = [w for w in name.split() if w[:1].isalpha()]
+    if not words:
+        return ""
+    return (words[0][0] + (words[-1][0] if len(words) > 1 else "")).upper()
+
+
+def _split_skills(cand: dict) -> tuple[list[str], list[str]]:
+    """(matched, other) display skills: the JD-matched ones first, then the rest of
+    the profile's skills, de-duplicated across both and capped at _SKILLS_MAX total."""
+    matched: list[str] = []
+    other: list[str] = []
     keys: set[str] = set()
-    for s in list(cand.get("matched_skills") or []) + list(cand.get("skills") or []):
-        s = " ".join(str(s or "").split())
-        k = term_key(s)
-        if s and k and k not in keys and not _CONTACTISH_RE.search(s):
-            keys.add(k)
-            out.append(s)
-        if len(out) >= _SKILLS_MAX:
-            break
-    return out
+    for bucket, source in ((matched, cand.get("matched_skills")), (other, cand.get("skills"))):
+        for s in source or []:
+            if len(matched) + len(other) >= _SKILLS_MAX:
+                return matched, other
+            s = " ".join(str(s or "").split())
+            k = term_key(s)
+            if s and k and k not in keys and not _CONTACTISH_RE.search(s):
+                keys.add(k)
+                bucket.append(s)
+    return matched, other
 
 
-def format_candidate_block(cands: list[dict]) -> str:
-    """The anonymised plain-text candidate card for the outreach email:
+def _candidate_view(cand: dict) -> dict:
+    """The display fields shared by the plain-text block and the HTML cards, so the
+    two parts of the email always show the same thing. Never carries contacts, the
+    profile URL, the employer or CTC; missing parts are ""/[]."""
+    role = _scrub(cand.get("current_designation") or "", cand) or _scrub(
+        cand.get("headline") or "", cand
+    )
+    matched, other = _split_skills(cand)
+    return {
+        "name": _display_name(cand),
+        "role": _truncate(role),
+        "facts": [(label, value) for label, value in (
+            ("Experience", _years(cand)),
+            ("Location", _scrub(cand.get("location") or "", cand)),
+            ("Notice period", _notice(cand)),
+        ) if value],
+        "matched": matched,
+        "other": other,
+    }
 
-        A few matching profiles from our network:
-        • Candidate 1 — Senior Java Developer · 7 yrs · Bengaluru · Notice: 30 days
-          Key skills: Java, Spring Boot, Microservices, AWS
-        Happy to share full profiles on request.
 
-    Never includes the name, contacts, profile URL, employer or CTC; skills list the
-    matched ones first (max 5); missing parts are simply left out. "" for none."""
+_BLOCK_TITLE = "MATCHING PROFILES FROM OUR NETWORK"
+_BLOCK_CTA = "Happy to share full profiles on request. Just reply to this email."
+_BLOCK_MATCH_NOTE = "Matched skills are the ones your job description asks for."
+_LABEL_WIDTH = len("Matched skills")
+
+
+def _shortlist_line(job_title: str) -> str:
+    title = " ".join((job_title or "").split())
+    return f"Shortlisted for your {title} requirement" if title else ""
+
+
+def format_candidate_block(cands: list[dict], job_title: str = "") -> str:
+    """The plain-text candidate block for the outreach email (the text part, and the
+    stored body); render_candidate_cards_html draws the same data as cards in the HTML
+    part. Labels sit on the left, values on the right:
+
+        MATCHING PROFILES FROM OUR NETWORK
+        Shortlisted for your Java Developer requirement
+        ====================================================
+
+        1. Ravi Kumar
+           Senior Java Developer
+           ----------------------------------------------
+           Experience     : 7 yrs
+           Location       : Bengaluru
+           Notice period  : 30 days
+           Matched skills : Java, Spring Boot
+           Other skills   : Microservices, AWS
+
+        ====================================================
+        Happy to share full profiles on request. Just reply to this email.
+        Matched skills are the ones your job description asks for.
+
+    Includes the candidate's name but never contacts, profile URL, employer or CTC;
+    missing parts are simply left out. "" for none."""
     if not cands:
         return ""
-    lines = ["A few matching profiles from our network:"]
+    rule = "=" * 52
+    lines = [_BLOCK_TITLE]
+    if _shortlist_line(job_title):
+        lines.append(_shortlist_line(job_title))
+    lines += [rule, ""]
+    any_matched = False
     for i, cand in enumerate(cands, start=1):
-        role = _scrub(cand.get("current_designation") or "", cand) or _scrub(
-            cand.get("headline") or "", cand
-        )
-        parts = [p for p in (
-            _truncate(role), _years(cand), _scrub(cand.get("location") or "", cand), _notice(cand),
-        ) if p]
-        lines.append(f"• Candidate {i} — {' · '.join(parts)}" if parts else f"• Candidate {i}")
-        skills = _display_skills(cand)
-        if skills:
-            lines.append(f"  Key skills: {', '.join(skills)}")
-    lines.append("Happy to share full profiles on request.")
+        v = _candidate_view(cand)
+        heading = v["name"] or v["role"] or f"Candidate {i}"
+        lines.append(f"{i}. {heading}")
+        if v["name"] and v["role"]:
+            lines.append(f"   {v['role']}")
+        rows = list(v["facts"])
+        if v["matched"]:
+            rows.append(("Matched skills", ", ".join(v["matched"])))
+            any_matched = True
+        if v["other"]:
+            rows.append(("Other skills", ", ".join(v["other"])))
+        if rows:
+            lines.append("   " + "-" * 46)
+            lines += [f"   {label.ljust(_LABEL_WIDTH)} : {value}" for label, value in rows]
+        lines.append("")
+    lines += [rule, _BLOCK_CTA]
+    if any_matched:
+        lines.append(_BLOCK_MATCH_NOTE)
     return "\n".join(lines)
+
+
+# Card palette — the signature card's navy/violet (email_service.render_signature_html).
+_C_NAVY = "#201a4a"
+_C_VIOLET = "#7b53c9"
+_C_MUTED = "#8a879f"
+_C_TEXT = "#3f3d55"
+_C_BORDER = "#e0d9f0"
+_C_DIVIDER = "#eee9f7"
+_C_TINT = "#faf8fe"
+_C_FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif"
+_C_LABEL = (
+    f"font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:{_C_MUTED};"
+    "font-weight:600;line-height:1.3;"
+)
+_C_VALUE = f"font-size:13px;color:{_C_NAVY};font-weight:600;line-height:1.4;"
+
+
+def _chip(skill: str, matched: bool) -> str:
+    look = (
+        "background:#ece6f8;color:#4b2f8f;border:1px solid #d6c9f0;font-weight:600;"
+        if matched else "background:#f4f4f7;color:#5c5a70;border:1px solid #e4e3ea;"
+    )
+    return (
+        '<span style="display:inline-block;margin:0 4px 4px 0;padding:2px 9px;'
+        f'border-radius:999px;font-size:12px;line-height:18px;{look}">'
+        f"{html_lib.escape(skill)}</span>"
+    )
+
+
+def _card_html(v: dict, index: int) -> str:
+    esc = html_lib.escape
+    title = v["name"] or v["role"] or f"Candidate {index}"
+    subtitle = v["role"] if v["name"] else ""
+    badge = _initials(v["name"]) or f"C{index}"
+    header = (
+        '<table role="presentation" cellpadding="0" cellspacing="0" border="0" '
+        'style="border-collapse:collapse;"><tr>'
+        '<td valign="middle" width="44" style="width:44px;">'
+        f'<div style="width:44px;height:44px;line-height:44px;border-radius:50%;'
+        f"background:{_C_NAVY};color:#ffffff;text-align:center;font-family:{_C_FONT};"
+        f'font-size:15px;font-weight:700;">{esc(badge)}</div></td>'
+        f'<td valign="middle" style="padding-left:12px;font-family:{_C_FONT};">'
+        f'<div style="font-size:15px;font-weight:700;color:{_C_NAVY};line-height:1.3;">'
+        f"{esc(title)}</div>"
+        + (
+            f'<div style="font-size:13px;font-weight:600;color:{_C_VIOLET};line-height:1.4;">'
+            f"{esc(subtitle)}</div>" if subtitle else ""
+        )
+        + "</td></tr></table>"
+    )
+
+    facts = "".join(
+        f'<div style="{_C_LABEL}">{esc(label)}</div>'
+        f'<div style="{_C_VALUE}{"" if n == len(v["facts"]) - 1 else "margin-bottom:9px;"}">'
+        f"{esc(value)}</div>"
+        for n, (label, value) in enumerate(v["facts"])
+    )
+    skills = "".join(
+        f'<div style="{_C_LABEL}margin:0 0 5px;">{label}</div>'
+        f'<div style="margin:0 0 6px;">{"".join(_chip(s, on) for s in items)}</div>'
+        for label, items, on in (
+            ("Matched skills", v["matched"], True), ("Other skills", v["other"], False),
+        ) if items
+    )
+    # Details row: facts down a tinted left column, skills on the right. Either side
+    # alone takes the full width; with neither, the card is just the header.
+    cells = ""
+    if facts and skills:
+        cells = (
+            f'<td valign="top" width="130" style="width:130px;padding:12px 14px;'
+            f"background:{_C_TINT};border-right:1px solid {_C_DIVIDER};"
+            f'border-bottom-left-radius:10px;font-family:{_C_FONT};">{facts}</td>'
+            f'<td valign="top" style="padding:12px 14px 6px;font-family:{_C_FONT};">{skills}</td>'
+        )
+    elif facts or skills:
+        cells = (
+            f'<td valign="top" style="padding:12px 14px 6px;font-family:{_C_FONT};">'
+            f"{facts or skills}</td>"
+        )
+    details = (
+        '<tr><td style="padding:0;"><table role="presentation" width="100%" cellpadding="0" '
+        f'cellspacing="0" border="0" style="border-collapse:collapse;"><tr>{cells}</tr>'
+        "</table></td></tr>" if cells else ""
+    )
+    header_border = f"border-bottom:1px solid {_C_DIVIDER};" if cells else ""
+    return (
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" '
+        f"style=\"border-collapse:separate;margin:0 0 12px;background:#ffffff;"
+        f'border:1px solid {_C_BORDER};border-radius:10px;">'
+        f'<tr><td style="padding:13px 14px 12px;{header_border}">{header}</td></tr>'
+        f"{details}</table>"
+    )
+
+
+def render_candidate_cards_html(cands: list[dict], job_title: str = "") -> str:
+    """The HTML-part counterpart of format_candidate_block: one profile card per
+    candidate (initials badge, name, role; Experience / Location / Notice period down
+    the left; matched + other skills as pills on the right). Table-based with inline
+    styles only so Gmail/Outlook/Apple Mail render it alike, and stacked in one column
+    so it works on phones. email_service draws it in place of the text block. "" for
+    none."""
+    if not cands:
+        return ""
+    views = [_candidate_view(c) for c in cands]
+    shortlist = _shortlist_line(job_title)
+    note = (
+        f'<div style="font-size:11.5px;color:{_C_MUTED};margin-top:3px;">'
+        f"{html_lib.escape(_BLOCK_MATCH_NOTE)}</div>"
+        if any(v["matched"] for v in views) else ""
+    )
+    return (
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" '
+        'style="max-width:580px;border-collapse:collapse;margin:4px 0 0;">'
+        f'<tr><td style="padding:0 0 8px;font-family:{_C_FONT};">'
+        f'<div style="font-size:11px;letter-spacing:.14em;text-transform:uppercase;'
+        f'font-weight:700;color:{_C_VIOLET};">{html_lib.escape(_BLOCK_TITLE.title())}</div>'
+        + (
+            f'<div style="font-size:12.5px;color:{_C_MUTED};margin-top:2px;">'
+            f"{html_lib.escape(shortlist)}</div>" if shortlist else ""
+        )
+        + "</td></tr>"
+        f'<tr><td>{"".join(_card_html(v, i) for i, v in enumerate(views, start=1))}</td></tr>'
+        f'<tr><td style="padding:2px 0 0;font-family:{_C_FONT};font-size:13px;color:{_C_TEXT};">'
+        f"{html_lib.escape(_BLOCK_CTA)}{note}</td></tr>"
+        "</table>"
+    )
 
 
 async def mark_candidates_sent(candidate_ids: list[str], outreach_id: str) -> None:

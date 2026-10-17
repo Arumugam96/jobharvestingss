@@ -309,8 +309,8 @@ def append_closing(
 
         <rest of the pitch body>
 
-        <candidate_block>                (when given — the anonymised Resdex matching-
-                                          profiles card, resdex_match_service.
+        <candidate_block>                (when given — the Resdex matching-profiles
+                                          block, resdex_match_service.
                                           format_candidate_block)
 
         <contact_block>                  (when given — the automated-send desk
