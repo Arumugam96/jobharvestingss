@@ -91,7 +91,15 @@ class Settings(BaseSettings):
     apollo_base_url: str = "https://api.apollo.io/api/v1"
     apollo_timeout_s: float = 20.0
     apollo_reveal_phone: bool = False
+    # Full public URL of POST /recruiter-finder/apollo-phone-webhook (Apollo delivers
+    # revealed phones there asynchronously). Empty disables phone reveal everywhere.
     apollo_webhook_url: str = ""
+    # Shared secret appended to the webhook URL as ?token=… — Apollo doesn't sign its
+    # webhook, so the receiver authenticates deliveries by this token instead.
+    apollo_webhook_token: str = ""
+    # A phone request with no delivery after this long is marked expired (NOT_FOUND);
+    # a late delivery still lands and is charged.
+    apollo_phone_pending_ttl_minutes: int = 60
     apollo_recheck_days: int = 30
     apollo_enrich_company: bool = True
     apollo_daily_cap: int = 100
@@ -107,6 +115,9 @@ class Settings(BaseSettings):
 
     # ── Recruiter Contact Finder (app/services/recruiter_finder_service.py) ───────
     recruiter_finder_daily_cap: int = 50
+    # Finder credits charged per phone — only when Apollo's webhook actually delivers
+    # one (an email stays 1 credit, charged on a hit).
+    recruiter_finder_phone_credit_cost: int = 8
     recruiter_finder_max_rows: int = 1000
     company_contact_max_count: int = 25
     recruiter_finder_concurrency: int = 3

@@ -27,6 +27,7 @@ import app.models.auth  # noqa: F401 — registers users / otp_verifications on 
 import app.models.harvest_run  # noqa: F401 — registers harvest_runs / scraped_jobs / llm_calls on Base.metadata
 import app.models.recruiter  # noqa: F401 — registers recruiters on Base.metadata
 import app.models.recruiter_finder  # noqa: F401 — registers recruiter_finder_usage/jobs/items on Base.metadata
+import app.models.apollo_phone  # noqa: F401 — registers apollo_phone_requests / apollo_webhook_events on Base.metadata
 import app.models.outreach  # noqa: F401 — registers email_outreach on Base.metadata
 import app.models.outreach_reply  # noqa: F401 — registers outreach_replies on Base.metadata
 import app.models.resdex  # noqa: F401 — registers resdex_searches / resdex_candidates / resdex_daily_usage on Base.metadata
@@ -47,6 +48,7 @@ from app.routes.frontend_routes import router as frontend_router
 from app.routes.prospect_routes import router as prospect_intelligence_router
 from app.routes.recruiter_routes import router as recruiter_discovery_router
 from app.routes.recruiter_finder_routes import router as recruiter_finder_router
+from app.routes.recruiter_finder_routes import webhook_router as recruiter_finder_webhook_router
 from app.routes.lead_intelligence_routes import router as lead_intelligence_router
 from app.routes.outreach_routes import router as outreach_router, webhook_router as outreach_webhook_router
 from app.services.job_tracker import JobTracker
@@ -292,6 +294,26 @@ def _ensure_recruiter_finder_jobs_columns(sync_conn) -> None:
         logger.info("recruiter_finder_jobs_column_added", column="personas")
 
 
+def _ensure_recruiter_finder_items_columns(sync_conn) -> None:
+    """One-time, idempotent ADD COLUMN backfill for the pre-existing
+    recruiter_finder_items table: `phone_status` (PENDING while Apollo's async phone
+    webhook is outstanding, then VERIFIED/PUBLIC/NOT_FOUND…) and `apollo_person_id`
+    (correlates the delivery). Mirrors alembic 0023 — create_all never alters an
+    existing table."""
+    inspector = sa_inspect(sync_conn)
+    if "recruiter_finder_items" not in inspector.get_table_names():
+        return  # brand-new DB — create_all already made this table with the columns
+    cols = {c["name"] for c in inspector.get_columns("recruiter_finder_items")}
+    pending = [
+        ("phone_status", "ALTER TABLE recruiter_finder_items ADD COLUMN phone_status VARCHAR(20) NOT NULL DEFAULT ''"),
+        ("apollo_person_id", "ALTER TABLE recruiter_finder_items ADD COLUMN apollo_person_id VARCHAR(60)"),
+    ]
+    for name, ddl in pending:
+        if name not in cols:
+            sync_conn.execute(sa_text(ddl))
+            logger.info("recruiter_finder_items_column_added", column=name)
+
+
 def _backfill_scraped_jobs_location(sync_conn) -> None:
     """One-time data backfill: populate country/state on pre-existing scraped_jobs
     rows by re-parsing their free-text `location` (app/core/location.py).
@@ -343,6 +365,9 @@ _TENANT_CONTENT_TABLES = [
     # Recruiter Contact Finder (recruiter_finder_usage is a standalone counter scoped
     # by explicit tenant_id in SQL, like apollo_daily_usage — so NOT listed here).
     "recruiter_finder_jobs", "recruiter_finder_items", "recruiter_finder_reveal_log",
+    # Async Apollo phone requests (apollo_webhook_events is a global diagnostics log —
+    # not listed).
+    "apollo_phone_requests",
     # Resdex candidate matching (resdex_daily_usage is a global counter — not listed).
     "resdex_searches", "resdex_candidates",
 ]
@@ -479,6 +504,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # recruiter_finder_jobs gained personas (the ordered multi-select "Who to
         # look up" for a bulk upload) — same idempotent ADD COLUMN treatment.
         await conn.run_sync(_ensure_recruiter_finder_jobs_columns)
+        # recruiter_finder_items gained phone_status + apollo_person_id (async Apollo
+        # phone delivery) — same idempotent ADD COLUMN treatment.
+        await conn.run_sync(_ensure_recruiter_finder_items_columns)
         # Data backfill: re-parse country/state onto scraped_jobs rows harvested
         # before location parsing was wired (columns above exist but stayed empty).
         await conn.run_sync(_backfill_scraped_jobs_location)
@@ -587,6 +615,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception as exc:
         logger.warning("reply_poll_setup_failed", error=str(exc))
 
+    # Contact Finder async phones: expire requests Apollo never delivered within
+    # APOLLO_PHONE_PENDING_TTL_MINUTES (linked statuses → NOT_FOUND). Cheap no-op when
+    # nothing is pending, so it's registered unconditionally.
+    try:
+        from app.services.apollo_phone_service import expire_stale
+        scheduler.schedule_interval_job(
+            job_id           = "apollo_phone_expiry",
+            job_fn           = expire_stale,
+            interval_seconds = 600,
+            name             = "Apollo phone request expiry",
+        )
+    except Exception as exc:
+        logger.warning("apollo_phone_expiry_setup_failed", error=str(exc))
+
     yield  # ← app runs here
 
     # ── Shutdown ──────────────────────────────────────────────────────────────
@@ -669,6 +711,9 @@ def create_app() -> FastAPI:
     # Mailjet delivery-event webhook — unauthenticated (Mailjet has no login
     # cookie); guarded by a shared token in the URL query instead.
     app.include_router(outreach_webhook_router)                               # POST /outreach/mailjet-events
+    # Apollo async phone delivery — unauthenticated (Apollo has no login cookie);
+    # guarded by APOLLO_WEBHOOK_TOKEN in the URL query instead.
+    app.include_router(recruiter_finder_webhook_router)                       # POST /recruiter-finder/apollo-phone-webhook
 
     return app
 

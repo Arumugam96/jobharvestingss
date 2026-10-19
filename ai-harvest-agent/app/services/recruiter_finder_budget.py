@@ -67,6 +67,43 @@ async def _reserve(db: AsyncSession, today, tenant_id: str, cap: int, cost: int)
     return True
 
 
+async def _charge(db: AsyncSession, today, tenant_id: str, cost: int) -> None:
+    """UNCONDITIONAL increment of today's (tenant) counter row (no commit — the caller
+    owns the transaction). Used for charges that are already incurred and can't be
+    refused — an Apollo phone delivered to the webhook — so it may overshoot the cap
+    slightly; the pre-flight gate (apollo_phone_service.can_afford_phone) keeps that rare."""
+    await db.execute(
+        sa_text(
+            "INSERT INTO recruiter_finder_usage (usage_date, tenant_id, count) "
+            "VALUES (:d, :t, 0) ON CONFLICT (usage_date, tenant_id) DO NOTHING"
+        ),
+        {"d": today, "t": tenant_id},
+    )
+    await db.execute(
+        sa_text(
+            "UPDATE recruiter_finder_usage "
+            "SET count = count + :cost, updated_at = CURRENT_TIMESTAMP "
+            "WHERE usage_date = :d AND tenant_id = :t"
+        ),
+        {"cost": cost, "d": today, "t": tenant_id},
+    )
+
+
+async def charge(cost: int, tenant_id: str) -> bool:
+    """Unconditionally add ``cost`` credits to ``tenant_id``'s usage today, in its own
+    session. True on success; False (logged) on a DB error."""
+    settings = get_settings()
+    try:
+        factory = get_session_factory(settings)
+        async with factory() as db:
+            await _charge(db, _utc_today(), tenant_id, cost)
+            await db.commit()
+            return True
+    except Exception as exc:
+        logger.warning("recruiter_finder_budget_charge_failed", tenant_id=tenant_id, cost=cost, error=str(exc))
+        return False
+
+
 def _resolve_cap(cap: int | None) -> int:
     return get_settings().recruiter_finder_daily_cap if cap is None else cap
 

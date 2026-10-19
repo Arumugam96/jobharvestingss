@@ -135,6 +135,11 @@ class RecruiterFinderItemORM(Base):
     email: Mapped[str] = mapped_column(String(320), nullable=False, default="")
     email_status: Mapped[str] = mapped_column(String(30), nullable=False, default="")
     phone: Mapped[str] = mapped_column(String(50), nullable=False, default="")
+    # PENDING (Apollo webhook outstanding) | VERIFIED | PUBLIC | NOT_FOUND |
+    # SKIPPED_BUDGET | UNAVAILABLE — '' when no phone was asked for.
+    phone_status: Mapped[str] = mapped_column(String(20), nullable=False, default="", server_default="")
+    # Apollo person id of the revealed contact (correlates the async phone delivery).
+    apollo_person_id: Mapped[str | None] = mapped_column(String(60), nullable=True)
     confidence: Mapped[str] = mapped_column(String(20), nullable=False, default="")
     # The recruiters.id the contact was upserted into (nullable, not a hard FK so a
     # purge of recruiters can't block item rows).

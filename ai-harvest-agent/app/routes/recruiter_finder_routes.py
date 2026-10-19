@@ -9,6 +9,12 @@ Endpoints (all under the shared auth guard; added to harvest-agent/nginx.conf):
   POST /recruiter-finder/jobs/{job_id}/retry   re-queue unsuccessful/deferred rows
   GET  /recruiter-finder/usage                 per-tenant daily credit gauge + 14-day history
   GET  /recruiter-finder/history               recent jobs
+  GET  /recruiter-finder/phone-status          poll async Apollo phone deliveries
+  GET  /recruiter-finder/apollo-webhook-events recent raw webhook deliveries (diagnostics)
+
+Unauthenticated (``webhook_router`` — Apollo carries no login cookie; guarded by a
+shared token in the URL query, like the outreach webhooks):
+  POST /recruiter-finder/apollo-phone-webhook  Apollo's async phone delivery
 
 Thin trigger layer — all Apollo/budget/persistence logic lives in
 app/services/recruiter_finder_service.py (+ _import / _budget).
@@ -17,14 +23,18 @@ from __future__ import annotations
 
 from typing import Any
 
+import hmac
+import json
+
 import structlog
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.core.dependencies import get_current_user, get_db_session
-from app.services import recruiter_finder_budget
+from app.core.tenant_context import is_all_access
+from app.services import apollo_phone_service, recruiter_finder_budget
 from app.services.recruiter_finder_import import parse_and_validate
 from app.services.recruiter_finder_service import (
     create_job_with_items,
@@ -43,12 +53,14 @@ from app.services.recruiter_finder_service import (
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(tags=["Recruiter Contact Finder"])
+# Mounted WITHOUT the auth guard in app/main.py (Apollo has no session cookie).
+webhook_router = APIRouter(tags=["Recruiter Contact Finder"])
 
 
 # ── Serializers ──────────────────────────────────────────────────────────────
 
-def _job_dict(job) -> dict[str, Any]:
-    return {
+def _job_dict(job, *, phones_pending: int | None = None) -> dict[str, Any]:
+    out = {
         "job_id": job.id, "status": job.status, "progress": job.progress, "message": job.message,
         "source": job.source, "filename": job.filename, "persona": job.persona,
         "personas": [p for p in (job.personas or "").split("\n") if p], "reveal": job.reveal,
@@ -59,6 +71,9 @@ def _job_dict(job) -> dict[str, Any]:
         "started_at": job.started_at.isoformat() if job.started_at else None,
         "completed_at": job.completed_at.isoformat() if job.completed_at else None,
     }
+    if phones_pending is not None:
+        out["phones_pending"] = phones_pending
+    return out
 
 
 def _item_dict(it) -> dict[str, Any]:
@@ -68,6 +83,7 @@ def _item_dict(it) -> dict[str, Any]:
         "validation_status": it.validation_status, "status": it.status,
         "contact_name": it.contact_name, "contact_title": it.contact_title,
         "email": it.email, "email_status": it.email_status, "phone": it.phone,
+        "phone_status": it.phone_status or "", "person_id": it.apollo_person_id or "",
         "confidence": it.confidence, "recruiter_id": it.recruiter_id,
         "error": it.error, "attempts": it.attempts,
     }
@@ -232,7 +248,9 @@ async def job_status(
     job = await get_job(db, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
-    return _job_dict(job)
+    # Outstanding Apollo phone deliveries — the UI keeps polling after completion
+    # while this is > 0.
+    return _job_dict(job, phones_pending=await apollo_phone_service.job_pending_count(db, job_id))
 
 
 # UI filter buckets → the item statuses they include ("all" = no filter).
@@ -290,7 +308,14 @@ async def usage(current_user=Depends(get_current_user)) -> Any:
     used = await recruiter_finder_budget.usage_today(tenant)
     remaining = await recruiter_finder_budget.remaining_today(tenant, cap=cap)
     history = await recruiter_finder_budget.usage_history(tenant, 14)
-    return {"cap": cap, "used": used, "remaining": remaining, "history": history}
+    return {
+        "cap": cap, "used": used, "remaining": remaining, "history": history,
+        # Async phone reveal (Apollo → webhook): offered only when a webhook URL is set;
+        # each delivered phone costs phone_credit_cost credits, charged on delivery.
+        "phone_enabled": apollo_phone_service.phone_enabled(),
+        "phone_credit_cost": apollo_phone_service.phone_cost(),
+        "phones_pending": await apollo_phone_service.pending_count(tenant),
+    }
 
 
 @router.get("/recruiter-finder/history")
@@ -332,6 +357,72 @@ async def recent_contacts(
     return {"contacts": [{
         "name": r.person_name, "title": r.designation, "company": r.company_name,
         "domain": r.company_domain, "email": r.official_email_id, "email_status": r.email_status,
-        "phone": r.contact_number, "confidence": r.confidence_score,
+        "phone": r.contact_number, "phone_status": r.phone_status, "confidence": r.confidence_score,
         "requested_by": r.requested_by, "linkedin_url": r.linkedin_profile_url,
     } for r in rows]}
+
+
+# ── Async phone reveal (Apollo webhook) ──────────────────────────────────────
+
+def _csv(value: str) -> list[str]:
+    return [v.strip() for v in (value or "").split(",") if v.strip()]
+
+
+@router.get("/recruiter-finder/phone-status")
+async def phone_status(
+    person_ids: str = Query(default="", description="Comma-separated Apollo person ids"),
+    item_ids: str = Query(default="", description="Comma-separated finder item ids"),
+    db: AsyncSession = Depends(get_db_session),
+    current_user=Depends(get_current_user),
+) -> Any:
+    """Latest async phone-request state per Apollo person id / finder item id —
+    ``{persons: {id: {phone_status, phone, phone_type, dnc_status}}, items: {…}}``.
+    The UI polls this while any visible row is PENDING. Tenant-scoped."""
+    return await apollo_phone_service.phone_status_for(
+        db, person_ids=_csv(person_ids), item_ids=_csv(item_ids),
+    )
+
+
+@router.get("/recruiter-finder/apollo-webhook-events")
+async def apollo_webhook_events(
+    limit: int = 20,
+    db: AsyncSession = Depends(get_db_session),
+    current_user=Depends(get_current_user),
+) -> Any:
+    """Recent raw deliveries to the Apollo phone webhook — answers "is Apollo actually
+    delivering?". Not tenant-scoped (bodies span workspaces), so internal-only."""
+    if not is_all_access(getattr(current_user, "tenant_id", None)):
+        raise HTTPException(status_code=403, detail="Webhook diagnostics are internal-only.")
+    return {"events": await apollo_phone_service.recent_webhook_events(db, limit=limit)}
+
+
+def _remote_addr(request: Request) -> str:
+    fwd = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+    return fwd or request.headers.get("x-real-ip") or (request.client.host if request.client else "")
+
+
+@webhook_router.post("/recruiter-finder/apollo-phone-webhook", status_code=status.HTTP_200_OK)
+async def apollo_phone_webhook(
+    request: Request,
+    token: str | None = Query(default=None, description="Shared webhook secret (APOLLO_WEBHOOK_TOKEN)."),
+    ref: str = Query(default="", description="Correlation ref we embedded in the webhook URL."),
+) -> dict:
+    """Receive Apollo's asynchronous phone delivery (``{people: [{id, phone_numbers: […]}]}``)
+    for a Contact Finder reveal. Apollo doesn't sign the webhook, so the request is
+    authenticated by our own ``token`` in the URL; a bad token is logged as a raw event
+    (diagnostics) and rejected 401. Every other delivery returns 200 — even a benign
+    no-match — so Apollo doesn't retry it."""
+    settings = get_settings()
+    raw = (await request.body()).decode("utf-8", errors="replace")
+    try:
+        payload: Any = json.loads(raw) if raw.strip() else None
+    except ValueError:
+        payload = None
+    expected = (settings.apollo_webhook_token or "").strip()
+    token_ok = not expected or hmac.compare_digest((token or "").encode(), expected.encode())
+    result = await apollo_phone_service.process_webhook(
+        payload, ref=ref or "", token_ok=token_ok, remote_addr=_remote_addr(request), raw_body=raw,
+    )
+    if not token_ok:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid webhook token")
+    return result

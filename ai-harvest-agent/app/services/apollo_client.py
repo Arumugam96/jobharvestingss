@@ -19,14 +19,20 @@ gating/caching (see ``apollo_enrichment.apollo_contact_fallback`` for reveals an
 Phone reveal note: Apollo returns phone numbers *asynchronously* via a webhook,
 not in the match response, and it *requires* a ``webhook_url`` param whenever
 ``reveal_phone_number`` is set — otherwise the whole request 400s (taking the
-email reveal down with it). So phone reveal is only sent when both
-``settings.apollo_reveal_phone`` AND ``settings.apollo_webhook_url`` are set;
-without a webhook it is silently downgraded to email-only so the email still
-resolves. Even with a webhook, phones arrive at that URL later, not inline.
+email reveal down with it). So a phone is only requested when the caller asks for it
+(``reveal_phone=True``) AND ``settings.apollo_webhook_url`` is set; without a webhook
+it is silently downgraded to email-only so the email still resolves. (The Contact
+Finder decides per call; ``settings.apollo_reveal_phone`` only gates the harvest-time
+fallback in apollo_enrichment.) The URL sent carries ``token=<apollo_webhook_token>``
+and, when the caller passes ``webhook_ref``, ``ref=<ref>`` so the delivery can be
+authenticated and correlated (app/services/apollo_phone_service.py). If Apollo rejects
+the webhook_url itself (e.g. a plain-http URL), the call is retried ONCE email-only
+and the result's ``phone_requested`` is False — no webhook will follow.
 """
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urlencode
 
 import httpx
 import structlog
@@ -126,6 +132,10 @@ class ApolloPersonResult(BaseModel):
     country: str | None = None
     address: str | None = None
     organization: ApolloOrgResult | None = None
+    # True only when Apollo ACCEPTED a phone request for this (matched) person — i.e. a
+    # webhook delivery is expected. False when no phone was asked for, the reveal was
+    # downgraded (no webhook URL), or Apollo rejected the webhook_url.
+    phone_requested: bool = False
 
     @classmethod
     def no_match(cls) -> "ApolloPersonResult":
@@ -220,10 +230,18 @@ class ApolloClient:
         # Required by Apollo whenever reveal_phone_number is set; empty disables
         # phone reveal (downgraded to email-only) so the request never 400s.
         self._webhook_url = (settings.apollo_webhook_url or "").strip()
+        # Appended to the webhook URL so the (unsigned) delivery can be authenticated.
+        # getattr: lightweight test settings may not carry it.
+        self._webhook_token = (getattr(settings, "apollo_webhook_token", "") or "").strip()
 
     @property
     def enabled(self) -> bool:
         return bool(self._api_key)
+
+    @property
+    def phone_enabled(self) -> bool:
+        """Phone reveal is possible only with a webhook URL to deliver to."""
+        return bool(self._webhook_url)
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -236,10 +254,12 @@ class ApolloClient:
         name: str = "",
         company: str = "",
         domain: str = "",
+        webhook_ref: str = "",
     ) -> ApolloPersonResult:
         """POST /people/match — match one person by LinkedIn URL (name/company/
         domain are secondary hints) and optionally reveal email/phone. Returns a
-        no-match result (not an error) when Apollo finds nobody."""
+        no-match result (not an error) when Apollo finds nobody. ``webhook_ref``
+        tags the phone webhook URL so the async delivery can be correlated."""
         if not self.enabled:
             raise ApolloAPIError("Apollo is not configured (APOLLO_API_KEY is empty)")
         if not linkedin_url:
@@ -255,7 +275,7 @@ class ApolloClient:
             "reveal_phone_number": _bool(want_phone),
         }
         if want_phone:
-            params["webhook_url"] = self._webhook_url
+            params["webhook_url"] = self._webhook_url_for(webhook_ref)
         if name:
             params["name"] = name
         if company:
@@ -266,8 +286,11 @@ class ApolloClient:
         if not await self._reserve_credit("people/match"):
             return ApolloPersonResult.no_match()
 
-        data = await self._request("/people/match", params=params)
+        data, phone_requested = await self._reveal_request(
+            "/people/match", params=params, want_phone=want_phone, context=linkedin_url,
+        )
         result = ApolloPersonResult.from_person(data.get("person"))
+        result.phone_requested = phone_requested and result.matched
         self._log_result("people/match", linkedin_url, result)
         return result
 
@@ -277,6 +300,7 @@ class ApolloClient:
         *,
         reveal_email: bool = True,
         reveal_phone: bool = False,
+        webhook_ref: str = "",
     ) -> ApolloPersonResult:
         """POST /people/match keyed on an Apollo person **id** (not a LinkedIn URL) —
         used to reveal the email of a person returned by search_people. Mirrors the
@@ -294,13 +318,17 @@ class ApolloClient:
             "reveal_phone_number": _bool(want_phone),
         }
         if want_phone:
-            params["webhook_url"] = self._webhook_url
+            params["webhook_url"] = self._webhook_url_for(webhook_ref)
 
         if not await self._reserve_credit("people/match"):
             return ApolloPersonResult.no_match()
 
-        data = await self._request("/people/match", params=params, json={"id": person_id})
+        data, phone_requested = await self._reveal_request(
+            "/people/match", params=params, json={"id": person_id},
+            want_phone=want_phone, context=person_id,
+        )
         result = ApolloPersonResult.from_person(data.get("person"))
+        result.phone_requested = phone_requested and result.matched
         self._log_result("people/match", person_id, result)
         return result
 
@@ -427,10 +455,12 @@ class ApolloClient:
         *,
         reveal_email: bool = True,
         reveal_phone: bool = False,
+        webhook_ref: str = "",
     ) -> list[ApolloPersonResult]:
         """POST /people/bulk_match in batches of <=10. Each item is a dict of
         match hints, e.g. {"linkedin_url": ...} or {"name","organization_name"}.
-        Returns one ApolloPersonResult per input item, order-preserved."""
+        Returns one ApolloPersonResult per input item, order-preserved.
+        ``webhook_ref`` tags the phone webhook URL (one ref for the whole call)."""
         if not self.enabled:
             raise ApolloAPIError("Apollo is not configured (APOLLO_API_KEY is empty)")
         # Same webhook gate as the single-match path — a phone reveal without a
@@ -450,14 +480,17 @@ class ApolloClient:
                 "reveal_phone_number": want_phone,
             }
             if want_phone:
-                payload["webhook_url"] = self._webhook_url
-            data = await self._request("/people/bulk_match", json=payload)
+                payload["webhook_url"] = self._webhook_url_for(webhook_ref)
+            data, phone_requested = await self._reveal_request(
+                "/people/bulk_match", json=payload, want_phone=want_phone, context="bulk_match",
+            )
             matches = data.get("matches")
             if not isinstance(matches, list):
                 matches = []
             for i, person in enumerate(chunk):
                 match = matches[i] if i < len(matches) else None
                 result = ApolloPersonResult.from_person(match)
+                result.phone_requested = phone_requested and result.matched
                 self._log_result("people/bulk_match", person.get("linkedin_url", ""), result)
                 results.append(result)
         return results
@@ -479,6 +512,51 @@ class ApolloClient:
         if not allowed:
             logger.info("apollo_daily_cap_reached", endpoint=endpoint, cost=cost)
         return allowed
+
+    def _webhook_url_for(self, ref: str = "") -> str:
+        """The configured webhook URL plus our ``token`` (authenticates the unsigned
+        delivery) and ``ref`` (correlates it to the request rows), respecting any
+        query string the configured URL already has."""
+        extra: dict[str, str] = {}
+        if self._webhook_token:
+            extra["token"] = self._webhook_token
+        if ref:
+            extra["ref"] = ref
+        if not extra:
+            return self._webhook_url
+        sep = "&" if "?" in self._webhook_url else "?"
+        return f"{self._webhook_url}{sep}{urlencode(extra)}"
+
+    async def _reveal_request(
+        self,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
+        want_phone: bool,
+        context: str,
+    ) -> tuple[dict[str, Any], bool]:
+        """Issue a reveal call; returns (body, phone_requested). When a phone was
+        requested and Apollo rejects the request because of the webhook_url (4xx whose
+        body mentions "webhook" — e.g. it insists on HTTPS), log
+        ``apollo_webhook_url_rejected`` and retry ONCE email-only so the email reveal
+        never breaks. The credit was already reserved for this call — the retry
+        doesn't reserve another."""
+        try:
+            return await self._request(path, params=params, json=json), want_phone
+        except ApolloAPIError as exc:
+            if not want_phone or not _is_webhook_rejection(exc):
+                raise
+            logger.warning(
+                "apollo_webhook_url_rejected",
+                path=path, context=context,
+                status=exc.details.get("status"),
+                body=str(exc.details.get("body") or exc.message)[:300],
+                webhook_url=self._webhook_url,  # configured base only — never the token
+                hint="Apollo refused the webhook_url (it may require public HTTPS); retrying email-only",
+            )
+            data = await self._request(path, params=_strip_phone(params), json=_strip_phone(json))
+            return data, False
 
     def _phone_reveal_allowed(self, context: str) -> bool:
         """Phone reveal is only sent to Apollo when a webhook_url is configured;
@@ -530,7 +608,7 @@ class ApolloClient:
             # Permanent (bad key/params) — do not retry.
             raise ApolloAPIError(
                 f"Apollo returned HTTP {response.status_code}: {response.text[:300]}",
-                details={"status": response.status_code, "path": path},
+                details={"status": response.status_code, "path": path, "body": response.text[:500]},
             )
         try:
             return response.json()
@@ -564,6 +642,28 @@ class ApolloClient:
             )
         else:
             logger.info("apollo_matched_no_contact", endpoint=endpoint, linkedin_url=linkedin_url)
+
+
+def _is_webhook_rejection(exc: ApolloAPIError) -> bool:
+    """A permanent 4xx whose message/body names the webhook (Apollo validates
+    webhook_url and 400s the whole reveal when it dislikes it)."""
+    status = exc.details.get("status")
+    if not isinstance(status, int) or not 400 <= status < 500:
+        return False
+    text = f"{exc.message} {exc.details.get('body') or ''}".lower()
+    return "webhook" in text
+
+
+def _strip_phone(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Copy of a reveal payload/params with the phone reveal switched off and the
+    webhook_url dropped (keeps the value's type: "false" in query params, False in JSON)."""
+    if payload is None:
+        return None
+    out = dict(payload)
+    out.pop("webhook_url", None)
+    if "reveal_phone_number" in out:
+        out["reveal_phone_number"] = "false" if isinstance(out["reveal_phone_number"], str) else False
+    return out
 
 
 def _bool(v: bool) -> str:

@@ -26,8 +26,10 @@ def test_custom_titles_win() -> None:
 
 
 def test_reveal_flags_and_cost() -> None:
+    # Third element is the EMAIL credit (charged on a hit); a phone's credits are
+    # deferred to webhook delivery (settings.recruiter_finder_phone_credit_cost).
     assert _reveal_flags("email") == (True, False, 1)
-    assert _reveal_flags("phone") == (False, True, 1)
-    assert _reveal_flags("both") == (True, True, 2)
+    assert _reveal_flags("phone") == (False, True, 0)
+    assert _reveal_flags("both") == (True, True, 1)
     assert _reveal_flags("") == (True, False, 1)   # defaults to email
     assert _reveal_flags(None) == (True, False, 1)

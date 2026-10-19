@@ -2,12 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Loader2, Search, Upload, RotateCw, Download, Zap, Mail, FileSpreadsheet,
   CheckCircle2, AlertTriangle, Building2, MapPin, UserSearch, Users, Link2,
-  History, Folder, LayoutList, ChevronLeft, Lock, Clock,
+  History, Folder, LayoutList, ChevronLeft, Lock, Clock, Phone,
 } from "lucide-react";
 import {
   finderSearch, finderCandidates, finderRevealSelected, finderHistoryLog, finderValidate,
   finderUpload, getFinderJob, getFinderJobItems, retryFinderJob, getFinderUsage, getFinderHistory,
-  getFinderRecentContacts, ApiError,
+  getFinderRecentContacts, getFinderPhoneStatus, ApiError,
 } from "../api";
 
 /* ── Recruiter Contact Finder — ports the approved artifact design. The whole page
@@ -48,12 +48,102 @@ function Seg({ value, onChange, options }) {
     <div className="seg">
       {options.map((o) => (
         <button key={o.value} type="button" className={"seg-btn" + (value === o.value ? " active" : "")}
-          onClick={() => onChange(o.value)}>
+          onClick={() => onChange(o.value)} disabled={!!o.disabled} title={o.title}>
           {o.icon}{o.label}
         </button>
       ))}
     </div>
   );
+}
+
+// ── Async phone reveal (Apollo delivers phones to a webhook minutes later) ────
+const PHONE_POLL_MS = 8000;
+const PHONE_POLL_MAX_MS = 30 * 60 * 1000; // stop polling a stuck request after 30 min
+const PHONE_OFF_TIP = "Phone reveal needs APOLLO_WEBHOOK_URL";
+
+// Reveal choices; Phone/Both are disabled (with a tooltip) when the backend has no
+// webhook URL to receive Apollo's phone deliveries. `phoneEnabled` undefined = unknown yet.
+function revealOptions(phoneEnabled) {
+  const off = phoneEnabled === false;
+  const title = off ? PHONE_OFF_TIP : undefined;
+  return [
+    { value: "email", label: "Email", icon: <Mail size={14} /> },
+    { value: "phone", label: "Phone", icon: <Phone size={14} />, disabled: off, title },
+    { value: "both", label: "Both", disabled: off, title },
+  ];
+}
+
+// Human cost copy for a reveal choice: 1 credit per email found (charged now), N per
+// phone — charged only when Apollo actually delivers one.
+function costText(reveal, phoneCost) {
+  const email = "1 credit per email found";
+  const phone = `${phoneCost} credits per phone, charged only when Apollo delivers one (usually a few minutes)`;
+  return reveal === "both" ? `${email} · ${phone}` : reveal === "phone" ? phone : email;
+}
+// Worst-case credits for revealing `n` contacts.
+function maxCredits(reveal, phoneCost, n) {
+  const per = (reveal === "phone" ? 0 : 1) + (reveal === "email" ? 0 : phoneCost);
+  return per * n;
+}
+
+const PHONE_MUTED = {
+  NOT_FOUND: ["no phone", "Apollo had no phone number for this contact"],
+  UNAVAILABLE: ["unavailable", "No phone request went out — Apollo rejected the webhook URL, or phone reveal isn't configured"],
+  SKIPPED_BUDGET: ["skipped · budget", "Today's credit budget couldn't cover a phone for this contact"],
+};
+const DNC_CLEAN = new Set(["", "not_found", "not_on_list", "unknown", "not_applicable"]);
+
+// One phone cell: PENDING → spinner chip; a number (+ DNC tag if flagged); otherwise a
+// muted reason with a tooltip.
+function PhoneCell({ phone, status, dnc }) {
+  const s = (status || "").toUpperCase();
+  if (s === "PENDING") {
+    return (
+      <span className="chip proc" title="Apollo delivers phones asynchronously — usually within a few minutes">
+        <Loader2 size={11} className="ha-spin" />Finding phone…
+      </span>
+    );
+  }
+  if (phone) {
+    const flagged = dnc && !DNC_CLEAN.has(String(dnc).toLowerCase());
+    return <span>{phone}{flagged ? <span className="dnc" title={`Do-not-call status: ${dnc}`}>DNC</span> : null}</span>;
+  }
+  const m = PHONE_MUTED[s];
+  if (m) return <span className="phone-muted" title={m[1]}>{m[0]}</span>;
+  return <span className="none">—</span>;
+}
+
+// Poll GET /recruiter-finder/phone-status while any of `pendingIds` (Apollo person ids)
+// is PENDING — every 8 s (setTimeout-in-ref, like BulkPanel.tick), stopping after 30 min
+// or on unmount. `onUpdate(persons)` receives {personId: {phone_status, phone, …}}.
+function usePhonePoll(pendingIds, onUpdate) {
+  const timerRef = useRef(null);
+  const startedRef = useRef(0);
+  const cbRef = useRef(onUpdate);
+  cbRef.current = onUpdate;
+  const key = [...pendingIds].sort().join(",");
+  useEffect(() => {
+    if (!key) { startedRef.current = 0; return undefined; }
+    if (!startedRef.current) startedRef.current = Date.now();
+    let cancelled = false;
+    const tick = async () => {
+      if (cancelled || Date.now() - startedRef.current > PHONE_POLL_MAX_MS) return;
+      try {
+        const r = await getFinderPhoneStatus({ personIds: key.split(",") });
+        if (!cancelled) cbRef.current((r && r.persons) || {});
+      } catch { /* transient — try again next tick */ }
+      if (!cancelled) timerRef.current = setTimeout(tick, PHONE_POLL_MS);
+    };
+    timerRef.current = setTimeout(tick, PHONE_POLL_MS);
+    return () => { cancelled = true; clearTimeout(timerRef.current); };
+  }, [key]);
+}
+
+// Merge one phone-status update into a result row (only rows still PENDING change).
+function mergePhone(row, persons) {
+  const u = row && row.person_id ? persons[row.person_id] : null;
+  if (!u || row.phone_status !== "PENDING" || u.phone_status === "PENDING") return row;
+  return { ...row, phone: u.phone || row.phone, phone_status: u.phone_status, dnc_status: u.dnc_status };
 }
 
 // Styled dropdown (replaces the native <select> so the options panel aligns with the design).
@@ -160,7 +250,7 @@ export default function RecruiterContactFinderPage() {
               <Upload size={15} /> Bulk upload <span className="kbd">CSV · XLSX</span>
             </button>
           </div>
-          {tab === "single" ? <SinglePanel onSpent={loadUsage} /> : <BulkPanel onSpent={loadUsage} />}
+          {tab === "single" ? <SinglePanel usage={usage} onSpent={loadUsage} /> : <BulkPanel usage={usage} onSpent={loadUsage} />}
         </section>
       </div>
     </main>
@@ -233,7 +323,12 @@ function StatBand({ usage, collapsed }) {
             <div className="credit-meta">
               <span className="lbl">Credits left</span>
               <span className="bigleft num">{left}</span>
-              <div className="credit-tags"><span className="ctag sep"><span className="dot" />Separate budget</span></div>
+              <div className="credit-tags"><span className="ctag sep"><span className="dot" />Separate budget</span>
+                {usage?.phones_pending > 0 && (
+                  <span className="ctag" title={`Each delivered phone costs ${usage.phone_credit_cost ?? 8} credits`}>
+                    <Phone size={10} /> {usage.phones_pending} phone{usage.phones_pending === 1 ? "" : "s"} pending
+                  </span>
+                )}</div>
             </div>
           </div>
           <div className="footnote" style={{ justifyContent: "flex-start", padding: "10px 16px 12px" }}>Resets at 00:00 UTC · isolated from the harvest Apollo pool</div>
@@ -362,13 +457,20 @@ function HistoryTab() {
   const [period, setPeriod] = useState("");
   const [page, setPage] = useState(1);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  const load = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true);
     try { setData(await finderHistoryLog({ q, company, email_status: status, confidence: conf, period, page, page_size: HIST_PAGE })); }
-    catch { setData(null); }
-    finally { setLoading(false); }
+    catch { if (!silent) setData(null); }
+    finally { if (!silent) setLoading(false); }
   }, [q, company, status, conf, period, page]);
   useEffect(() => { const t = setTimeout(load, 220); return () => clearTimeout(t); }, [load]);
+  // Phones arrive asynchronously — quietly reload every 15 s while any row is still pending.
+  const anyPhonePending = (data?.rows || []).some((r) => r.phone_status === "PENDING");
+  useEffect(() => {
+    if (!anyPhonePending) return undefined;
+    const t = setTimeout(() => load(true), 15000);
+    return () => clearTimeout(t);
+  }, [anyPhonePending, data, load]);
 
   const setFilter = (fn) => { fn(); setPage(1); };
   const rows = data?.rows || [];
@@ -415,7 +517,7 @@ function HistoryTab() {
                 <td className="co"><b>{r.company || "—"}</b>{r.company_domain ? <span>{r.company_domain}</span> : null}</td>
                 <td className="email">{r.email ? <span className="addr">{r.email}</span> : <span className="muted">—</span>}</td>
                 <td>{r.email_status ? <span className={"chip " + histStatusTone(r.email_status)}><span className="d" />{r.email_status}</span> : <span className="none">—</span>}</td>
-                <td>{r.phone || <span className="none">—</span>}</td>
+                <td className="phone"><PhoneCell phone={r.phone} status={r.phone_status} /></td>
                 <td>{r.location || <span className="none">—</span>}</td>
                 <td>{r.confidence ? <span className={"chip " + confTone(r.confidence)}><span className="d" />{r.confidence}</span> : <span className="none">—</span>}</td>
                 <td><span className="histsrc">{SOURCE_LABEL[r.source] || r.source || "—"}</span></td>
@@ -449,13 +551,7 @@ function HistoryTab() {
 }
 
 // ── Single lookup ─────────────────────────────────────────────────────────────
-const REVEAL_OPTS = [
-  { value: "email", label: "Email", icon: <Mail size={14} /> },
-  { value: "phone", label: "Phone" },
-  { value: "both", label: "Both" },
-];
-
-function SinglePanel({ onSpent }) {
+function SinglePanel({ usage, onSpent }) {
   const [target, setTarget] = useState("company"); // company | people | history
   const [reveal, setReveal] = useState("email");
   const [company, setCompany] = useState("");
@@ -481,7 +577,31 @@ function SinglePanel({ onSpent }) {
   const [revealing, setRevealing] = useState(false);
   const [revealSummary, setRevealSummary] = useState(null);
 
-  const perCost = reveal === "both" ? 2 : 1; // credits per revealed contact
+  const phoneEnabled = usage?.phone_enabled;
+  const phoneCost = usage?.phone_credit_cost ?? 8;
+  const revealOpts = useMemo(() => revealOptions(phoneEnabled), [phoneEnabled]);
+  // Phone reveal switched off server-side → fall back to email.
+  useEffect(() => { if (phoneEnabled === false && reveal !== "email") setReveal("email"); }, [phoneEnabled, reveal]);
+  const perMax = maxCredits(reveal, phoneCost, 1); // worst-case credits per revealed contact
+  const revealWhat = reveal === "both" ? "email + phone" : reveal;
+
+  // Phones arrive asynchronously: poll every PENDING one (browse reveals + person result).
+  const pendingPhoneIds = useMemo(() => {
+    const ids = new Set();
+    Object.values(revealedMap).forEach((r) => { if (r?.phone_status === "PENDING" && r.person_id) ids.add(r.person_id); });
+    (result?.results || []).forEach((r) => { if (r.phone_status === "PENDING" && r.person_id) ids.add(r.person_id); });
+    return Array.from(ids);
+  }, [revealedMap, result]);
+  usePhonePoll(pendingPhoneIds, (persons) => {
+    if (!Object.values(persons).some((u) => u.phone_status !== "PENDING")) return;
+    setRevealedMap((prev) => {
+      const next = {};
+      Object.entries(prev).forEach(([k, v]) => { next[k] = mergePhone(v, persons); });
+      return next;
+    });
+    setResult((prev) => (prev ? { ...prev, results: (prev.results || []).map((r) => mergePhone(r, persons)) } : prev));
+    onSpent(); // a delivered phone was charged — refresh the gauge
+  });
 
   // ── People mode ──
   const canSubmitPerson = !!(personName.trim() || linkedinUrl.trim());
@@ -557,7 +677,8 @@ function SinglePanel({ onSpent }) {
         return next;
       });
       setRevealSummary({ credits_spent: r.credits_spent, revealed: r.revealed,
-        requested: r.requested, budget_exhausted: r.budget_exhausted });
+        requested: r.requested, budget_exhausted: r.budget_exhausted,
+        phones_pending: r.phones_pending || 0, message: r.status === "unconfigured" ? r.message : "" });
       setSelected(new Set());
       onSpent();
     } catch (err) {
@@ -576,7 +697,7 @@ function SinglePanel({ onSpent }) {
           ]} />
         </div>
         {target !== "history" && (
-          <div className="optgrp"><span className="olbl">Reveal</span><Seg value={reveal} onChange={setReveal} options={REVEAL_OPTS} /></div>
+          <div className="optgrp"><span className="olbl">Reveal</span><Seg value={reveal} onChange={setReveal} options={revealOpts} /></div>
         )}
       </div>
 
@@ -597,7 +718,7 @@ function SinglePanel({ onSpent }) {
             </button>
           </div>
           <div className="form-foot"><Zap size={15} />
-            <span>Listing contacts is <b>free</b> — you only spend <b>{perCost} credit{perCost > 1 ? "s" : ""}</b> per contact when you reveal ({reveal === "both" ? "email + phone" : reveal === "phone" ? "phone" : "email"}). Cached contacts are free.</span>
+            <span>Listing contacts is <b>free</b> — revealing ({revealWhat}) costs <b>{costText(reveal, phoneCost)}</b>. Cached contacts are free.</span>
           </div>
 
           {error && <div className="valnote" style={{ marginTop: 16, background: "var(--bad-bg)", borderColor: "transparent" }}><AlertTriangle className="ic" style={{ color: "var(--bad)" }} /><div className="t">{error}</div></div>}
@@ -631,8 +752,9 @@ function SinglePanel({ onSpent }) {
               {revealSummary && (
                 <div className="form-foot" style={{ marginTop: 0, marginBottom: 10, color: "var(--good)" }}>
                   <CheckCircle2 size={15} style={{ color: "var(--good)" }} />
-                  <span><b>{revealSummary.revealed}</b> revealed · <b>{revealSummary.credits_spent}</b> credit{revealSummary.credits_spent === 1 ? "" : "s"} spent · saved to Recruiters
-                    {revealSummary.budget_exhausted ? " · daily budget reached" : (revealSummary.requested > revealSummary.revealed ? ` · ${revealSummary.requested - revealSummary.revealed} had no unlockable contact` : "")}</span>
+                  <span>{revealSummary.message ? revealSummary.message : <><b>{revealSummary.revealed}</b> revealed · <b>{revealSummary.credits_spent}</b> credit{revealSummary.credits_spent === 1 ? "" : "s"} spent · saved to Recruiters
+                    {revealSummary.phones_pending > 0 ? ` · ${revealSummary.phones_pending} phone${revealSummary.phones_pending === 1 ? "" : "s"} on the way (${phoneCost} credits each, charged on delivery)` : ""}
+                    {revealSummary.budget_exhausted ? " · daily budget reached" : (revealSummary.requested > revealSummary.revealed ? ` · ${revealSummary.requested - revealSummary.revealed} had no unlockable contact` : "")}</>}</span>
                 </div>
               )}
 
@@ -640,7 +762,7 @@ function SinglePanel({ onSpent }) {
                 <table className="rt">
                   <thead><tr>
                     <th className="sel"><input type="checkbox" aria-label="Select all" checked={allVisibleSelected} onChange={toggleAll} disabled={selectableVisible.length === 0} /></th>
-                    <th>Contact</th><th>Title</th><th>Location</th><th>Email</th><th>Status</th>
+                    <th>Contact</th><th>Title</th><th>Location</th><th>Email</th><th>Phone</th><th>Status</th>
                   </tr></thead>
                   <tbody>
                     {filtered.map((c) => {
@@ -655,9 +777,13 @@ function SinglePanel({ onSpent }) {
                           <td>{c.title || "—"}</td>
                           <td>{c.location || <span className="none">—</span>}</td>
                           <td className="email">
-                            {done ? <span className="addr">{rv.email}</span>
+                            {done ? (rv.email ? <span className="addr">{rv.email}</span> : <span className="muted">—</span>)
                               : rv ? <span className="muted">no email</span>
                               : <span className="lockpill"><Lock size={11} /> Locked</span>}
+                          </td>
+                          <td className="phone">
+                            {rv ? <PhoneCell phone={rv.phone} status={rv.phone_status} dnc={rv.dnc_status} />
+                              : <span className="none">—</span>}
                           </td>
                           <td>{done
                             ? <span className="chip done"><span className="d" />Revealed</span>
@@ -666,7 +792,7 @@ function SinglePanel({ onSpent }) {
                         </tr>
                       );
                     })}
-                    {filtered.length === 0 && <tr><td colSpan={6} style={{ textAlign: "center", color: "var(--ink-faint)", padding: 22 }}>No candidates match this filter.</td></tr>}
+                    {filtered.length === 0 && <tr><td colSpan={7} style={{ textAlign: "center", color: "var(--ink-faint)", padding: 22 }}>No candidates match this filter.</td></tr>}
                   </tbody>
                 </table>
               </div>
@@ -674,10 +800,10 @@ function SinglePanel({ onSpent }) {
               {selCount > 0 && (
                 <div className="confirm" style={{ position: "sticky", bottom: 0 }}>
                   <Zap size={15} />
-                  <span className="cm"><b>{selCount}</b> selected — reveal {reveal === "both" ? "email + phone" : reveal} for <b>{perCost * selCount}</b> credit{perCost * selCount > 1 ? "s" : ""}. You're only charged for contacts with a real email.</span>
+                  <span className="cm"><b>{selCount}</b> selected — reveal {revealWhat} for up to <b>{perMax * selCount}</b> credit{perMax * selCount === 1 ? "" : "s"}. {costText(reveal, phoneCost)} — you're only charged for what's actually found.</span>
                   <button className="btn sm btn-ghost" onClick={() => setSelected(new Set())} disabled={revealing}>Clear</button>
                   <button className="btn sm btn-primary" onClick={doReveal} disabled={revealing}>
-                    {revealing ? <Loader2 size={15} className="ha-spin" /> : <Mail size={15} />} Reveal {selCount} · {perCost * selCount} credit{perCost * selCount > 1 ? "s" : ""}
+                    {revealing ? <Loader2 size={15} className="ha-spin" /> : reveal === "phone" ? <Phone size={15} /> : <Mail size={15} />} Reveal {selCount} · up to {perMax * selCount} credit{perMax * selCount === 1 ? "" : "s"}
                   </button>
                 </div>
               )}
@@ -701,18 +827,18 @@ function SinglePanel({ onSpent }) {
           {confirming ? (
             <div className="confirm">
               <Zap size={15} />
-              <span className="cm">Reveal this contact — costs <b>{perCost}</b> credit{perCost > 1 ? "s" : ""} if found.</span>
+              <span className="cm">Reveal this contact ({revealWhat}) — <b>{costText(reveal, phoneCost)}</b>.</span>
               <button className="btn sm btn-ghost" onClick={() => setConfirming(false)}>Cancel</button>
               <button className="btn sm btn-primary" onClick={runPerson}>Confirm &amp; reveal</button>
             </div>
           ) : (
             <div className="form-foot"><Zap size={15} />
-              <span><b>{perCost} credit{perCost > 1 ? "s" : ""}</b> per revealed contact ({reveal === "both" ? "email + phone" : reveal === "phone" ? "phone" : "email"}) · charged only if found · cached contacts are free</span>
+              <span><b>{costText(reveal, phoneCost)}</b> · charged only if found · cached contacts are free</span>
             </div>
           )}
 
           {error && <div className="valnote" style={{ marginTop: 16, background: "var(--bad-bg)", borderColor: "transparent" }}><AlertTriangle className="ic" style={{ color: "var(--bad)" }} /><div className="t">{error}</div></div>}
-          {result && <SingleResult result={result} company={company} />}
+          {result && <SingleResult result={result} company={company} phoneCost={phoneCost} />}
           {!result && !loading && !confirming && !error && (
             <EmptyState icon={<Users size={28} />} title="Find one person by name or LinkedIn"
               tags={["👁 preview the match for free", "✉️ reveal on confirm"]}>
@@ -725,7 +851,7 @@ function SinglePanel({ onSpent }) {
   );
 }
 
-function SingleResult({ result, company }) {
+function SingleResult({ result, company, phoneCost }) {
   if (result.status === "unconfigured" || result.status === "over_budget") {
     return <div className="valnote" style={{ marginTop: 16 }}><AlertTriangle className="ic" /><div className="t">{result.message}</div></div>;
   }
@@ -755,6 +881,9 @@ function SingleResult({ result, company }) {
             </tbody>
           </table>
         </div>
+        {result.message && result.status !== "failed" && (
+          <div className="valnote" style={{ marginTop: 12 }}><AlertTriangle className="ic" /><div className="t">{result.message}</div></div>
+        )}
       </>
     );
   }
@@ -767,6 +896,7 @@ function SingleResult({ result, company }) {
         <span style={{ flex: 1 }} />
         <span style={{ fontSize: 12, color: "var(--ink-soft)" }}>
           <b>{result.credits_spent}</b> credit{result.credits_spent === 1 ? "" : "s"} spent
+          {result.phones_pending > 0 ? ` · ${result.phones_pending} phone${result.phones_pending === 1 ? "" : "s"} on the way (${phoneCost ?? 8} credits each, charged on delivery)` : ""}
           {result.budget_exhausted ? " · daily budget reached" : short ? ` · only ${result.revealed} of ${result.requested} found` : ""}
         </span>
       </div>
@@ -780,7 +910,7 @@ function SingleResult({ result, company }) {
                 <td>{r.contact_title || "—"}</td>
                 <td className="co"><b>{company || "—"}</b>{r.company_domain ? <span>{r.company_domain}</span> : null}</td>
                 <td className="email">{r.email ? <span className="addr">{r.email}</span> : <span className="muted">—</span>}</td>
-                <td className="phone">{r.phone || <span className="none">—</span>}</td>
+                <td className="phone"><PhoneCell phone={r.phone} status={r.phone_status} dnc={r.dnc_status} /></td>
                 <td><span className="chip done"><span className="d" />Found</span></td>
               </tr>
             ))}
@@ -869,6 +999,7 @@ function RunView({ job, items, filter, setFilter, running, mapping, onRetry, onE
             <span>{total} rows</span><span className="dot" />
             {job.persona ? <><span>{job.persona}</span><span className="dot" /></> : null}
             <span>reveal: {job.reveal || "email"}</span><span className="dot" />
+            {job.phones_pending > 0 ? <><span><Loader2 size={11} className="ha-spin" style={{ verticalAlign: "-1px" }} /> {job.phones_pending} phone{job.phones_pending === 1 ? "" : "s"} on the way</span><span className="dot" /></> : null}
             <span>{running ? (job.message || "working…") : `finished ${relTimeFrom(job.completed_at || job.created_at)} ago`}</span>
           </div>
           <div className="rv-strip">
@@ -921,7 +1052,7 @@ function RunView({ job, items, filter, setFilter, running, mapping, onRetry, onE
                 <td className="contact">{it.contact_name ? <span className="nm">{it.contact_name}</span> : <span className="intent">{it.person_name || "⌕ persona"}</span>}</td>
                 <td>{it.contact_title || <span className="none">—</span>}</td>
                 <td className="email">{it.email ? <span className="addr">{it.email}</span> : <span className="muted">{it.error ? "error" : "—"}</span>}</td>
-                <td className="phone">{it.phone || <span className="none">—</span>}</td>
+                <td className="phone"><PhoneCell phone={it.phone} status={it.phone_status} /></td>
                 <td><Chip status={it.status} /></td>
               </tr>
             ))}
@@ -934,7 +1065,7 @@ function RunView({ job, items, filter, setFilter, running, mapping, onRetry, onE
 }
 
 // ── Bulk upload + live enrichment ─────────────────────────────────────────────
-function BulkPanel({ onSpent }) {
+function BulkPanel({ usage, onSpent }) {
   const [file, setFile] = useState(null);
   const [preview, setPreview] = useState(null);
   const [validating, setValidating] = useState(false);
@@ -960,7 +1091,11 @@ function BulkPanel({ onSpent }) {
   const [histFilter, setHistFilter] = useState("all");
   const [histLoading, setHistLoading] = useState(false);
   const pollRef = useRef(null);
+  const phoneWaitRef = useRef(0); // when post-completion phone polling started
   const fileRef = useRef(null);
+  const phoneEnabled = usage?.phone_enabled;
+  const phoneCost = usage?.phone_credit_cost ?? 8;
+  useEffect(() => { if (phoneEnabled === false && reveal !== "email") setReveal("email"); }, [phoneEnabled, reveal]);
   const [dragging, setDragging] = useState(false);
 
   const loadHistory = useCallback(async () => {
@@ -987,7 +1122,14 @@ function BulkPanel({ onSpent }) {
       const it = await getFinderJobItems(id, { pageSize: 500 });
       setItems(it.items || []);
       onSpent();
-      if (j.status === "running" || j.status === "queued") pollRef.current = setTimeout(() => tick(id), 6000);
+      if (j.status === "running" || j.status === "queued") { phoneWaitRef.current = 0; pollRef.current = setTimeout(() => tick(id), 6000); }
+      else if (j.phones_pending > 0) {
+        // Run finished but Apollo phones are still on their way — keep ticking (15 s,
+        // capped at 30 min) so the Phone column fills in as they're delivered.
+        if (!phoneWaitRef.current) phoneWaitRef.current = Date.now();
+        if (Date.now() - phoneWaitRef.current < PHONE_POLL_MAX_MS) pollRef.current = setTimeout(() => tick(id), 15000);
+        else stopPoll();
+      }
       else stopPoll();
     } catch (err) {
       if (err instanceof ApiError && err.status === 404) pollRef.current = setTimeout(() => tick(id), 10000);
@@ -1047,7 +1189,7 @@ function BulkPanel({ onSpent }) {
 
   const running = job && (job.status === "running" || job.status === "queued");
   const sum = preview?.summary;
-  const revealOpts = [{ value: "email", label: "Email", icon: <Mail size={14} /> }, { value: "phone", label: "Phone" }, { value: "both", label: "Both" }];
+  const revealOpts = revealOptions(phoneEnabled);
   // stepper state
   const st2 = !!preview, st3done = job && !running, st3active = running || (preview && !job);
 
@@ -1192,6 +1334,9 @@ function BulkPanel({ onSpent }) {
                 <button className="btn btn-primary" onClick={start} disabled={starting || sum.ready === 0}>
                   {starting ? <Loader2 size={16} className="ha-spin" /> : <Zap size={16} />} Start enrichment ({sum.ready})
                 </button>
+              </div>
+              <div className="form-foot" style={{ marginTop: 0 }}><Zap size={15} />
+                <span><b>{costText(reveal, phoneCost)}</b>{reveal !== "email" ? " · phones fill in after the run as Apollo delivers them" : ""}</span>
               </div>
             </div>
           )}
@@ -1470,6 +1615,9 @@ const CSS = `
 .rcf .contact .nm{font-weight:600}.rcf .contact .intent{color:var(--ink-faint);font-style:italic;font-size:12.5px}
 .rcf .email .addr{font-weight:500}.rcf .email .muted{color:var(--ink-faint)}
 .rcf .phone{font-variant-numeric:tabular-nums}.rcf .phone .none{color:var(--ink-faint)}
+.rcf .phone-muted{color:var(--ink-faint);font-size:12px;cursor:help}
+.rcf .dnc{display:inline-block;margin-left:6px;font-size:9.5px;font-weight:800;letter-spacing:.04em;color:var(--bad);background:var(--bad-bg);border-radius:5px;padding:1px 5px;vertical-align:1px;cursor:help}
+.rcf .seg-btn:disabled{opacity:.45;cursor:not-allowed}.rcf .seg-btn:disabled:hover{color:var(--ink-soft)}
 .rcf .chip{display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:700;padding:4px 9px;border-radius:999px;white-space:nowrap}
 .rcf .chip .d{width:6px;height:6px;border-radius:50%}
 .rcf .chip.pending{color:var(--ink-soft);background:var(--line-soft)}.rcf .chip.pending .d{background:var(--ink-faint)}

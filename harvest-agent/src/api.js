@@ -441,6 +441,21 @@ export function getFinderRecentContacts() {
   return request("/recruiter-finder/recent-contacts");
 }
 
+/** GET /recruiter-finder/phone-status — poll Apollo's async phone deliveries.
+ * Returns {persons: {personId: {phone_status, phone, phone_type, dnc_status}}, items: {…}}. */
+export function getFinderPhoneStatus({ personIds = [], itemIds = [] } = {}) {
+  const qs = new URLSearchParams();
+  if (personIds.length) qs.set("person_ids", personIds.join(","));
+  if (itemIds.length) qs.set("item_ids", itemIds.join(","));
+  return request(`/recruiter-finder/phone-status?${qs.toString()}`);
+}
+
+/** GET /recruiter-finder/apollo-webhook-events — recent raw Apollo phone deliveries
+ * (internal-only diagnostics: "is Apollo actually delivering?"). */
+export function getApolloWebhookEvents(limit = 20) {
+  return request(`/recruiter-finder/apollo-webhook-events?limit=${limit}`);
+}
+
 // ── Outreach (LLM email / LinkedIn generation + send) ──────────────────────────
 
 /** POST /outreach/generate-email — draft a recruiter email; returns {subject, body, from_email, to_email, client_type, tone, fallback_used, attachment_name}. */

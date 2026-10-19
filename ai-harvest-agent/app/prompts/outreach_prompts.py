@@ -458,9 +458,9 @@ def sender_display_name(sender_email: str) -> str:
 # back to a first-name-only identity with the default role and no phone (resolve_identity),
 # so an unlisted sender still gets a valid signature, just without a bespoke full name.
 SENDER_IDENTITIES: dict[str, dict[str, str]] = {
-    "sanjeeta@sightspectrum.com": {
-        "first": "Sanjeeta",
-        "full": "Sanjeeta Mohanty",
+    "dharshana@sightspectrum.com": {
+        "first": "Dharshana",
+        "full": "Dharshana Gerald",
         "title": "Business Development Executive",
         "phone": "", 
     },

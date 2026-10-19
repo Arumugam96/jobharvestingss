@@ -171,6 +171,29 @@ class SchedulerService:
         )
         logger.info("reply_poll_registered", poller=name, interval_seconds=seconds)
 
+    def schedule_interval_job(
+        self,
+        job_id:           str,
+        job_fn:           Callable[[], Coroutine[Any, Any, Any]],
+        interval_seconds: int,
+        name:             str,
+    ) -> None:
+        """Register (or replace) a generic recurring maintenance job under its own id
+        (e.g. the Apollo phone-request expiry). Never overlaps itself; a backlog of
+        missed ticks collapses into one."""
+        seconds = max(30, int(interval_seconds))
+        self._scheduler.add_job(
+            func    = job_fn,
+            trigger = IntervalTrigger(seconds=seconds),
+            id      = job_id,
+            name    = name,
+            replace_existing = True,
+            misfire_grace_time = 60,
+            coalesce = True,
+            max_instances = 1,
+        )
+        logger.info("interval_job_registered", job_id=job_id, interval_seconds=seconds)
+
     def get_next_run(self) -> str | None:
         """Return ISO string of next scheduled run, or None."""
         job = self._scheduler.get_job(_JOB_ID)

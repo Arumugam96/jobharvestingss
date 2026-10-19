@@ -48,6 +48,7 @@ async def engine():
     import app.models.harvest_run  # noqa: F401 — registers harvest_runs / scraped_jobs / llm_calls on Base.metadata
     import app.models.recruiter  # noqa: F401 — registers recruiters (scraped_jobs.recruiter_id FK target) on Base.metadata
     import app.models.recruiter_finder  # noqa: F401 — registers recruiter_finder_usage/jobs/items on Base.metadata
+    import app.models.apollo_phone  # noqa: F401 — registers apollo_phone_requests / apollo_webhook_events
     import app.models.outreach  # noqa: F401 — registers email_outreach on Base.metadata
     import app.models.resdex  # noqa: F401 — registers resdex_searches / resdex_candidates / resdex_daily_usage
 
