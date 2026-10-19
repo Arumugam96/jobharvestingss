@@ -38,6 +38,9 @@ job_type   NOT expressible — Naukri drops jobType from its search request; job
 date       24h → jobAge=1 | 48h → 2 | 72h → 3 | 7d → 7 | 30d → 30
 salary     INR only, and only when undisclosed-salary jobs are NOT wanted →
            ctcFilter=<bucket> for every Naukri lakh bucket overlapping the range.
+company    naukri_company_types → qbusinessSize (repeated per selection):
+  type     Indian MNC 217 | Foreign MNC 213 | Corporate 211 | Startup 62 |
+           MNC 60 | Govt/PSU 215 | Others 63
 pagination ``…-jobs-N`` path suffix. Page N>1 must NOT carry ``l=`` (Naukri then
            redirects to page 1 and strips every param); location stays in the path.
 
@@ -146,6 +149,18 @@ _DATE_MAP: dict[int, str] = {
     72:  "3",
     168: "7",
     720: "30",
+}
+# FiltersConfig.naukri_company_types → Naukri qbusinessSize ids (the SRP's
+# business_size cluster; verified live 2026-10). Repeated param per selection,
+# identical name/ids on the SRP URL and the /jobapi/v3/search request.
+_COMPANY_TYPE_MAP: dict[str, str] = {
+    "Indian MNC":  "217",
+    "Foreign MNC": "213",
+    "Corporate":   "211",
+    "Startup":     "62",
+    "MNC":         "60",
+    "Govt/PSU":    "215",
+    "Others":      "63",
 }
 # Naukri salary buckets (lakhs per annum) as used by ctcFilter.
 _CTC_BUCKETS: tuple[tuple[int, int], ...] = (
@@ -468,6 +483,8 @@ def _expected_filter_params(f: FiltersConfig) -> dict[str, list[str]]:
         exp["wfhType"] = [wt]
     if ctc := _salary_buckets(f):
         exp["ctcFilter"] = ctc
+    if biz := [_COMPANY_TYPE_MAP[t] for t in f.naukri_company_types if t in _COMPANY_TYPE_MAP]:
+        exp["qbusinessSize"] = biz
     return exp
 
 
@@ -478,7 +495,8 @@ def build_search_url(f: FiltersConfig, page_no: int = 1) -> str:
     ``jobs-in-{location}`` / ``jobs-in-india``, with ``-{N}`` for page N>1.
     Query: ``k`` (keyword, every page), ``l`` (location, page 1 ONLY — on later
     pages Naukri redirects an ``l=`` URL to page 1 and strips every param; the
-    location is carried by the path), ``jobAge``, ``wfhType``, ``ctcFilter``.
+    location is carried by the path), ``jobAge``, ``wfhType``, ``ctcFilter``,
+    ``qbusinessSize`` (company type).
     """
     keyword = _keyword_for(f)
     location = (f.location or "").strip()

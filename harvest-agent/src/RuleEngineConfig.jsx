@@ -15,7 +15,7 @@ import { GLASS, GLASS_FALLBACK, GLASS_INPUT, GLASS_INPUT_FOCUS } from "./theme";
 import {
   JOB_TYPES, WORK_MODES, HIRING_ENTITIES, GCC_MODES, SEARCH_WINDOWS,
   LINKEDIN_ACCOUNTS, TIMEZONES, CURRENCIES, fmtRunDate, nowLabel,
-  IT_JOB_CATEGORIES, NON_IT_JOB_CATEGORIES, COMPANY_SIZE_RANGES,
+  IT_JOB_CATEGORIES, NON_IT_JOB_CATEGORIES, COMPANY_SIZE_RANGES, NAUKRI_COMPANY_TYPES,
   MAX_JOBS_LIMIT, parseMaxJobs,
 } from "./lib/ruleEngineOptions";
 import SearchableMultiSelect from "./components/SearchableMultiSelect";
@@ -297,6 +297,8 @@ export default function RuleEngineConfig({
   const [nonItCategories, setNonItCategories] = useState(NON_IT_JOB_CATEGORIES);
   const [customJobTitles, setCustomJobTitles] = useState([]);
   const [companySizes, setCompanySizes] = useState(["ALL"]);
+  // Naukri "Company type" (Indian MNC, Foreign MNC, …); [] ⇒ all company types.
+  const [naukriCompanyTypes, setNaukriCompanyTypes] = useState([]);
   const [hiringEntity, setHiringEntity] = useState(DEFAULT_CONFIG.filters.hiring_entity);
   const [gccMode, setGccMode] = useState(DEFAULT_CONFIG.filters.gcc_mode);
   const [salaryMin, setSalaryMin] = useState("");
@@ -386,6 +388,7 @@ export default function RuleEngineConfig({
     // Company Size is now persisted (minimum-size floor for the outreach gate);
     // an empty saved list means "All Sizes".
     setCompanySizes(config.filters.company_sizes?.length ? config.filters.company_sizes : ["ALL"]);
+    setNaukriCompanyTypes(config.filters.naukri_company_types || []);
     const loadedEntity = config.filters.hiring_entity || "Any";
     setHiringEntity(loadedEntity);
     // A specific hiring entity determines GCC-ness — neutralize any stale/
@@ -450,6 +453,8 @@ export default function RuleEngineConfig({
         // Minimum company-size floor for the email outreach gate; ["ALL"] ⇒ [] ⇒
         // no gate. Under-floor jobs are still scraped and stored, just not emailed.
         company_sizes: companySizes.includes("ALL") ? [] : companySizes,
+        // Naukri search-time Company type filter (qbusinessSize); [] ⇒ all types.
+        naukri_company_types: naukriCompanyTypes,
         hiring_entity: hiringEntity,
         gcc_mode: gccMode,
         salary_min: salaryMin === "" ? null : Number(salaryMin),
@@ -1129,6 +1134,21 @@ export default function RuleEngineConfig({
                     ))}
                   </div>
                 </Card>
+
+                {sources.naukri && (
+                  <Card title="Naukri Company Type" desc="Applied to the Naukri search itself (Naukri&rsquo;s Company type filter). LinkedIn and Dice ignore it.">
+                    <div className="rec-chips">
+                      <Chip active={naukriCompanyTypes.length === 0} onClick={() => { setNaukriCompanyTypes([]); markDirty(); }}>All Types</Chip>
+                      {NAUKRI_COMPANY_TYPES.map((t) => (
+                        <Chip key={t} active={naukriCompanyTypes.includes(t)}
+                          onClick={() => {
+                            setNaukriCompanyTypes((prev) => (prev.includes(t) ? prev.filter((x) => x !== t) : [...prev, t]));
+                            markDirty();
+                          }}>{t}</Chip>
+                      ))}
+                    </div>
+                  </Card>
+                )}
 
                 <Card title="GCC flag" required invalid={showErr("gccFlag")}
                   desc={hiringEntity !== "Any"

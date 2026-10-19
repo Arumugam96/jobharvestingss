@@ -13,7 +13,7 @@ import os
 from typing import Literal
 
 import structlog
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 logger = structlog.get_logger(__name__)
 
@@ -21,6 +21,13 @@ logger = structlog.get_logger(__name__)
 # one of these, gcc_mode="gcc_only" is impossible (the intersection is empty);
 # and hiring_entity="GCC" with gcc_mode="exclude_gcc" is the symmetric conflict.
 _NON_GCC_ENTITIES = {"Direct Client", "Staffing Firm", "Ambiguous"}
+
+# Naukri's left-panel "Company type" options (its business_size cluster labels),
+# in the order the Rule Engine UI shows them. Mapped to Naukri's qbusinessSize ids
+# in app/agents/naukri_agent.py (_COMPANY_TYPE_MAP).
+NAUKRI_COMPANY_TYPES: tuple[str, ...] = (
+    "Indian MNC", "Foreign MNC", "Corporate", "Startup", "MNC", "Govt/PSU", "Others",
+)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -103,6 +110,11 @@ class FiltersConfig(BaseModel):
     # are still scraped and stored, they are only not emailed. Empty ⇒ no gate.
     company_sizes:     list[str] = Field(default_factory=list)
 
+    # Naukri "Company type" filter (NAUKRI_COMPANY_TYPES labels, e.g. "Indian MNC").
+    # Applied at search time as Naukri's own qbusinessSize URL param, so only
+    # Naukri honours it — LinkedIn/Dice ignore it. Empty ⇒ all company types.
+    naukri_company_types: list[str] = Field(default_factory=list)
+
     # ── Hiring entity + GCC ───────────────────────────────────────────────────
     hiring_entity: Literal["Direct Client", "GCC", "Ambiguous", "Staffing Firm", "Any"]             = "Any"
     gcc_mode:      Literal["include_gcc", "gcc_only", "exclude_gcc"]                                 = "include_gcc"
@@ -115,6 +127,17 @@ class FiltersConfig(BaseModel):
 
     # ── Company verification ──────────────────────────────────────────────────
     verification: VerificationConfig = Field(default_factory=VerificationConfig)
+
+    @field_validator("naukri_company_types", mode="before")
+    @classmethod
+    def _known_company_types(cls, v: object) -> list[str]:
+        """Keep only known labels (deduped, canonical order). Drops unknown values
+        instead of raising — ConfigService.load swallows validation errors and
+        would otherwise reset ALL settings to defaults on an already-saved file."""
+        if not isinstance(v, (list, tuple)):
+            return []
+        wanted = {str(x).strip() for x in v}
+        return [t for t in NAUKRI_COMPANY_TYPES if t in wanted]
 
     @model_validator(mode="after")
     def _reconcile_gcc(self) -> "FiltersConfig":

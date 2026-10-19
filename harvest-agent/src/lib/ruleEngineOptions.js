@@ -50,6 +50,13 @@ export const COMPANY_SIZE_RANGES = [
   { value: "10001+", label: "10K+" },
 ];
 
+// Naukri's left-panel "Company type" filter (backend: FiltersConfig.naukri_company_types,
+// sent to Naukri as qbusinessSize). Values must match NAUKRI_COMPANY_TYPES in
+// ai-harvest-agent/app/models/harvest_models.py.
+export const NAUKRI_COMPANY_TYPES = [
+  "Indian MNC", "Foreign MNC", "Corporate", "Startup", "MNC", "Govt/PSU", "Others",
+];
+
 export const GCC_MODES = [
   { value: "include_gcc", label: "Include GCC" },
   { value: "gcc_only", label: "GCC only" },

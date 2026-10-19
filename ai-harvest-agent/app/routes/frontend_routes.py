@@ -298,7 +298,7 @@ async def list_jobs(
     company_exact: str = Query("",                        description="Filter by exact company name (UI dropdown)"),
     job_title:     str = Query("",                        description="Filter by exact job title (UI dropdown)"),
     poc:           str = Query("",                        description="Filter by exact POC name (UI dropdown): the job poster, else the company contact"),
-    contact:       str = Query("",                        description="Contact availability — comma-separated tokens, OR-combined: email | email_poster | email_company | mobile | linkedin | no_email | no_mobile | no_linkedin | none (email/mobile include the company contact)"),
+    contact:       str = Query("",                        description="Contact availability — comma-separated tokens, OR-combined: email | email_poster | email_company | mobile | linkedin | no_email | no_mobile | no_linkedin | none | resdex (email/mobile include the company contact; resdex = latest Resdex search matched candidates, DB only)"),
     size_tier:     str = Query("",                        description="Company-size tier: Small | Medium | Large | Enterprise | unknown"),
     country:       str = Query("",                        description="Filter by job-location country (UI dropdown), e.g. India"),
     company_country: str = Query("",                      description="Filter by company HQ country (UI dropdown), e.g. United States"),

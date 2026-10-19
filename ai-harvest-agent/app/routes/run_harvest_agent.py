@@ -117,6 +117,7 @@ def _filters_snapshot(cfg) -> dict:
         "salary_max":               f.salary_max,
         "salary_currency":          f.salary_currency,
         "include_undisclosed_salary": f.include_undisclosed_salary,
+        "naukri_company_types":     list(f.naukri_company_types),
         "verification_enabled":     f.verification.enabled,
     }
 

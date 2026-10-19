@@ -42,12 +42,17 @@ const CONTACT_FILTER_OPTIONS = [
   { value: "email_company", label: "Apollo Resolved email",         summaryLabel: "Apollo Resolved email" },
   { value: "mobile",        label: "Phone",                         summaryLabel: "Phone" },
   { value: "linkedin",      label: "LinkedIn",                      summaryLabel: "LinkedIn" },
+  // Server mode only: Resdex matches live in resdex_searches, not on the job rows, so
+  // client mode (Run Detail) can't evaluate it — hidden there (CLIENT_CONTACT_FILTER_OPTIONS).
+  { group: "Resdex", serverOnly: true },
+  { value: "resdex", label: "Resdex contacts", summaryLabel: "Resdex contacts", serverOnly: true },
   { group: "Without contact" },
   { value: "no_email",    label: "No Email",    summaryLabel: "No Email" },
   { value: "no_mobile",   label: "No Phone",    summaryLabel: "No Phone" },
   { value: "no_linkedin", label: "No LinkedIn", summaryLabel: "No LinkedIn" },
   { value: "none", label: "No contact on file", summaryLabel: "No contact" },
 ];
+const CLIENT_CONTACT_FILTER_OPTIONS = CONTACT_FILTER_OPTIONS.filter((o) => !o.serverOnly);
 
 // Positive tokens match rows that HAVE that channel; "no_*" tokens match rows
 // MISSING it; "none" matches rows with no contact at all. Tokens are OR-combined
@@ -369,7 +374,7 @@ export default function JobsTable({
           options={[{ value: "all", label: "All" }, ...jobTitles.map((t) => ({ value: t, label: t }))]}
           loading={serverMode && !facets} />
         <MultiSelect label="Contact" selected={filters.contact} onChange={(v) => setFilters((f) => ({ ...f, contact: v }))}
-          options={CONTACT_FILTER_OPTIONS} />
+          options={serverMode ? CONTACT_FILTER_OPTIONS : CLIENT_CONTACT_FILTER_OPTIONS} />
         <SearchableSelect label="POC" value={filters.poc} onChange={(v) => setFilters((f) => ({ ...f, poc: v }))}
           options={[{ value: "all", label: "All" }, ...pocNames.map((p) => ({ value: p, label: p }))]}
           loading={serverMode && !facets} />
