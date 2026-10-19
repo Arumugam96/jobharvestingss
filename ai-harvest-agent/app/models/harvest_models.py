@@ -176,6 +176,21 @@ class ScheduleConfig(BaseModel):
     timezone:  str  = "Asia/Kolkata"   # IANA timezone name
     enabled:   bool = False
 
+    @field_validator("run_time", mode="before")
+    @classmethod
+    def _zero_pad_run_time(cls, v: object) -> object:
+        """Zero-pad a hand-edited "7:00" → "07:00": the UI's <input type="time">
+        renders a non-padded value as blank. Anything unparseable is left as-is
+        (the scheduler falls back to 09:00) — never raises, since ConfigService.load
+        would otherwise reset ALL settings to defaults."""
+        if isinstance(v, str):
+            parts = v.strip().split(":")
+            if len(parts) == 2 and all(p.isdigit() for p in parts):
+                h, m = int(parts[0]), int(parts[1])
+                if 0 <= h <= 23 and 0 <= m <= 59:
+                    return f"{h:02d}:{m:02d}"
+        return v
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Notifications (post-harvest report email)

@@ -7,7 +7,9 @@ import {
   getHarvestConfig, saveHarvestConfig, runHarvestAgent, getHarvestStatus,
   getRunHistory, getRunHistoryEntry, getActiveRun, setupLinkedinSession, ApiError,
   getNaukriRecruiterStatus, startNaukriRecruiterLogin, verifyNaukriRecruiter,
+  saveSchedule, getScheduleStatus,
 } from "./api";
+import { fmtNextRun } from "./lib/schedule";
 import LiveBrowserView from "./components/LiveBrowserView";
 import StopHarvestButton from "./components/StopHarvestModal";
 import LiveHarvestCard, { LIVE_HARVEST_PREVIEW } from "./components/LiveHarvestCard";
@@ -33,10 +35,10 @@ function SourceBadge({ glyph, tint }) {
    local segmented control mirroring the US redesign (hourly/daily/weekly). */
 const FREQUENCIES = ["hourly", "daily", "weekly"];
 
-function Toggle({ on, onChange, label }) {
+function Toggle({ on, onChange, label, disabled }) {
   return (
     <button type="button" role="switch" aria-checked={on} aria-label={label}
-      className={"rec-toggle" + (on ? " is-on" : "")} onClick={() => onChange(!on)}>
+      className={"rec-toggle" + (on ? " is-on" : "")} onClick={() => onChange(!on)} disabled={disabled}>
       <span className="rec-toggle-knob" />
     </button>
   );
@@ -287,6 +289,11 @@ export default function RuleEngineConfig({
   const [runTime, setRunTime] = useState(DEFAULT_CONFIG.schedule.run_time);
   const [timezone, setTimezone] = useState(DEFAULT_CONFIG.schedule.timezone);
   const [scheduleEnabled, setScheduleEnabled] = useState(DEFAULT_CONFIG.schedule.enabled);
+  // The schedule toggle saves on click (see handleScheduleToggle); nextRun is the
+  // live scheduler's next fire time so the user can see it actually took effect.
+  const [scheduleSaving, setScheduleSaving] = useState(false);
+  const [scheduleError, setScheduleError] = useState("");
+  const [nextRun, setNextRun] = useState(null);
   const [searchWindow, setSearchWindow] = useState(DEFAULT_CONFIG.filters.search_window_hours);
   // Job Domain redesign — primary selector + its two independent category
   // lists (switching back and forth keeps each one's in-progress edits) +
@@ -343,6 +350,7 @@ export default function RuleEngineConfig({
         ]);
         if (cancelled) return;
         applyConfig(config);
+        refreshScheduleStatus();
         const latest = history.runs && history.runs[0];
         if (latest) {
           setLastRun(fmtRunDate(latest.completed_at || latest.started_at));
@@ -466,6 +474,33 @@ export default function RuleEngineConfig({
     };
   }
 
+  function refreshScheduleStatus() {
+    getScheduleStatus().then((st) => setNextRun(st?.next_run || null)).catch(() => {});
+  }
+
+  // The toggle used to only flip local state and wait for Save — leaving the page
+  // dropped it, so harvest_config.json kept enabled=false and nothing was scheduled.
+  // It now persists the schedule block immediately (with the frequency / time /
+  // timezone shown above it); the backend re-applies the APScheduler job on PUT.
+  // Other unsaved edits on the page are NOT saved by this.
+  const handleScheduleToggle = async (on) => {
+    if (scheduleSaving) return;
+    setScheduleEnabled(on);
+    setScheduleSaving(true);
+    setScheduleError("");
+    try {
+      const saved = await saveSchedule({ frequency, run_time: runTime, timezone, enabled: on });
+      setLoadedConfig(saved);
+      setScheduleEnabled(!!saved.schedule?.enabled);
+      refreshScheduleStatus();
+    } catch (err) {
+      setScheduleEnabled(!on);
+      setScheduleError(err instanceof ApiError ? err.message : "Could not update the schedule — check the backend connection.");
+    } finally {
+      setScheduleSaving(false);
+    }
+  };
+
   // Returns true once the config on screen is persisted, false otherwise.
   const handleSave = async () => {
     if (hasErrors) { setAttempted(true); setActiveTab("sources"); return false; }
@@ -478,6 +513,7 @@ export default function RuleEngineConfig({
       const latest = await getHarvestConfig();
       const saved = await saveHarvestConfig(buildPayload(latest));
       setLoadedConfig(saved);
+      refreshScheduleStatus();
       setMaxJobsInput(null);
       setLastSaved(nowLabel());
       setDirty(false);
@@ -913,7 +949,14 @@ export default function RuleEngineConfig({
                       <b>Automatic scheduled runs</b>
                       <small>Run the harvest automatically on the schedule above.</small>
                     </span>
-                    <Toggle on={scheduleEnabled} onChange={(v) => { setScheduleEnabled(v); markDirty(); }} label="Automatic scheduled runs" />
+                    <Toggle on={scheduleEnabled} onChange={handleScheduleToggle} disabled={scheduleSaving} label="Automatic scheduled runs" />
+                  </div>
+                  <div className={"rec-sched-st" + (scheduleError ? " err" : scheduleEnabled ? "" : " off")}>
+                    {scheduleSaving ? "Saving schedule…"
+                      : scheduleError ? scheduleError
+                      : scheduleEnabled
+                        ? (nextRun ? `Scheduled — next run ${fmtNextRun(nextRun)}` : "Scheduled")
+                        : "Automatic runs are off"}
                   </div>
                   <div className="rec-field rec-field--full" style={{ marginTop: 14 }}>
                     <label>Max jobs per source (each run)</label>
@@ -1368,6 +1411,9 @@ const styles = `
   .rec-tglrow-tx { flex:1; min-width:0; }
   .rec-tglrow-tx b { display:block; font-size:13.5px; }
   .rec-tglrow-tx small { color:var(--muted); font-size:12px; }
+  .rec-sched-st { font-size:12px; color:#15803D; padding:4px 0 0; }
+  .rec-sched-st.err { color:#B91C1C; }
+  .rec-sched-st.off { color:var(--muted); }
 
   /* Cards */
   .rec-card-title { font-size:15.5px; font-weight:700; margin-bottom:4px; }

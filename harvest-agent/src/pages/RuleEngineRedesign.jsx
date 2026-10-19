@@ -6,7 +6,9 @@ import {
   getHarvestConfig, saveHarvestConfig, runHarvestAgent, getHarvestStatus, getActiveRun,
   getRunHistory, getRunHistoryEntry, setupLinkedinSession, ApiError,
   getNaukriRecruiterStatus, startNaukriRecruiterLogin, verifyNaukriRecruiter,
+  saveSchedule, getScheduleStatus,
 } from "../api";
+import { fmtNextRun } from "../lib/schedule";
 import LiveBrowserView from "../components/LiveBrowserView";
 import StopHarvestButton from "../components/StopHarvestModal";
 import SourceProgress from "../components/SourceProgress";
@@ -48,12 +50,12 @@ const SOURCES = [
 ];
 const FREQUENCIES = ["hourly", "daily", "weekly"];
 
-function Toggle({ on, onChange, label }) {
+function Toggle({ on, onChange, label, disabled }) {
   return (
     <button
       type="button" role="switch" aria-checked={on} aria-label={label}
       className={"rr-toggle" + (on ? " on" : "")}
-      onClick={() => onChange(!on)}
+      onClick={() => onChange(!on)} disabled={disabled}
     >
       <span className="rr-knob" />
     </button>
@@ -234,6 +236,11 @@ export default function RuleEngineRedesign() {
   const [runTime, setRunTime] = useState("09:00");
   const [timezone, setTimezone] = useState("America/New_York");
   const [scheduleEnabled, setScheduleEnabled] = useState(false);
+  // The schedule toggle saves on click (see handleScheduleToggle); nextRun is the
+  // live scheduler's next fire time so the user can see it actually took effect.
+  const [scheduleSaving, setScheduleSaving] = useState(false);
+  const [scheduleError, setScheduleError] = useState("");
+  const [nextRun, setNextRun] = useState(null);
   const [keyword, setKeyword] = useState("");
   const [location, setLocation] = useState("");
   const [jobType, setJobType] = useState("Any");
@@ -301,6 +308,7 @@ export default function RuleEngineRedesign() {
         ]);
         if (cancelled) return;
         applyConfig(cfg);
+        refreshScheduleStatus();
         const latest = history.runs && history.runs[0];
         if (latest) {
           setLastRun(fmtRunDate(latest.completed_at || latest.started_at));
@@ -407,6 +415,7 @@ export default function RuleEngineRedesign() {
       // normalize fields (e.g. gcc_mode via _reconcile_gcc).
       const saved = await saveHarvestConfig(buildPayload(latest));
       setConfig(saved);
+      refreshScheduleStatus();
       setMaxJobsInput(null);
       setLastSaved(nowLabel());
       setDirty(false);
@@ -417,6 +426,33 @@ export default function RuleEngineRedesign() {
       return false;
     } finally {
       setSaving(false);
+    }
+  }
+
+  function refreshScheduleStatus() {
+    getScheduleStatus().then((st) => setNextRun(st?.next_run || null)).catch(() => {});
+  }
+
+  // The toggle used to only flip local state and wait for Save — leaving the page
+  // dropped it, so harvest_config.json kept enabled=false and nothing was scheduled.
+  // It now persists the schedule block immediately (with the frequency / time /
+  // timezone shown above it); the backend re-applies the APScheduler job on PUT.
+  // Other unsaved edits on the page are NOT saved by this.
+  async function handleScheduleToggle(on) {
+    if (scheduleSaving) return;
+    setScheduleEnabled(on);
+    setScheduleSaving(true);
+    setScheduleError("");
+    try {
+      const saved = await saveSchedule({ frequency, run_time: runTime, timezone, enabled: on });
+      setConfig(saved);
+      setScheduleEnabled(!!saved.schedule?.enabled);
+      refreshScheduleStatus();
+    } catch (err) {
+      setScheduleEnabled(!on);
+      setScheduleError(err instanceof ApiError ? err.message : "Could not update the schedule — check the backend connection.");
+    } finally {
+      setScheduleSaving(false);
     }
   }
 
@@ -789,7 +825,14 @@ export default function RuleEngineRedesign() {
                 <b>Automatic scheduled runs</b>
                 <small>Run the harvest automatically on the schedule above.</small>
               </span>
-              <Toggle on={scheduleEnabled} label="Automatic scheduled runs" onChange={markDirty(setScheduleEnabled)} />
+              <Toggle on={scheduleEnabled} label="Automatic scheduled runs" onChange={handleScheduleToggle} disabled={scheduleSaving} />
+            </div>
+            <div className={"rr-sched-st" + (scheduleError ? " err" : scheduleEnabled ? "" : " off")}>
+              {scheduleSaving ? "Saving schedule…"
+                : scheduleError ? scheduleError
+                : scheduleEnabled
+                  ? (nextRun ? `Scheduled — next run ${fmtNextRun(nextRun)}` : "Scheduled")
+                  : "Automatic runs are off"}
             </div>
           </section>
           {/* Connect accounts — same view as everything else, like the classic page */}
@@ -873,14 +916,14 @@ export default function RuleEngineRedesign() {
                   onChange={(e) => markDirty(setMaxJobsInput)(e.target.value)} />
               </label>
             </div>
-            <div className="rr-info">
+            {/* <div className="rr-info">
               <Info size={14} />
               <span>Rule stored in <code>harvest_config.search_window_hours</code>. The agent skips any posting older than now − N hours.</span>
             </div>
             <div className="rr-info">
               <Info size={14} />
               <span>Each enabled source stops after <b>max jobs</b> new jobs (<code>0</code> = no limit). <code>LINKEDIN_TEST_MAX_JOBS</code> / <code>NAUKRI_TEST_MAX_JOBS</code> in <code>.env</code> can lower it further.</span>
-            </div>
+            </div> */}
           </section>
 
           <section className="rr-card rr-rise">
@@ -1114,6 +1157,9 @@ const CSS = `
 .rr-seg button{flex:1;border:0;background:none;font-family:inherit;font-size:13px;font-weight:600;color:#64748B;padding:8px;border-radius:7px;cursor:pointer;transition:.15s;}
 .rr-seg button.on{background:#fff;color:#2563EB;box-shadow:0 1px 2px rgba(15,23,42,.08);}
 .rr-tglrow{display:flex;align-items:center;gap:12px;padding:10px 0 2px;border-top:1px solid rgba(226,232,240,.8);margin-top:12px;}
+.rr-sched-st{font-size:12px;color:#15803D;padding:4px 0 0;}
+.rr-sched-st.err{color:#B91C1C;}
+.rr-sched-st.off{color:#64748B;}
 .rr-tglrow--bare{border:0;margin:0;padding:8px 0 0;}
 .rr-tglrow-tx{flex:1;min-width:0;}
 .rr-tglrow-tx b{display:block;font-size:13.5px;}

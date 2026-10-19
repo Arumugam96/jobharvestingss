@@ -128,6 +128,20 @@ export function saveHarvestConfig(config) {
   return request("/harvest-config", { method: "PUT", body: JSON.stringify(config) });
 }
 
+/** Persist ONLY the schedule block (re-read the latest config, merge, PUT) so the
+ * "Automatic scheduled runs" toggle takes effect immediately — the backend re-applies
+ * the APScheduler job on PUT — without also saving the page's other unsaved edits. */
+export async function saveSchedule(schedule) {
+  const latest = await getHarvestConfig();
+  return saveHarvestConfig({ ...latest, schedule: { ...latest.schedule, ...schedule } });
+}
+
+/** GET /harvest-schedule/status — {enabled, frequency, run_time, timezone, next_run}
+ * (next_run is an ISO timestamp from the live scheduler, null when disabled). */
+export function getScheduleStatus() {
+  return request("/harvest-schedule/status");
+}
+
 /** POST /run-harvest-agent — kicks off a background harvest run; returns {job_id, run_id, status}. */
 export function runHarvestAgent() {
   return request("/run-harvest-agent", { method: "POST", body: JSON.stringify({ config_id: "active" }) });
