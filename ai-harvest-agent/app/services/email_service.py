@@ -390,7 +390,7 @@ def _outreach_body_to_html(
             name=identity["full"] or identity["first"] or COMPANY_NAME,
             title=identity["title"],
             phone=identity["phone"],
-            email=sender_email,
+            email=identity["email"],
             website=website_url,
             has_logo=logo_available,
         ))

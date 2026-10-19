@@ -208,7 +208,7 @@ def _build_sign_off(sender_email: str) -> str:
     formatted signature card)."""
     identity = resolve_identity(sender_email)
     name = identity["full"] or identity["first"]
-    email = (sender_email or "").strip()
+    email = identity["email"]
     lines = ["Regards,"]
     if name:
         lines.append(name)
@@ -472,19 +472,33 @@ SENDER_IDENTITIES: dict[str, dict[str, str]] = {
     }
 }
 
+# Which SENDER_IDENTITIES entry signs EVERY outreach email — the intro ("I'm <first>…"),
+# the plain-text sign-off and the HTML signature card (name, title, phone, email), for
+# both the automated end-of-harvest send and the manual composer. Change this ONE value
+# to switch the name on all emails; it must be a key of SENDER_IDENTITIES. Set to "" (or
+# an unlisted address) to fall back to the per-send address instead (OUTREACH_AUTO_REPLY_TO
+# for auto-outreach, the logged-in user for the composer). Display only — the Reply-To
+# header still follows OUTREACH_AUTO_REPLY_TO / the composer's From field.
+ACTIVE_SENDER_EMAIL = "dharshana@sightspectrum.com"
+
 
 def resolve_identity(sender_email: str) -> dict[str, str]:
-    """Resolve the sender's display identity (``first``, ``full``, 
-    ``title``, ``phone``)
+    """Resolve the sender's display identity (``first``, ``full``, ``title``, ``phone``,
+    ``email``). ACTIVE_SENDER_EMAIL, when it names a SENDER_IDENTITIES entry, overrides
+    the per-send ``sender_email`` so every email carries that one identity.
     """
-    email = (sender_email or "").strip().lower()
-    entry = SENDER_IDENTITIES.get(email) or {}
-    first = entry.get("first") or sender_display_name(sender_email)
+    active = (ACTIVE_SENDER_EMAIL or "").strip().lower()
+    if active in SENDER_IDENTITIES:
+        sender_email = active
+    email = (sender_email or "").strip()
+    entry = SENDER_IDENTITIES.get(email.lower()) or {}
+    first = entry.get("first") or sender_display_name(email)
     return {
         "first": first,
         "full": entry.get("full", ""),
         "title": entry.get("title") or DEFAULT_ROLE,
         "phone": entry.get("phone", ""),
+        "email": email,
     }
 
 
