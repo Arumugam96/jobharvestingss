@@ -17,6 +17,31 @@ CANDIDATE_FIELDS = (
     "last_active", "profile_url",
 )
 
+# Resdex advSearch `phoneStatus` for a Naukri-verified phone. Matched live
+# (2026-10-14) against the rendered card: phoneStatus 3 ⇔ "Verified phone & email"
+# (title "Verified by naukri.com"), 0 ⇔ "Verified Email" only.
+NAUKRI_PHONE_VERIFIED = 3
+
+
+def naukri_verified(raw: Any) -> bool:
+    """True only when Naukri itself marks the candidate's phone AND email verified:
+    the stored card `raw` has emailVerified is True and phoneStatus == 3 (an int,
+    never a bool/str), or — text cards — Naukri's rendered verification status
+    mentions both "verified phone" and "email". Anything else (email-only,
+    missing flags, rows stored before the flags were captured) is False.
+
+    NOTE: not used for display — the email/job-page "Naukri Verified" badge is
+    shown on every card (RESDEX_SHOW_NAUKRI_VERIFIED). Kept as the truthful
+    per-candidate rule should the badge be gated again."""
+    if not isinstance(raw, dict):
+        return False
+    status = raw.get("phoneStatus")
+    if (raw.get("emailVerified") is True and type(status) is int
+            and status == NAUKRI_PHONE_VERIFIED):
+        return True
+    text = str(raw.get("verificationStatus") or "").lower()
+    return "verified phone" in text and "email" in text
+
 
 @dataclass
 class ResdexTier:

@@ -30,7 +30,7 @@ import app.models.recruiter_finder  # noqa: F401 — registers recruiter_finder_
 import app.models.apollo_phone  # noqa: F401 — registers apollo_phone_requests / apollo_webhook_events on Base.metadata
 import app.models.outreach  # noqa: F401 — registers email_outreach on Base.metadata
 import app.models.outreach_reply  # noqa: F401 — registers outreach_replies on Base.metadata
-import app.models.resdex  # noqa: F401 — registers resdex_searches / resdex_candidates / resdex_daily_usage on Base.metadata
+import app.models.resdex  # noqa: F401 — registers resdex_searches / resdex_candidates / resdex_candidate_emails / resdex_daily_usage on Base.metadata
 import app.models.suppression  # noqa: F401 — registers email_suppressions on Base.metadata
 import app.models.tenant  # noqa: F401 — registers tenants on Base.metadata
 from app.models.harvest import Base
@@ -314,6 +314,23 @@ def _ensure_recruiter_finder_items_columns(sync_conn) -> None:
             logger.info("recruiter_finder_items_column_added", column=name)
 
 
+def _ensure_resdex_searches_columns(sync_conn) -> None:
+    """One-time, idempotent ADD COLUMN backfill for the pre-existing resdex_searches
+    table: `contact_source` — the origin of the outreach contact that triggered the
+    search (job_post | recruiter_profile | apollo | apollo_hr), shown as a badge on
+    the job detail page. Mirrors alembic 0024 — create_all never alters an existing
+    table."""
+    inspector = sa_inspect(sync_conn)
+    if "resdex_searches" not in inspector.get_table_names():
+        return  # brand-new DB — create_all already made this table with the column
+    cols = {c["name"] for c in inspector.get_columns("resdex_searches")}
+    if "contact_source" not in cols:
+        sync_conn.execute(sa_text(
+            "ALTER TABLE resdex_searches ADD COLUMN contact_source VARCHAR(30) NOT NULL DEFAULT ''"
+        ))
+        logger.info("resdex_searches_column_added", column="contact_source")
+
+
 def _backfill_scraped_jobs_location(sync_conn) -> None:
     """One-time data backfill: populate country/state on pre-existing scraped_jobs
     rows by re-parsing their free-text `location` (app/core/location.py).
@@ -369,7 +386,7 @@ _TENANT_CONTENT_TABLES = [
     # not listed).
     "apollo_phone_requests",
     # Resdex candidate matching (resdex_daily_usage is a global counter — not listed).
-    "resdex_searches", "resdex_candidates",
+    "resdex_searches", "resdex_candidates", "resdex_candidate_emails",
 ]
 
 
@@ -507,6 +524,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # recruiter_finder_items gained phone_status + apollo_person_id (async Apollo
         # phone delivery) — same idempotent ADD COLUMN treatment.
         await conn.run_sync(_ensure_recruiter_finder_items_columns)
+        # resdex_searches gained contact_source (origin of the contact that
+        # triggered the search) — same idempotent ADD COLUMN treatment.
+        await conn.run_sync(_ensure_resdex_searches_columns)
         # Data backfill: re-parse country/state onto scraped_jobs rows harvested
         # before location parsing was wired (columns above exist but stayed empty).
         await conn.run_sync(_backfill_scraped_jobs_location)

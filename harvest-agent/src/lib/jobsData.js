@@ -128,6 +128,10 @@ function mapApiJobFields(j) {
     // sort, mailto:/tel: links and the contact-action icons.
     emailScraped: j.email_scraped || null,
     emailRecruiter: j.email_recruiter || null,
+    // "apollo" when Apollo revealed the recruiter email (else null/""), and the
+    // resolved outreach contact's origin (job_post | recruiter_profile | apollo | apollo_hr).
+    emailRecruiterSource: j.email_recruiter_source || null,
+    outreachToSource: j.outreach_to_source || null,
     mobileScraped: j.phone_scraped || null,
     mobileRecruiter: j.phone_recruiter || null,
     // Inferred HR contact found by (company + job location) via Apollo, attached
@@ -197,6 +201,7 @@ export function mapJobToDetail(j) {
       mobile: j.mobile || "",
       emailScraped: j.emailScraped || "",
       emailRecruiter: j.emailRecruiter || "",
+      emailRecruiterSource: j.emailRecruiterSource || "",
       mobileScraped: j.mobileScraped || "",
       mobileRecruiter: j.mobileRecruiter || "",
     },

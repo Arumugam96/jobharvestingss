@@ -46,7 +46,12 @@ from app.core.company_size import minimum_floor, size_meets_floor
 from app.models.harvest_run import ScrapedJobORM
 from app.services.active_clients import classify_client
 from app.services.email_service import AUTOMATION_CONTACT_BLOCK, EmailSender, render_outreach_email_html
-from app.services.harvest_run_service import db_read, db_write, scraped_job_view
+from app.services.harvest_run_service import (
+    contact_origin,
+    db_read,
+    db_write,
+    scraped_job_view,
+)
 from app.services.llm_service import LLMService
 from app.core.location import normalize_location_key
 from app.services.company_location_contact_service import (
@@ -141,6 +146,9 @@ def _dedupe_targets(
             "recruiter_id": None if is_company else recruiter_id,
             "email": email,
             "contact_kind": "company" if is_company else "recruiter",
+            # job_post | recruiter_profile | apollo | apollo_hr — stored on the
+            # Resdex search for the detail page's source badge.
+            "contact_origin": contact_origin(job),
             "company": view.get("company") or "",
             "location": job.location or "",
             "job_title": view.get("job_title") or "",
@@ -170,7 +178,7 @@ def _no_email_resdex_targets(job_rows: list[ScrapedJobORM]) -> list[dict]:
         seen.add(url)
         out.append({
             "view": view, "job_id": job.id, "recruiter_id": None, "email": "",
-            "contact_kind": "none", "company": view.get("company") or "",
+            "contact_kind": "none", "contact_origin": "", "company": view.get("company") or "",
             "location": job.location or "", "job_title": view.get("job_title") or "",
             "job_url": url, "unsubscribed": False,
         })
@@ -236,8 +244,15 @@ async def _skip_reason(
     return None
 
 
+async def _no_login_wait(since: datetime) -> bool:
+    """prepare_resdex_candidates login_waiter that never waits (a catch-up pass after
+    the harvest's own Resdex pass, which already waited for a login once)."""
+    return False
+
+
 async def run_auto_outreach_after_harvest(
-    job_rows: list[ScrapedJobORM], *, run_id: str, company_sizes: list[str] | None = None
+    job_rows: list[ScrapedJobORM], *, run_id: str, company_sizes: list[str] | None = None,
+    resdex_login_wait: bool = True,
 ) -> dict:
     """Send an initial outreach email to every eligible recruiter in `job_rows`.
 
@@ -249,7 +264,11 @@ async def run_auto_outreach_after_harvest(
 
     `company_sizes` are the Rule Engine size pills (e.g. ["501-1000"]); their lowest
     band lower-bound is a minimum-size floor below which a KNOWN-size company is not
-    emailed (its jobs are still stored). Empty/None ⇒ no size gate."""
+    emailed (its jobs are still stored). Empty/None ⇒ no size gate.
+
+    `resdex_login_wait=False` makes a Resdex session_expired outcome final instead of
+    raising the "Naukri recruiter login needed" request and waiting (used by the
+    Apollo catch-up sweep, which runs right after the harvest's own Resdex pass)."""
     counts = {
         "sent": 0, "failed": 0,
         "skipped_suppressed": 0, "skipped_already": 0,
@@ -317,8 +336,10 @@ async def run_auto_outreach_after_harvest(
                 pre_claimed.add(target["email"].lower())
                 return False
 
+            # Only passed when disabling the wait, so the default call is unchanged.
+            wait_kw = {} if resdex_login_wait else {"login_waiter": _no_login_wait}
             resdex = await prepare_resdex_candidates(
-                targets + resdex_only, run_id=run_id, skip_check=_would_skip,
+                targets + resdex_only, run_id=run_id, skip_check=_would_skip, **wait_kw,
             ) or {}
             counts["resdex_jobs_with_candidates"] = sum(1 for v in resdex.values() if v)
 

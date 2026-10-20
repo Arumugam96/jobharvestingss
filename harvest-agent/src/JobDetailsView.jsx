@@ -49,10 +49,13 @@ const LinkedInIcon = ({ size = 16 }) => (
 // and the enriched recruiter record. Both present (and distinct) → two labeled
 // lines (Job / Recruiter); single source → unlabeled; neither → em-dash.
 // `fallback` covers rows that carry only the merged value (JSON read path).
-function DualContactVal({ scraped, recruiter, fallback }) {
+// `recruiterSource` "apollo" (Apollo revealed the recruiter value) labels it "Apollo"
+// instead of "Recruiter" — also when it's the only value shown.
+function DualContactVal({ scraped, recruiter, fallback, recruiterSource }) {
   const s = (scraped || "").trim();
   const r = (recruiter || "").trim();
   const muted = <span className="ha-muted">—</span>;
+  const apollo = (recruiterSource || "").toLowerCase() === "apollo";
 
   if (!s && !r) {
     const f = (fallback || "").trim();
@@ -62,12 +65,23 @@ function DualContactVal({ scraped, recruiter, fallback }) {
     return (
       <span style={{ display: "flex", flexDirection: "column", gap: 2 }}>
         <span><span className="ha-src-tag">Job</span> {s}</span>
-        <span><span className="ha-src-tag">Recruiter</span> {r}</span>
+        <span><span className="ha-src-tag">{apollo ? "Apollo" : "Recruiter"}</span> {r}</span>
       </span>
     );
   }
+  if (!s && apollo) {
+    return <span><span className="ha-src-tag">Apollo</span> {r}</span>;
+  }
   return <span>{s || r}</span>;
 }
+
+// Origin of the contact that triggered a Resdex search (resdex_searches.contact_source).
+const CONTACT_SOURCE_LABEL = {
+  job_post: "Job post",
+  recruiter_profile: "Recruiter profile",
+  apollo: "Apollo",
+  apollo_hr: "Apollo HR",
+};
 
 // Company-size tier → badge colours (bg tint + text), matching the jobs table.
 const SIZE_TIER_STYLE = {
@@ -283,7 +297,16 @@ function CandidateCard({ c, must, isClient }) {
             {c.current_company ? <><span className="ha-rx-at"> @ </span>{c.current_company}</> : null}
           </div>
         </div>
-        {c.emailed && <span className="ha-rx-emailed" title="Included in the outreach email"><BadgeCheck size={12} /> In email</span>}
+        {/* Top-right, like the emailed card: the "Naukri Verified" badge every card
+            carries (backend naukri_verified_badge = RESDEX_SHOW_NAUKRI_VERIFIED). */}
+        {(c.naukri_verified_badge || c.emailed) && (
+          <div className="ha-rx-tags">
+            {c.naukri_verified_badge && (
+              <span className="ha-rx-verified"><Check size={11} strokeWidth={3} /> Naukri Verified</span>
+            )}
+            {c.emailed && <span className="ha-rx-emailed" title="Included in the outreach email"><BadgeCheck size={12} /> In email</span>}
+          </div>
+        )}
       </div>
 
       {(must.length > 0 || pct !== null) && (
@@ -447,6 +470,7 @@ function ResdexCandidatesSection({ resdex, isClient, onLogin }) {
   const st = RESDEX_STATUS[resdex.status];
   const badge = cands.length ? `${cands.length} matched` : (st?.badge || resdex.status || "—");
   const emailedN = cands.filter((c) => c.emailed).length;
+  const sourceLabel = CONTACT_SOURCE_LABEL[resdex.contact_source] || "";
 
   return (
     <section className="ha-section ha-poc ha-enriched ha-rx">
@@ -454,6 +478,9 @@ function ResdexCandidatesSection({ resdex, isClient, onLogin }) {
         aria-expanded={open} aria-controls="ha-rx-body">
         <span className="ha-rx-acc-title"><UserSearch size={14} /> Naukri Resdex candidates</span>
         <span className="ha-en-badge">{badge}</span>
+        {sourceLabel && (
+          <span className="ha-src-tag" title="Contact the search was run for">{sourceLabel}</span>
+        )}
         {emailedN > 0 && <span className="ha-rx-acc-meta">{emailedN} in email</span>}
         {resdex.searched_at && <span className="ha-rx-when">Searched {fmtWhen(resdex.searched_at)}</span>}
         <ChevronDown size={16} className="ha-rx-chev" style={{ transform: open ? "rotate(180deg)" : "none" }} />
@@ -682,6 +709,7 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
                   <DualContactVal
                     scraped={job.posterContact?.emailScraped}
                     recruiter={job.posterContact?.emailRecruiter}
+                    recruiterSource={job.posterContact?.emailRecruiterSource}
                     fallback={job.posterContact?.email}
                   />
                 </span>
@@ -1000,6 +1028,9 @@ const styles = `
   .ha-rx-at, .ha-rx-sub { color: #64748B; }
   .ha-rx-emailed { display: inline-flex; align-items: center; gap: 4px; font-size: 10.5px; font-weight: 700; white-space: nowrap;
     color: #047857; background: #ECFDF5; border: 1px solid #A7F3D0; padding: 2px 8px; border-radius: 999px; }
+  .ha-rx-tags { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+  .ha-rx-verified { display: inline-flex; align-items: center; gap: 3px; font-size: 10.5px; font-weight: 700;
+    white-space: nowrap; color: #16794A; background: #E9F7EF; border: 1px solid #BFE5CF; padding: 1px 8px; border-radius: 999px; }
   .ha-rx-cov { display: flex; flex-direction: column; gap: 5px; }
   .ha-rx-cov-top { display: flex; justify-content: space-between; font-size: 11.5px; color: #64748B; }
   .ha-rx-cov-top strong { color: #334155; font-weight: 700; }

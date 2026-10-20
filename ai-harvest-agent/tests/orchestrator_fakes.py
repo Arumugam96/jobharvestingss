@@ -236,6 +236,7 @@ def install_route_fakes(monkeypatch) -> dict:
     Returns {"service": RecordingRunService, "outreach": [...], "history": [...]}"""
     import app.routes.run_harvest_agent as route
     import app.services.auto_outreach_service as outreach_mod
+    import app.services.outreach_sweep_service as sweep_mod
     from app.services.job_tracker import JobTracker
 
     RecordingRunService.calls = []
@@ -254,6 +255,12 @@ def install_route_fakes(monkeypatch) -> dict:
     async def _outreach(rows, **kwargs: Any) -> None:
         outreach_calls.append({"rows": rows, **kwargs})
 
+    apollo_sweep_calls: list[dict] = []
+
+    async def _apollo_sweep(**kwargs: Any) -> dict:
+        apollo_sweep_calls.append(kwargs)
+        return {}
+
     class _History:
         def append(self, entry: dict) -> None:
             history.append(entry)
@@ -266,8 +273,11 @@ def install_route_fakes(monkeypatch) -> dict:
     monkeypatch.setattr(route, "EmailSender", lambda settings: None)
     monkeypatch.setattr(route, "_history_svc", _History())
     monkeypatch.setattr(outreach_mod, "run_auto_outreach_after_harvest", _outreach)
+    # The Apollo-contact Resdex catch-up reads the real DB / Resdex settings — stubbed.
+    monkeypatch.setattr(sweep_mod, "run_apollo_resdex_sweep", _apollo_sweep)
     monkeypatch.setattr(JobTracker, "_persist", classmethod(lambda cls: None))
     # The Resdex recruiter pre-flight would launch a real browser when the
     # developer's .env has RESDEX_ENABLED=true — off unless a test opts in.
     monkeypatch.setattr(route, "_start_recruiter_preflight", lambda enabled: None)
-    return {"service": RecordingRunService, "outreach": outreach_calls, "history": history}
+    return {"service": RecordingRunService, "outreach": outreach_calls, "history": history,
+            "apollo_sweep": apollo_sweep_calls}

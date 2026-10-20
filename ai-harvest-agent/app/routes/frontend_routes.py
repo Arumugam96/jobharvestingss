@@ -559,7 +559,16 @@ def _resdex_candidate_view(c: Any) -> dict:
         "extraction_method":   c.extraction_method,
         "outreach_id":         c.outreach_id,
         "emailed":             bool(c.outreach_id),
+        # The "✓ Naukri Verified" badge every emailed card carries — mirrors the
+        # RESDEX_SHOW_NAUKRI_VERIFIED setting so the job page matches the email.
+        "naukri_verified_badge": _naukri_verified_badge(),
     }
+
+
+def _naukri_verified_badge() -> bool:
+    from app.config import get_settings
+
+    return bool(getattr(get_settings(), "resdex_show_naukri_verified", True))
 
 
 def _resdex_search_view(s: Any) -> dict:
@@ -573,6 +582,8 @@ def _resdex_search_view(s: Any) -> dict:
         "searches_used": s.searches_used,
         "result_count":  s.result_count,
         "error":         s.error,
+        # job_post | recruiter_profile | apollo | apollo_hr ("" for older searches)
+        "contact_source": getattr(s, "contact_source", "") or "",
         "candidates":    [_resdex_candidate_view(c) for c in (s.candidates or [])],
     }
 
@@ -617,7 +628,7 @@ async def _job_outreach_detail(db: Any, job_id: str) -> dict:
 
     from app.core.job_url import normalize_job_url
     from app.core.tenant_context import apply_tenant
-    from app.models.resdex import ResdexCandidateORM, ResdexSearchORM
+    from app.models.resdex import ResdexCandidateEmailORM, ResdexCandidateORM, ResdexSearchORM
     from app.services.outreach_log_service import emails_for_job
 
     job = await HarvestRunService(db).get_scraped_job_by_id(job_id)
@@ -645,6 +656,22 @@ async def _job_outreach_detail(db: Any, job_id: str) -> dict:
         )).scalars().all()
         for c in stamped:
             by_email.setdefault(c.outreach_id, []).append(c)
+        # A reused match can be in several emails: resdex_candidate_emails links each
+        # email to every candidate it carried (outreach_id above keeps only the first).
+        linked = (await db.execute(
+            apply_tenant(
+                select(ResdexCandidateEmailORM.outreach_id, ResdexCandidateORM),
+                ResdexCandidateEmailORM.tenant_id,
+            )
+            .join(ResdexCandidateORM, ResdexCandidateORM.id == ResdexCandidateEmailORM.candidate_id)
+            .where(ResdexCandidateEmailORM.outreach_id.in_(email_ids))
+        )).all()
+        for oid, c in linked:
+            cands = by_email.setdefault(oid, [])
+            if all(x.id != c.id for x in cands):
+                cands.append(c)
+        for cands in by_email.values():
+            cands.sort(key=lambda c: c.rank)
 
     return {
         "job":     job,

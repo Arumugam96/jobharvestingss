@@ -197,6 +197,9 @@ class Settings(BaseSettings):
     # anonymised candidate card into the email (keep it off for a shadow period).
     resdex_enabled: bool = False
     resdex_include_in_email: bool = False
+    # "✓ Naukri Verified" badge on EVERY Resdex candidate card (email text + HTML
+    # parts, job detail page), whatever the candidate's status. False hides it.
+    resdex_show_naukri_verified: bool = True
     resdex_sources: str = "LinkedIn,Naukri"
     # Also search for jobs whose only contact is the Apollo company+location HR
     # contact (no recruiter/job-posting email) — more searches, e.g. while testing.
@@ -205,6 +208,17 @@ class Settings(BaseSettings):
     # Candidates are stored for the job detail page only — such jobs are never
     # emailed. Useful while testing, when few harvested jobs carry an email.
     resdex_include_jobs_without_email: bool = False
+    # Apollo-enriched contacts: also search for jobs whose only contact is the Apollo
+    # company+location HR contact (either this or RESDEX_INCLUDE_COMPANY_CONTACTS
+    # enables it), and run the end-of-harvest catch-up sweep for earlier jobs whose
+    # Apollo contact arrived after their harvest (Contact Finder, prospect
+    # intelligence, Apollo recruiter sweep). Apollo recruiter emails found during a
+    # harvest are always eligible, like any recruiter email.
+    resdex_include_apollo_contacts: bool = True
+    # Catch-up sweep (outreach_sweep_service.run_apollo_resdex_sweep): at most this
+    # many jobs per harvest (0 = off), harvested within the last N days.
+    resdex_apollo_sweep_max_jobs: int = 10
+    resdex_apollo_sweep_lookback_days: int = 7
     resdex_candidates_per_job: int = 3
     resdex_min_skill_coverage: float = 0.6     # share of mandatory skills a pick must show
     resdex_active_within_months: int = 3       # Resdex "active in" filter (0 = off)

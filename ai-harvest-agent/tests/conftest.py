@@ -35,6 +35,16 @@ def _naukri_llm_enrichment_off(monkeypatch):
     monkeypatch.setattr(settings, "naukri_llm_description_restructure", False)
 
 
+@pytest.fixture(autouse=True)
+def _outreach_sender_override_off(monkeypatch):
+    """ACTIVE_SENDER_EMAIL is a deploy-time choice (whose name signs every outreach
+    email). Tests assert identities derived from the per-send address, so it is
+    cleared here; tests of the override set it explicitly."""
+    from app.prompts import outreach_prompts
+
+    monkeypatch.setattr(outreach_prompts, "ACTIVE_SENDER_EMAIL", "")
+
+
 # ── In-memory SQLite for tests ────────────────────────────────────────────────
 
 TEST_DB_URL = "sqlite+aiosqlite:///:memory:"

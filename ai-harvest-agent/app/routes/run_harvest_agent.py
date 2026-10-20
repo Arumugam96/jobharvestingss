@@ -776,6 +776,16 @@ async def _run_harvest_background_impl(
         outreach_rows or [], run_id=run_id, company_sizes=config.filters.company_sizes,
     )
 
+    # ── Apollo-contact Resdex catch-up (best-effort, never raises) ────────────
+    # Earlier jobs whose Apollo-enriched contact arrived after their own harvest
+    # (Contact Finder / prospect intelligence / Apollo sweep) get the same Resdex
+    # search + outreach now — still inside this run's single-flight guard, so the
+    # recruiter browser profile is never shared. Off unless RESDEX_ENABLED and
+    # RESDEX_INCLUDE_APOLLO_CONTACTS; bounded by RESDEX_APOLLO_SWEEP_MAX_JOBS.
+    from app.services.outreach_sweep_service import run_apollo_resdex_sweep
+
+    await run_apollo_resdex_sweep(run_id=run_id, company_sizes=config.filters.company_sizes)
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # POST /run-harvest-agent

@@ -4,8 +4,9 @@ run_auto_outreach_after_harvest calls prepare_resdex_candidates() once, after
 _dedupe_targets and before the send fan-out, so only jobs that will actually be
 emailed are searched:
 
-  1. select   recruiter/job-posting contacts (not company HR), source in
-              RESDEX_SOURCES, with a JD; drop targets outreach would skip anyway
+  1. select   recruiter/job-posting contacts (Apollo recruiter emails included) and,
+              with RESDEX_INCLUDE_APOLLO_CONTACTS, the Apollo company HR contact;
+              source in RESDEX_SOURCES, with a JD; drop targets outreach would skip anyway
               (no Resdex quota spent on emails that won't go out)
   2. reuse    a matched search for the same tenant + job_url within
               RESDEX_REUSE_DAYS instead of searching again
@@ -41,7 +42,12 @@ from app.config import get_settings
 from app.core.job_url import normalize_job_url
 from app.core.tenant_context import get_current_tenant_id
 from app.models.harvest_run import LlmCallType
-from app.models.resdex import ResdexCandidateORM, ResdexSearchORM, ResdexSearchStatus
+from app.models.resdex import (
+    ResdexCandidateEmailORM,
+    ResdexCandidateORM,
+    ResdexSearchORM,
+    ResdexSearchStatus,
+)
 from app.prompts import resdex_prompts as rp
 from app.services.harvest_run_service import db_read, db_write
 from app.services.jd_llm_enrichment import llm_configured
@@ -314,6 +320,8 @@ async def _record(
         tier=result.tier if result else 0, searches_used=result.searches_used if result else 0,
         status=status, result_count=result.result_count if result else 0,
         error=error if error is not None else (result.error if result else None),
+        # Origin of the contact that triggered the search (detail-page badge).
+        contact_source=(target.get("contact_origin") or "")[:30],
     )
     rows: list[ResdexCandidateORM] = []
     for rank, (fields, method, coverage, matched) in enumerate(picks or [], start=1):
@@ -395,7 +403,11 @@ async def _select(targets: list[dict], settings: Any, skip_check: SkipCheck | No
     so it can be recorded."""
     sources = {s.lower() for s in settings.resdex_source_list}
     kinds = {"recruiter"}
-    if settings.resdex_include_company_contacts:
+    # The company kind is the Apollo company+location HR contact; either flag
+    # (RESDEX_INCLUDE_COMPANY_CONTACTS is the legacy alias) enables it.
+    if settings.resdex_include_company_contacts or getattr(
+        settings, "resdex_include_apollo_contacts", False
+    ):
         kinds.add("company")
     if getattr(settings, "resdex_include_jobs_without_email", False):
         kinds.add("none")
@@ -426,7 +438,13 @@ async def _select(targets: list[dict], settings: Any, skip_check: SkipCheck | No
                 logger.warning("resdex_skip_check_failed", job_url=norm, error=str(exc))
                 _drop("skip_check_failed")
                 continue
-        selected.setdefault(norm, []).append(t)
+        group = selected.setdefault(norm, [])
+        # The first target labels the stored search — prefer a non-Apollo contact.
+        if group and str(group[0].get("contact_origin") or "").startswith("apollo") \
+                and not str(t.get("contact_origin") or "").startswith("apollo"):
+            group.insert(0, t)
+        else:
+            group.append(t)
     return selected, dropped
 
 
@@ -440,7 +458,8 @@ async def _prepare(
     tenant_id = get_current_tenant_id()
     selected, dropped = await _select(targets, settings, skip_check)
     # Always logged — a pass that searches nothing must say why (e.g. every job
-    # had only an Apollo HR contact while RESDEX_INCLUDE_COMPANY_CONTACTS is off).
+    # had only an Apollo HR contact while RESDEX_INCLUDE_APOLLO_CONTACTS /
+    # RESDEX_INCLUDE_COMPANY_CONTACTS are both off).
     logger.info("resdex_selection", run_id=run_id, targets=len(targets or []),
                 selected=len(selected), dropped=dropped)
     if not selected:
@@ -752,9 +771,16 @@ def _candidate_view(cand: dict) -> dict:
     }
 
 
+def show_naukri_verified() -> bool:
+    """RESDEX_SHOW_NAUKRI_VERIFIED: the "✓ Naukri Verified" badge on every candidate
+    card (email text + HTML parts); False → no badge anywhere. Default on."""
+    return bool(getattr(get_settings(), "resdex_show_naukri_verified", True))
+
+
 _BLOCK_TITLE = "MATCHING PROFILES FROM OUR NETWORK"
 _BLOCK_CTA = "Happy to share full profiles on request. Just reply to this email."
 _BLOCK_MATCH_NOTE = "Matched skills are the ones your job description asks for."
+_VERIFIED_TEXT = "✓ Naukri Verified"
 _LABEL_WIDTH = len("Matched skills")
 
 
@@ -772,7 +798,7 @@ def format_candidate_block(cands: list[dict], job_title: str = "") -> str:
         Shortlisted for your Java Developer requirement
         ====================================================
 
-        1. Ravi Kumar
+        1. Ravi Kumar  ✓ Naukri Verified
            Senior Java Developer
            ----------------------------------------------
            Experience     : 7 yrs
@@ -785,11 +811,13 @@ def format_candidate_block(cands: list[dict], job_title: str = "") -> str:
         Happy to share full profiles on request. Just reply to this email.
         Matched skills are the ones your job description asks for.
 
-    Includes the candidate's name but never contacts, profile URL, employer or CTC;
-    missing parts are simply left out. "" for none."""
+    Every heading carries "✓ Naukri Verified" (RESDEX_SHOW_NAUKRI_VERIFIED=false
+    drops it). Includes the candidate's name but never contacts, profile URL,
+    employer or CTC; missing parts are simply left out. "" for none."""
     if not cands:
         return ""
     rule = "=" * 52
+    badge = f"  {_VERIFIED_TEXT}" if show_naukri_verified() else ""
     lines = [_BLOCK_TITLE]
     if _shortlist_line(job_title):
         lines.append(_shortlist_line(job_title))
@@ -798,7 +826,7 @@ def format_candidate_block(cands: list[dict], job_title: str = "") -> str:
     for i, cand in enumerate(cands, start=1):
         v = _candidate_view(cand)
         heading = v["name"] or v["role"] or f"Candidate {i}"
-        lines.append(f"{i}. {heading}")
+        lines.append(f"{i}. {heading}{badge}")
         if v["name"] and v["role"]:
             lines.append(f"   {v['role']}")
         rows = list(v["facts"])
@@ -845,6 +873,18 @@ def _chip(skill: str, matched: bool) -> str:
     )
 
 
+def _verified_badge_html() -> str:
+    """The "✓ Naukri Verified" pill (top-right of each card): text only (no image/SVG/
+    web font), inline styles. Outlook's Word engine ignores padding/radius on inline
+    spans, so there it degrades to green text on a light-green tint."""
+    return (
+        '<span style="display:inline-block;padding:1px 8px;border-radius:999px;'
+        "background:#e9f7ef;border:1px solid #bfe5cf;color:#16794a;"
+        f"font-family:{_C_FONT};font-size:11px;line-height:16px;font-weight:700;"
+        'white-space:nowrap;">&#10003;&nbsp;Naukri Verified</span>'
+    )
+
+
 def _card_html(v: dict, index: int) -> str:
     esc = html_lib.escape
     title = v["name"] or v["role"] or f"Candidate {index}"
@@ -866,6 +906,15 @@ def _card_html(v: dict, index: int) -> str:
         )
         + "</td></tr></table>"
     )
+    if show_naukri_verified():
+        # 2-cell header: avatar + name/role on the left, the badge top-right.
+        header = (
+            '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+            'border="0" style="border-collapse:collapse;"><tr>'
+            f'<td valign="top">{header}</td>'
+            '<td align="right" valign="top" style="padding-left:8px;white-space:nowrap;">'
+            f"{_verified_badge_html()}</td></tr></table>"
+        )
 
     facts = "".join(
         f'<div style="{_C_LABEL}">{esc(label)}</div>'
@@ -945,17 +994,37 @@ def render_candidate_cards_html(cands: list[dict], job_title: str = "") -> str:
 
 
 async def mark_candidates_sent(candidate_ids: list[str], outreach_id: str) -> None:
-    """Stamp the outreach email id on the candidates it included. Never raises."""
-    ids = [c for c in candidate_ids or [] if c]
+    """Record that this outreach email included these candidates. Never raises.
+
+    A matched search is reused for later contacts of the same posting (e.g. the next
+    Apollo HR contact), so a candidate can go out in several emails: each pair gets a
+    resdex_candidate_emails row, and resdex_candidates.outreach_id keeps the FIRST
+    email (only stamped while empty) so an earlier email never loses its candidates."""
+    ids = list(dict.fromkeys(c for c in candidate_ids or [] if c))
     if not ids or not outreach_id:
         return
 
     async def _stamp(db):
         await db.execute(
             update(ResdexCandidateORM)
-            .where(ResdexCandidateORM.id.in_(ids))
+            .where(ResdexCandidateORM.id.in_(ids), ResdexCandidateORM.outreach_id.is_(None))
             .values(outreach_id=outreach_id)
         )
+        rows = (await db.execute(
+            select(ResdexCandidateORM.id, ResdexCandidateORM.tenant_id)
+            .where(ResdexCandidateORM.id.in_(ids))
+        )).all()
+        linked = set((await db.execute(
+            select(ResdexCandidateEmailORM.candidate_id).where(
+                ResdexCandidateEmailORM.outreach_id == outreach_id,
+                ResdexCandidateEmailORM.candidate_id.in_(ids),
+            )
+        )).scalars())
+        for cid, tid in rows:
+            if cid not in linked:
+                db.add(ResdexCandidateEmailORM(
+                    id=str(uuid.uuid4()), tenant_id=tid, candidate_id=cid, outreach_id=outreach_id,
+                ))
         return True
 
     try:

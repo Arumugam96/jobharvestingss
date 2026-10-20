@@ -78,8 +78,10 @@ _LINKS_JS = """() => {
 
 _TEXT_CARDS_JS = """() => Array.from(document.querySelectorAll('.tuple[data-tuple-id]')).map(t => {
   const a = t.querySelector('a[href*="/v3/preview"]');
+  const v = t.querySelector('.candidate-verification-status');
   return {id: t.getAttribute('data-tuple-id'), text: (t.innerText || '').slice(0, 4000),
-          href: a ? a.getAttribute('href') : ''};
+          href: a ? a.getAttribute('href') : '',
+          status: v ? (v.innerText || '').trim().slice(0, 200) : ''};
 })"""
 
 # ── CAPTCHA / bot-wall / session detection ───────────────────────────────────
@@ -278,6 +280,10 @@ def parse_resdex_json(
             "activeDateMillis": t.get("activeDateMillis"), "modifyDateMillis": t.get("modifyDateMillis"),
             "fresher": t.get("fresher"), "cvAttached": t.get("cvAttached"),
             "noticePeriodCode": t.get("noticePeriod"), "expectedCtcLacs": t.get("expectedCtcLacs"),
+            # Naukri's own verification flags (resdex_types.naukri_verified).
+            "emailVerified": t.get("emailVerified"), "phoneStatus": t.get("phoneStatus"),
+            "conciergeValidatedLabel": t.get("conciergeValidatedLabel"),
+            "conciergeValidatedOn": t.get("conciergeValidatedOn"),
         }
         cards.append(ResdexCard(method="json", fields=fields, profile_url=fields["profile_url"], raw=raw))
     return cards
@@ -448,7 +454,8 @@ class ResdexCandidateAgent:
         cards = [
             ResdexCard(method="text", text=c["text"],
                        profile_url=urljoin(RESDEX_ORIGIN, c["href"]) if c.get("href") else "",
-                       raw={"jsUserId": c.get("id")})
+                       raw={"jsUserId": c.get("id"),
+                            "verificationStatus": c.get("status") or ""})
             for c in rendered if c.get("text")
         ]
         return cards, len(cards), applied

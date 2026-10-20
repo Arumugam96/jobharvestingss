@@ -1159,6 +1159,32 @@ def filters_view(snapshot: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+# Where a job's resolved outreach contact came from (contact_origin) — stored on
+# resdex_searches.contact_source and shown as a badge on the job detail page.
+CONTACT_ORIGIN_JOB_POST = "job_post"                  # scraped from the posting itself
+CONTACT_ORIGIN_RECRUITER_PROFILE = "recruiter_profile"  # scraped recruiter contact info
+CONTACT_ORIGIN_APOLLO = "apollo"                      # recruiter email revealed by Apollo
+CONTACT_ORIGIN_APOLLO_HR = "apollo_hr"                # company+location Apollo HR contact
+
+
+def contact_origin(job: Any) -> str:
+    """Provenance of the contact outreach would email for this job — the same
+    precedence as scraped_job_view's outreach_to_email (job email → linked recruiter
+    email → company HR contact). Read only from stored provenance; "" when the job
+    has no contact. Works on a ScrapedJobORM with its recruiter eager-loaded."""
+    if _txt(getattr(job, "email_id", None)):
+        return CONTACT_ORIGIN_JOB_POST
+    recruiter = getattr(job, "recruiter", None)
+    if recruiter is not None and _txt(getattr(recruiter, "official_email_id", None)):
+        if _txt(getattr(recruiter, "enrichment_source", None)).lower() == "apollo":
+            return CONTACT_ORIGIN_APOLLO
+        return CONTACT_ORIGIN_RECRUITER_PROFILE
+    if _txt(getattr(job, "company_contact_email", None)):
+        # Company+location contacts are only ever discovered via Apollo.
+        return CONTACT_ORIGIN_APOLLO_HR
+    return ""
+
+
 def scraped_job_view(job: ScrapedJobORM) -> dict[str, Any]:
     """Matches the shape of one entry in a combined-JSON file's "jobs" list
     (see frontend_routes.py's _load_all_jobs) — used by GET /jobs so the DB
@@ -1268,6 +1294,12 @@ def scraped_job_view(job: ScrapedJobORM) -> dict[str, Any]:
         "company_contact_source":   (getattr(job, "company_contact_source", "") or "") or None,
         "outreach_to_email":        outreach_to_email,
         "outreach_to_name":         outreach_to_name,
+        # Provenance: the linked recruiter email's enrichment source ("apollo" when
+        # Apollo revealed it) and the resolved outreach contact's origin
+        # (job_post | recruiter_profile | apollo | apollo_hr — see contact_origin).
+        "email_recruiter_source":   ((getattr(recruiter, "enrichment_source", "") or "") or None)
+                                    if email_recruiter else None,
+        "outreach_to_source":       contact_origin(job) or None,
         # LinkedIn Home Feed leads carry an LLM lead-quality score; NULL for every
         # other source, so the UI shows a confidence badge only on feed leads.
         "lead_confidence":        lead_confidence,

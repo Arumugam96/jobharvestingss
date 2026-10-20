@@ -7,6 +7,8 @@ with the logged-in recruiter session, and the 2-3 best candidates are kept:
   resdex_searches     one row per (job, search pass): requirements, query, filters,
                       outcome status
   resdex_candidates   the picked candidates of a search, as shown on Resdex
+  resdex_candidate_emails  every outreach email a candidate was included in (a
+                      reused match can go out in several emails)
   resdex_daily_usage  account-wide per-UTC-day search / candidate counters (the
                       hard daily cap — app/services/resdex_budget.py)
 
@@ -20,7 +22,19 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import JSON, Date, DateTime, Float, ForeignKey, Index, Integer, String, Text, func
+from sqlalchemy import (
+    JSON,
+    Date,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.harvest import Base
@@ -55,6 +69,12 @@ class ResdexSearchORM(Base):
     status: Mapped[str] = mapped_column(String(30), nullable=False, default=ResdexSearchStatus.ERROR)
     result_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Origin of the outreach contact that triggered this search
+    # (harvest_run_service.contact_origin): job_post | recruiter_profile | apollo |
+    # apollo_hr, "" for a job with no contact / rows before this column. Alembic 0024.
+    contact_source: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="", server_default=""
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     candidates: Mapped[list["ResdexCandidateORM"]] = relationship(
@@ -90,11 +110,32 @@ class ResdexCandidateORM(Base):
     skill_coverage: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     extraction_method: Mapped[str] = mapped_column(String(10), nullable=False, default="")  # json | llm
     raw: Mapped[dict | None] = mapped_column(JSON, nullable=True)
-    # email_outreach.id of the outreach email this candidate was included in.
+    # email_outreach.id of the FIRST outreach email this candidate was included in
+    # (never overwritten); every email that carried it is in resdex_candidate_emails.
     outreach_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     search: Mapped[ResdexSearchORM] = relationship(back_populates="candidates")
+
+
+class ResdexCandidateEmailORM(Base):
+    """One row per (candidate, outreach email) that carried it. A matched search is
+    reused (RESDEX_REUSE_DAYS) for later contacts of the same posting — e.g. the next
+    Apollo HR contact — so one candidate can be in several emails; the job detail
+    page lists each email's candidates from here (plus the legacy
+    resdex_candidates.outreach_id stamp). Alembic 0024."""
+    __tablename__ = "resdex_candidate_emails"
+    __table_args__ = (
+        UniqueConstraint("candidate_id", "outreach_id", name="uq_resdex_candidate_emails"),
+    )
+
+    tenant_id: Mapped[str] = mapped_column(String(40), nullable=False, server_default="'internal'", index=True)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    candidate_id: Mapped[str] = mapped_column(
+        ForeignKey("resdex_candidates.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    outreach_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class ResdexUsageORM(Base):
