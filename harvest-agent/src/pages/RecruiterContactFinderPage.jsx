@@ -648,6 +648,12 @@ function SinglePanel({ usage, onSpent }) {
   const isRevealed = (pid) => revealedMap[pid]?.status === "completed";
   const selectableVisible = filtered.filter((c) => c.person_id && !isRevealed(c.person_id));
   const allVisibleSelected = selectableVisible.length > 0 && selectableVisible.every((c) => selected.has(c.person_id));
+  const someVisibleSelected = selectableVisible.some((c) => selected.has(c.person_id));
+  // Header checkbox shows "partially selected" when only some visible rows are ticked.
+  const selectAllRef = useRef(null);
+  useEffect(() => {
+    if (selectAllRef.current) selectAllRef.current.indeterminate = someVisibleSelected && !allVisibleSelected;
+  });
 
   const toggleOne = (pid) => setSelected((prev) => {
     const next = new Set(prev);
@@ -761,7 +767,7 @@ function SinglePanel({ usage, onSpent }) {
               <div className="table-scroll" style={{ maxHeight: 460 }}>
                 <table className="rt">
                   <thead><tr>
-                    <th className="sel"><input type="checkbox" aria-label="Select all" checked={allVisibleSelected} onChange={toggleAll} disabled={selectableVisible.length === 0} /></th>
+                    <th className="sel"><input ref={selectAllRef} type="checkbox" aria-label="Select all" checked={allVisibleSelected} onChange={toggleAll} disabled={selectableVisible.length === 0} /></th>
                     <th>Contact</th><th>Title</th><th>Location</th><th>Email</th><th>Phone</th><th>Status</th>
                   </tr></thead>
                   <tbody>
@@ -1474,8 +1480,9 @@ const CSS = `
 .rcf .input input,.rcf .input select{border:none;background:none;outline:none;font:inherit;color:var(--ink);width:100%;height:100%}
 .rcf .input select{cursor:pointer;appearance:none;padding-right:16px}
 .rcf .input input::placeholder{color:var(--ink-faint)}
-.rcf .sel{position:relative}
-.rcf .sel::after{content:"";position:absolute;right:12px;top:50%;width:7px;height:7px;border-right:2px solid var(--ink-faint);border-bottom:2px solid var(--ink-faint);transform:translateY(-70%) rotate(45deg);pointer-events:none}
+/* chevron only on the Dropdown trigger — a bare .sel also matches th/td.sel (checkbox cells) and *-opt.sel */
+.rcf .dd-btn{position:relative}
+.rcf .dd-btn::after{content:"";position:absolute;right:12px;top:50%;width:7px;height:7px;border-right:2px solid var(--ink-faint);border-bottom:2px solid var(--ink-faint);transform:translateY(-70%) rotate(45deg);pointer-events:none}
 .rcf .btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:40px;padding:0 18px;border-radius:10px;border:1px solid var(--line);background:var(--glass);color:var(--ink);font:inherit;font-weight:600;font-size:13px;cursor:pointer;white-space:nowrap}
 .rcf .btn:hover{border-color:var(--ink-faint)}
 .rcf .btn-primary{background:linear-gradient(135deg,var(--primary),var(--primary-ink));border-color:transparent;color:#fff;box-shadow:0 8px 20px -10px rgba(37,99,235,.9)}
@@ -1490,7 +1497,7 @@ const CSS = `
 .rcf .cand-tool{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:18px 0 10px}
 .rcf .cand-tool .grow{flex:1}
 .rcf .rt th.sel,.rcf .rt td.sel{width:34px;text-align:center;padding-left:6px;padding-right:6px}
-.rcf .rt input[type=checkbox]{width:15px;height:15px;cursor:pointer;accent-color:var(--primary)}
+.rcf .rt input[type=checkbox]{width:15px;height:15px;margin:0;vertical-align:middle;cursor:pointer;accent-color:var(--primary)}
 .rcf .rt input[type=checkbox][disabled]{cursor:not-allowed;opacity:.4}
 .rcf .lockpill{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;font-weight:600;color:var(--ink-faint)}
 .rcf .lockpill svg{color:var(--ink-faint)}

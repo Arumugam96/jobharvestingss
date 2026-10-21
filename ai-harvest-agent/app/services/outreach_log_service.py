@@ -19,11 +19,13 @@ from typing import Any
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.core.job_url import normalize_job_url
 from app.core.tenant_context import apply_tenant, get_current_tenant_id
 from app.models.harvest_run import ScrapedJobORM
 from app.models.outreach import EmailOutreachORM
 from app.models.recruiter import RecruiterORM
+from app.services.email_service import outreach_sender_email
 
 
 def outreach_to_dict(row: EmailOutreachORM, contact_name: str | None = None) -> dict[str, Any]:
@@ -50,7 +52,10 @@ def outreach_to_dict(row: EmailOutreachORM, contact_name: str | None = None) -> 
         "tone": row.tone,
         "contact_name": contact_name,
         "to_email": row.to_email,
+        # `from_email` is the salesperson address used as Reply-To; the visible From
+        # is the shared outreach mailbox (SMTP_SENDER_MAIL), resolved from config.
         "from_email": row.from_email,
+        "sender_email": outreach_sender_email(get_settings()) if row.channel == "email" else "",
         "subject": row.subject,
         "body": row.body,
         "body_html": row.body_html,

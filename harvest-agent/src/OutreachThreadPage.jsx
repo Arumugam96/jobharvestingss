@@ -102,6 +102,11 @@ export default function OutreachThreadPage() {
   const timeline = detail ? deliveryTimeline(detail) : [];
   const links = detail ? clickedLinks(detail) : []; // the links the recipient clicked
   const clientLabel = (detail && CLIENT_LABEL[detail.client_type]) || "";
+  // From = the configured outreach mailbox (SMTP_SENDER_MAIL, sent by the API as
+  // sender_email); the stored from_email is the salesperson's Reply-To address.
+  const fromAddr = detail?.sender_email || detail?.from_email || "";
+  const replyTo = detail?.sender_email && detail?.from_email
+    && detail.from_email.toLowerCase() !== detail.sender_email.toLowerCase() ? detail.from_email : "";
   // Inbound replies merged into the thread (oldest-first) — the newest is pinned as a
   // "Latest reply" callout at the top of the side column for quick action.
   const replies = thread.filter((m) => m.direction === "inbound");
@@ -200,7 +205,8 @@ export default function OutreachThreadPage() {
           <div className="ha-card" style={{ padding: "16px 16px" }}>
             <div style={{ ...LABEL, marginBottom: 14 }}>Details</div>
             <div style={{ display: "grid", gridTemplateColumns: "68px 1fr", gap: "8px 12px", fontSize: 13 }}>
-              {detail?.from_email && (<><span style={K}>From</span><span style={V} title={detail.from_email}>{detail.from_email}</span></>)}
+              {fromAddr && (<><span style={K}>From</span><span style={V} title={fromAddr}>{fromAddr}</span></>)}
+              {replyTo && (<><span style={K}>Reply-To</span><span style={V} title={replyTo}>{replyTo}</span></>)}
               <span style={K}>To</span><span style={V}>{detail?.contact_name || detail?.to_email || "—"}</span>
               {detail?.to_email && (<><span style={K}>Email</span><span style={V} title={detail.to_email}>{detail.to_email}</span></>)}
               {detail?.company && (<><span style={K}>Company</span><span style={V} title={detail.company}>{detail.company}</span></>)}

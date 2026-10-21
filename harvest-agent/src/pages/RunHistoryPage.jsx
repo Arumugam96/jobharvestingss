@@ -2,8 +2,10 @@ import { useEffect, useMemo, useState } from "react";
 import { SlidersHorizontal, Download, Search, RefreshCw } from "lucide-react";
 import { C } from "../theme";
 import {
-  SourceChip, StatusPill, AnimatedNumber, StatCard, SortHeader, PlainHeader, Select, fmtDate,
+  SourceChip, StatusPill, AnimatedNumber, StatCard, SortHeader, PlainHeader, Select, MultiSelect, fmtDate,
 } from "../components/ui";
+import { getRunHistoryContactMatch, ApiError } from "../api";
+import { CONTACT_FILTER_OPTIONS } from "../lib/contactFilter";
 import { useHarvestData } from "../HarvestDataContext";
 import { useTenant } from "../TenantContext";
 
@@ -21,9 +23,36 @@ export default function RunHistoryPage({ runs, loading, error, onRefresh, onNavi
   const [endDate, setEndDate] = useState(saved?.endDate || "");
   const [query, setQuery] = useState(saved?.query || "");
   const [sort, setSort] = useState(saved?.sort || { col: "started", dir: "desc" });
+  // Contact filter: same tokens/semantics as the jobs tables (incl. "Resdex
+  // contacts"). A run passes when ≥1 of its jobs matches ANY selected token —
+  // resolved server-side (GET /run-history/contact-match) since the run list
+  // carries no per-job contact data.
+  const [contact, setContact] = useState(saved?.contact || []);
   useEffect(() => {
-    runHistoryViewRef.current = { filters, startDate, endDate, query, sort };
-  }, [runHistoryViewRef, filters, startDate, endDate, query, sort]);
+    runHistoryViewRef.current = { filters, startDate, endDate, query, sort, contact };
+  }, [runHistoryViewRef, filters, startDate, endDate, query, sort, contact]);
+
+  // Matching display run_ids for the current selection (null = no contact filter).
+  const [contactMatch, setContactMatch] = useState(null);
+  const [contactLoading, setContactLoading] = useState(false);
+  const [contactError, setContactError] = useState("");
+  const contactKey = contact.join(",");
+  useEffect(() => {
+    setContactError("");
+    if (!contactKey) { setContactMatch(null); setContactLoading(false); return undefined; }
+    let cancelled = false;
+    setContactLoading(true);
+    getRunHistoryContactMatch(contactKey)
+      .then((res) => { if (!cancelled) setContactMatch(new Set(res?.run_ids || [])); })
+      .catch((err) => {
+        if (cancelled) return;
+        setContactMatch(new Set());
+        setContactError(err instanceof ApiError ? err.message : "Could not apply the contact filter.");
+      })
+      .finally(() => { if (!cancelled) setContactLoading(false); });
+    return () => { cancelled = true; };
+    // runs.length: re-resolve when a refresh brings in new runs.
+  }, [contactKey, runs.length]);
 
   const counts = useMemo(() => ({
     totalRuns: runs.length,
@@ -38,6 +67,7 @@ export default function RunHistoryPage({ runs, loading, error, onRefresh, onNavi
       if (startDate && r.startedAt.slice(0, 10) < startDate) return false;
       if (endDate && r.startedAt.slice(0, 10) > endDate) return false;
       if (query.trim() && !r.runId.toLowerCase().includes(query.trim().toLowerCase())) return false;
+      if (contactMatch && !contactMatch.has(r.runId)) return false;
       return true;
     });
     const dir = sort.dir === "asc" ? 1 : -1;
@@ -51,7 +81,7 @@ export default function RunHistoryPage({ runs, loading, error, onRefresh, onNavi
         default: return 0;
       }
     });
-  }, [runs, filters, startDate, endDate, query, sort]);
+  }, [runs, filters, startDate, endDate, query, sort, contactMatch]);
 
   function exportCsv() {
     const header = ["Run ID", "Sources", "Status", "Started", "Completed", "Jobs found", "Verified", "Direct clients", "GCC", "Staffing firms", "Ambiguous"];
@@ -89,6 +119,7 @@ export default function RunHistoryPage({ runs, loading, error, onRefresh, onNavi
 
       <div className="ha-pagebody">
         {error && <div className="ha-errbanner">{error}</div>}
+        {contactError && <div className="ha-errbanner">{contactError}</div>}
 
         <div className="ha-daterow">
           <span style={{ fontSize: 13, fontWeight: 600, color: C.text }}>Started between</span>
@@ -105,11 +136,12 @@ export default function RunHistoryPage({ runs, loading, error, onRefresh, onNavi
           <StatCard value={counts.directClients} label="Direct clients" color={C.primary} />
         </div>
 
-        <div className="ha-card ha-filterbar" style={{ padding: "11px 14px", gridTemplateColumns: "repeat(2, minmax(0, 1fr))" }}>
+        <div className="ha-card ha-filterbar" style={{ padding: "11px 14px", gridTemplateColumns: "repeat(3, minmax(0, 1fr))" }}>
           <Select label="Source" value={filters.source} onChange={(v) => setFilters((f) => ({ ...f, source: v }))}
             options={[{ value: "all", label: "All" }, { value: "linkedin", label: "LinkedIn" }, { value: "linkedin feed", label: "LinkedIn Feed" }, { value: "naukri", label: "Naukri" }, { value: "dice", label: "Dice" }]} />
           <Select label="Status" value={filters.status} onChange={(v) => setFilters((f) => ({ ...f, status: v }))}
             options={[{ value: "all", label: "All" }, { value: "success", label: "Success" }, { value: "no_results", label: "No results" }, { value: "failed", label: "Failed" }, { value: "running", label: "Running" }, { value: "stopped", label: "Stopped" }]} />
+          <MultiSelect label="Contact" selected={contact} onChange={setContact} options={CONTACT_FILTER_OPTIONS} />
           <div className="ha-filter-search">
             <Search size={16} />
             <input className="ha-input" value={query}
@@ -132,12 +164,12 @@ export default function RunHistoryPage({ runs, loading, error, onRefresh, onNavi
                 </tr>
               </thead>
               <tbody>
-                {loading && (
+                {(loading || contactLoading) && (
                   <tr><td className="ha-td" colSpan={7} style={{ textAlign: "center", padding: "48px 16px", color: "#94A3B8" }}>
-                    Loading run history…
+                    {loading ? "Loading run history…" : "Filtering runs by contact…"}
                   </td></tr>
                 )}
-                {!loading && filtered.map((r) => {
+                {!loading && !contactLoading && filtered.map((r) => {
                   const isFeed = r.runType === "feed";
                   return (
                   <tr key={r.runId} className="ha-row">
@@ -171,7 +203,7 @@ export default function RunHistoryPage({ runs, loading, error, onRefresh, onNavi
                   </tr>
                   );
                 })}
-                {!loading && !error && filtered.length === 0 && (
+                {!loading && !contactLoading && !error && !contactError && filtered.length === 0 && (
                   <tr><td className="ha-td" colSpan={7} style={{ textAlign: "center", padding: "48px 16px", color: "#94A3B8" }}>
                     No runs match your search. Trigger a harvest from the Rule Engine to see history here.
                   </td></tr>

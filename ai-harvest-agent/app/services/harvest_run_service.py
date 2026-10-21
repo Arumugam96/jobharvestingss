@@ -61,7 +61,7 @@ JOB_SORT_FIELDS = {
 }
 
 # Contact-availability tokens accepted by GET /jobs' `contact` filter — mirrors
-# the UI's jobMatchesContact() (harvest-agent/src/components/JobsTable.jsx).
+# the UI's jobMatchesContact() (harvest-agent/src/lib/contactFilter.js).
 # Positive tokens match rows that HAVE the channel, no_* tokens rows missing it,
 # "none" rows with no contact at all. Selected tokens are OR-combined.
 # "email"/"mobile" count the poster/recruiter value OR the Company-tagged
@@ -613,6 +613,31 @@ class HarvestRunService:
         )
         stmt = apply_tenant(stmt, HarvestRunORM.tenant_id)
         return (await self._db.execute(stmt)).scalar_one()
+
+    async def list_run_ids_matching_contact(self, contact: list[str]) -> list[str]:
+        """Display run_ids (HarvestRunORM.run_id) of runs holding ≥1 scraped job
+        that satisfies ANY of the `contact` tokens — the same OR-combined
+        predicates GET /jobs' `contact` filter applies (_contact_token_exprs),
+        so a run listed here shows ≥1 row under that filter on its detail page.
+        Unknown tokens are dropped like GET /jobs; none left → []. Backs
+        GET /run-history/contact-match (the Run History page's Contact filter)."""
+        token_exprs = _contact_token_exprs()
+        selected = [token_exprs[t] for t in contact if t in token_exprs]
+        if not selected:
+            return []
+        stmt = (
+            select(HarvestRunORM.run_id)
+            .distinct()
+            .select_from(ScrapedJobORM)
+            .join(HarvestRunORM, ScrapedJobORM.run_id == HarvestRunORM.id)
+            # The contact predicates read the linked recruiter's email/phone (1:1
+            # on the recruiter PK), exactly as list_scraped_jobs joins it.
+            .outerjoin(RecruiterORM, ScrapedJobORM.recruiter_id == RecruiterORM.id)
+            .where(or_(*selected))
+        )
+        stmt = apply_tenant(stmt, ScrapedJobORM.tenant_id)  # scope to the caller's tenant
+        result = await self._db.execute(stmt)
+        return [r for r in result.scalars() if r]
 
     async def fail_stale_running(self, message: str = "Interrupted by a server restart") -> int:
         """Mark every still-'running' run as 'failed'. A harvest executes in a

@@ -536,6 +536,17 @@ def _iso(dt: Any) -> str | None:
 
 
 def _resdex_candidate_view(c: Any) -> dict:
+    from app.services.resdex_types import (
+        clean_profile_url,
+        resdex_link_context,
+        resdex_results_url,
+    )
+
+    # Rows stored before 2026-10-21 hold the result card's /v3/preview link, which
+    # only works inside the search's own browser session (Naukri: "link is not
+    # valid") — it is dropped here, and its sid / tupleIndex rebuild the
+    # reopenable result-list link instead (resdex_types).
+    sid, position = resdex_link_context(c.profile_url, getattr(c, "raw", None))
     return {
         "id":                  c.id,
         "rank":                c.rank,
@@ -553,7 +564,13 @@ def _resdex_candidate_view(c: Any) -> dict:
         "notice_period":       c.notice_period,
         "ctc":                 c.ctc,
         "last_active":         c.last_active,
-        "profile_url":         c.profile_url,
+        # A stable profile link, or "" — never a session-bound /v3/preview link.
+        "profile_url":         clean_profile_url(c.profile_url),
+        # The Resdex result list this candidate came from (needs the same Naukri
+        # recruiter login) and their 1-based place in it when searched; ""/None
+        # when the search id is unknown.
+        "resdex_url":          resdex_results_url(sid),
+        "resdex_position":     position,
         "matched_skills":      c.matched_skills or [],
         "skill_coverage":      c.skill_coverage,
         "extraction_method":   c.extraction_method,
@@ -572,6 +589,7 @@ def _naukri_verified_badge() -> bool:
 
 
 def _resdex_search_view(s: Any) -> dict:
+    candidates = [_resdex_candidate_view(c) for c in (s.candidates or [])]
     return {
         "status":        s.status,
         "searched_at":   _iso(s.created_at),
@@ -584,7 +602,10 @@ def _resdex_search_view(s: Any) -> dict:
         "error":         s.error,
         # job_post | recruiter_profile | apollo | apollo_hr ("" for older searches)
         "contact_source": getattr(s, "contact_source", "") or "",
-        "candidates":    [_resdex_candidate_view(c) for c in (s.candidates or [])],
+        # Reopenable Resdex result list of this search ("" when no candidate
+        # carries its search id — then the UI falls back to the blank form).
+        "resdex_url":    next((c["resdex_url"] for c in candidates if c["resdex_url"]), ""),
+        "candidates":    candidates,
     }
 
 

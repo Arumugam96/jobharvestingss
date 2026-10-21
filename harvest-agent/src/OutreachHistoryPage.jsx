@@ -442,7 +442,7 @@ export default function OutreachHistoryPage() {
                         <span title="Sent from your outreach mailbox" style={{ width: 24, height: 24, borderRadius: "50%", flex: "none", display: "grid", placeItems: "center", background: "#EAF1FF", color: "#1E40AF", border: "1px solid #C7D9FF" }}>
                           <Send size={12} />
                         </span>
-                        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "22ch", fontSize: 12.5, color: "#334155" }}>{it.from_email || "—"}</span>
+                        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "22ch", fontSize: 12.5, color: "#334155" }}>{it.sender_email || it.from_email || "—"}</span>
                       </div>
                     </td>
                     {/* Company — name + client mini-chip, one line */}

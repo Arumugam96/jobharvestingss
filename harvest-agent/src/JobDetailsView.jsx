@@ -5,7 +5,7 @@ import LinkedInMessageModal from "./components/LinkedInMessageModal";
 import { getOutreachStatus, getJobOutreachDetail, openLoginRequired, ApiError } from "./api";
 import LiveBrowserView from "./components/LiveBrowserView";
 import { GLASS, GLASS_BTN, PAGE_BG, GLASS_FALLBACK } from "./theme";
-import { useTenant } from "./TenantContext";
+import { copyText } from "./lib/clipboard";
 import {
   ArrowLeft,
   MapPin,
@@ -232,26 +232,22 @@ function QueryText({ query }) {
 
 function CopyQueryButton({ text, targetRef }) {
   const [msg, setMsg] = useState("");
-  const onCopy = () => {
-    const fallback = () => {
-      const el = targetRef.current;
-      if (el) {
-        const r = document.createRange();
-        r.selectNodeContents(el);
-        const s = window.getSelection();
-        s.removeAllRanges();
-        s.addRange(r);
-      }
-      setMsg("Selected — press Ctrl+C to copy");
-    };
-    try {
-      navigator.clipboard.writeText(text).then(() => {
-        setMsg("Copied");
-        setTimeout(() => setMsg(""), 1800);
-      }, fallback);
-    } catch {
-      fallback();
+  const onCopy = async () => {
+    if (await copyText(text)) {
+      setMsg("Copied");
+      setTimeout(() => setMsg(""), 1800);
+      return;
     }
+    // Last resort (both clipboard paths refused): select the query for a manual Ctrl+C.
+    const el = targetRef.current;
+    if (el) {
+      const r = document.createRange();
+      r.selectNodeContents(el);
+      const s = window.getSelection();
+      s.removeAllRanges();
+      s.addRange(r);
+    }
+    setMsg("Selected — press Ctrl+C to copy");
   };
   return (
     <>
@@ -267,10 +263,20 @@ const normMust = (req) => asList(req?.mandatory_skills)
   .map((m) => (typeof m === "string" ? { name: m } : m))
   .filter((m) => m && m.name);
 
-function CandidateCard({ c, must, isClient }) {
+// Resdex names often arrive ALL CAPS / all lower — title-case those (mirrors the
+// backend email's _display_name); mixed case is kept as typed.
+function displayName(raw) {
+  const s = String(raw || "").replace(/\s+/g, " ").trim();
+  if (!s || (s !== s.toUpperCase() && s !== s.toLowerCase())) return s;
+  return s.toLowerCase().split(/([\s.'-])/)
+    .map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w)).join("");
+}
+
+function CandidateCard({ c, must }) {
   const matched = new Set(asList(c.matched_skills).map(lc));
-  const name = isClient ? `Candidate ${c.rank}` : (c.candidate_name || `Candidate ${c.rank}`);
-  const initials = isClient ? null : String(c.candidate_name || "").split(/[\s.]+/).filter(Boolean)
+  const realName = displayName(c.candidate_name);
+  const name = realName || `Candidate ${c.rank}`;
+  const initials = realName.split(/[\s.]+/).filter(Boolean)
     .slice(0, 2).map((w) => w[0].toUpperCase()).join("");
   const skills = asList(c.skills);
   const ordered = [...skills].sort((a, b) => matched.has(lc(b)) - matched.has(lc(a)));
@@ -346,9 +352,17 @@ function CandidateCard({ c, must, isClient }) {
       )}
 
       <div className="ha-rx-foot">
+        {/* Resdex /v3/preview links are bound to the harvester's search session and
+            fail elsewhere, so the backend sends the reusable search-results link
+            (resdex_url) plus this candidate's position in it instead. */}
         {c.profile_url ? (
           <a className="ha-rx-btn ha-rx-btn-amber" href={c.profile_url} target="_blank" rel="noreferrer">
             Open in Naukri <ExternalLink size={13} />
+          </a>
+        ) : c.resdex_url ? (
+          <a className="ha-rx-btn ha-rx-btn-amber" href={c.resdex_url} target="_blank" rel="noreferrer"
+            title={`Opens the Resdex search this candidate came from${c.resdex_position ? ` — they were result #${c.resdex_position}` : ""}. Needs the same Naukri recruiter login.`}>
+            Find in Resdex{c.resdex_position ? ` (#${c.resdex_position})` : ""} <ExternalLink size={13} />
           </a>
         ) : <span className="ha-muted">No profile link</span>}
         <span className="ha-rx-hint"><Lock size={12} /> Recruiter login</span>
@@ -382,8 +396,8 @@ function ResdexSearchPanel({ resdex }) {
             {tierParts.map((p, i) => <React.Fragment key={i}>{i ? " · " : ""}{p}</React.Fragment>)}
           </span>
         )}
-        <a className="ha-rx-btn" href={RESDEX_SEARCH_URL} target="_blank" rel="noreferrer">
-          Open Resdex search <ExternalLink size={13} />
+        <a className="ha-rx-btn" href={resdex.resdex_url || RESDEX_SEARCH_URL} target="_blank" rel="noreferrer">
+          {resdex.resdex_url ? "Open these results in Resdex" : "Open Resdex search"} <ExternalLink size={13} />
         </a>
       </div>
       <div className="ha-rx-search-body">
@@ -463,7 +477,7 @@ function ResdexSearchPanel({ resdex }) {
 }
 
 // Collapsed by default (accordion): the header carries the one-line summary.
-function ResdexCandidatesSection({ resdex, isClient, onLogin }) {
+function ResdexCandidatesSection({ resdex, onLogin }) {
   const [open, setOpen] = useState(false);
   const cands = resdex.candidates || [];
   const must = normMust(resdex.requirements);
@@ -495,7 +509,7 @@ function ResdexCandidatesSection({ resdex, isClient, onLogin }) {
                 {emailedN > 0 && <span><strong>{emailedN} of {cands.length}</strong> included in the outreach email</span>}
               </div>
               <div className="ha-rx-grid">
-                {cands.map((c) => <CandidateCard key={c.id} c={c} must={must} isClient={isClient} />)}
+                {cands.map((c) => <CandidateCard key={c.id} c={c} must={must} />)}
               </div>
             </>
           ) : (
@@ -593,7 +607,6 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
   // Non-blocking: the page renders without it; a failure shows one muted line.
   const [detail, setDetail] = useState(null);
   const [detailError, setDetailError] = useState(false);
-  const { isClient } = useTenant();
   // Naukri recruiter login from a 'login needed' Resdex state — same global
   // action as the app-wide banner (POST /login-required/open + Live Browser).
   const [liveLogin, setLiveLogin] = useState(null);   // title | null
@@ -827,7 +840,6 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
         {detail?.resdex && (
           <ResdexCandidatesSection
             resdex={detail.resdex}
-            isClient={isClient}
             onLogin={openRecruiterLogin}
           />
         )}

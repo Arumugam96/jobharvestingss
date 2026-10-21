@@ -93,16 +93,17 @@ _AUDIENCE = {
 _EMAIL_ASK = {
     "active": (
         "This company is an existing SightSpectrum client. Acknowledge the existing "
-        "partnership briefly and invite them to share their priority/upcoming "
+        "partnership in a few words only — don't describe or invent specific past work, "
+        "placements, or people — and invite them to share their priority/upcoming "
         "requirements. Do NOT ask about vendor onboarding."
     ),
     "new": (
-        "This company is a new prospect. Ask about their vendor onboarding process and "
-        "potential collaboration."
+        "This company is a new prospect. Ask whether they're open to working with "
+        "additional staffing vendors and, if so, about their vendor onboarding process."
     ),
     "unknown": (
-        "The company could not be identified. Ask about their vendor onboarding process "
-        "and potential collaboration."
+        "The company could not be identified. Ask whether they're open to working with "
+        "additional staffing vendors and, if so, about their vendor onboarding process."
     ),
 }
 
@@ -126,15 +127,15 @@ CTA_LINE = "Would it help if I shared a few relevant profiles, or would a quick 
 # Value/ask + CTA lines for the INITIAL-email fallback (render_email_fallback) only —
 # OFFER_LINE / CTA_LINE above stay as the follow-up fallback's lines.
 INTRO_OFFER_NEW = (
-    "We provide skilled contract IT professionals to support your hiring needs, and I'd "
-    "be happy to learn about your vendor onboarding process and explore potential "
-    "collaboration."
+    "We'd be interested in supporting your current and upcoming IT hiring requirements. "
+    "Are you open to working with additional staffing vendors? If so, could you share "
+    "your vendor onboarding process?"
 )
 INTRO_OFFER_ACTIVE = (
-    "As your existing staffing partner, we'd be glad to support your current requirements "
-    "with skilled contract IT professionals; please feel free to share your priority roles."
+    "As your existing staffing partner, we'd be glad to support this role and any other "
+    "current or upcoming requirements; please feel free to share your priority roles."
 )
-INTRO_CTA = "Would you be available for a brief call?"
+INTRO_CTA = "Looking forward to connecting."
 # Hardcoded sender title in the sign-off.
 SENDER_TITLE = "Business Development Executive, SightSpectrum"
 # Company name used in the intro line and the email signature.
@@ -345,56 +346,31 @@ EMAIL_SYSTEM_PROMPT = """
 You write short, natural outreach emails for SightSpectrum, an IT staffing company.
 
 CONTEXT:
-You're writing to a recruiter, talent acquisition professional, or hiring manager who posted an IT job. The purpose is to start a conversation about contract IT staffing.
+You're writing to a recruiter or hiring manager who posted an IT job. The goal is simply to open a conversation about a staffing partnership — mention the role you saw, say we'd be interested in supporting their current and upcoming IT hiring, and make the ask given in the "Ask —" line of the request. End on a light, friendly note.
 
 WHAT THE APPLICATION ADDS (do NOT write these):
-The application automatically adds the greeting ("Hi <Name>,") and the sender's introduction ("I'm <Name>, a <Role> at SightSpectrum.") before your text, and the contact details, website link and sign-off after it. Your body continues the same paragraph straight after that introduction.
+The greeting ("Hi <Name>,") and the sender's introduction ("I'm <Name>, a <Role> at SightSpectrum.") are added before your text, and the contact details, website link and sign-off after it. Your text continues straight after that introduction, so don't greet, introduce yourself or the company again ("introduce ourselves / SightSpectrum"), or name SightSpectrum. Write as "I" for yourself (e.g. "I came across…") and "we" for the company.
 
-WHAT TO WRITE — the BODY only, as 3 short paragraphs separated by a blank line, about 45–85 words in total:
+WHAT TO WRITE:
+The email BODY only — short (roughly 40–90 words), in a few short paragraphs separated by blank lines. How you phrase and structure it is up to you; write it the way a person would naturally write a quick work email.
 
-P1. One sentence referencing the opening. Use the EXACT job title provided in the context (preserve its wording and capitalization; don't shorten, rephrase, or reorder it), the company name, and the platform exactly as given in the context's "Job posting source" (e.g. your Naukri posting, your LinkedIn posting, your Dice posting). Never assume LinkedIn; if the source is unknown, say "your job posting" and don't name any platform. If the company is unknown, leave it out. Vary the verb (noticed / came across / saw) and how the sentence ends (e.g. "and wanted to connect", "and wanted to introduce our IT staffing services").
-P2. One or two sentences saying SightSpectrum provides skilled contract IT professionals to support their hiring needs, followed by the ask given in the "Ask —" line of the request.
-P3. One short, low-pressure question, e.g. whether they'd be available for a brief call or a quick discussion next week. Don't start it with "Thanks" or "Thank you".
+A few facts must be right:
+* Always mention the role you saw in the first sentence, using the job title EXACTLY as given in the context (same wording and capitalization) — even for an existing client.
+* Name the platform only as given in "Job posting source" (e.g. "your Naukri posting"). Never assume LinkedIn; if the source is unknown, say "your job posting" and name no platform. If the company is unknown, leave it out.
 
-STYLE REFERENCES (style reference — do not copy verbatim; vary wording). Each shows a BODY only, for a sample job "Senior Data Engineer" at "Acme Corp" — always use the real job title, company and platform from the context:
+EXAMPLE (for tone only — do NOT copy its wording or follow its structure):
+I came across your Naukri posting for Senior Data Engineer at Acme Corp and wanted to reach out about a possible staffing partnership. We'd be keen to support your current and upcoming IT hiring.
 
-Reference 1 (new prospect, Naukri):
-I noticed your Naukri posting for Senior Data Engineer at Acme Corp and wanted to connect.
+Are you open to working with additional vendors at the moment? If so, could you share your vendor onboarding process?
 
-We provide skilled contract IT professionals to support your hiring needs. I'd be happy to learn about your vendor onboarding process and explore potential collaboration.
+Looking forward to connecting.
 
-Would you be available for a brief call?
-
-Reference 2 (new prospect, LinkedIn):
-I came across your LinkedIn posting for Senior Data Engineer at Acme Corp and wanted to introduce our IT staffing services.
-
-SightSpectrum provides qualified contract IT professionals to help organizations meet their technical hiring needs. I'd welcome the opportunity to understand your vendor onboarding process and explore how we could support your current and future staffing requirements.
-
-Would you be available for a brief discussion next week?
-
-Reference 3 (existing client, Dice):
-I saw your Dice posting for Senior Data Engineer at Acme Corp and wanted to connect.
-
-As your existing staffing partner, we'd be glad to support this role with skilled contract IT professionals. Please feel free to share your priority requirements with us.
-
-Would a quick call this week work for you?
-
-HUMAN WRITING:
-
-* Write like a person sending a quick, genuine work email — simple, relaxed, and professional. Everyday English and natural contractions are fine.
-* Vary the wording and sentence structure between emails; don't reuse the references word for word.
-* Don't repeat the job title unnecessarily.
-* Avoid corporate language, generic pleasantries, exaggerated enthusiasm, and sales pitches.
-* Avoid phrases like "I hope this email finds you well", "Moreover", "Furthermore", and "In today's fast-paced market".
-* Don't invent personal connections, previous conversations, candidate details, or company facts.
-* Don't claim candidates are pre-screened, available, or qualified for this specific role unless the supplied context confirms it.
-
-DON'T:
-* Don't write a greeting or salutation.
-* Don't introduce yourself or name the sender — no "I'm … from SightSpectrum", no "My name is …".
-* Don't add a sign-off, signature, phone number, URL, or email address.
-* Never output bracketed placeholders such as [Name], [Job Title], or [Company Name].
+KEEP IN MIND:
+* Plain, polite, everyday English; natural contractions are fine. Vary the wording from email to email.
+* Avoid sales hype, exaggerated enthusiasm, and filler like "I hope this email finds you well".
+* Don't invent facts, candidate details, previous conversations, or past work together, and don't promise candidates for the role.
 * Don't mention candidate counts, fees, discounts, guarantees, deadlines, or urgency.
+* Don't add a sign-off, signature, phone number, URL, or email address, and never output bracketed placeholders such as [Name] or [Job Title].
 
 SUBJECT:
 Write a short, relevant subject line connected to the actual job. Keep it natural and specific, without clickbait or promotional wording.
@@ -766,12 +742,12 @@ def build_email_prompt(
     with the caller. The body structure and output rules live in EMAIL_SYSTEM_PROMPT.
     `candidates_included` adds CANDIDATES_CONTEXT_LINE after the role context (a Resdex
     candidate card follows the body); False leaves the prompt text unchanged."""
+    # Only the per-audience ask — the broader _AUDIENCE note ("completed onboards recently")
+    # made the model invent shared history ("great working with you on …").
     tone_instr = TONE_INSTRUCTIONS.get(tone, TONE_INSTRUCTIONS["Formal"])
-    audience = _AUDIENCE.get(client_type, _AUDIENCE["new"])
     ask = _EMAIL_ASK.get(client_type, _EMAIL_ASK["new"])
     candidates = f"{CANDIDATES_CONTEXT_LINE}\n\n" if candidates_included else ""
     return (
-        f"Audience — {audience}\n\n"
         f"Ask — {ask}\n\n"
         f"Tone: {tone} — {tone_instr}\n\n"
         f"Recipient / role context:\n{_job_context(job, include_description=False, greet=False)}\n\n"

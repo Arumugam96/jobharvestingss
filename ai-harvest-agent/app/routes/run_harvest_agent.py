@@ -38,7 +38,7 @@ from typing import Any
 from uuid import uuid4
 
 import structlog
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Query, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -51,6 +51,7 @@ from app.services.config_service import ConfigService
 from app.services.email_service import EmailSender
 from app.services.harvest_notification_service import send_harvest_report
 from app.services.harvest_run_service import (
+    CONTACT_FILTER_TOKENS,
     HarvestRunService,
     data_source_mode,
     db_read,
@@ -1038,6 +1039,33 @@ async def get_run_history() -> Any:
         return {"total_runs": total if total is not None else len(entries), "runs": entries}
 
     return {"total_runs": len(runs), "runs": runs}
+
+
+# Declared BEFORE /run-history/{run_id} so "contact-match" isn't captured as a run_id.
+@router.get("/run-history/contact-match", status_code=status.HTTP_200_OK)
+async def get_run_history_contact_match(
+    contact: str = Query(
+        "",
+        description="Contact availability — comma-separated tokens, OR-combined, same as GET /jobs' "
+                    "`contact`: email | email_poster | email_company | mobile | linkedin | no_email | "
+                    "no_mobile | no_linkedin | none | resdex",
+    ),
+) -> Any:
+    """Display run_ids of runs with ≥1 job matching ANY selected contact token —
+    backs the Run History page's Contact filter. Unknown tokens are dropped
+    (like GET /jobs); the echoed `contact` lists the tokens actually applied.
+    DB-only: the JSON file store has no per-run job index (or Resdex data), so
+    the JSON path — and a DB read error — yield an empty list."""
+    tokens = [
+        t for t in dict.fromkeys(tok.strip() for tok in contact.split(","))
+        if t in CONTACT_FILTER_TOKENS
+    ]
+    run_ids: list[str] = []
+    if tokens and data_source_mode() != "json":
+        run_ids = await db_read(
+            lambda db: HarvestRunService(db).list_run_ids_matching_contact(tokens)
+        ) or []
+    return {"contact": tokens, "run_ids": run_ids}
 
 
 @router.get("/run-history/{run_id}", status_code=status.HTTP_200_OK)

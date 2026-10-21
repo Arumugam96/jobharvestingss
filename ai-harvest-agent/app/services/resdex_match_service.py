@@ -59,6 +59,7 @@ from app.services.resdex_types import (
     ResdexBatchResult,
     ResdexCard,
     ResdexJobQuery,
+    clean_profile_url,
 )
 
 logger = structlog.get_logger(__name__)
@@ -161,8 +162,20 @@ async def _card_fields(llm: Any, card: ResdexCard, job_url: str, timeout_s: floa
             return None
         fields = rp.ground_profile(raw, card.text)
         method = "llm"
-    fields["profile_url"] = (card.profile_url or fields.get("profile_url") or "").strip()
+    # Never store a session-bound Resdex /v3/preview link (opens as "not valid"
+    # outside the search's browser session) or a non-http(s) value.
+    fields["profile_url"] = clean_profile_url(card.profile_url or fields.get("profile_url"))
     return _clean_fields(fields), method
+
+
+def _dedupe_key(fields: dict, card: ResdexCard) -> str:
+    """Identity of a result card within one search: Resdex's jsUserId when known,
+    else the profile link ("" = no key, never deduplicated)."""
+    uid = (card.raw or {}).get("jsUserId") if isinstance(card.raw, dict) else None
+    if uid not in (None, ""):
+        return f"uid:{uid}"
+    url = fields.get("profile_url") or ""
+    return f"url:{url}" if url else ""
 
 
 def _clean_fields(fields: dict) -> dict:
@@ -631,7 +644,7 @@ async def _pick(
     want = max(0, int(settings.resdex_candidates_per_job))
     threshold = float(settings.resdex_min_skill_coverage)
     picks: list[tuple[dict, str, float, list[str]]] = []
-    seen_urls: set[str] = set()
+    seen: set[str] = set()
     for card in (result.cards or [])[:_MAX_CARDS_EXAMINED]:
         if len(picks) >= want:
             break
@@ -643,14 +656,14 @@ async def _pick(
         if not got:
             continue
         fields, method = got
-        url_key = fields.get("profile_url") or ""
-        if url_key and url_key in seen_urls:
+        key = _dedupe_key(fields, card)
+        if key and key in seen:
             continue
         coverage, matched = skill_coverage(fields, req)
         if coverage < threshold:
             continue
-        if url_key:
-            seen_urls.add(url_key)
+        if key:
+            seen.add(key)
         fields["_raw"] = card.raw if card.raw is not None else (
             {"text": card.text} if card.text else None
         )

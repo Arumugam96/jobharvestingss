@@ -19,7 +19,11 @@ How a search runs (verified live against resdex.naukri.com, 2026-10-14)
     skills / education / notice / CTC / activity, so no LLM is needed for cards.
   • Each result renders as .tuple[data-tuple-id=<jsUserId>] with the profile
     link in .candidate-headline a[href*="/v3/preview"] — joined to the JSON by
-    jsUserId.
+    jsUserId. That link is bound to this search in this browser session
+    (sid, storageKey, per-search dynamicEncrypted* keys) and Naukri rejects it
+    anywhere else, so it is NOT stored as profile_url. Instead each card keeps
+    the search id (`sid`, JSON top level) and its 0-based `tupleIndex` in raw;
+    the job page links the reopenable result list (resdex_types.resdex_results_url).
 
 Never opens a profile, reveals a contact or downloads a CV (those spend Resdex
 credits). Never automates login — a dead session reports session_expired.
@@ -46,17 +50,23 @@ import random
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlparse
 
 import structlog
 
 from app.models.resdex import ResdexSearchStatus
-from app.services.resdex_types import ResdexBatchResult, ResdexCard, ResdexJobQuery, ResdexTier
+from app.services.resdex_types import (
+    ResdexBatchResult,
+    ResdexCard,
+    ResdexJobQuery,
+    ResdexTier,
+    preview_link_context,
+    resdex_sid,
+)
 
 logger = structlog.get_logger(__name__)
 
 RESDEX_SEARCH_URL = "https://resdex.naukri.com/v3?activeTab=advSrch"
-RESDEX_ORIGIN = "https://resdex.naukri.com"
 _SEARCH_API = "search/results/advSearch"
 _KEYWORD_BOX = 'input[name="ezKeywordsAny"], textarea[name="ezKeywordsAny"]'   # chip mode
 _BOOLEAN_BOX = 'input[name="boolKeywords"], textarea[name="boolKeywords"]'   # replaces it in Boolean mode
@@ -229,13 +239,17 @@ def parse_resdex_json(
 ) -> list[ResdexCard]:
     """advSearch JSON → normalized cards (CANDIDATE_FIELDS), in Resdex order.
 
-    `links` maps jsUserId → profile href (from the rendered tuples). Candidates
+    `links` maps jsUserId → the rendered card's /v3/preview href. That href is
+    session-bound (see module doc), so it is never stored as profile_url — it
+    only backs up the search id when the payload lacks `sid`. Each card's raw
+    keeps `sid` and its 0-based `tupleIndex` in the result list. Candidates
     whose `activeDateMillis` is older than `active_within_months` are dropped
     (0 = keep all). Only values present in the payload are stored."""
     links = links or {}
     now_ms = now_ms if now_ms is not None else int(time.time() * 1000)
+    payload_sid = resdex_sid(payload.get("sid"))
     cards: list[ResdexCard] = []
-    for t in payload.get("tuples") or []:
+    for index, t in enumerate(payload.get("tuples") or []):
         if not isinstance(t, dict):
             continue
         active_ms = int(t.get("activeDateMillis") or 0)
@@ -257,7 +271,8 @@ def parse_resdex_json(
             if s.lower() not in {x.lower() for x in skills}:
                 skills.append(s)
         uid = str(t.get("jsUserId") or "")
-        href = links.get(uid, "")
+        href_sid, href_index = preview_link_context(links.get(uid, ""))
+        sid = payload_sid or href_sid
         fields = {
             "candidate_name": str(t.get("jsUserName") or "").strip(),
             "headline": str(t.get("jobTitle") or "").strip(),
@@ -273,10 +288,16 @@ def parse_resdex_json(
             "notice_period": str(t.get("noticePeriodLabel") or "").strip(),
             "ctc": _ctc(t.get("ctcInfo")),
             "last_active": str(t.get("activeDateLabel") or "").strip(),
-            "profile_url": urljoin(RESDEX_ORIGIN, href) if href else "",
+            # No stable per-candidate Resdex URL exists in the payload; the card's
+            # /v3/preview href is session-bound and would open as "not valid".
+            "profile_url": "",
         }
         raw = {
             "jsUserId": t.get("jsUserId"), "jsResId": t.get("jsResId"),
+            # Search id + place in its result list → the job page links the
+            # reopenable result list (resdex_types.resdex_link_context).
+            "sid": sid or None,
+            "tupleIndex": href_index if href_index is not None else index,
             "activeDateMillis": t.get("activeDateMillis"), "modifyDateMillis": t.get("modifyDateMillis"),
             "fresher": t.get("fresher"), "cvAttached": t.get("cvAttached"),
             "noticePeriodCode": t.get("noticePeriod"), "expectedCtcLacs": t.get("expectedCtcLacs"),
@@ -451,13 +472,18 @@ class ResdexCandidateAgent:
 
         # JSON unavailable — hand the rendered cards' text to the LLM extractor.
         rendered = await page.evaluate(_TEXT_CARDS_JS) if links else []
-        cards = [
-            ResdexCard(method="text", text=c["text"],
-                       profile_url=urljoin(RESDEX_ORIGIN, c["href"]) if c.get("href") else "",
-                       raw={"jsUserId": c.get("id"),
-                            "verificationStatus": c.get("status") or ""})
-            for c in rendered if c.get("text")
-        ]
+        cards = []
+        for index, c in enumerate(rendered):
+            if not c.get("text"):
+                continue
+            # The /v3/preview href is session-bound — keep only its search id and
+            # result position, never the link itself.
+            sid, href_index = preview_link_context(c.get("href") or "")
+            cards.append(ResdexCard(
+                method="text", text=c["text"], profile_url="",
+                raw={"jsUserId": c.get("id"), "sid": sid or None,
+                     "tupleIndex": href_index if href_index is not None else index,
+                     "verificationStatus": c.get("status") or ""}))
         return cards, len(cards), applied
 
 

@@ -10,13 +10,8 @@ import {
   Select, SearchableSelect, MultiSelect, ContactActionBtn, DualContact, CompanySizeCell, PocCell,
 } from "./ui";
 import { mapJobToDetail, jobContact, sortSources, SOURCE_ORDER } from "../lib/jobsData";
+import { CONTACT_FILTER_OPTIONS, CLIENT_CONTACT_FILTER_OPTIONS, jobMatchesContact } from "../lib/contactFilter";
 
-/* Run detail page */
-// Contact filter options — grouped for a professional dropdown. The option
-// VALUES and the OR-combined predicate (jobMatchesContact) are unchanged; only
-// the presentation is grouped. `summaryLabel` keeps the collapsed chip
-// unambiguous ("Has email" vs "No email") while the open list stays short
-// under its group header.
 // Company-size filter options. Named tiers map to the LinkedIn employee bands
 // captured per job (backend app/core/company_size.py); "unknown" catches jobs
 // with no detected band (and non-LinkedIn sources). Display-only — filters which
@@ -29,53 +24,6 @@ const COMPANY_SIZE_FILTER_OPTIONS = [
   { value: "Enterprise", label: "Enterprise · 10,001+" },
   { value: "unknown", label: "Unknown" },
 ];
-
-// One token set for both modes: client mode (Run Detail) evaluates it in-memory
-// via jobMatchesContact()/jobContact(); server mode (Harvested Jobs) sends it as
-// GET /jobs' `contact` param, which understands the same tokens with the same
-// semantics (CONTACT_FILTER_TOKENS / _contact_presence_exprs in
-// harvest_run_service.py). Email/Phone include the Company-tagged contact.
-const CONTACT_FILTER_OPTIONS = [
-  { group: "With contact" },
-  { value: "email",         label: "Email",                         summaryLabel: "Email" },
-  { value: "email_poster",  label: "Poster email (job / recruiter)", summaryLabel: "Poster email" },
-  { value: "email_company", label: "Apollo Resolved email",         summaryLabel: "Apollo Resolved email" },
-  { value: "mobile",        label: "Phone",                         summaryLabel: "Phone" },
-  { value: "linkedin",      label: "LinkedIn",                      summaryLabel: "LinkedIn" },
-  // Server mode only: Resdex matches live in resdex_searches, not on the job rows, so
-  // client mode (Run Detail) can't evaluate it — hidden there (CLIENT_CONTACT_FILTER_OPTIONS).
-  { group: "Resdex", serverOnly: true },
-  { value: "resdex", label: "Resdex contacts", summaryLabel: "Resdex contacts", serverOnly: true },
-  { group: "Without contact" },
-  { value: "no_email",    label: "No Email",    summaryLabel: "No Email" },
-  { value: "no_mobile",   label: "No Phone",    summaryLabel: "No Phone" },
-  { value: "no_linkedin", label: "No LinkedIn", summaryLabel: "No LinkedIn" },
-  { value: "none", label: "No contact on file", summaryLabel: "No contact" },
-];
-const CLIENT_CONTACT_FILTER_OPTIONS = CONTACT_FILTER_OPTIONS.filter((o) => !o.serverOnly);
-
-// Positive tokens match rows that HAVE that channel; "no_*" tokens match rows
-// MISSING it; "none" matches rows with no contact at all. Tokens are OR-combined
-// (a row passes if it satisfies any selected one). Empty selection = no filter.
-// Presence comes from jobContact(), i.e. exactly what the Email/Mobile cells show
-// — poster/recruiter AND Company-tagged contacts, for every source.
-function jobMatchesContact(j, contact) {
-  if (!contact || contact.length === 0) return true;
-  const c = jobContact(j);
-  const has = { email: !!c.email, mobile: !!c.phone, linkedin: !!c.linkedin };
-  const none = !has.email && !has.mobile && !has.linkedin;
-  return contact.some((t) =>
-    t === "email" ? has.email
-      : t === "email_poster" ? c.hasPosterEmail
-      : t === "email_company" ? c.hasCompanyEmail
-      : t === "mobile" ? has.mobile
-      : t === "linkedin" ? has.linkedin
-      : t === "no_email" ? !has.email
-      : t === "no_mobile" ? !has.mobile
-      : t === "no_linkedin" ? !has.linkedin
-      : t === "none" ? none
-      : false);
-}
 
 /**
  * Shared jobs table used by both the Harvested Jobs page (JobsPage) and the
@@ -121,6 +69,9 @@ export default function JobsTable({
   serverTotal = 0,
   onParamsChange = null,
   serverExtraParams = null,
+  // Client mode only: the parent has stamped `hasResdex` on its rows (from
+  // GET /jobs?contact=resdex), so the Contact filter can offer the Resdex group.
+  resdexAvailable = false,
 }) {
   // When `urlState`, the filter/search/sort/page state is mirrored to the URL
   // query string (so /jobs?company=…&page=2 is shareable and survives a refresh).
@@ -374,7 +325,7 @@ export default function JobsTable({
           options={[{ value: "all", label: "All" }, ...jobTitles.map((t) => ({ value: t, label: t }))]}
           loading={serverMode && !facets} />
         <MultiSelect label="Contact" selected={filters.contact} onChange={(v) => setFilters((f) => ({ ...f, contact: v }))}
-          options={serverMode ? CONTACT_FILTER_OPTIONS : CLIENT_CONTACT_FILTER_OPTIONS} />
+          options={serverMode || resdexAvailable ? CONTACT_FILTER_OPTIONS : CLIENT_CONTACT_FILTER_OPTIONS} />
         <SearchableSelect label="POC" value={filters.poc} onChange={(v) => setFilters((f) => ({ ...f, poc: v }))}
           options={[{ value: "all", label: "All" }, ...pocNames.map((p) => ({ value: p, label: p }))]}
           loading={serverMode && !facets} />

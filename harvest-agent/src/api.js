@@ -160,6 +160,14 @@ export function getRunHistory() {
   return request("/run-history");
 }
 
+/** GET /run-history/contact-match — display run_ids of runs with ≥1 job matching
+ * ANY of the given contact tokens (array or comma string; same tokens as GET
+ * /jobs' `contact`, incl. "resdex"). Returns {contact, run_ids}. */
+export function getRunHistoryContactMatch(contact) {
+  const tokens = Array.isArray(contact) ? contact.join(",") : contact;
+  return request(`/run-history/contact-match${qs({ contact: tokens })}`);
+}
+
 /** GET /active-run — whether a harvest is currently running (any source/tab).
  * Returns {active, job_id, run_id, source}. Used to freeze the Run controls. */
 export function getActiveRun() {

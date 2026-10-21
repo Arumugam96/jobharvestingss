@@ -596,6 +596,13 @@ def _shared_identity_from(settings: Settings) -> dict:
     return {"Email": username , "Name": f"SS - {configured}"}
 
 
+def outreach_sender_email(settings: Settings) -> str:
+    """The From address every outreach email is sent from (SMTP_SENDER_MAIL, with the
+    same fallbacks as _shared_identity_from). Resolved from settings at read time so
+    the Mail logs reflect the currently configured mailbox."""
+    return (_shared_identity_from(settings).get("Email") or "").strip()
+
+
 def _otp_identity_from(settings: Settings) -> dict:
     """The From identity for the OTP (login) email — a dedicated no-reply sender
     ("Login OTP" <no-reply@sightspectrum.com> by default, OTP_FROM_EMAIL /

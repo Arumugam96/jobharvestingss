@@ -27,6 +27,10 @@ export default function RunDetailView({ runId, onBack, onView }) {
   const [jobsLoading, setJobsLoading] = useState(true);
   const [jobsError, setJobsError] = useState("");
   const [pageSizeSel, setPageSizeSel] = useState("100");
+  // Resdex matches live server-side (resdex_searches), so the run's matched job
+  // ids are fetched separately and stamped as `hasResdex` on the rows. Only when
+  // that lookup succeeds does the Contact filter offer "Resdex contacts".
+  const [resdexAvailable, setResdexAvailable] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -42,10 +46,22 @@ export default function RunDetailView({ runId, onBack, onView }) {
     let cancelled = false;
     setJobsLoading(true);
     setJobsError("");
+    setResdexAvailable(false);
     (async () => {
       try {
-        const { rows } = await fetchAllJobs({ run_id: runId });
-        if (!cancelled) setJobs(rows);
+        // The Resdex lookup is best-effort: a failure just hides the option.
+        const [{ rows }, resdex] = await Promise.all([
+          fetchAllJobs({ run_id: runId }),
+          fetchAllJobs({ run_id: runId, contact: "resdex" }).catch(() => null),
+        ]);
+        if (cancelled) return;
+        if (resdex) {
+          const matched = new Set(resdex.rows.map((r) => r.id));
+          setJobs(rows.map((r) => (matched.has(r.id) ? { ...r, hasResdex: true } : r)));
+          setResdexAvailable(true);
+        } else {
+          setJobs(rows);
+        }
       } catch (err) {
         if (!cancelled) { setJobsError(err instanceof ApiError ? err.message : "Could not load this run's jobs."); setJobs([]); }
       } finally {
@@ -209,6 +225,7 @@ export default function RunDetailView({ runId, onBack, onView }) {
                     onFilteredChange={setFilteredRows}
                     minWidth={1410}
                     pageSize={Number(pageSizeSel)}
+                    resdexAvailable={resdexAvailable}
                     emptyMessage={jobs.length === 0 ? "No jobs recorded for this run." : "No jobs match your filters."}
                   />
                 </div>
