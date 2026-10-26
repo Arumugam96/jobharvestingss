@@ -71,11 +71,11 @@ _RETRYABLE_SMTP_ERRORS = (
     OSError,
 )
 
-AUTOMATION_CONTACT_BLOCK = (
-    "For any queries, please reach out to us:\n"
-    "Shankar - +91 8056081469\n"
-    "Sanjeeta - +91 9949099528\n"
-)
+# AUTOMATION_CONTACT_BLOCK = (
+#     "For any queries, please reach out to us:\n"
+#     "Shankar - +91 8056081469\n"
+#     "Sanjeeta - +91 9949099528\n"
+# )
 
 _SIGNOFF_LEAD = "regards,"
 _WEBSITE_LEAD = "more about us"
@@ -106,7 +106,7 @@ def apply_automation_contact_block(body: str) -> str:
     is_automation=True) AND historically by the auto-outreach send-log write. The
     live auto-outreach flow now threads the block through append_closing instead, so
     this is a defensive fallback that still keeps the signature last if used."""
-    return _insert_above_signoff(body, AUTOMATION_CONTACT_BLOCK, lead=_WEBSITE_LEAD)
+    return _insert_above_signoff(body, lead=_WEBSITE_LEAD)
 
 
 def _resolve_sender(settings: Settings) -> tuple[str, str]:
