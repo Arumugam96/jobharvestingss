@@ -228,7 +228,8 @@ async def apollo_company_contact_fallback(
     async def _budget_ok() -> bool:
         # Front-run the ApolloClient's own gate so we can distinguish "cap reached"
         # (defer, no negative) from "searched, found nothing" (cacheable negative).
-        remaining = await apollo_budget.remaining_today()
+        # Harvest-time fallback → also bound by the enrichment sub-cap.
+        remaining = await apollo_budget.remaining_today(purpose="enrichment")
         return remaining is None or remaining > 0
 
     if not await _budget_ok():

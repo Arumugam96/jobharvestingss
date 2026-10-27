@@ -102,7 +102,12 @@ class Settings(BaseSettings):
     apollo_phone_pending_ttl_minutes: int = 60
     apollo_recheck_days: int = 30
     apollo_enrich_company: bool = True
+    # Account-wide ceiling on Apollo credit-calls per UTC day (every caller counts).
     apollo_daily_cap: int = 100
+    # Additional sub-cap for harvest/maintenance contact enrichment only (also counts
+    # against apollo_daily_cap). When exhausted, enrichment stops but Recruiter Finder
+    # can still use the remaining global headroom. <= 0 = no sub-cap.
+    apollo_enrichment_daily_cap: int = 0
     company_contact_fallback: bool = True
     company_contact_reveal_cap: int = 5
     # HR shortlist per (company, location) — free Apollo search, revealed lazily as

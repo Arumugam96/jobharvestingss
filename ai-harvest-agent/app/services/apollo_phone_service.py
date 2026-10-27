@@ -19,6 +19,8 @@ round-trip (tables in app/models/apollo_phone.py):
      retries never double-charge.
   4. ``expire_stale`` (APScheduler, every 10 min) marks rows with no delivery after
      ``apollo_phone_pending_ttl_minutes`` as ``expired``; a late delivery still lands.
+     Between ticks, ``phone_status_for`` already reads a past-TTL pending row as
+     NOT_FOUND so the UI never waits on the scheduler.
 
 Data-integrity: only a number Apollo actually delivered is ever stored; statuses stay
 truthful (PENDING while waiting, NOT_FOUND when Apollo had none / never answered).
@@ -431,8 +433,26 @@ async def expire_stale() -> int:
 
 # ── Read models (polling / diagnostics) ──────────────────────────────────────
 
-def ui_phone_status(row: ApolloPhoneRequestORM) -> str:
+def _aware(dt: datetime | None) -> datetime | None:
+    if dt is not None and dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)  # SQLite drops the tz — stored as UTC
+    return dt
+
+
+def _pending_cutoff() -> datetime:
+    """Requests made before this are past the pending TTL."""
+    ttl = max(1, int(get_settings().apollo_phone_pending_ttl_minutes))
+    return _now() - timedelta(minutes=ttl)
+
+
+def ui_phone_status(row: ApolloPhoneRequestORM, *, stale_before: datetime | None = None) -> str:
+    """UI phone status for a request row. With ``stale_before``, a ``pending`` row
+    requested before it reads as NOT_FOUND — the expiry job only runs every 10 min, so
+    this closes the gap at read time (the row itself is expired by ``expire_stale``)."""
     if row.status == PENDING:
+        requested = _aware(row.requested_at)
+        if stale_before is not None and requested is not None and requested < stale_before:
+            return PS_NOT_FOUND
         return PS_PENDING
     if row.status == FOUND:
         return row.phone_status or PS_PUBLIC
@@ -441,16 +461,21 @@ def ui_phone_status(row: ApolloPhoneRequestORM) -> str:
     return PS_NOT_FOUND
 
 
-def _row_view(row: ApolloPhoneRequestORM) -> dict:
-    return {"phone_status": ui_phone_status(row), "phone": row.phone or "",
-            "phone_type": row.phone_type or "", "dnc_status": row.dnc_status or ""}
+def _row_view(row: ApolloPhoneRequestORM, *, stale_before: datetime | None = None) -> dict:
+    requested = _aware(row.requested_at)
+    return {"phone_status": ui_phone_status(row, stale_before=stale_before),
+            "phone": row.phone or "",
+            "phone_type": row.phone_type or "", "dnc_status": row.dnc_status or "",
+            "requested_at": requested.isoformat() if requested else None}
 
 
 async def phone_status_for(
     db: AsyncSession, *, person_ids: list[str] | None = None, item_ids: list[str] | None = None,
 ) -> dict:
-    """Latest phone request per Apollo person id / finder item id (tenant-scoped)."""
+    """Latest phone request per Apollo person id / finder item id (tenant-scoped). A
+    pending request older than apollo_phone_pending_ttl_minutes reads as NOT_FOUND."""
     R = ApolloPhoneRequestORM
+    stale_before = _pending_cutoff()
     out: dict[str, dict] = {"persons": {}, "items": {}}
     person_ids = [p for p in (person_ids or []) if p][:200]
     item_ids = [i for i in (item_ids or []) if i][:200]
@@ -459,13 +484,13 @@ async def phone_status_for(
             select(R).where(R.apollo_person_id.in_(person_ids)).order_by(R.requested_at.asc()), R.tenant_id,
         ))).scalars().all()
         for r in rows:  # ascending → the newest request per person wins
-            out["persons"][r.apollo_person_id] = _row_view(r)
+            out["persons"][r.apollo_person_id] = _row_view(r, stale_before=stale_before)
     if item_ids:
         rows = (await db.execute(apply_tenant(
             select(R).where(R.finder_item_id.in_(item_ids)).order_by(R.requested_at.asc()), R.tenant_id,
         ))).scalars().all()
         for r in rows:
-            out["items"][r.finder_item_id] = _row_view(r)
+            out["items"][r.finder_item_id] = _row_view(r, stale_before=stale_before)
     return out
 
 

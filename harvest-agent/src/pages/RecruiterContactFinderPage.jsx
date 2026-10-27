@@ -31,13 +31,17 @@ const CHIP = {
   ambiguous:  ["amb", "Ambiguous"],
   failed:     ["fail", "Failed"],
   queued:     ["queue", "Queued · tomorrow"],
+  // Completed, but Apollo's phone is still on its way (see revealState).
+  phone_pending: ["proc", "In progress"],
 };
+const IN_PROGRESS_TIP = "Waiting for Apollo to deliver the phone number";
 
 function Chip({ status }) {
   const [cls, label] = CHIP[status] || CHIP.pending;
+  const spin = status === "processing" || status === "phone_pending";
   return (
-    <span className={"chip " + cls}>
-      {status === "processing" ? <Loader2 size={11} className="ha-spin" /> : <span className="d" />}
+    <span className={"chip " + cls} title={status === "phone_pending" ? IN_PROGRESS_TIP : undefined}>
+      {spin ? <Loader2 size={11} className="ha-spin" /> : <span className="d" />}
       {label}
     </span>
   );
@@ -58,7 +62,12 @@ function Seg({ value, onChange, options }) {
 
 // ── Async phone reveal (Apollo delivers phones to a webhook minutes later) ────
 const PHONE_POLL_MS = 8000;
-const PHONE_POLL_MAX_MS = 30 * 60 * 1000; // stop polling a stuck request after 30 min
+// Stop polling a stuck request a little after the backend's pending TTL (usage
+// .phone_pending_ttl_minutes, default 60) — by then it reads NOT_FOUND server-side.
+const PHONE_POLL_GRACE_MIN = 12;
+function phonePollMaxMs(ttlMinutes) {
+  return ((ttlMinutes || 60) + PHONE_POLL_GRACE_MIN) * 60 * 1000;
+}
 const PHONE_OFF_TIP = "Phone reveal isn't enabled for this workspace.";
 
 // Reveal choices; Phone/Both are disabled (with a tooltip) when the backend has no
@@ -114,36 +123,88 @@ function PhoneCell({ phone, status, dnc }) {
 }
 
 // Poll GET /recruiter-finder/phone-status while any of `pendingIds` (Apollo person ids)
-// is PENDING — every 8 s (setTimeout-in-ref, like BulkPanel.tick), stopping after 30 min
-// or on unmount. `onUpdate(persons)` receives {personId: {phone_status, phone, …}}.
-function usePhonePoll(pendingIds, onUpdate) {
+// is PENDING — every 8 s (setTimeout-in-ref, like BulkPanel.tick), until `maxMs` after
+// the newest id joined, or unmount. `onUpdate(persons)` receives {personId:
+// {phone_status, phone, …}}. At the cap one final fetch runs and anything still PENDING
+// is reported as NOT_FOUND, so a "Finding phone…" spinner never sticks.
+function usePhonePoll(pendingIds, onUpdate, maxMs = phonePollMaxMs()) {
   const timerRef = useRef(null);
   const startedRef = useRef(0);
+  const seenRef = useRef(new Set());
   const cbRef = useRef(onUpdate);
   cbRef.current = onUpdate;
   const key = [...pendingIds].sort().join(",");
   useEffect(() => {
-    if (!key) { startedRef.current = 0; return undefined; }
-    if (!startedRef.current) startedRef.current = Date.now();
+    if (!key) { startedRef.current = 0; seenRef.current = new Set(); return undefined; }
+    const ids = key.split(",");
+    // A newly pending phone restarts the clock so it gets its own full wait.
+    if (!startedRef.current || ids.some((id) => !seenRef.current.has(id))) startedRef.current = Date.now();
+    seenRef.current = new Set(ids);
     let cancelled = false;
     const tick = async () => {
-      if (cancelled || Date.now() - startedRef.current > PHONE_POLL_MAX_MS) return;
+      if (cancelled) return;
+      const gaveUp = Date.now() - startedRef.current > maxMs;
+      let persons = null;
       try {
-        const r = await getFinderPhoneStatus({ personIds: key.split(",") });
-        if (!cancelled) cbRef.current((r && r.persons) || {});
+        const r = await getFinderPhoneStatus({ personIds: ids });
+        persons = (r && r.persons) || {};
       } catch { /* transient — try again next tick */ }
-      if (!cancelled) timerRef.current = setTimeout(tick, PHONE_POLL_MS);
+      if (cancelled) return;
+      if (gaveUp) {
+        const final = { ...(persons || {}) };
+        ids.forEach((id) => {
+          if (!final[id] || final[id].phone_status === "PENDING") final[id] = { ...(final[id] || {}), phone_status: "NOT_FOUND" };
+        });
+        cbRef.current(final);
+        return;
+      }
+      if (persons) cbRef.current(persons);
+      timerRef.current = setTimeout(tick, PHONE_POLL_MS);
     };
     timerRef.current = setTimeout(tick, PHONE_POLL_MS);
     return () => { cancelled = true; clearTimeout(timerRef.current); };
-  }, [key]);
+  }, [key, maxMs]);
 }
 
 // Merge one phone-status update into a result row (only rows still PENDING change).
+// reveal_state is cleared so revealState() re-derives it from the new phone status.
 function mergePhone(row, persons) {
   const u = row && row.person_id ? persons[row.person_id] : null;
   if (!u || row.phone_status !== "PENDING" || u.phone_status === "PENDING") return row;
-  return { ...row, phone: u.phone || row.phone, phone_status: u.phone_status, dnc_status: u.dnc_status };
+  return { ...row, phone: u.phone || row.phone, phone_status: u.phone_status, dnc_status: u.dnc_status,
+    reveal_state: undefined };
+}
+
+// What a revealed contact's Status shows — mirrors the backend's _reveal_state: a
+// completed contact whose phone is still PENDING is "in_progress", one that ended with
+// neither email nor phone is "no_contact", otherwise "revealed". Non-completed statuses
+// pass through.
+function revealState(r) {
+  if (!r) return "";
+  if (r.reveal_state) return r.reveal_state;
+  if (r.status !== "completed") return r.status || "";
+  if ((r.phone_status || "").toUpperCase() === "PENDING") return "in_progress";
+  if (!r.email && !r.phone) return "no_contact";
+  return "revealed";
+}
+
+// Status chip for a revealed contact (browse table + single result).
+function RevealChip({ row, revealedLabel = "Revealed" }) {
+  const s = revealState(row);
+  if (s === "in_progress") {
+    return <span className="chip proc" title={IN_PROGRESS_TIP}><Loader2 size={11} className="ha-spin" />In progress</span>;
+  }
+  if (s === "no_contact") {
+    return <span className="chip pending" title="Apollo returned no email or phone for this contact"><span className="d" />No phone found</span>;
+  }
+  return <span className="chip done"><span className="d" />{revealedLabel}</span>;
+}
+
+// {revealed, in_progress} across result rows — live, so counts follow phone deliveries.
+function countStates(rows) {
+  const out = { revealed: 0, in_progress: 0 };
+  rows.forEach((r) => { const s = revealState(r); if (s in out) out[s] += 1; });
+  return out;
 }
 
 // Styled dropdown (replaces the native <select> so the options panel aligns with the design).
@@ -267,6 +328,13 @@ function StatBand({ usage, collapsed }) {
   const dash = `${(ratio * CAP_C).toFixed(1)} ${CAP_C.toFixed(1)}`;
   const stroke = ratio < 0.6 ? "var(--good)" : ratio < 0.9 ? "var(--accent)" : "var(--bad)";
   const pctW = `${Math.round(ratio * 100)}%`;
+  // Account-wide Apollo usage (harvest enrichment sub-cap + global ceiling) — context
+  // for why harvest enrichment may have stopped while this workspace still has credits.
+  const ap = usage?.apollo;
+  const of = (n, c) => `${n ?? 0} / ${c > 0 ? c : "unlimited"}`;
+  const apolloLine = ap
+    ? `Harvest enrichment: ${of(ap.enrichment_used, ap.enrichment_cap)} Apollo credits today · Account: ${of(ap.global_used, ap.global_cap)}`
+    : "";
 
   return (
     <div className={"statband" + (collapsed ? " collapsed" : "")}>
@@ -328,10 +396,15 @@ function StatBand({ usage, collapsed }) {
                   <span className="ctag" title={`Each delivered phone costs ${usage.phone_credit_cost ?? 8} credits`}>
                     <Phone size={10} /> {usage.phones_pending} phone{usage.phones_pending === 1 ? "" : "s"} pending
                   </span>
+                )}
+                {ap && (
+                  <span className="ctag" title={apolloLine}>
+                    Harvest {of(ap.enrichment_used, ap.enrichment_cap)}
+                  </span>
                 )}</div>
             </div>
           </div>
-          <div className="footnote" style={{ justifyContent: "flex-start", padding: "10px 16px 12px" }}>Resets at 00:00 UTC · separate from the harvest enrichment budget</div>
+          <div className="footnote" style={{ justifyContent: "flex-start", padding: "10px 16px 12px" }}>Resets at 00:00 UTC · separate from the harvest enrichment budget{apolloLine ? ` · ${apolloLine}` : ""}</div>
         </div>
       </div>
     </div>
@@ -601,7 +674,7 @@ function SinglePanel({ usage, onSpent }) {
     });
     setResult((prev) => (prev ? { ...prev, results: (prev.results || []).map((r) => mergePhone(r, persons)) } : prev));
     onSpent(); // a delivered phone was charged — refresh the gauge
-  });
+  }, phonePollMaxMs(usage?.phone_pending_ttl_minutes));
 
   // ── People mode ──
   const canSubmitPerson = !!(personName.trim() || linkedinUrl.trim());
@@ -668,6 +741,7 @@ function SinglePanel({ usage, onSpent }) {
   });
 
   const selCount = selected.size;
+  const batch = countStates((revealSummary?.ids || []).map((id) => revealedMap[id]).filter(Boolean));
   const doReveal = async () => {
     if (selCount === 0) return;
     setRevealing(true); setError("");
@@ -682,9 +756,10 @@ function SinglePanel({ usage, onSpent }) {
         (r.results || []).forEach((res) => { next[res.person_id] = res; });
         return next;
       });
-      setRevealSummary({ credits_spent: r.credits_spent, revealed: r.revealed,
+      // Keep the batch's ids so the revealed / in-progress counts stay live as phones land.
+      setRevealSummary({ credits_spent: r.credits_spent, ids: (r.results || []).map((x) => x.person_id),
         requested: r.requested, budget_exhausted: r.budget_exhausted,
-        phones_pending: r.phones_pending || 0, message: r.status === "unconfigured" ? r.message : "" });
+        message: r.status === "unconfigured" ? r.message : "" });
       setSelected(new Set());
       onSpent();
     } catch (err) {
@@ -758,9 +833,9 @@ function SinglePanel({ usage, onSpent }) {
               {revealSummary && (
                 <div className="form-foot" style={{ marginTop: 0, marginBottom: 10, color: "var(--good)" }}>
                   <CheckCircle2 size={15} style={{ color: "var(--good)" }} />
-                  <span>{revealSummary.message ? revealSummary.message : <><b>{revealSummary.revealed}</b> revealed · <b>{revealSummary.credits_spent}</b> credit{revealSummary.credits_spent === 1 ? "" : "s"} spent · saved to Recruiters
-                    {revealSummary.phones_pending > 0 ? ` · ${revealSummary.phones_pending} phone${revealSummary.phones_pending === 1 ? "" : "s"} on the way (${phoneCost} credits each, charged on delivery)` : ""}
-                    {revealSummary.budget_exhausted ? " · daily budget reached" : (revealSummary.requested > revealSummary.revealed ? ` · ${revealSummary.requested - revealSummary.revealed} had no unlockable contact` : "")}</>}</span>
+                  <span>{revealSummary.message ? revealSummary.message : <><b>{batch.revealed}</b> revealed · <b>{revealSummary.credits_spent}</b> credit{revealSummary.credits_spent === 1 ? "" : "s"} spent · saved to Recruiters
+                    {batch.in_progress > 0 ? <> · <span title={`Waiting for Apollo to deliver the phone (${phoneCost} credits each, charged on delivery)`}>{batch.in_progress} in progress</span></> : ""}
+                    {revealSummary.budget_exhausted ? " · daily budget reached" : (revealSummary.requested > batch.revealed + batch.in_progress ? ` · ${revealSummary.requested - batch.revealed - batch.in_progress} had no unlockable contact` : "")}</>}</span>
                 </div>
               )}
 
@@ -792,7 +867,7 @@ function SinglePanel({ usage, onSpent }) {
                               : <span className="none">—</span>}
                           </td>
                           <td>{done
-                            ? <span className="chip done"><span className="d" />Revealed</span>
+                            ? <RevealChip row={rv} />
                             : c.email_status ? <span className="lockpill">{c.email_status}</span>
                             : <span className="none">—</span>}</td>
                         </tr>
@@ -893,17 +968,19 @@ function SingleResult({ result, company, phoneCost }) {
       </>
     );
   }
-  const short = result.requested > 1 && result.revealed < result.requested;
+  // Live counts (rows are merged as phones arrive): only delivered contacts are "revealed".
+  const counts = countStates(rows);
+  const short = result.requested > 1 && rows.length < result.requested;
   return (
     <>
       <div className="gridtool">
         <h3><span className="ic" style={{ color: "var(--primary)" }}><Users size={16} /></span>Result</h3>
-        <span className="count-pill num">{result.revealed}</span>
+        <span className="count-pill num">{counts.revealed}</span>
         <span style={{ flex: 1 }} />
         <span style={{ fontSize: 12, color: "var(--ink-soft)" }}>
           <b>{result.credits_spent}</b> credit{result.credits_spent === 1 ? "" : "s"} spent
-          {result.phones_pending > 0 ? ` · ${result.phones_pending} phone${result.phones_pending === 1 ? "" : "s"} on the way (${phoneCost ?? 8} credits each, charged on delivery)` : ""}
-          {result.budget_exhausted ? " · daily budget reached" : short ? ` · only ${result.revealed} of ${result.requested} found` : ""}
+          {counts.in_progress > 0 ? <> · <span title={`Waiting for Apollo to deliver the phone (${phoneCost ?? 8} credits each, charged on delivery)`}>{counts.in_progress} in progress</span></> : ""}
+          {result.budget_exhausted ? " · daily budget reached" : short ? ` · only ${rows.length} of ${result.requested} found` : ""}
         </span>
       </div>
       <div className="table-scroll" style={{ maxHeight: "none" }}>
@@ -917,7 +994,7 @@ function SingleResult({ result, company, phoneCost }) {
                 <td className="co"><b>{company || "—"}</b>{r.company_domain ? <span>{r.company_domain}</span> : null}</td>
                 <td className="email">{r.email ? <span className="addr">{r.email}</span> : <span className="muted">—</span>}</td>
                 <td className="phone"><PhoneCell phone={r.phone} status={r.phone_status} dnc={r.dnc_status} /></td>
-                <td><span className="chip done"><span className="d" />Found</span></td>
+                <td><RevealChip row={r} revealedLabel="Found" /></td>
               </tr>
             ))}
           </tbody>
@@ -1059,7 +1136,7 @@ function RunView({ job, items, filter, setFilter, running, mapping, onRetry, onE
                 <td>{it.contact_title || <span className="none">—</span>}</td>
                 <td className="email">{it.email ? <span className="addr">{it.email}</span> : <span className="muted">{it.error ? "error" : "—"}</span>}</td>
                 <td className="phone"><PhoneCell phone={it.phone} status={it.phone_status} /></td>
-                <td><Chip status={it.status} /></td>
+                <td><Chip status={revealState(it) === "in_progress" ? "phone_pending" : it.status} /></td>
               </tr>
             ))}
             {filtered.length === 0 && <tr><td colSpan={7} style={{ textAlign: "center", color: "var(--ink-faint)", padding: 22 }}>No records in this view.</td></tr>}
@@ -1098,6 +1175,8 @@ function BulkPanel({ usage, onSpent }) {
   const [histLoading, setHistLoading] = useState(false);
   const pollRef = useRef(null);
   const phoneWaitRef = useRef(0); // when post-completion phone polling started
+  const phoneMaxRef = useRef(phonePollMaxMs());
+  phoneMaxRef.current = phonePollMaxMs(usage?.phone_pending_ttl_minutes);
   const fileRef = useRef(null);
   const phoneEnabled = usage?.phone_enabled;
   const phoneCost = usage?.phone_credit_cost ?? 8;
@@ -1131,10 +1210,18 @@ function BulkPanel({ usage, onSpent }) {
       if (j.status === "running" || j.status === "queued") { phoneWaitRef.current = 0; pollRef.current = setTimeout(() => tick(id), 6000); }
       else if (j.phones_pending > 0) {
         // Run finished but Apollo phones are still on their way — keep ticking (15 s,
-        // capped at 30 min) so the Phone column fills in as they're delivered.
+        // capped a little past the backend's pending TTL) so the Phone column fills in
+        // as they're delivered.
         if (!phoneWaitRef.current) phoneWaitRef.current = Date.now();
-        if (Date.now() - phoneWaitRef.current < PHONE_POLL_MAX_MS) pollRef.current = setTimeout(() => tick(id), 15000);
-        else stopPoll();
+        if (Date.now() - phoneWaitRef.current < phoneMaxRef.current) pollRef.current = setTimeout(() => tick(id), 15000);
+        else {
+          // Gave up (this fetch was the final one): show anything still PENDING as not
+          // found so the spinners never stick.
+          stopPoll();
+          setItems((prev) => prev.map((i) => (i.phone_status === "PENDING"
+            ? { ...i, phone_status: "NOT_FOUND", reveal_state: undefined } : i)));
+          setJob((prev) => (prev ? { ...prev, phones_pending: 0 } : prev));
+        }
       }
       else stopPoll();
     } catch (err) {

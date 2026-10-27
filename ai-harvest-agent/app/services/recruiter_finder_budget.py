@@ -15,6 +15,9 @@ apollo_budget. ``cap <= 0`` = unlimited (counted, never denied).
 
 The global apollo_daily_cap still applies at the ApolloClient chokepoint as the
 account-wide backstop; this gate is the feature's user-facing, per-tenant limit.
+Finder's ApolloClients are built with ``purpose="finder"``, so the harvest-only
+enrichment sub-cap (settings.apollo_enrichment_daily_cap) never blocks them — they
+only share the global ceiling with enrichment.
 """
 from __future__ import annotations
 

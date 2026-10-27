@@ -426,3 +426,23 @@ class ApolloUsageORM(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+
+class ApolloPurposeUsageORM(Base):
+    """Per-UTC-day Apollo credit-call counter broken down by purpose
+    (app/services/apollo_budget.py).
+
+    Sits alongside the global ``apollo_daily_usage`` counter: every credit still
+    reserves against the global cap, and ``purpose="enrichment"`` (harvest/maintenance
+    contact enrichment) must ALSO pass settings.apollo_enrichment_daily_cap via its row
+    here. Other purposes (e.g. "finder") are counted for observability only. Global
+    (not tenant-scoped) — like the global cap, it protects one shared API key.
+    """
+    __tablename__ = "apollo_purpose_usage"
+
+    usage_date: Mapped[datetime] = mapped_column(Date, primary_key=True)
+    purpose: Mapped[str] = mapped_column(String(20), primary_key=True)
+    count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )

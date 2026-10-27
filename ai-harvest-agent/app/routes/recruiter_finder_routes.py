@@ -34,9 +34,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.core.dependencies import get_current_user, get_db_session
 from app.core.tenant_context import is_all_access
-from app.services import apollo_phone_service, recruiter_finder_budget
+from app.services import apollo_budget, apollo_phone_service, recruiter_finder_budget
 from app.services.recruiter_finder_import import parse_and_validate
 from app.services.recruiter_finder_service import (
+    _reveal_state,
     create_job_with_items,
     get_job,
     history_log,
@@ -84,6 +85,8 @@ def _item_dict(it) -> dict[str, Any]:
         "contact_name": it.contact_name, "contact_title": it.contact_title,
         "email": it.email, "email_status": it.email_status, "phone": it.phone,
         "phone_status": it.phone_status or "", "person_id": it.apollo_person_id or "",
+        # What the UI shows: "in_progress" while a completed row's phone is still PENDING.
+        "reveal_state": _reveal_state(it.status, it.email, it.phone, it.phone_status),
         "confidence": it.confidence, "recruiter_id": it.recruiter_id,
         "error": it.error, "attempts": it.attempts,
     }
@@ -315,6 +318,11 @@ async def usage(current_user=Depends(get_current_user)) -> Any:
         "phone_enabled": apollo_phone_service.phone_enabled(),
         "phone_credit_cost": apollo_phone_service.phone_cost(),
         "phones_pending": await apollo_phone_service.pending_count(tenant),
+        # A phone still pending after this long is treated as not found (the UI stops
+        # polling a little after it).
+        "phone_pending_ttl_minutes": get_settings().apollo_phone_pending_ttl_minutes,
+        # Account-wide Apollo usage today (global ceiling + harvest enrichment sub-cap).
+        "apollo": await apollo_budget.usage_today(),
     }
 
 

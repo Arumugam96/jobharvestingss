@@ -11,7 +11,10 @@ exceptions, and structlog. No new heavy dependencies.
 Credits: the reveal calls (people/match, people/bulk_match) cost a credit per person,
 and so do the organization lookups — organizations/enrich (1 per company) and
 mixed_companies/search (1 per page). All of them reserve against the per-UTC-day cap
-(app/services/apollo_budget.py) before the request. Only the people listing
+(app/services/apollo_budget.py) before the request — and, when the client was built
+with ``purpose="enrichment"`` (the default: harvest/maintenance enrichment), also
+against the separate enrichment sub-cap; Recruiter Finder builds its clients with
+``purpose="finder"`` so it only hits the global ceiling. Only the people listing
 (mixed_people/api_search) is free and ungated. Callers are responsible for
 gating/caching (see ``apollo_enrichment.apollo_contact_fallback`` for reveals and
 ``company_enrichment_service.resolve_apollo_org``, which caches the org id per company).
@@ -233,8 +236,12 @@ def _first_phone(phone_numbers: list[dict[str, Any]] | None) -> str | None:
 class ApolloClient:
     """Async wrapper around Apollo's people-match REST API."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, *, purpose: str = "enrichment") -> None:
         self._settings = settings
+        # Which daily budget this client's credits count toward: "enrichment"
+        # (harvest/maintenance contact enrichment — also gated by the enrichment
+        # sub-cap) or "finder" (on-demand Recruiter Finder — global cap only).
+        self.purpose = purpose
         self._api_key = settings.apollo_api_key
         self._base_url = settings.apollo_base_url.rstrip("/")
         self._timeout = settings.apollo_timeout_s
@@ -510,18 +517,21 @@ class ApolloClient:
 
     async def _reserve_credit(self, endpoint: str, cost: int = 1) -> bool:
         """Reserve ``cost`` credit-calls against the global per-UTC-day Apollo cap
-        BEFORE issuing a credit-spending request. Called by the reveal endpoints
-        (people/match, people/bulk_match) and the organization lookups
-        (organizations/enrich, mixed_companies/search) — only the people listing is
-        free and never reserves. Returns False when the day's budget is exhausted (caller
-        short-circuits to its empty value). Best-effort (fails open on DB error) — see
+        (and, for ``purpose="enrichment"``, the enrichment sub-cap) BEFORE issuing a
+        credit-spending request. Called by the reveal endpoints (people/match,
+        people/bulk_match) and the organization lookups (organizations/enrich,
+        mixed_companies/search) — only the people listing is free and never reserves.
+        Returns False when the day's budget is exhausted (caller short-circuits to its
+        empty value). Best-effort (fails open on DB error) — see
         app/services/apollo_budget.py. Imported lazily to keep the client importable
         without a DB session."""
         from app.services import apollo_budget
 
-        allowed = await apollo_budget.try_consume(cost)
+        allowed = await apollo_budget.try_consume(cost, purpose=self.purpose)
         if not allowed:
-            logger.info("apollo_daily_cap_reached", endpoint=endpoint, cost=cost)
+            logger.info(
+                "apollo_daily_cap_reached", endpoint=endpoint, cost=cost, purpose=self.purpose
+            )
         return allowed
 
     def _webhook_url_for(self, ref: str = "") -> str:

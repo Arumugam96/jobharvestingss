@@ -226,6 +226,27 @@ async def _reveal(pctx: _PhoneCtx, call, *, person_id: str | None = None, item_i
     return match, ref, ps
 
 
+def _reveal_state(status: str, email: str, phone: str, phone_status: str) -> str:
+    """What the UI should show for a contact. ``status`` stays "completed" as soon as
+    Apollo accepts a reveal (counters/billing key off it), but a completed contact whose
+    phone is still PENDING on the webhook is "in_progress", not yet "revealed"; one that
+    ended with neither an email nor a phone is "no_contact". Non-completed statuses pass
+    through unchanged."""
+    if status != "completed":
+        return status
+    if (phone_status or "").upper() == apollo_phone_service.PS_PENDING:
+        return "in_progress"
+    if not email and not phone:
+        return "no_contact"
+    return "revealed"
+
+
+def _with_reveal_state(r: dict) -> dict:
+    r["reveal_state"] = _reveal_state(
+        r.get("status", ""), r.get("email", ""), r.get("phone", ""), r.get("phone_status", ""))
+    return r
+
+
 def _is_hit(match, want_email: bool, ref: str) -> bool:
     """A reveal counts when it produced an email that was asked for, or Apollo accepted
     a phone request for a matched person (the phone arrives later via the webhook)."""
@@ -672,7 +693,7 @@ async def _run_enrichment_background(job_id: str) -> None:
     reveal_cap = settings.company_contact_reveal_cap
     cap = await resolve_tenant_cap(tenant)
     requested_by = jobd["requested_by"]
-    client = ApolloClient(settings)
+    client = ApolloClient(settings, purpose="finder")
     pctx = _PhoneCtx(want_email=want_email, want_phone=want_phone, tenant=tenant, cap=cap,
                      requested_by=requested_by, job_id=job_id)
     if pctx.phone_only_unavailable:
@@ -799,22 +820,28 @@ async def run_single(
     miss costs nothing), bounded by the workspace's remaining daily budget. Every hit
     is upserted into `recruiters`. Runs in the request context (tenant already bound).
 
-    Returns ``{status, requested, revealed, credits_spent, budget_exhausted,
+    Returns ``{status, requested, revealed, in_progress, credits_spent, budget_exhausted,
     company_domain, message, phones_pending, phone_credit_cost,
-    results: [outcome+recruiter_id, …]}``. ``credits_spent`` counts the email credits
-    charged now; a PENDING phone is charged on webhook delivery."""
+    results: [outcome+recruiter_id+reveal_state, …]}``. ``credits_spent`` counts the
+    email credits charged now; a PENDING phone is charged on webhook delivery (its
+    contact is ``in_progress`` until then, not ``revealed``)."""
     settings = get_settings()
     tenant = get_current_tenant_id()
     want_email, want_phone, email_cost = _reveal_flags(reveal)
 
     def _resp(status, *, results=None, requested=1, budget_exhausted=False, message="", domain_out=""):
-        results = results or []
+        results = [_with_reveal_state({k: v for k, v in r.items() if k != "phone_ref"})
+                   for r in (results or [])]
         return {
-            "status": status, "requested": requested, "revealed": len(results),
+            "status": status, "requested": requested,
+            # Only contacts with a delivered email/phone count as revealed; a contact
+            # whose phone is still on its way is in_progress.
+            "revealed": sum(1 for r in results if r["reveal_state"] == "revealed"),
+            "in_progress": sum(1 for r in results if r["reveal_state"] == "in_progress"),
             "credits_spent": sum(email_cost for r in results if r.get("email_charged")),
             "budget_exhausted": budget_exhausted,
             "company_domain": domain_out, "message": message,
-            "results": [{k: v for k, v in r.items() if k != "phone_ref"} for r in results],
+            "results": results,
             "phones_pending": sum(1 for r in results
                                   if r.get("phone_status") == apollo_phone_service.PS_PENDING),
             "phone_credit_cost": apollo_phone_service.phone_cost(),
@@ -845,7 +872,7 @@ async def run_single(
     async def reserve():
         return await recruiter_finder_budget.try_consume(email_cost, tenant, cap=cap)
 
-    client = ApolloClient(settings)
+    client = ApolloClient(settings, purpose="finder")
     item = {
         "id": None, "company": company or "", "person_name": person_name or "",
         "linkedin_url": linkedin_url or "", "domain": domain or "", "location": location or "", "title": "",
@@ -925,7 +952,7 @@ async def list_company_candidates(
         return {"status": "unconfigured", "company_domain": "", "total": 0, "candidates": [],
                 "message": "Contact enrichment isn't configured. Contact your administrator."}
 
-    client = ApolloClient(settings)
+    client = ApolloClient(settings, purpose="finder")
     res = await resolve_apollo_org(settings, company_name=company, domain=domain, client=client)
     if res.cap_reached:
         return {"status": "over_budget", "company_domain": domain or "", "total": 0,
@@ -972,18 +999,24 @@ async def reveal_candidates(
     upsert each hit into `recruiters`. The email credit is reserved for each contact
     that ACTUALLY yields an email (a miss costs nothing), bounded by the workspace's
     remaining daily budget; a requested phone comes back PENDING and is charged only when
-    Apollo's webhook delivers it. Returns ``{status, requested, revealed, credits_spent,
-    budget_exhausted, phones_pending, phone_credit_cost, results: [{person_id, status,
-    email, email_status, phone, phone_status, confidence, recruiter_id}]}``."""
+    Apollo's webhook delivers it. Returns ``{status, requested, revealed, in_progress,
+    credits_spent, budget_exhausted, phones_pending, phone_credit_cost, results:
+    [{person_id, status, reveal_state, email, email_status, phone, phone_status,
+    confidence, recruiter_id}]}`` — ``reveal_state`` (see _reveal_state) is what the UI
+    shows; ``revealed`` counts only contacts whose email/phone actually arrived."""
     settings = get_settings()
     tenant = get_current_tenant_id()
     want_email, want_phone, email_cost = _reveal_flags(reveal)
     requested = len([s for s in selections if s.get("person_id")])
 
     def _resp(status, *, results=None, budget_exhausted=False, message=""):
-        results = results or []
-        revealed = sum(1 for r in results if r["status"] == "completed")
+        results = [_with_reveal_state(r) for r in (results or [])]
+        # Only contacts with a delivered email/phone count as revealed; a contact whose
+        # phone is still on its way is in_progress.
+        revealed = sum(1 for r in results if r["reveal_state"] == "revealed")
+        in_progress = sum(1 for r in results if r["reveal_state"] == "in_progress")
         return {"status": status, "requested": requested, "revealed": revealed,
+                "in_progress": in_progress,
                 "credits_spent": sum(email_cost for r in results if r.get("email_charged")),
                 "budget_exhausted": budget_exhausted,
                 "phones_pending": sum(1 for r in results
@@ -1012,7 +1045,7 @@ async def reveal_candidates(
         return _resp("over_budget",
                      message="Daily enrichment budget reached for this workspace — try again tomorrow.")
 
-    client = ApolloClient(settings)
+    client = ApolloClient(settings, purpose="finder")
     results: list[dict] = []
     budget_exhausted = False
     for sel in selections:
@@ -1064,8 +1097,8 @@ async def reveal_candidates(
             "recruiter_id": recruiter_id, "error": "",
         })
 
-    revealed = sum(1 for r in results if r["status"] == "completed")
-    status = "completed" if revealed else ("over_budget" if budget_exhausted else "not_found")
+    done = sum(1 for r in results if r["status"] == "completed")
+    status = "completed" if done else ("over_budget" if budget_exhausted else "not_found")
     return _resp(status, results=results, budget_exhausted=budget_exhausted)
 
 

@@ -133,14 +133,18 @@ async def resolve_apollo_org(
             return OrgResolution()
         return OrgResolution(org=_org_from_row(row), size_band=row.company_size or "")
 
+    # The client's purpose picks the budget: an enrichment client is also bound by the
+    # enrichment sub-cap, a Finder client only by the global ceiling.
+    client = client or ApolloClient(settings)
+    purpose = getattr(client, "purpose", "enrichment")
+
     async def _budget_left() -> bool:
-        remaining = await apollo_budget.remaining_today()
+        remaining = await apollo_budget.remaining_today(purpose=purpose)
         return remaining is None or remaining > 0
 
     if not await _budget_left():
         return OrgResolution(cap_reached=True)
 
-    client = client or ApolloClient(settings)
     lookup_dom = dom or (infer_company_domain(company_name)[0] if guess_domain else "")
     org = await client.enrich_organization(lookup_dom) if lookup_dom else None
     if org is None or not org.id:

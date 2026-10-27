@@ -282,7 +282,9 @@ async def pick_rotation_contact(
         if not cand.email:
             if client is None or cap_hit or revealed >= reveal_cap:
                 continue
-            remaining = await apollo_budget.remaining_today()
+            remaining = await apollo_budget.remaining_today(
+                purpose=getattr(client, "purpose", "enrichment")
+            )
             if remaining is not None and remaining <= 0:
                 cap_hit = True          # a cap denial is not "no email" — no flag
                 continue
