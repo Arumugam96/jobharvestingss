@@ -520,7 +520,8 @@ async def _prepare(
     jobs: list[ResdexJobQuery] = []
     for norm, req in requirements.items():
         tiers = build_tiers(req, int(settings.resdex_max_searches_per_job),
-                            int(settings.resdex_active_within_months))
+                            int(settings.resdex_active_within_months),
+                            fixed_tier=int(getattr(settings, "resdex_search_tier", 0) or 0))
         if tiers:
             jobs.append(ResdexJobQuery(job_url=norm, tiers=tiers))
         else:

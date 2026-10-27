@@ -166,7 +166,7 @@ const RESDEX_MAX_TIERS = 3; // relaxation ladder (app/services/resdex_query.py)
 const RESDEX_STATUS = {
   no_results: {
     tone: "neutral", Icon: Search, title: "No suitable candidates", badge: "No match",
-    text: "Resdex returned no profiles that clear the skill bar, even after relaxing the search. Try the search below by hand with a broader experience range or fewer must-have skills.",
+    text: "Resdex returned no profiles that clear the skill bar. Try one of the other search tiers below by hand, or a broader experience range or fewer must-have skills.",
   },
   session_expired: {
     tone: "bad", Icon: Lock, title: "Naukri recruiter login needed", badge: "Login needed", login: true,
@@ -375,6 +375,38 @@ function CandidateCard({ c, must }) {
   );
 }
 
+// What each ladder tier searches (app/services/resdex_query.py).
+const TIER_LABEL = {
+  1: "Strict: every must-have skill and a job title",
+  2: "Balanced: lowest-priority skill dropped, job title or a nice-to-have skill",
+  3: "Broad: tier 2's query, experience ±2 yrs, any location",
+};
+
+// One ladder tier (GET /jobs/{id}/outreach-detail `resdex.tiers`): its query and
+// filters with a copy button, so a tier that wasn't searched can be run by hand.
+function TierQueryRow({ t }) {
+  const ref = useRef(null);
+  const fRows = filterRows(t.filters);
+  return (
+    <div className={`ha-rx-tier${t.searched ? " searched" : ""}`}>
+      <div className="ha-rx-tier-head">
+        <strong>Tier {t.tier}</strong>
+        {TIER_LABEL[t.tier] && <span className="ha-rx-hint">{TIER_LABEL[t.tier]}</span>}
+        {t.searched && <span className="ha-rx-tier-used">Searched</span>}
+      </div>
+      <pre className="ha-rx-query" ref={ref} tabIndex={0}><QueryText query={t.query} /></pre>
+      {fRows.length > 0 && (
+        <div className="ha-rx-fchips">
+          {fRows.map(([k, v]) => (
+            <span key={k} className="ha-rx-fchip"><span className="k" style={{ textTransform: "capitalize" }}>{k}</span> {v}</span>
+          ))}
+        </div>
+      )}
+      <div className="ha-rx-query-acts"><CopyQueryButton text={t.query} targetRef={ref} /></div>
+    </div>
+  );
+}
+
 function ResdexSearchPanel({ resdex }) {
   const queryRef = useRef(null);
   const req = resdex.requirements || {};
@@ -387,7 +419,7 @@ function ResdexSearchPanel({ resdex }) {
   if (!resdex.boolean_query && !must.length && !fRows.length) return null;
 
   const tierParts = [];
-  if (resdex.tier) tierParts.push(<strong key="t">Tier {resdex.tier} of {RESDEX_MAX_TIERS}</strong>);
+  if (resdex.tier) tierParts.push(<strong key="t">Tier {resdex.tier}</strong>);
   if (resdex.result_count) tierParts.push(`${Number(resdex.result_count).toLocaleString("en-IN")} matches in Resdex`);
   if (resdex.searches_used) tierParts.push(`${resdex.searches_used} search${resdex.searches_used === 1 ? "" : "es"} used`);
 
@@ -476,6 +508,17 @@ function ResdexSearchPanel({ resdex }) {
           </div>
         )}
       </div>
+      {asList(resdex.tiers).length > 0 && (
+        <div className="ha-rx-tiers">
+          <div className="ha-rx-mini">
+            All search tiers
+            <span className="ha-rx-extracted">· copy any of them into Resdex Keywords with Boolean on</span>
+          </div>
+          <div className="ha-rx-tier-list">
+            {asList(resdex.tiers).map((t) => <TierQueryRow key={t.tier} t={t} />)}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1112,6 +1155,15 @@ const styles = `
   .ha-rx-fchip { font-size: 12px; color: #334155; background: #fff; border: 1px solid #E2E8F0; padding: 4px 10px; border-radius: 999px; }
   .ha-rx-fchip .k { color: #64748B; }
   .ha-rx-fchip.relaxed { border-style: dashed; color: #94A3B8; }
+  .ha-rx-tiers { padding: 14px 16px 16px; border-top: 1px solid #F1F5F9; }
+  .ha-rx-tier-list { display: flex; flex-direction: column; gap: 10px; }
+  .ha-rx-tier { border: 1px solid #E2E8F0; border-radius: 10px; padding: 10px 12px; background: #fff;
+    display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+  .ha-rx-tier.searched { border-color: #FCE3BC; background: #FFF7EC; }
+  .ha-rx-tier-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; font-size: 12.5px; color: #334155; }
+  .ha-rx-tier-used { margin-left: auto; font-size: 11px; font-weight: 700; color: #92580B; background: #fff;
+    border: 1px solid #FCE3BC; padding: 1px 8px; border-radius: 999px; }
+  .ha-rx-tier .ha-rx-query-acts { margin-top: 0; }
   .ha-rx-reqs { display: flex; flex-direction: column; gap: 6px; }
   .ha-rx-req { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: baseline; font-size: 12.5px; }
   .ha-rx-req .nm { color: #1E293B; font-weight: 600; }

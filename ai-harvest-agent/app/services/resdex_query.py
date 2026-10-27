@@ -12,6 +12,9 @@ Relaxation ladder (one Resdex search per tier, at most RESDEX_MAX_SEARCHES_PER_J
   T3  same query as T2 — the *filters* relax instead (experience ±2 yrs, no
       location filter)
 
+RESDEX_SEARCH_TIER=1|2|3 replaces the ladder with that single tier (one search
+per job); tier_previews() still renders all three for the job detail page.
+
 Term matching (grounding, coverage) is token based and space/punctuation
 tolerant: "Spring Boot" matches "SpringBoot" / "spring-boot", but "Java" never
 matches "JavaScript" (a term must cover whole tokens).
@@ -282,10 +285,23 @@ def build_filters(req: dict, tier: int, active_within_months: int) -> dict[str, 
     return {k: v for k, v in out.items() if v is not None}
 
 
-def build_tiers(req: dict, max_tiers: int, active_within_months: int) -> list[ResdexTier]:
+def build_tiers(
+    req: dict, max_tiers: int, active_within_months: int, fixed_tier: int = 0,
+) -> list[ResdexTier]:
     """The relaxation ladder T1..T{min(3, max_tiers)}; a tier identical to the
     previous one (same query AND filters — e.g. a single mandatory skill and no
-    location/experience to relax) is skipped so no search is wasted on it."""
+    location/experience to relax) is skipped so no search is wasted on it.
+
+    ``fixed_tier`` 1-3 (RESDEX_SEARCH_TIER) replaces the ladder with that ONE
+    tier's query + filters — a single search per job; ``max_tiers`` is then
+    ignored. Any other value keeps the ladder."""
+    fixed = int(fixed_tier or 0)
+    if 1 <= fixed <= MAX_TIERS:
+        query = build_boolean_query(req, fixed)
+        if not query:
+            return []
+        return [ResdexTier(tier=fixed, query=query,
+                           filters=build_filters(req, fixed, active_within_months))]
     tiers: list[ResdexTier] = []
     for t in range(1, min(MAX_TIERS, max(1, int(max_tiers or 1))) + 1):
         query = build_boolean_query(req, t)
@@ -296,6 +312,20 @@ def build_tiers(req: dict, max_tiers: int, active_within_months: int) -> list[Re
             continue
         tiers.append(ResdexTier(tier=t, query=query, filters=filters))
     return tiers
+
+
+def tier_previews(req: dict, active_within_months: int) -> list[dict[str, Any]]:
+    """Every ladder tier's query + filters for ``req`` — [{"tier", "query",
+    "filters"}], T1..T3, not de-duplicated and whatever RESDEX_SEARCH_TIER is, so
+    the job detail page can offer the tiers that were not searched for manual use.
+    Deterministic: the same stored requirements always rebuild the same queries."""
+    out: list[dict[str, Any]] = []
+    for t in range(1, MAX_TIERS + 1):
+        query = build_boolean_query(req or {}, t)
+        if query:
+            out.append({"tier": t, "query": query,
+                        "filters": build_filters(req or {}, t, active_within_months)})
+    return out
 
 
 # ── Coverage ──────────────────────────────────────────────────────────────────

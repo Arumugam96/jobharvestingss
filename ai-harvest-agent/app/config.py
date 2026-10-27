@@ -223,6 +223,10 @@ class Settings(BaseSettings):
     resdex_min_skill_coverage: float = 0.6     # share of mandatory skills a pick must show
     resdex_active_within_months: int = 3       # Resdex "active in" filter (0 = off)
     resdex_max_searches_per_job: int = 3       # relaxation ladder T1..T3
+    # 1 | 2 | 3 = ONE search per job with only that ladder tier's query + filters
+    # (resdex_max_searches_per_job is then ignored); 0 = the full ladder above.
+    # The job detail page shows all three tier queries either way.
+    resdex_search_tier: int = 0
     # Open the picked candidates' full profiles for richer extraction — spends
     # Resdex profile-view credits, so off by default (search-result cards only).
     resdex_open_profiles: bool = False
@@ -230,14 +234,14 @@ class Settings(BaseSettings):
     resdex_daily_search_cap: int = 100
     resdex_daily_candidate_cap: int = 100
     resdex_reuse_days: int = 14                # reuse a job_url's recent search instead of re-searching
-    resdex_delay_min_ms: int = 30_000          # human-like gap between searches
-    resdex_delay_max_ms: int = 45_000
+    resdex_delay_min_ms: int = 5_000          # human-like gap between searches
+    resdex_delay_max_ms: int = 20_000
     # Anti-automation pacing (app/agents/resdex_candidate_agent.py): after results
     # load, scroll the list and dwell a random 5-15 s like a recruiter reading it;
     # every N searches in a batch take a longer 2-4 min break (0 = never).
-    resdex_results_dwell_min_s: float = 5.0
-    resdex_results_dwell_max_s: float = 15.0
-    resdex_break_every_searches: int = 10
+    resdex_results_dwell_min_s: float = 25.0
+    resdex_results_dwell_max_s: float = 35.0
+    resdex_break_every_searches: int = 20
     resdex_break_min_s: float = 120.0
     resdex_break_max_s: float = 240.0
     # A CAPTCHA / bot wall during a batch is held open in the Live Browser for a

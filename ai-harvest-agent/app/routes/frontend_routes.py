@@ -588,6 +588,29 @@ def _naukri_verified_badge() -> bool:
     return bool(getattr(get_settings(), "resdex_show_naukri_verified", True))
 
 
+def _resdex_tier_views(s: Any) -> list[dict]:
+    """All three ladder tiers for the search's stored requirements — whatever
+    RESDEX_SEARCH_TIER is — so the tiers that were not searched can be run by hand.
+    The searched tier shows the query + filters actually used (stored row);
+    the others are rebuilt from the requirements (deterministic)."""
+    from app.config import get_settings
+    from app.services.resdex_query import tier_previews
+
+    req = s.requirements if isinstance(s.requirements, dict) else None
+    if not req:
+        return []
+    try:
+        tiers = tier_previews(req, int(get_settings().resdex_active_within_months or 0))
+    except Exception as exc:  # a malformed stored requirement must not break the page
+        logger.warning("resdex_tier_preview_failed", error=str(exc))
+        return []
+    for t in tiers:
+        t["searched"] = bool(s.tier) and t["tier"] == s.tier and bool(s.searches_used)
+        if t["searched"] and s.boolean_query:
+            t["query"], t["filters"] = s.boolean_query, s.filters or t["filters"]
+    return tiers
+
+
 def _resdex_search_view(s: Any) -> dict:
     candidates = [_resdex_candidate_view(c) for c in (s.candidates or [])]
     return {
@@ -605,6 +628,8 @@ def _resdex_search_view(s: Any) -> dict:
         # Reopenable Resdex result list of this search ("" when no candidate
         # carries its search id — then the UI falls back to the blank form).
         "resdex_url":    next((c["resdex_url"] for c in candidates if c["resdex_url"]), ""),
+        # [{tier, query, filters, searched}] for T1..T3 (see _resdex_tier_views).
+        "tiers":         _resdex_tier_views(s),
         "candidates":    candidates,
     }
 
