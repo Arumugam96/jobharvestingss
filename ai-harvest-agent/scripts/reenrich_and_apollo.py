@@ -44,6 +44,9 @@ Usage
     python scripts/reenrich_and_apollo.py --skip-outreach
     python scripts/reenrich_and_apollo.py --skip-reenrich --skip-apollo
 
+    # Recover the latest run's jobs first (e.g. the newest 83), no Apollo/emails:
+    python scripts/reenrich_and_apollo.py --newest-first --reenrich-limit 83 --skip-apollo --skip-outreach
+
     # Cap work / credits / sends, and see per-task debug logs:
     python scripts/reenrich_and_apollo.py --reenrich-limit 100 --apollo-limit 50 --outreach-limit 50 --verbose
 
@@ -75,7 +78,10 @@ _ALL = 1_000_000
 async def _run(args: argparse.Namespace) -> None:
     if not args.skip_reenrich:
         print("== Phase 1: re-enrichment sweep (LLM re-extraction) ==")
-        sweep = await run_reenrichment_sweep(limit=args.reenrich_limit, max_age_days=args.max_age_days)
+        sweep = await run_reenrichment_sweep(
+            limit=args.reenrich_limit, max_age_days=args.max_age_days,
+            newest_first=args.newest_first,
+        )
         print(
             f"  pending={sweep['pending']}  done={sweep['done']}  "
             f"expired={sweep['expired']}  still_pending={sweep['still_pending']}"
@@ -140,6 +146,10 @@ def main() -> None:
         "--max-age-days", type=int, default=_ALL,
         help="Retry tasks up to this age in days; older ones are marked expired "
              "(default: effectively unlimited, so nothing is expired).",
+    )
+    parser.add_argument(
+        "--newest-first", action="store_true",
+        help="Re-enrich the most recently queued tasks first (default: oldest first).",
     )
     parser.add_argument("--skip-reenrich", action="store_true", help="Skip phase 1 (LLM re-extraction).")
     parser.add_argument("--skip-apollo", action="store_true", help="Skip phase 2 (Apollo enrichment).")

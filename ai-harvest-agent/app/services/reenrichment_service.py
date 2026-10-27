@@ -36,6 +36,7 @@ _CONSECUTIVE_FAILURE_LIMIT = 5
 async def run_reenrichment_sweep(
     limit: int | None = None,
     max_age_days: int | None = None,
+    newest_first: bool = False,
 ) -> dict[str, int]:
     """Retry pending re-enrichment tasks (oldest first, capped). Returns a summary
     dict {pending, done, expired, still_pending}. Never raises — a failure here
@@ -44,14 +45,15 @@ async def run_reenrichment_sweep(
     `limit` and `max_age_days` default to settings.reenrichment_sweep_limit /
     settings.reenrichment_max_age_days (the start-of-harvest behavior). A manual
     caller (scripts/reenrich_and_apollo.py) passes large values to drain the whole
-    backlog and to retry aged tasks instead of expiring them."""
+    backlog and to retry aged tasks instead of expiring them, and may set
+    `newest_first` to recover the latest run's jobs before older backlog."""
     settings = get_settings()
     lim = limit if limit is not None else settings.reenrichment_sweep_limit
     age_days = max_age_days if max_age_days is not None else settings.reenrichment_max_age_days
     summary = {"pending": 0, "done": 0, "expired": 0, "still_pending": 0}
     try:
         tasks = await db_read(
-            lambda db: HarvestRunService(db).list_pending_reenrichment(lim)
+            lambda db: HarvestRunService(db).list_pending_reenrichment(lim, newest_first=newest_first)
         ) or []
     except Exception as exc:  # defensive — db_read already swallows, but never raise upward
         logger.warning("reenrichment_sweep_list_failed", error=str(exc))

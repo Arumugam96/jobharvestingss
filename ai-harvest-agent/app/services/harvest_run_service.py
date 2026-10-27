@@ -1000,13 +1000,20 @@ class HarvestRunService:
             .values(extraction_status="pending")
         )
 
-    async def list_pending_reenrichment(self, limit: int) -> list[dict[str, Any]]:
-        """Pending re-enrichment tasks, oldest first, as plain dicts (so callers can
-        run slow LLM calls without holding a DB session on detached ORM rows)."""
+    async def list_pending_reenrichment(
+        self, limit: int, newest_first: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Pending re-enrichment tasks, oldest first (or newest first), as plain dicts
+        (so callers can run slow LLM calls without holding a DB session on detached
+        ORM rows)."""
+        order = (
+            ReenrichmentTaskORM.first_seen_at.desc() if newest_first
+            else ReenrichmentTaskORM.first_seen_at.asc()
+        )
         stmt = (
             select(ReenrichmentTaskORM)
             .where(ReenrichmentTaskORM.status == "pending")
-            .order_by(ReenrichmentTaskORM.first_seen_at.asc())
+            .order_by(order)
             .limit(limit)
         )
         result = await self._db.execute(stmt)
