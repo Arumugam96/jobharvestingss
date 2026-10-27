@@ -16,7 +16,7 @@ export const CONTACT_FILTER_OPTIONS = [
   { group: "With contact" },
   { value: "email",         label: "Email",                         summaryLabel: "Email" },
   { value: "email_poster",  label: "Poster email (job / recruiter)", summaryLabel: "Poster email" },
-  { value: "email_company", label: "Apollo Resolved email",         summaryLabel: "Apollo Resolved email" },
+  { value: "email_company", label: "Enriched contact email",        summaryLabel: "Enriched contact email" },
   { value: "mobile",        label: "Phone",                         summaryLabel: "Phone" },
   { value: "linkedin",      label: "LinkedIn",                      summaryLabel: "LinkedIn" },
   // Resdex matches live in resdex_searches, not on the job rows, so a purely

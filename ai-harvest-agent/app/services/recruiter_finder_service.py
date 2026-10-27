@@ -54,7 +54,7 @@ logger = structlog.get_logger(__name__)
 
 _STATUS_COUNTERS = ("completed", "not_found", "ambiguous", "failed")
 # Resolving the company to an Apollo org costs a credit (account-wide daily cap).
-_ORG_CAP_MSG = "Daily Apollo credit cap reached — try again tomorrow."
+_ORG_CAP_MSG = "Daily enrichment credit limit reached — try again tomorrow."
 
 
 def _now():
@@ -151,10 +151,10 @@ def _completed_outcome(
 
 # ── Async phone requests (Apollo → webhook) ──────────────────────────────────────
 
-_PHONE_OFF_MSG = "Phone reveal is not configured (set APOLLO_WEBHOOK_URL)."
-_PHONE_BUDGET_MSG = "Daily Apollo budget can't cover another phone for this workspace — try again tomorrow."
-_PHONE_REJECTED_MSG = ("Apollo didn't accept the phone request (it may require an HTTPS webhook URL — "
-                       "see apollo_webhook_url_rejected in the API logs).")
+_PHONE_OFF_MSG = "Phone reveal isn't enabled for this workspace."
+_PHONE_BUDGET_MSG = "Daily enrichment budget can't cover another phone for this workspace — try again tomorrow."
+_PHONE_REJECTED_MSG = ("Phone lookup couldn't be requested right now. "
+                       "The email result (if any) is unaffected.")
 
 
 class _PhoneCtx:
@@ -547,8 +547,8 @@ async def _finalize_job(db: AsyncSession, job_id: str) -> None:
 
 
 async def _fail_job_unconfigured(
-    db: AsyncSession, job_id: str, *, error: str = "Apollo is not configured",
-    message: str = "Apollo is not configured (set APOLLO_API_KEY).",
+    db: AsyncSession, job_id: str, *, error: str = "Contact enrichment isn't configured",
+    message: str = "Contact enrichment isn't configured. Contact your administrator.",
 ) -> None:
     await db.execute(
         update(RecruiterFinderItemORM)
@@ -821,7 +821,7 @@ async def run_single(
         }
 
     if not settings.apollo_api_key:
-        return _resp("unconfigured", message="Apollo is not configured (set APOLLO_API_KEY).")
+        return _resp("unconfigured", message="Contact enrichment isn't configured. Contact your administrator.")
 
     is_person = bool((person_name or "").strip() or (linkedin_url or "").strip())
     want_count = 1 if is_person else max(1, min(int(count or 1), settings.company_contact_max_count))
@@ -838,7 +838,7 @@ async def run_single(
     remaining = await recruiter_finder_budget.remaining_today(tenant, cap=cap)  # None = unlimited
     if remaining is not None and remaining < need:
         return _resp("over_budget", requested=want_count,
-                     message="Daily Apollo budget reached for this workspace — try again tomorrow.")
+                     message="Daily enrichment budget reached for this workspace — try again tomorrow.")
     if remaining is not None and need:
         want_count = min(want_count, remaining // need)
 
@@ -869,7 +869,7 @@ async def run_single(
         if outcome["email_charged"] and not await reserve():
             await pctx.cancel(outcome.get("phone_ref", ""))
             return _resp("over_budget", requested=1,
-                         message="Daily Apollo budget reached for this workspace — try again tomorrow.")
+                         message="Daily enrichment budget reached for this workspace — try again tomorrow.")
         outcome["recruiter_id"] = await _persist_completed(
             outcome, item, requested_by, tenant, reveal_type=reveal, source="person", cost=email_cost)
         return _resp("completed", results=[outcome], requested=1,
@@ -923,7 +923,7 @@ async def list_company_candidates(
     settings = get_settings()
     if not settings.apollo_api_key:
         return {"status": "unconfigured", "company_domain": "", "total": 0, "candidates": [],
-                "message": "Apollo is not configured (set APOLLO_API_KEY)."}
+                "message": "Contact enrichment isn't configured. Contact your administrator."}
 
     client = ApolloClient(settings)
     res = await resolve_apollo_org(settings, company_name=company, domain=domain, client=client)
@@ -997,7 +997,7 @@ async def reveal_candidates(
                 "error": error}
 
     if not settings.apollo_api_key:
-        return _resp("unconfigured", message="Apollo is not configured (set APOLLO_API_KEY).")
+        return _resp("unconfigured", message="Contact enrichment isn't configured. Contact your administrator.")
     if requested == 0:
         return _resp("empty", message="No contacts selected.")
 
@@ -1010,7 +1010,7 @@ async def reveal_candidates(
     remaining = await recruiter_finder_budget.remaining_today(tenant, cap=cap)  # None = unlimited
     if remaining is not None and remaining < need:
         return _resp("over_budget",
-                     message="Daily Apollo budget reached for this workspace — try again tomorrow.")
+                     message="Daily enrichment budget reached for this workspace — try again tomorrow.")
 
     client = ApolloClient(settings)
     results: list[dict] = []

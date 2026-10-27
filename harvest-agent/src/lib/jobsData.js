@@ -56,7 +56,7 @@ export function contactParts(scraped, recruiter, company, fallback) {
     const f = clean(fallback);
     if (f) parts.push({ variant: "contact", label: "Contact", val: f });
   }
-  if (c && !parts.some((p) => p.val === c)) parts.push({ variant: "company", label: "Apollo Resolved", val: c });
+  if (c && !parts.some((p) => p.val === c)) parts.push({ variant: "company", label: "Enriched", val: c });
   return parts;
 }
 
@@ -100,7 +100,7 @@ export function jobContact(j) {
 }
 
 // CSV label for a POC kind / the source tag of a channel's primary value.
-export const pocKindLabel = (kind) => (kind === "poster" ? "Job poster" : kind === "company" ? "Apollo Resolved" : "—");
+export const pocKindLabel = (kind) => (kind === "poster" ? "Job poster" : kind === "company" ? "Enriched contact" : "—");
 export const partSourceLabel = (parts) => (parts.length && parts[0].label) || "—";
 
 /* ── API job → table row shape ─────────────────────────────────────────── */

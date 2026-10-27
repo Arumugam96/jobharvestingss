@@ -261,22 +261,22 @@ class Settings(BaseSettings):
     # Human-like randomized gap between consecutive Naukri detail-page visits
     # (~45 s average). The adaptive governor multiplies it after each
     # CAPTCHA/block and eases back after a clean streak.
-    naukri_detail_delay_min_ms: int = 30_000
-    naukri_detail_delay_max_ms: int = 60_000
+    naukri_detail_delay_min_ms: int = 15_000
+    naukri_detail_delay_max_ms: int = 30_000
     # How long a detail page is "read" once loaded (random scrolls down / back
     # up). Spent ON the job page and deducted from the gap above, so the
     # visit rate is unchanged — the time just moves from the SRP to the JD.
-    naukri_detail_dwell_min_s: int = 12
-    naukri_detail_dwell_max_s: int = 25
-    naukri_backoff_max_multiplier: float = 4.0     # cap on the adaptive slow-down
+    naukri_detail_dwell_min_s: int = 30
+    naukri_detail_dwell_max_s: int = 45
+    naukri_backoff_max_multiplier: float = 2.0     # cap on the adaptive slow-down
     naukri_backoff_clean_streak: int = 10          # clean detail pages before easing back one step
     # A longer "coffee break" every N detail pages.
-    naukri_break_every_details: int = 18           # 0 = never
-    naukri_break_min_s: int = 180
-    naukri_break_max_s: int = 300
+    naukri_break_every_details: int = 20           # 0 = never
+    naukri_break_min_s: int = 60
+    naukri_break_max_s: int = 90
     # On a blocked detail page: cool down, then retry that job once.
-    naukri_block_cooldown_min_s: int = 120
-    naukri_block_cooldown_max_s: int = 300
+    naukri_block_cooldown_min_s: int = 60
+    naukri_block_cooldown_max_s: int = 90
     # Circuit breaker: after N consecutive blocks pause details, then probe one.
     naukri_breaker_threshold: int = 3
     naukri_breaker_pause_min_s: int = 600
@@ -284,16 +284,7 @@ class Settings(BaseSettings):
     # Give up on the run once this many pause-then-probe attempts fail in a row
     # (a hard block) instead of pausing ever longer; collected jobs are kept.
     naukri_max_failed_probes: int = 3
-    # Human-in-the-loop: when blocks persist on a manual run, wait this long for
-    # someone to solve the CAPTCHA in the Live Browser (0 = never wait).
     naukri_human_wait_s: int = 600
-    # LLM enrichment on top of the deterministic parse (app/services/jd_llm_enrichment.py),
-    # via the configured EXTRACTION_LLM_MODEL chain. Every LLM contact is grounded
-    # against the description text (never stored unless written there); a
-    # restructured description is kept only if no word changed. Skipped with one
-    # warning when no LLM provider is configured; an LLM error never loses a job.
-    #   contact extraction — only for descriptions showing a contact signal
-    #   restructure        — only for flat, run-on descriptions
     naukri_llm_contact_extraction: bool = True
     naukri_llm_description_restructure: bool = True
     naukri_llm_timeout_s: float = 45.0        # per LLM call

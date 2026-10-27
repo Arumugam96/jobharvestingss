@@ -56,15 +56,26 @@ _BULK_MAX = 10
 _LOCKED_EMAIL_MARKER = "email_not_unlocked"
 
 
+# User-facing error text. ApolloAPIError's message / str() reaches the UI (Contact
+# Finder results, harvest_exception_handler), so it stays provider-neutral and never
+# echoes the upstream response body — full diagnostics are logged where it's raised.
+_MSG_NOT_CONFIGURED = "Contact enrichment isn't configured. Contact your administrator."
+_MSG_UNAVAILABLE = "The contact enrichment service is temporarily unavailable — please retry."
+_MSG_BAD_RESPONSE = "Contact enrichment returned an unexpected response."
+
+
 class ApolloAPIError(HarvestException):
     """A non-retryable Apollo failure (bad key, permanent 4xx, or a transient
     error that survived all retries). Subclasses HarvestException so the central
-    harvest_exception_handler renders it if it ever reaches a route."""
+    harvest_exception_handler renders it if it ever reaches a route. ``details``
+    (provider status/path/body) is internal-only — never serialized to clients."""
+
+    expose_details = False
 
     def __init__(self, message: str, details: dict[str, Any] | None = None) -> None:
         super().__init__(
             message=message,
-            code="APOLLO_API_ERROR",
+            code="ENRICHMENT_API_ERROR",
             status_code=502,  # bad gateway — upstream provider
             details=details or {},
         )
@@ -261,7 +272,7 @@ class ApolloClient:
         no-match result (not an error) when Apollo finds nobody. ``webhook_ref``
         tags the phone webhook URL so the async delivery can be correlated."""
         if not self.enabled:
-            raise ApolloAPIError("Apollo is not configured (APOLLO_API_KEY is empty)")
+            raise ApolloAPIError(_MSG_NOT_CONFIGURED)
         if not linkedin_url:
             return ApolloPersonResult.no_match()
 
@@ -308,7 +319,7 @@ class ApolloClient:
         the id in the JSON body. Returns a no-match result when Apollo finds nobody or
         the daily cap is reached."""
         if not self.enabled:
-            raise ApolloAPIError("Apollo is not configured (APOLLO_API_KEY is empty)")
+            raise ApolloAPIError(_MSG_NOT_CONFIGURED)
         if not person_id:
             return ApolloPersonResult.no_match()
 
@@ -342,7 +353,7 @@ class ApolloClient:
         when Apollo finds no organization or the daily cap is reached. Costs 1 credit
         per page, so it reserves against the daily cap like the reveals."""
         if not self.enabled:
-            raise ApolloAPIError("Apollo is not configured (APOLLO_API_KEY is empty)")
+            raise ApolloAPIError(_MSG_NOT_CONFIGURED)
         company_name = (company_name or "").strip()
         if not company_name:
             return None
@@ -395,7 +406,7 @@ class ApolloClient:
         ``email_statuses`` narrows Apollo's contact_email_status filter (e.g.
         ["verified"]); default: verified + likely to engage + unverified."""
         if not self.enabled:
-            raise ApolloAPIError("Apollo is not configured (APOLLO_API_KEY is empty)")
+            raise ApolloAPIError(_MSG_NOT_CONFIGURED)
         organization_ids = [o for o in (organization_ids or []) if o]
         if not organization_ids or not titles:
             return []
@@ -432,7 +443,7 @@ class ApolloClient:
         company, so it reserves against the daily cap like the reveals.
         """
         if not self.enabled:
-            raise ApolloAPIError("Apollo is not configured (APOLLO_API_KEY is empty)")
+            raise ApolloAPIError(_MSG_NOT_CONFIGURED)
         domain = (domain or "").strip()
         if not domain:
             return None
@@ -462,7 +473,7 @@ class ApolloClient:
         Returns one ApolloPersonResult per input item, order-preserved.
         ``webhook_ref`` tags the phone webhook URL (one ref for the whole call)."""
         if not self.enabled:
-            raise ApolloAPIError("Apollo is not configured (APOLLO_API_KEY is empty)")
+            raise ApolloAPIError(_MSG_NOT_CONFIGURED)
         # Same webhook gate as the single-match path — a phone reveal without a
         # webhook_url 400s the whole batch.
         want_phone = reveal_phone and self._phone_reveal_allowed("bulk_match")
@@ -606,14 +617,18 @@ class ApolloClient:
             raise _ApolloRetryable(f"Apollo {response.status_code}")
         if response.status_code >= 400:
             # Permanent (bad key/params) — do not retry.
+            logger.warning("apollo_http_error", path=path, status=response.status_code,
+                           body=response.text[:500])
             raise ApolloAPIError(
-                f"Apollo returned HTTP {response.status_code}: {response.text[:300]}",
+                f"Contact enrichment failed (HTTP {response.status_code}).",
                 details={"status": response.status_code, "path": path, "body": response.text[:500]},
             )
         try:
             return response.json()
         except ValueError as exc:
-            raise ApolloAPIError(f"Apollo returned non-JSON body: {response.text[:200]}") from exc
+            logger.warning("apollo_non_json_response", path=path, status=response.status_code,
+                           body=response.text[:200])
+            raise ApolloAPIError(_MSG_BAD_RESPONSE) from exc
 
     async def _request(
         self,
@@ -626,7 +641,8 @@ class ApolloClient:
             return await self._request_once(path, params=params, json=json)
         except _ApolloRetryable as exc:
             # Exhausted the retry budget on a transient failure.
-            raise ApolloAPIError(f"Apollo unavailable after retries: {exc}") from exc
+            logger.warning("apollo_unavailable_after_retries", path=path, error=str(exc))
+            raise ApolloAPIError(_MSG_UNAVAILABLE) from exc
 
     def _log_result(self, endpoint: str, linkedin_url: str, result: ApolloPersonResult) -> None:
         if not result.matched:

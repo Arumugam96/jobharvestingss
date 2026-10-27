@@ -65,12 +65,12 @@ function DualContactVal({ scraped, recruiter, fallback, recruiterSource }) {
     return (
       <span style={{ display: "flex", flexDirection: "column", gap: 2 }}>
         <span><span className="ha-src-tag">Job</span> {s}</span>
-        <span><span className="ha-src-tag">{apollo ? "Apollo" : "Recruiter"}</span> {r}</span>
+        <span><span className="ha-src-tag">{apollo ? "Enriched" : "Recruiter"}</span> {r}</span>
       </span>
     );
   }
   if (!s && apollo) {
-    return <span><span className="ha-src-tag">Apollo</span> {r}</span>;
+    return <span><span className="ha-src-tag">Enriched</span> {r}</span>;
   }
   return <span>{s || r}</span>;
 }
@@ -79,9 +79,13 @@ function DualContactVal({ scraped, recruiter, fallback, recruiterSource }) {
 const CONTACT_SOURCE_LABEL = {
   job_post: "Job post",
   recruiter_profile: "Recruiter profile",
-  apollo: "Apollo",
-  apollo_hr: "Apollo HR",
+  apollo: "Enriched",
+  apollo_hr: "Enriched HR contact",
 };
+
+// Display names for an inferred company contact's source (job.companyContact.source);
+// unmapped sources fall back to plain capitalisation.
+const CC_SOURCE_DISPLAY = { apollo: "Enriched" };
 
 // Company-size tier → badge colours (bg tint + text), matching the jobs table.
 const SIZE_TIER_STYLE = {
@@ -647,7 +651,7 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
   const cc = job.companyContact || {};
   const hasCompanyContact = !!(cc.email || cc.phone || cc.name);
   const ccSourceLabel = cc.source
-    ? `Inferred · ${cc.source.charAt(0).toUpperCase()}${cc.source.slice(1)}`
+    ? `Inferred · ${CC_SOURCE_DISPLAY[cc.source.toLowerCase()] || `${cc.source.charAt(0).toUpperCase()}${cc.source.slice(1)}`}`
     : "Inferred";
 
   const linkOrDash = (url, label) =>
@@ -780,7 +784,7 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
         {hasCompanyContact && (
           <section className="ha-section ha-poc ha-enriched">
             <div className="ha-label">
-              <Building2 size={14} /> Apollo Resolved
+              <Building2 size={14} /> Enriched Contact
               <span className="ha-en-badge">{ccSourceLabel}</span>
             </div>
             <div className="ha-poc-body">

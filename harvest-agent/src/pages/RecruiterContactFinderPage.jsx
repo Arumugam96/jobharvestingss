@@ -59,7 +59,7 @@ function Seg({ value, onChange, options }) {
 // ── Async phone reveal (Apollo delivers phones to a webhook minutes later) ────
 const PHONE_POLL_MS = 8000;
 const PHONE_POLL_MAX_MS = 30 * 60 * 1000; // stop polling a stuck request after 30 min
-const PHONE_OFF_TIP = "Phone reveal needs APOLLO_WEBHOOK_URL";
+const PHONE_OFF_TIP = "Phone reveal isn't enabled for this workspace.";
 
 // Reveal choices; Phone/Both are disabled (with a tooltip) when the backend has no
 // webhook URL to receive Apollo's phone deliveries. `phoneEnabled` undefined = unknown yet.
@@ -77,7 +77,7 @@ function revealOptions(phoneEnabled) {
 // phone — charged only when Apollo actually delivers one.
 function costText(reveal, phoneCost) {
   const email = "1 credit per email found";
-  const phone = `${phoneCost} credits per phone, charged only when Apollo delivers one (usually a few minutes)`;
+  const phone = `${phoneCost} credits per phone, charged only when a number is found (usually a few minutes)`;
   return reveal === "both" ? `${email} · ${phone}` : reveal === "phone" ? phone : email;
 }
 // Worst-case credits for revealing `n` contacts.
@@ -87,8 +87,8 @@ function maxCredits(reveal, phoneCost, n) {
 }
 
 const PHONE_MUTED = {
-  NOT_FOUND: ["no phone", "Apollo had no phone number for this contact"],
-  UNAVAILABLE: ["unavailable", "No phone request went out — Apollo rejected the webhook URL, or phone reveal isn't configured"],
+  NOT_FOUND: ["no phone", "No phone number found for this contact"],
+  UNAVAILABLE: ["unavailable", "Phone lookup is unavailable right now, or phone reveal isn't configured"],
   SKIPPED_BUDGET: ["skipped · budget", "Today's credit budget couldn't cover a phone for this contact"],
 };
 const DNC_CLEAN = new Set(["", "not_found", "not_on_list", "unknown", "not_applicable"]);
@@ -99,7 +99,7 @@ function PhoneCell({ phone, status, dnc }) {
   const s = (status || "").toUpperCase();
   if (s === "PENDING") {
     return (
-      <span className="chip proc" title="Apollo delivers phones asynchronously — usually within a few minutes">
+      <span className="chip proc" title="Phone numbers arrive asynchronously — usually within a few minutes">
         <Loader2 size={11} className="ha-spin" />Finding phone…
       </span>
     );
@@ -271,7 +271,7 @@ function StatBand({ usage, collapsed }) {
   return (
     <div className={"statband" + (collapsed ? " collapsed" : "")}>
       <div className="sb-mini" aria-hidden="true">
-        <span className="sb-mini-l"><Zap size={14} style={{ color: "var(--accent)" }} /> Apollo credits · today</span>
+        <span className="sb-mini-l"><Zap size={14} style={{ color: "var(--accent)" }} /> Enrichment credits · today</span>
         <span className="sb-mini-bar"><i style={{ width: pctW }} /></span>
         <span className="sb-mini-r num"><b>{used}</b>/{cap} used · <b>{left}</b> left · this workspace</span>
       </div>
@@ -279,7 +279,7 @@ function StatBand({ usage, collapsed }) {
       <div className="sb-cards">
         <section className="card usage-card">
           <div className="card-head">
-            <h2><Zap size={15} style={{ color: "var(--accent)" }} /> Daily Apollo usage</h2>
+            <h2><Zap size={15} style={{ color: "var(--accent)" }} /> Daily enrichment usage</h2>
             <span className="spacer" />
             <span className="count-pill" style={{ color: "var(--ink-soft)", background: "var(--line-soft)", borderColor: "transparent" }}>
               This workspace · last 14 days
@@ -331,7 +331,7 @@ function StatBand({ usage, collapsed }) {
                 )}</div>
             </div>
           </div>
-          <div className="footnote" style={{ justifyContent: "flex-start", padding: "10px 16px 12px" }}>Resets at 00:00 UTC · isolated from the harvest Apollo pool</div>
+          <div className="footnote" style={{ justifyContent: "flex-start", padding: "10px 16px 12px" }}>Resets at 00:00 UTC · separate from the harvest enrichment budget</div>
         </div>
       </div>
     </div>
@@ -624,7 +624,7 @@ function SinglePanel({ usage, onSpent }) {
       const r = await finderCandidates({ company, location, personas });
       setCompanyDomain(r.company_domain || "");
       if (r.status === "unconfigured" || r.status === "over_budget") {
-        setError(r.message || "Apollo is not configured."); setCandidates([]);
+        setError(r.message || "Contact enrichment isn't configured. Contact your administrator."); setCandidates([]);
       }
       else setCandidates(r.candidates || []);
     } catch (err) {
@@ -1328,7 +1328,7 @@ function BulkPanel({ usage, onSpent }) {
               </div>
               <div className="valnote">
                 <AlertTriangle className="ic" />
-                <div className="t">Data is <b>sanitized</b> before any Apollo call (trimmed, de-duplicated, URLs normalized). <b>{sum.ready}</b> records are ready to enrich; anything missing a company is excluded. If the daily budget runs out mid-run, the rest queue for tomorrow.</div>
+                <div className="t">Data is <b>sanitized</b> before any enrichment lookup (trimmed, de-duplicated, URLs normalized). <b>{sum.ready}</b> records are ready to enrich; anything missing a company is excluded. If the daily budget runs out mid-run, the rest queue for tomorrow.</div>
               </div>
 
               <div>
@@ -1342,7 +1342,7 @@ function BulkPanel({ usage, onSpent }) {
                 </button>
               </div>
               <div className="form-foot" style={{ marginTop: 0 }}><Zap size={15} />
-                <span><b>{costText(reveal, phoneCost)}</b>{reveal !== "email" ? " · phones fill in after the run as Apollo delivers them" : ""}</span>
+                <span><b>{costText(reveal, phoneCost)}</b>{reveal !== "email" ? " · phones fill in after the run as they arrive" : ""}</span>
               </div>
             </div>
           )}

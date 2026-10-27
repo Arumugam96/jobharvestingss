@@ -43,7 +43,7 @@ def _render_insights(insights: dict | None) -> str:
         f"- With contact number: {g('with_phone', 0)}\n\n"
         "Contact provenance\n"
         f"- Extracted via local LLM: {g('local_llm_contacts', 0)}\n"
-        f"- Enriched via Apollo: {g('apollo_enriched', 0)}\n\n"
+        f"- Enriched via contact database: {g('apollo_enriched', 0)}\n\n"
     )
 
 
@@ -109,7 +109,7 @@ def _insights_html(insights: dict | None) -> str:
         + row("With contact number", g("with_phone"))
         + section("Contact provenance")
         + row("Extracted via local LLM", g("local_llm_contacts"))
-        + row("Enriched via Apollo", g("apollo_enriched"))
+        + row("Enriched via contact database", g("apollo_enriched"))
     )
     return (
         '<p style="margin:16px 0 2px;font-weight:700;">Harvest insights</p>'

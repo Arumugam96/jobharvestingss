@@ -8,6 +8,10 @@ from fastapi.responses import JSONResponse
 class HarvestException(Exception):
     """Base exception for all Harvest Agent errors."""
 
+    # False → harvest_exception_handler omits ``details`` from the response
+    # (e.g. upstream-provider diagnostics that must stay server-side).
+    expose_details: bool = True
+
     def __init__(
         self,
         message: str,
@@ -117,7 +121,7 @@ async def harvest_exception_handler(request: Request, exc: HarvestException) -> 
             "error": {
                 "code": exc.code,
                 "message": exc.message,
-                "details": exc.details,
+                "details": exc.details if exc.expose_details else {},
             }
         },
     )

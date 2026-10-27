@@ -816,17 +816,17 @@ class RecruiterContactAgent:
                 if apollo.email:
                     result.official_email_id = apollo.email
                     result.email_status      = "VERIFIED"
-                    sources.append("Apollo")
-                    audit.append(f"S3.5 VERIFIED email from Apollo: {apollo.email}")
+                    sources.append("Contact Database")
+                    audit.append(f"S3.5 VERIFIED email from contact enrichment: {apollo.email}")
                 if apollo.phone and result.phone_status == "NOT_FOUND":
                     result.contact_number = apollo.phone
                     result.phone_status   = "PUBLIC"
-                    sources.append("Apollo (Phone)")
-                    audit.append(f"S3.5 phone from Apollo: {apollo.phone}")
+                    sources.append("Contact Database (Phone)")
+                    audit.append(f"S3.5 phone from contact enrichment: {apollo.phone}")
                 if apollo.attempted and not apollo.email:
-                    audit.append("S3.5 Apollo: no email found")
+                    audit.append("S3.5 contact enrichment: no email found")
             except Exception as exc:
-                audit.append(f"S3.5 Apollo error: {exc}")
+                audit.append(f"S3.5 contact enrichment error: {exc}")
 
         # ── Diagnostics ────────────────────────────────────────────────────────
         result.email_found = result.email_status in ("VERIFIED", "PUBLIC")

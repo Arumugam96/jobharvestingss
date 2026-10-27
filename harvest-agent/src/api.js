@@ -472,12 +472,6 @@ export function getFinderPhoneStatus({ personIds = [], itemIds = [] } = {}) {
   return request(`/recruiter-finder/phone-status?${qs.toString()}`);
 }
 
-/** GET /recruiter-finder/apollo-webhook-events — recent raw Apollo phone deliveries
- * (internal-only diagnostics: "is Apollo actually delivering?"). */
-export function getApolloWebhookEvents(limit = 20) {
-  return request(`/recruiter-finder/apollo-webhook-events?limit=${limit}`);
-}
-
 // ── Outreach (LLM email / LinkedIn generation + send) ──────────────────────────
 
 /** POST /outreach/generate-email — draft a recruiter email; returns {subject, body, from_email, to_email, client_type, tone, fallback_used, attachment_name}. */

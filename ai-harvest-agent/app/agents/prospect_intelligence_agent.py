@@ -1429,15 +1429,15 @@ class ProspectIntelligenceAgent:
                 if apollo.email:
                     result.official_email_id = apollo.email
                     result.email_status      = "VERIFIED"
-                    sources.append("Apollo")
-                    audit.append(f"S2.5 VERIFIED email from Apollo: {apollo.email}")
+                    sources.append("Contact Database")
+                    audit.append(f"S2.5 VERIFIED email from contact enrichment: {apollo.email}")
                 if apollo.phone and result.phone_status != "VERIFIED":
                     result.contact_number = apollo.phone
                     result.phone_status   = "PUBLIC"
-                    sources.append("Apollo (Phone)")
-                    audit.append(f"S2.5 phone from Apollo: {apollo.phone}")
+                    sources.append("Contact Database (Phone)")
+                    audit.append(f"S2.5 phone from contact enrichment: {apollo.phone}")
                 if apollo.attempted and not apollo.email:
-                    audit.append("S2.5 Apollo: no email found")
+                    audit.append("S2.5 contact enrichment: no email found")
 
                 # Persist Apollo's result + attempt stamp back to the shared cache.
                 if recruiter_id and apollo.attempted:
@@ -1461,9 +1461,9 @@ class ProspectIntelligenceAgent:
                             )
                             await db.commit()
                     except Exception as exc:
-                        audit.append(f"S2.5 apollo cache write error: {exc}")
+                        audit.append(f"S2.5 enrichment cache write error: {exc}")
             except Exception as exc:
-                audit.append(f"S2.5 Apollo error: {exc}")
+                audit.append(f"S2.5 contact enrichment error: {exc}")
 
         # ══════════════════════════════════════════════════════════════════════
         # Step 3 — Naukri cross-source (PUBLIC)  [DISABLED — LLM-ONLY MODE]

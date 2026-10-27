@@ -167,7 +167,7 @@ export default function Sidebar({ activePage, onNavigate = () => {}, jobsCount, 
               <NavItem glyph={UserSearch} active={activePage === "leads"} onClick={() => go("leads")}>Lead Intelligence</NavItem>
             )}
             {hasFeature("contacts") && (
-              <NavItem glyph={Contact} active={activePage === "contacts"} onClick={() => go("contacts")}>Apollo Enrichment</NavItem>
+              <NavItem glyph={Contact} active={activePage === "contacts"} onClick={() => go("contacts")}>Contact Enrichment</NavItem>
             )}
             {hasFeature("outreach") && (
               <NavItem glyph={Send} active={activePage === "outreach"} onClick={() => go("outreach")}>Mail logs</NavItem>
