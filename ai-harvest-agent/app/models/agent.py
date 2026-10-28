@@ -27,7 +27,7 @@ class AgentConfig(BaseModel):
     """Configuration passed when creating or running an agent."""
 
     agent_type: AgentType = AgentType.HARVEST
-    model: str = "claude-sonnet-4-6"
+    model: str = "claude-haiku-5-5"
     max_iterations: int = Field(20, ge=1, le=100)
     temperature: float = Field(0.0, ge=0.0, le=1.0)
     enable_screenshots: bool = True

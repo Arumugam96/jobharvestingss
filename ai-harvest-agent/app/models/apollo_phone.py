@@ -11,8 +11,7 @@ tables make that round-trip correlatable and observable:
     content table (listed in main._TENANT_CONTENT_TABLES).
 
   * apollo_webhook_events — raw log of every delivery hitting the webhook (token ok or
-    not, matched or not), so "is Apollo actually delivering?" is answerable without
-    reading container logs. Diagnostics only — not tenant-scoped.
+    not, matched or not), so "is Apollo actually delivering?". 
 """
 from __future__ import annotations
 
