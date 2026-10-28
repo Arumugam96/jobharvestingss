@@ -95,7 +95,7 @@ class OutreachService:
     async def generate_email(
         self, job: dict, client_type: str, tone: str, regenerate: bool = False,
         sender_email: str = "", deck_url: str = "", contact_block: str = "",
-        candidate_block: str = "",
+        candidate_block: str = "", profile_count_line: str = "",
     ) -> EmailDraft:
         """`sender_email` is the address the recipient is invited to reply to
         (the logged-in user). It's appended — as a reach-out line above the
@@ -109,10 +109,20 @@ class OutreachService:
         `candidate_block` (automated sends with Resdex matches) is the deterministic
         matching-profiles block placed between the body and the contact block;
         when set, the prompt also asks the model to mention it briefly. Empty → prompt
-        and body are exactly what they were without it."""
+        and body are exactly what they were without it.
+        `profile_count_line` (automated sends, RESDEX_EMAIL_MODE=count) is the one-line
+        "we have N matching profiles" note (resdex_match_service.
+        format_profile_count_line); it takes the same slot as `candidate_block`, and the
+        prompt tells the model NOT to mention profiles or counts itself. If both are
+        given, `candidate_block` wins and `profile_count_line` is ignored."""
         if candidate_block.strip():
             prompt = outreach_prompts.build_email_prompt(
                 client_type, tone, job, sender_email, candidates_included=True,
+            )
+        elif profile_count_line.strip():
+            candidate_block = profile_count_line
+            prompt = outreach_prompts.build_email_prompt(
+                client_type, tone, job, sender_email, profile_count_included=True,
             )
         else:
             prompt = outreach_prompts.build_email_prompt(client_type, tone, job, sender_email)

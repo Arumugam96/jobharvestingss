@@ -71,6 +71,8 @@ from app.services.outreach_service import OutreachService
 from app.services.reply_to_rotation import day_start, rotation_index
 from app.services.resdex_match_service import (
     format_candidate_block,
+    format_profile_count_line,
+    latest_match_counts,
     mark_candidates_sent,
     prepare_resdex_candidates,
     render_candidate_cards_html,
@@ -244,6 +246,16 @@ async def _skip_reason(
     return None
 
 
+def _resdex_email_mode(settings) -> str:
+    """RESDEX_EMAIL_MODE normalized to "count" | "cards". Anything else (typo, blank)
+    falls back to "count" — the safe default that never shows profiles — and is logged."""
+    raw = str(getattr(settings, "resdex_email_mode", "count") or "").strip().lower()
+    if raw in ("count", "cards"):
+        return raw
+    logger.warning("resdex_email_mode_unknown", value=raw, using="count")
+    return "count"
+
+
 async def _no_login_wait(since: datetime) -> bool:
     """prepare_resdex_candidates login_waiter that never waits (a catch-up pass after
     the harvest's own Resdex pass, which already waited for a login once)."""
@@ -276,7 +288,7 @@ async def run_auto_outreach_after_harvest(
         "skipped_below_size": 0, "skipped_duplicate_posting": 0, "skipped_error": 0,
         "skipped_recent_recipient": 0, "skipped_replied": 0,
         "skipped_company_replied": 0, "skipped_location_today": 0,
-        "resdex_jobs_with_candidates": 0,
+        "resdex_jobs_with_candidates": 0, "resdex_jobs_with_count": 0,
     }
     try:
         settings = get_settings()
@@ -350,6 +362,22 @@ async def run_auto_outreach_after_harvest(
         if not targets:      # only Resdex-only (no-email) jobs — nobody to email
             return {"enabled": True, "eligible": 0, **counts}
 
+        # What the Resdex pass contributes to each email (RESDEX_INCLUDE_IN_EMAIL):
+        # "cards" → the picked candidates as profile cards; "count" → one line quoting
+        # the newest matched search's Resdex result count (rounded, ≥ min). One read for
+        # every target here — covers this run's searches and reused recent ones alike.
+        include_resdex = settings.resdex_enabled and settings.resdex_include_in_email
+        email_mode = _resdex_email_mode(settings) if include_resdex else ""
+        profile_counts: dict[str, int] = {}
+        if email_mode == "count":
+            profile_counts = await latest_match_counts([t["job_url"] for t in targets])
+            counts["resdex_jobs_with_count"] = len({
+                t["job_url"] for t in targets
+                if format_profile_count_line(
+                    profile_counts.get(t["job_url"], 0), t["job_title"], t["job_url"],
+                )
+            })
+
         # Unattended send identity: shared From (resolved inside EmailSender), the
         # configured reply-to (or SMTP_FROM_EMAIL) as Reply-To and recorded sent_by.
         # OUTREACH_AUTO_REPLY_TO may hold several comma-separated addresses; when it
@@ -405,20 +433,32 @@ async def run_auto_outreach_after_harvest(
                     sender_email=reply_to, deck_url=deck_url,
                     contact_block=AUTOMATION_CONTACT_BLOCK,
                 )
-                # Resdex matches (pre-pass above) → candidate block between the body and
-                # the contact block: labelled text in the body (text part + stored body),
-                # drawn as profile cards in the HTML part. Only passed when non-empty so
-                # the call is unchanged for every other email.
-                cands = (resdex.get(job_url) or []) if settings.resdex_include_in_email else []
-                candidate_block = (
-                    format_candidate_block(cands, job_title=target["job_title"]) if cands else ""
-                )
-                candidate_html = (
-                    render_candidate_cards_html(cands, job_title=target["job_title"])
-                    if cands else ""
-                )
-                if candidate_block:
-                    gen_kwargs["candidate_block"] = candidate_block
+                # Resdex (pre-pass above) → one block between the body and the contact
+                # block. Only passed when non-empty so the call is unchanged for every
+                # other email.
+                #   cards: the candidate block — labelled text in the body (text part +
+                #          stored body), drawn as profile cards in the HTML part.
+                #   count: the one-line profile-count note; candidate_html stays "" so
+                #          the HTML part renders it as an ordinary body line.
+                cands: list[dict] = []
+                candidate_block = candidate_html = ""
+                if email_mode == "cards":
+                    cands = resdex.get(job_url) or []
+                    if cands:
+                        candidate_block = format_candidate_block(
+                            cands, job_title=target["job_title"],
+                        )
+                        candidate_html = render_candidate_cards_html(
+                            cands, job_title=target["job_title"],
+                        )
+                    if candidate_block:
+                        gen_kwargs["candidate_block"] = candidate_block
+                elif email_mode == "count":
+                    candidate_block = format_profile_count_line(
+                        profile_counts.get(job_url, 0), target["job_title"], job_url,
+                    )
+                    if candidate_block:
+                        gen_kwargs["profile_count_line"] = candidate_block
                 draft = await outreach.generate_email(
                     target["view"], client_type, _AUTO_TONE, **gen_kwargs,
                 )
@@ -476,8 +516,10 @@ async def run_auto_outreach_after_harvest(
 
                 await db_write(_persist)
 
-                if send_status == "sent" and candidate_block:
+                if send_status == "sent" and cands and candidate_block:
                     # Link the included Resdex candidates to this email (detail page).
+                    # Cards mode only — a count-mode email shows no profiles, so
+                    # linking any would be false.
                     await mark_candidates_sent(
                         [c["id"] for c in cands if c.get("id")], outreach_id,
                     )

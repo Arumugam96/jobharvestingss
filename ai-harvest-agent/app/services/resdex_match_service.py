@@ -23,11 +23,14 @@ Never raises — a Resdex problem (session expired, cap, LLM down, parse failure
 only means the email goes out exactly as it would without Resdex.
 format_candidate_block() renders the plain-text candidate block for the email and
 render_candidate_cards_html() the matching HTML cards (name, role, experience,
-location, notice, skills — never contacts, URL, employer or CTC).
+location, notice, skills — never contacts, URL, employer or CTC). With
+RESDEX_EMAIL_MODE=count (the default) the email instead gets one line from
+format_profile_count_line(), quoting latest_match_counts()' rounded Resdex count.
 """
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import html as html_lib
 import inspect
 import re
@@ -1005,6 +1008,123 @@ def render_candidate_cards_html(cands: list[dict], job_title: str = "") -> str:
         f"{html_lib.escape(_BLOCK_CTA)}{note}</td></tr>"
         "</table>"
     )
+
+
+# ── Email profile-count line (RESDEX_EMAIL_MODE=count) ────────────────────────
+
+# One is picked per job (stable digest of the job_url), so re-sends for the same job
+# read the same while different jobs vary. {count} is a bucket ("7", "20+"), {title}
+# the exact job title. Rules (tested over every entry): both placeholders exactly
+# once, no "!", URLs, bold or urgency words, and never a claim that profiles were sent.
+PROFILE_COUNT_LINES: tuple[str, ...] = (
+    "We currently have {count} matching profiles in our network for your {title} "
+    "requirement, and I'd be happy to discuss them with you in detail.",
+    "For the {title} role, we already have {count} relevant profiles in our network. "
+    "Happy to walk you through them whenever suits you.",
+    "Our network has {count} profiles that match your {title} requirement. "
+    "Glad to discuss them in detail if that's useful.",
+    "We've identified {count} profiles that fit your {title} opening, and I'd be glad "
+    "to share more details on a quick call.",
+    "Right now we have {count} candidates aligned with your {title} requirement. "
+    "Happy to go over them with you whenever convenient.",
+    "We have {count} suitable profiles for the {title} position in our talent pool, "
+    "and I can walk you through them in detail.",
+    "For your {title} opening, there are {count} matching profiles in our network. "
+    "Let me know if you'd like to discuss them.",
+    "We already have {count} profiles lined up that match your {title} needs, and I'd "
+    "be happy to discuss them further.",
+    "Our team has {count} relevant profiles for the {title} role ready to discuss "
+    "whenever it suits you.",
+    "There are {count} profiles in our network that closely match your {title} "
+    "requirement. Happy to share details on a short call.",
+    "We're tracking {count} candidates whose experience fits your {title} role, and "
+    "I'd welcome the chance to discuss them in detail.",
+    "We have {count} profiles that line up well with your {title} requirement. "
+    "Glad to walk you through them if helpful.",
+    "For the {title} position, our network currently holds {count} matching profiles. "
+    "Happy to discuss them with you in more detail.",
+    "We can already point to {count} profiles that suit your {title} role. "
+    "Let me know a convenient time to go over them.",
+)
+# Stand-in for a missing job title ("your current requirement", "the current role").
+_NO_TITLE = "current"
+# Searches whose result count may be quoted: real profiles cleared the skill bar
+# (CAP_REACHED = picks found but the daily candidate cap kept them from being stored).
+_COUNTABLE_STATUSES = (ResdexSearchStatus.MATCHED, ResdexSearchStatus.CAP_REACHED)
+
+
+def bucket_profile_count(n: Any, min_count: int | None = None) -> str | None:
+    """The rounded count quoted in the email, or None below ``min_count`` (default
+    RESDEX_EMAIL_MIN_COUNT): 3–9 exact, then "10+", "20+", "50+", "100+", "500+"."""
+    try:
+        n = int(n) if not isinstance(n, bool) else 0
+    except (TypeError, ValueError):
+        return None
+    if min_count is None:
+        min_count = int(getattr(get_settings(), "resdex_email_min_count", 3))
+    if n <= 0 or n < min_count:
+        return None
+    for floor in (500, 100, 50, 20, 10):
+        if n >= floor:
+            return f"{floor}+"
+    return str(n)
+
+
+def format_profile_count_line(n: Any, job_title: str, job_url: str) -> str:
+    """The one-line "we have N matching profiles" note for count-mode emails, or ""
+    when ``n`` is below RESDEX_EMAIL_MIN_COUNT. Deterministic per job_url (a stable
+    sha256 digest — not Python's salted hash() — picks the phrasing)."""
+    count = bucket_profile_count(n)
+    if count is None:
+        return ""
+    title = " ".join((job_title or "").split()) or _NO_TITLE
+    key = normalize_job_url(job_url) or (job_url or "").strip()
+    digest = hashlib.sha256(key.encode("utf-8")).digest()
+    line = PROFILE_COUNT_LINES[int.from_bytes(digest[:8], "big") % len(PROFILE_COUNT_LINES)]
+    return line.format(count=count, title=title)
+
+
+async def latest_match_counts(job_urls: list[str]) -> dict[str, int]:
+    """{caller's job_url: Resdex result_count} from the newest MATCHED / CAP_REACHED
+    search with result_count > 0 per job, for the current tenant, within
+    RESDEX_REUSE_DAYS (≤ 0 → the last day, so this run's own searches still count).
+    NO_RESULTS / ERROR / session outcomes are never quoted. Jobs without such a
+    search are absent. Never raises — {} on any failure."""
+    try:
+        by_norm: dict[str, list[str]] = {}
+        for url in job_urls or []:
+            norm = normalize_job_url(url)
+            if norm:
+                by_norm.setdefault(norm, []).append(url)
+        if not by_norm:
+            return {}
+        tenant_id = get_current_tenant_id()
+        reuse_days = int(getattr(get_settings(), "resdex_reuse_days", 0) or 0)
+        since = datetime.now(timezone.utc) - timedelta(days=reuse_days if reuse_days > 0 else 1)
+
+        async def _q(db):
+            stmt = (
+                select(ResdexSearchORM.job_url, ResdexSearchORM.result_count)
+                .where(
+                    ResdexSearchORM.tenant_id == tenant_id,
+                    ResdexSearchORM.job_url.in_(list(by_norm)),
+                    ResdexSearchORM.status.in_(_COUNTABLE_STATUSES),
+                    ResdexSearchORM.result_count > 0,
+                    ResdexSearchORM.created_at >= since,
+                )
+                .order_by(ResdexSearchORM.created_at.desc())
+            )
+            newest: dict[str, int] = {}
+            for job_url, result_count in (await db.execute(stmt)).all():
+                newest.setdefault(job_url, int(result_count or 0))
+            return newest
+
+        newest = await db_read(_q) or {}
+        return {url: newest[norm] for norm, urls in by_norm.items() if norm in newest
+                for url in urls}
+    except Exception as exc:
+        logger.warning("resdex_match_counts_failed", jobs=len(job_urls or []), error=str(exc))
+        return {}
 
 
 async def mark_candidates_sent(candidate_ids: list[str], outreach_id: str) -> None:

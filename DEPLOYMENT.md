@@ -216,8 +216,20 @@ Then verify exactly like the local Docker pass, against the public IP instead of
 ### Step 5 — TLS (optional, once you have a domain)
 
 Two options:
-- **Certbot on the host**, fronting the containers — point your domain's A record at the Elastic IP, get a cert (briefly stopping the `frontend` container to free port 80 for standalone mode), add an HTTPS server block to `harvest-agent/nginx.conf`, set up a renewal cron.
-- **AWS ALB + ACM certificate** in front of the instance — no renewal to manage, small extra monthly cost.
+- **nginx + certbot on the host** (recommended), fronting the containers — point your domain's A record at the Elastic IP and use the ready config in [`deploy/host-nginx-https.conf`](deploy/host-nginx-https.conf). It terminates TLS on 443 and proxies everything to the `frontend` container on `127.0.0.1:8080`. The file's header has the full steps. On a fresh host, get the certificate **first** (`sudo certbot certonly --nginx -d <domain>`), because `listen 443 ssl` without a certificate fails `nginx -t`. Then copy the file to `/etc/nginx/conf.d/`, fill in `<domain>` and the cert paths, and run `sudo nginx -t && sudo systemctl reload nginx`. Keep `API_BIND_IP=127.0.0.1` and never open 6080/8000 in the firewall: websockify has no password, and hitting it directly skips the `/vnc/` login check.
+- **AWS ALB + ACM certificate** in front of the instance — no renewal to manage, small extra monthly cost. ALB passes WebSockets natively; raise its idle timeout (default 60s) to ~3600s for the live view.
+
+**Why the Live Browser needs special handling.** The live view is a WebSocket at `wss://<domain>/vnc/`. A WebSocket starts as an HTTP request carrying `Upgrade: websocket` + `Connection: upgrade`, and every proxy on the path must forward those headers explicitly — nginx drops them by default. If the outer TLS proxy doesn't, REST calls keep working but the live view shows **"Could not connect"**. A second trap is the proxy's default 60s idle timeout, which cuts a quiet VNC session (**"Connection dropped"**). `deploy/host-nginx-https.conf` handles both on its `/vnc/` block (`Connection $connection_upgrade`, `proxy_read_timeout`/`proxy_send_timeout 3600s`, `proxy_buffering off`).
+
+If 443 is already served by something, find it first: `sudo ss -ltnp | grep ':443'`; if it's nginx, `sudo nginx -T | grep -n server_name` shows which file serves the domain — merge the `/vnc/` block (and the `map`) into that file instead of adding a second server for the same name.
+
+Check the WebSocket path end to end (expect `HTTP/1.1 101 Switching Protocols`):
+```bash
+curl -i -N -H "Connection: Upgrade" -H "Upgrade: websocket" \
+  -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: SGVsbG8sIHdvcmxkIQ==" \
+  -H "Cookie: ha_session=<your session cookie>" https://<domain>/vnc/
+```
+The container nginx gates `/vnc/` with `auth_request` against `/auth/me`, so the same request **without** a valid `ha_session` cookie returns `401` (with `AUTH_ENABLED=false` it is let through). Then open the Live Browser in the UI on `https://<domain>`, confirm **Connected**, and leave it idle for 2+ minutes to confirm it stays connected.
 
 Until either is done, the app is fully functional over plain HTTP — a legitimate state for an initial deployment.
 

@@ -728,10 +728,19 @@ CANDIDATES_CONTEXT_LINE = (
     "you've included a few relevant profiles; do not describe them."
 )
 
+# Extra prompt line, only when the Resdex profile-count line follows the body
+# (RESDEX_EMAIL_MODE=count). That line — "we have 20+ matching profiles…" — is added
+# deterministically (resdex_match_service.format_profile_count_line), never by the
+# model, so EMAIL_SYSTEM_PROMPT's "Don't mention candidate counts" rule still holds.
+PROFILE_COUNT_CONTEXT_LINE = (
+    "A one-line note about matching profiles follows the message — do not mention "
+    "candidates, profiles or counts yourself."
+)
+
 
 def build_email_prompt(
     client_type: str, tone: str, job: dict, sender_email: str = "",
-    candidates_included: bool = False,
+    candidates_included: bool = False, profile_count_included: bool = False,
 ) -> str:
     """User prompt for email generation. It supplies only the per-request
     variables — `client_type` picks the audience ask (_EMAIL_ASK: vendor onboarding for
@@ -741,12 +750,20 @@ def build_email_prompt(
     and sign-off are added by append_closing); it's kept for signature compatibility
     with the caller. The body structure and output rules live in EMAIL_SYSTEM_PROMPT.
     `candidates_included` adds CANDIDATES_CONTEXT_LINE after the role context (a Resdex
-    candidate card follows the body); False leaves the prompt text unchanged."""
+    candidate card follows the body); `profile_count_included` adds
+    PROFILE_COUNT_CONTEXT_LINE in the same slot instead (the Resdex profile-count line
+    follows the body; candidates_included wins if both are set). Both False leaves the
+    prompt text unchanged."""
     # Only the per-audience ask — the broader _AUDIENCE note ("completed onboards recently")
     # made the model invent shared history ("great working with you on …").
     tone_instr = TONE_INSTRUCTIONS.get(tone, TONE_INSTRUCTIONS["Formal"])
     ask = _EMAIL_ASK.get(client_type, _EMAIL_ASK["new"])
-    candidates = f"{CANDIDATES_CONTEXT_LINE}\n\n" if candidates_included else ""
+    if candidates_included:
+        candidates = f"{CANDIDATES_CONTEXT_LINE}\n\n"
+    elif profile_count_included:
+        candidates = f"{PROFILE_COUNT_CONTEXT_LINE}\n\n"
+    else:
+        candidates = ""
     return (
         f"Ask — {ask}\n\n"
         f"Tone: {tone} — {tone_instr}\n\n"

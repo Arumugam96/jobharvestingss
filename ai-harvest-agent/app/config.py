@@ -202,6 +202,13 @@ class Settings(BaseSettings):
     # anonymised candidate card into the email (keep it off for a shadow period).
     resdex_enabled: bool = False
     resdex_include_in_email: bool = False
+    # What RESDEX_INCLUDE_IN_EMAIL puts in the email: "count" = one line such as
+    # "we have 20+ matching profiles for your <title> requirement…" (rounded from
+    # the newest matched/cap-reached search's Resdex result count, no profiles
+    # shown); "cards" = the old anonymised candidate cards. Unknown → "count".
+    resdex_email_mode: str = "count"
+    # Count mode: below this many Resdex results the line is left out.
+    resdex_email_min_count: int = 3
     # "✓ Naukri Verified" badge on EVERY Resdex candidate card (email text + HTML
     # parts, job detail page), whatever the candidate's status. False hides it.
     resdex_show_naukri_verified: bool = True
