@@ -36,6 +36,8 @@ RUN rm -rf /var/lib/apt/lists/* \
     libsecret-1-0 \
     libxtst6 \
     fonts-liberation \
+    libgl1-mesa-dri \
+    libgl1-mesa-glx \
     squashfs-tools \
     && rm -rf /var/lib/apt/lists/*
 

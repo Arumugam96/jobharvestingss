@@ -166,15 +166,23 @@ async def _start(app_dir: Path) -> asyncio.subprocess.Process:
         "XDG_CONFIG_HOME": str(cfg),
         "DISPLAY": os.environ.get("DISPLAY", ":99"),
         "NAUKRI_LAUNCHER_HANDOFF": str(HANDOFF_PATH),
+        # Force Mesa llvmpipe (software GL). The Launcher's bundled Electron
+        # does not ship SwiftShader, so --disable-gpu alone leaves it with no
+        # rasterizer → solid-black window on Xvfb.
+        "LIBGL_ALWAYS_SOFTWARE": "1",
+        "ELECTRON_ENABLE_LOGGING": "1",
     }
     if dbus_addr:
         env["DBUS_SESSION_BUS_ADDRESS"] = dbus_addr
     with log_path.open("wb") as log:
         return await asyncio.create_subprocess_exec(
             str(app_dir / "AppRun"),
-            "--no-sandbox", "--disable-gpu",
+            "--no-sandbox",
+            "--disable-gpu",
             "--disable-gpu-compositing",
+            "--disable-gpu-sandbox",
             "--disable-dev-shm-usage",
+            "--in-process-gpu",
             "--ozone-platform=x11",
             env=env, stdout=log, stderr=asyncio.subprocess.STDOUT,
             start_new_session=True,
