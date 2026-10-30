@@ -108,6 +108,9 @@ class Settings(BaseSettings):
     # against apollo_daily_cap). When exhausted, enrichment stops but Recruiter Finder
     # can still use the remaining global headroom. <= 0 = no sub-cap.
     apollo_enrichment_daily_cap: int = 0
+    # Monthly credit pool (e.g. 2500). Each day's usage subtracts from it;
+    # the email report shows remaining. <= 0 = unlimited / not tracked.
+    apollo_monthly_cap: int = 0
     company_contact_fallback: bool = True
     company_contact_reveal_cap: int = 5
     # HR shortlist per (company, location) — free Apollo search, revealed lazily as
@@ -381,6 +384,11 @@ class Settings(BaseSettings):
     # forwarding is skipped (the reply is still captured + shown in-app).
     outreach_reply_forward_map: str = ""
     outreach_reply_forward_default: str = ""
+    # Even/odd day-of-month rotation: "even_day@example.com,odd_day@example.com".
+    # Even days (2nd, 4th, …) → first address; odd days (1st, 3rd, …) → second.
+    # A per-tenant MAP entry overrides rotation; when unset or only one address,
+    # falls through to OUTREACH_REPLY_FORWARD_DEFAULT.
+    outreach_reply_forward_rotation: str = ""
     # Brevo v3 API key (header "api-key"). Used ONLY by scripts/register_brevo_events.py to
     # create/update the transactional event webhook — NOT the SMTP key used to send mail.
     brevo_api_key: str = ""
@@ -441,9 +449,11 @@ class Settings(BaseSettings):
     def reply_forward_address(self, tenant_id: str | None) -> str:
         """The mailbox a captured reply should be forwarded to for ``tenant_id``.
 
-        Parses OUTREACH_REPLY_FORWARD_MAP ("tenant_id:address" pairs) and returns
-        the tenant's address, else OUTREACH_REPLY_FORWARD_DEFAULT, else "" (no
-        forward). Robust to spaces around pairs/colons and empty entries."""
+        Resolution order:
+        1. OUTREACH_REPLY_FORWARD_MAP — per-tenant "tenant_id:address" entry.
+        2. OUTREACH_REPLY_FORWARD_ROTATION — even/odd day-of-month rotation.
+        3. OUTREACH_REPLY_FORWARD_DEFAULT — static fallback.
+        Returns "" when none resolve (no forward)."""
         tid = (tenant_id or "").strip()
         for pair in (self.outreach_reply_forward_map or "").split(","):
             if ":" not in pair:
@@ -451,7 +461,26 @@ class Settings(BaseSettings):
             key, _, addr = pair.partition(":")
             if key.strip() == tid and addr.strip():
                 return addr.strip()
+
+        rotation_addr = self._rotation_forward_address()
+        if rotation_addr:
+            return rotation_addr
+
         return (self.outreach_reply_forward_default or "").strip()
+
+    def _rotation_forward_address(self) -> str:
+        """Pick the rotation address for today's even/odd day, or "" if rotation
+        is not configured (fewer than 2 addresses)."""
+        addrs = _split_email_csv(self.outreach_reply_forward_rotation)
+        if len(addrs) < 2:
+            return ""
+        try:
+            from app.services.reply_to_rotation import _today
+            day = _today().day
+        except Exception:
+            from datetime import datetime
+            day = datetime.now().day
+        return addrs[0] if day % 2 == 0 else addrs[1]
 
     @property
     def is_production(self) -> bool:

@@ -112,15 +112,14 @@ class OutreachService:
         and body are exactly what they were without it.
         `profile_count_line` (automated sends, RESDEX_EMAIL_MODE=count) is the one-line
         "we have N matching profiles" note (resdex_match_service.
-        format_profile_count_line); it takes the same slot as `candidate_block`, and the
-        prompt tells the model NOT to mention profiles or counts itself. If both are
-        given, `candidate_block` wins and `profile_count_line` is ignored."""
+        format_profile_count_line); it is inserted as the second content paragraph
+        (after the intro + job reference) so the count reads as part of the pitch. If
+        both are given, `candidate_block` wins and `profile_count_line` is ignored."""
         if candidate_block.strip():
             prompt = outreach_prompts.build_email_prompt(
                 client_type, tone, job, sender_email, candidates_included=True,
             )
         elif profile_count_line.strip():
-            candidate_block = profile_count_line
             prompt = outreach_prompts.build_email_prompt(
                 client_type, tone, job, sender_email, profile_count_included=True,
             )
@@ -135,26 +134,20 @@ class OutreachService:
             if parsed:
                 _, pitch = parsed
                 pitch = self._fix_platform(pitch, job)
-                # Subject is built deterministically (exact job title + a random
-                # tagline) so its format is guaranteed; the LLM subject is ignored.
                 subject = outreach_prompts.build_email_subject(job)
-                # Greeting + self-intro are deterministic — so the email always opens with a
-                # recipient greeting (never the sender's name) followed by the fixed self-
-                # intro; the LLM writes the posting reference + value + CTA lines.
                 intro = outreach_prompts.build_intro(sender_email, job)
                 greeting = outreach_prompts.build_greeting(job)
                 body = outreach_prompts.append_closing(
                     pitch, sender_email, deck_url, contact_block, intro=intro, greeting=greeting,
-                    candidate_block=candidate_block,
+                    candidate_block=candidate_block, profile_count_line=profile_count_line,
                 )
                 return EmailDraft(subject=subject, body=body, fallback_used=False, meta=meta)
-            # Model responded but not with usable JSON — mark the audit row and fall back.
             meta.success = False
             meta.error_message = meta.error_message or "unparseable LLM JSON"
 
         subject, body = outreach_prompts.render_email_fallback(
             client_type, job, sender_email, deck_url, contact_block,
-            candidate_block=candidate_block,
+            candidate_block=candidate_block, profile_count_line=profile_count_line,
         )
         return EmailDraft(subject=subject, body=body, fallback_used=True, meta=meta)
 

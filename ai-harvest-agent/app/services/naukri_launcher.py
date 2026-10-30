@@ -134,10 +134,32 @@ def _clear_handoff() -> None:
         pass
 
 
+async def _ensure_dbus() -> str | None:
+    """Start a session dbus-daemon if none is running. Returns the bus address."""
+    addr = os.environ.get("DBUS_SESSION_BUS_ADDRESS")
+    if addr:
+        return addr
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "dbus-daemon", "--session", "--print-address", "--fork",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await proc.communicate()
+        addr = out.decode().strip()
+        if addr:
+            os.environ["DBUS_SESSION_BUS_ADDRESS"] = addr
+            logger.info("dbus_session_started", address=addr)
+            return addr
+    except Exception as exc:
+        logger.debug("dbus_session_start_failed", error=str(exc))
+    return None
+
+
 async def _start(app_dir: Path) -> asyncio.subprocess.Process:
     cfg = config_dir()
     cfg.mkdir(parents=True, exist_ok=True)
     log_path = appimage_path().parent / "launcher.log"
+    dbus_addr = await _ensure_dbus()
     env = {
         **os.environ,
         "APPDIR": str(app_dir),
@@ -145,9 +167,13 @@ async def _start(app_dir: Path) -> asyncio.subprocess.Process:
         "DISPLAY": os.environ.get("DISPLAY", ":99"),
         "NAUKRI_LAUNCHER_HANDOFF": str(HANDOFF_PATH),
     }
+    if dbus_addr:
+        env["DBUS_SESSION_BUS_ADDRESS"] = dbus_addr
     with log_path.open("wb") as log:
         return await asyncio.create_subprocess_exec(
-            str(app_dir / "AppRun"), "--no-sandbox",
+            str(app_dir / "AppRun"),
+            "--no-sandbox", "--disable-gpu",
+            "--ozone-platform=x11",
             env=env, stdout=log, stderr=asyncio.subprocess.STDOUT,
             start_new_session=True,
         )

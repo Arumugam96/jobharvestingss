@@ -295,9 +295,22 @@ def _ensure_greeting(body: str, greeting: str) -> str:
     return f"{greeting}\n\n{rest}" if rest else greeting
 
 
+def _insert_after_opening(body: str, line: str) -> str:
+    """Insert ``line`` as the second content paragraph — right after the opening
+    paragraph (greeting + intro + job reference), before the value/ask paragraph.
+    Used for the Resdex profile-count note so it reads as part of the pitch."""
+    parts = body.split("\n\n")
+    insert_at = 1
+    if parts and _GREETING_RE.match(parts[0].strip()):
+        insert_at = 2
+    insert_at = min(insert_at, len(parts))
+    parts.insert(insert_at, line)
+    return "\n\n".join(parts)
+
+
 def append_closing(
     pitch: str, sender_email: str, deck_url: str = "", contact_block: str = "", intro: str = "",
-    greeting: str = "", candidate_block: str = "",
+    greeting: str = "", candidate_block: str = "", profile_count_line: str = "",
 ) -> str:
     """Append the deterministic closing to an LLM- or template-generated pitch, in
     this order (blocks separated by blank lines):
@@ -307,6 +320,9 @@ def append_closing(
         <intro> <first pitch paragraph>  (when given — the deterministic self-intro is
                                           merged into the pitch's opening paragraph,
                                           i.e. the posting reference)
+
+        <profile_count_line>             (when given — the Resdex profile-count note,
+                                          inserted as the second content paragraph)
 
         <rest of the pitch body>
 
@@ -328,6 +344,9 @@ def append_closing(
         _insert_after_greeting(_greeting_on_own_line(_strip_trailing_closing(pitch)), intro),
         greeting,
     )
+    count = (profile_count_line or "").strip()
+    if count:
+        body = _insert_after_opening(body, count)
     url = (deck_url or "").strip()
     contact = (contact_block or "").strip()
     candidates = (candidate_block or "").strip()
@@ -349,7 +368,7 @@ CONTEXT:
 You're writing to a recruiter or hiring manager who posted an IT job. The goal is simply to open a conversation about a staffing partnership — mention the role you saw, say we'd be interested in supporting their current and upcoming IT hiring, and make the ask given in the "Ask —" line of the request. End on a light, friendly note.
 
 WHAT THE APPLICATION ADDS (do NOT write these):
-The greeting ("Hi <Name>,") and the sender's introduction ("I'm <Name>, a <Role> at SightSpectrum.") are added before your text, and the contact details, website link and sign-off after it. Your text continues straight after that introduction, so don't greet, introduce yourself or the company again ("introduce ourselves / SightSpectrum"), or name SightSpectrum. Write as "I" for yourself (e.g. "I came across…") and "we" for the company.
+The greeting ("Hi <Name>,") and the sender's introduction ("I'm <Name>, from SightSpectrum.") are added before your text, and the contact details, website link and sign-off after it. Your text continues straight after that introduction, so don't greet, introduce yourself or the company again ("introduce ourselves / SightSpectrum"), or name SightSpectrum. Write as "I" for yourself (e.g. "I came across…") and "we" for the company.
 
 WHAT TO WRITE:
 The email BODY only — short (roughly 40–90 words), in a few short paragraphs separated by blank lines. How you phrase and structure it is up to you; write it the way a person would naturally write a quick work email.
@@ -733,8 +752,8 @@ CANDIDATES_CONTEXT_LINE = (
 # deterministically (resdex_match_service.format_profile_count_line), never by the
 # model, so EMAIL_SYSTEM_PROMPT's "Don't mention candidate counts" rule still holds.
 PROFILE_COUNT_CONTEXT_LINE = (
-    "A one-line note about matching profiles follows the message — do not mention "
-    "candidates, profiles or counts yourself."
+    "A one-line note about matching profiles is placed right after the opening — "
+    "do not mention candidates, profiles or counts yourself."
 )
 
 
@@ -788,7 +807,7 @@ def build_email_subject(job: dict) -> str:
 
 def render_email_fallback(
     client_type: str, job: dict, sender_email: str = "", deck_url: str = "",
-    contact_block: str = "", candidate_block: str = "",
+    contact_block: str = "", candidate_block: str = "", profile_count_line: str = "",
 ) -> tuple[str, str]:
     """Deterministic fallback used when LLM generation fails — builds the same shape the
     LLM path assembles (greeting + self-intro merged with the posting reference + offer/ask
@@ -798,14 +817,12 @@ def render_email_fallback(
     (INTRO_OFFER_ACTIVE); any other `client_type` is treated as a new/unknown prospect and
     gets the vendor-onboarding line (INTRO_OFFER_NEW). `contact_block` (automated sends)
     is placed above the sign-off, mirroring the LLM path; `candidate_block` (Resdex
-    matching profiles) sits between the body and the contact block."""
+    matching profiles) sits between the body and the contact block; `profile_count_line`
+    (Resdex count note) is inserted as the second content paragraph."""
     company = (job.get("company") or "").strip() or _GENERIC_COMPANY
     title = (job.get("job_title") or "").strip()
 
     greeting = build_greeting(job)
-    # "your Naukri posting" / "your LinkedIn posting" / "your Dice posting", or the neutral
-    # "your job posting" when the source is unknown — never a guessed platform. The title
-    # stays verbatim so email_service._outreach_body_to_html links it to the posting.
     posting = posting_phrase(job)
     reference = (
         f"I noticed {posting} for {title} at {company} and wanted to connect."
@@ -817,7 +834,7 @@ def render_email_fallback(
     intro = build_intro(sender_email, job)
     return build_email_subject(job), append_closing(
         body, sender_email, deck_url, contact_block, intro=intro, greeting=greeting,
-        candidate_block=candidate_block,
+        candidate_block=candidate_block, profile_count_line=profile_count_line,
     )
 
 

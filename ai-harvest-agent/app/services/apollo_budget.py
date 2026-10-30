@@ -28,7 +28,7 @@ bound usage, and a DB outage means little is running anyway. ``cap <= 0`` = unli
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import structlog
 from sqlalchemy import text as sa_text
@@ -249,4 +249,35 @@ async def usage_today() -> dict:
         "enrichment_used": e_used,
         "enrichment_cap": e_cap,
         "enrichment_remaining": max(0, e_cap - e_used) if e_cap and e_cap > 0 else None,
+    }
+
+
+async def usage_this_month() -> dict:
+    """Current calendar month's cumulative Apollo usage for display in the
+    harvest report email. Sums ``apollo_daily_usage.count`` from the 1st of
+    the month through today. Returns ``monthly_cap`` and ``monthly_remaining``
+    when ``APOLLO_MONTHLY_CAP > 0``; ``monthly_remaining`` is None when
+    uncapped. Zero usage on any DB error."""
+    settings = get_settings()
+    m_cap = settings.apollo_monthly_cap
+    today = _utc_today()
+    month_start = date(today.year, today.month, 1)
+    m_used = 0
+    try:
+        factory = get_session_factory(settings)
+        async with factory() as db:
+            row = await db.execute(
+                sa_text(
+                    "SELECT COALESCE(SUM(count), 0) FROM apollo_daily_usage"
+                    " WHERE usage_date >= :start AND usage_date <= :end"
+                ),
+                {"start": month_start, "end": today},
+            )
+            m_used = int(row.scalar() or 0)
+    except Exception as exc:
+        logger.warning("apollo_budget_month_usage_failed", error=str(exc))
+    return {
+        "monthly_used": m_used,
+        "monthly_cap": m_cap,
+        "monthly_remaining": max(0, m_cap - m_used) if m_cap and m_cap > 0 else None,
     }

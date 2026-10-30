@@ -758,6 +758,11 @@ async def _run_harvest_background_impl(
         sources     = result.sources_executed,
         job_dicts   = report_dicts,
         insights    = insights,
+        run_timing  = {
+            "started":  result.started_at,
+            "completed": result.completed_at,
+            "duration_s": elapsed_seconds,
+        },
     )
 
     # ── Automated end-of-harvest outreach (best-effort, never raises) ─────────

@@ -64,17 +64,18 @@ def build_excel_report_bytes(job_dicts: list[dict[str, Any]]) -> bytes:
     return ExcelExportService().build_bytes(job_dicts)
 
 
-def compute_harvest_insights(jobs: list[ScrapedJobORM]) -> dict[str, int]:
+def compute_harvest_insights(jobs: list[ScrapedJobORM]) -> dict[str, Any]:
     """Summary counts for the post-harvest report EMAIL (nothing in this is
     surfaced in the UI) — computed straight off the run's ScrapedJobORM rows and
     their eagerly-loaded RecruiterORM, so contact provenance is exact.
 
     Splits the harvest along the axes the business tracks:
-      * source            — LinkedIn vs non-LinkedIn (Naukri + Dice)
-      * contactability     — how many records carry an email / phone (the job's
-        own scraped value, else the linked recruiter's enriched value — same
-        merge scraped_job_view uses for the attachments)
-      * contact provenance — free contacts (scraped on the page / extracted by
+      * source             — LinkedIn / Naukri / Dice
+      * contactability     — how many records carry an email / phone / LinkedIn
+        profile (the job's own scraped value, else the linked recruiter's
+        enriched value — same merge scraped_job_view uses for the attachments)
+      * per-source contacts — email / phone / linkedin per source
+      * contact provenance  — free contacts (scraped on the page / extracted by
         the local LLM) vs paid Apollo enrichments (recruiter.enrichment_source
         == "apollo")"""
     def _has(value: Any) -> bool:
@@ -82,24 +83,48 @@ def compute_harvest_insights(jobs: list[ScrapedJobORM]) -> dict[str, int]:
 
     total = len(jobs)
     linkedin = naukri = dice = 0
-    with_email = with_phone = with_contact = 0
+    with_email = with_phone = with_contact = with_linkedin = 0
     apollo_enriched = local_llm_contacts = 0
 
+    src_stats: dict[str, dict[str, int]] = {
+        "LinkedIn": {"jobs": 0, "email": 0, "phone": 0, "linkedin": 0, "poster_name": 0},
+        "Naukri":   {"jobs": 0, "email": 0, "phone": 0, "linkedin": 0, "poster_name": 0},
+        "Dice":     {"jobs": 0, "email": 0, "phone": 0, "linkedin": 0, "poster_name": 0},
+    }
+
     for j in jobs:
-        if j.source == "LinkedIn":
+        src = j.source or ""
+        if src in src_stats:
+            src_stats[src]["jobs"] += 1
+        if src == "LinkedIn":
             linkedin += 1
-        elif j.source == "Naukri":
+        elif src == "Naukri":
             naukri += 1
-        elif j.source == "Dice":
+        elif src == "Dice":
             dice += 1
 
         recruiter = j.recruiter
         has_email = _has(j.email_id) or _has(getattr(recruiter, "official_email_id", ""))
         has_phone = _has(j.contact_number) or _has(getattr(recruiter, "contact_number", ""))
+        has_li = _has(j.linkedin_profile_url) or _has(getattr(recruiter, "linkedin_profile_url", ""))
+        has_name = _has(j.job_poster_name) or _has(getattr(recruiter, "name", ""))
+
         if has_email:
             with_email += 1
         if has_phone:
             with_phone += 1
+        if has_li:
+            with_linkedin += 1
+
+        if src in src_stats:
+            if has_email:
+                src_stats[src]["email"] += 1
+            if has_phone:
+                src_stats[src]["phone"] += 1
+            if has_li:
+                src_stats[src]["linkedin"] += 1
+            if has_name:
+                src_stats[src]["poster_name"] += 1
 
         if has_email or has_phone:
             with_contact += 1
@@ -116,9 +141,11 @@ def compute_harvest_insights(jobs: list[ScrapedJobORM]) -> dict[str, int]:
         "dice":                dice,
         "with_email":          with_email,
         "with_phone":          with_phone,
+        "with_linkedin":       with_linkedin,
         "with_contact":        with_contact,
         "local_llm_contacts":  local_llm_contacts,
         "apollo_enriched":     apollo_enriched,
+        "per_source":          src_stats,
     }
 
 
