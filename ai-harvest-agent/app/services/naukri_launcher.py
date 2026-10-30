@@ -173,6 +173,8 @@ async def _start(app_dir: Path) -> asyncio.subprocess.Process:
         return await asyncio.create_subprocess_exec(
             str(app_dir / "AppRun"),
             "--no-sandbox", "--disable-gpu",
+            "--disable-gpu-compositing",
+            "--disable-dev-shm-usage",
             "--ozone-platform=x11",
             env=env, stdout=log, stderr=asyncio.subprocess.STDOUT,
             start_new_session=True,
