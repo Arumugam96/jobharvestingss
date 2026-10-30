@@ -6,7 +6,7 @@ Uses a persistent Chrome profile for session reuse.  No login automation.
 from __future__ import annotations
 
 import structlog
-from app.models.harvest_models import FiltersConfig
+from app.models.harvest_config import FiltersConfig
 from app.scrapers.browser_manager import PersistentBrowserManager
 from app.scrapers.dice_scraper import DiceScrapedJob, DiceScraper
 

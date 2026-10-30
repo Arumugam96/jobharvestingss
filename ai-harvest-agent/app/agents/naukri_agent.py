@@ -89,7 +89,7 @@ from app.core.text_formatting import (
     restructure_description_html,
     sanitize_description_html,
 )
-from app.models.harvest_models import FiltersConfig
+from app.models.harvest_config import FiltersConfig
 from app.scrapers.browser_manager import BrowserManager, PersistentBrowserManager
 from app.scrapers.human import human_scroll
 from app.services import run_guard

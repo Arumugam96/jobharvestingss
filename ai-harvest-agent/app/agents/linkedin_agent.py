@@ -61,7 +61,7 @@ from app.core.text_formatting import (
 from app.core.dependencies import get_llm_service
 from app.config import get_settings
 from app.core.linkedin_geo import resolve_geo
-from app.models.harvest_models import FiltersConfig
+from app.models.harvest_config import FiltersConfig
 from app.models.harvest_run import LlmCallType
 from app.scrapers.browser_manager import PersistentBrowserManager
 from app.scrapers.human import human_scroll

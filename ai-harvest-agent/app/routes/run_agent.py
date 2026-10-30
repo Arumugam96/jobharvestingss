@@ -17,7 +17,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from app.core.proactor import needs_proactor, run_in_proactor
-from app.models.harvest_models import FiltersConfig
+from app.models.harvest_config import FiltersConfig
 from app.services.config_service import ConfigService
 from app.scrapers.linkedin_form_scraper import (
     LINKEDIN_SESSION_FILE,

@@ -36,7 +36,7 @@ from app.core.domain_keywords import (
     infer_domain as _infer_domain_shared,
 )
 from app.core.job_url import normalize_job_url
-from app.models.harvest_models import FiltersConfig
+from app.models.harvest_config import FiltersConfig
 from app.models.unified_job import UnifiedJob
 
 logger = structlog.get_logger(__name__)

@@ -41,7 +41,7 @@ from app.agents.linkedin_agent import (
 )
 from app.core.exceptions import LLMUnavailableError
 from app.core.job_url import normalize_job_url
-from app.models.harvest_models import HarvestConfig
+from app.models.harvest_config import HarvestConfig
 from app.models.response_models import HarvestJob
 from app.models.unified_job import UnifiedJob
 from app.services import run_guard

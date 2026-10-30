@@ -14,7 +14,7 @@ from urllib.parse import urlencode
 import structlog
 from playwright.async_api import ElementHandle, Page
 
-from app.models.harvest_models import FiltersConfig
+from app.models.harvest_config import FiltersConfig
 
 logger = structlog.get_logger(__name__)
 

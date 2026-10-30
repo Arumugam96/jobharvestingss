@@ -23,7 +23,7 @@ from fastapi.responses import JSONResponse
 from app.agents.orchestrator_agent import OrchestratorAgent
 from app.core.proactor import needs_proactor, run_in_proactor
 from app.services import run_guard
-from app.models.harvest_models import HarvestConfig
+from app.models.harvest_config import HarvestConfig
 from app.models.response_models import (
     HarvestFiltersSnapshot,
     HarvestJob,

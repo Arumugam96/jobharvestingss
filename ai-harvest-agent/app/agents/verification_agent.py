@@ -19,7 +19,7 @@ import re
 import structlog
 from playwright.async_api import Browser, Page, async_playwright
 
-from app.models.harvest_models import VerificationConfig
+from app.models.harvest_config import VerificationConfig
 from app.models.unified_job import UnifiedJob
 from app.scrapers.browser_manager import _LAUNCH_ARGS, _USER_AGENT
 

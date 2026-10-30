@@ -14,7 +14,7 @@ from pathlib import Path
 
 import structlog
 
-from app.models.harvest_models import HarvestConfig
+from app.models.harvest_config import HarvestConfig
 
 logger = structlog.get_logger(__name__)
 
