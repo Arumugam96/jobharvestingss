@@ -155,34 +155,45 @@ async def _ensure_dbus() -> str | None:
     return None
 
 
+def _find_electron_binary(app_dir: Path) -> Path:
+    """Find the actual Electron binary inside the unpacked AppImage.
+    AppRun is a shell wrapper that doesn't forward CLI flags, so we call
+    the binary directly."""
+    for candidate in app_dir.iterdir():
+        if candidate.is_file() and os.access(candidate, os.X_OK) and candidate.name not in (
+            "AppRun", "chrome-sandbox", "chrome_crashpad_handler",
+            "libEGL.so", "libGLESv2.so", "libvk_swiftshader.so",
+            "libvulkan.so.1",
+        ) and not candidate.name.startswith("lib") and not candidate.suffix:
+            return candidate
+    return app_dir / "AppRun"
+
+
 async def _start(app_dir: Path) -> asyncio.subprocess.Process:
     cfg = config_dir()
     cfg.mkdir(parents=True, exist_ok=True)
     log_path = appimage_path().parent / "launcher.log"
-    dbus_addr = await _ensure_dbus()
-    # CLI flags passed to AppRun are NOT forwarded to the Electron binary;
-    # ELECTRON_EXTRA_LAUNCH_ARGS is the reliable channel.
-    _electron_flags = " ".join([
-        "--no-sandbox",
-        "--disable-gpu",
-        "--disable-gpu-compositing",
-        "--disable-software-rasterizer",
-        "--in-process-gpu",
-        "--ozone-platform=x11",
-    ])
+    binary = _find_electron_binary(app_dir)
+    logger.info("naukri_launcher_binary", binary=str(binary))
     env = {
         **os.environ,
         "APPDIR": str(app_dir),
         "XDG_CONFIG_HOME": str(cfg),
         "DISPLAY": os.environ.get("DISPLAY", ":99"),
         "NAUKRI_LAUNCHER_HANDOFF": str(HANDOFF_PATH),
-        "ELECTRON_EXTRA_LAUNCH_ARGS": _electron_flags,
+        # Suppress all D-Bus connection attempts — no bus in the container.
+        "DBUS_SESSION_BUS_ADDRESS": "disabled:",
+        "DBUS_SYSTEM_BUS_ADDRESS": "disabled:",
     }
-    if dbus_addr:
-        env["DBUS_SESSION_BUS_ADDRESS"] = dbus_addr
     with log_path.open("wb") as log:
         return await asyncio.create_subprocess_exec(
-            str(app_dir / "AppRun"),
+            str(binary),
+            "--no-sandbox",
+            "--disable-gpu",
+            "--disable-gpu-compositing",
+            "--in-process-gpu",
+            "--disable-dev-shm-usage",
+            "--ozone-platform=x11",
             env=env, stdout=log, stderr=asyncio.subprocess.STDOUT,
             start_new_session=True,
         )
