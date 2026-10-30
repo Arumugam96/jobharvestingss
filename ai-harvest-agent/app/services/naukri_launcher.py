@@ -160,20 +160,29 @@ async def _start(app_dir: Path) -> asyncio.subprocess.Process:
     cfg.mkdir(parents=True, exist_ok=True)
     log_path = appimage_path().parent / "launcher.log"
     dbus_addr = await _ensure_dbus()
+    # CLI flags passed to AppRun are NOT forwarded to the Electron binary;
+    # ELECTRON_EXTRA_LAUNCH_ARGS is the reliable channel.
+    _electron_flags = " ".join([
+        "--no-sandbox",
+        "--disable-gpu",
+        "--disable-gpu-compositing",
+        "--disable-software-rasterizer",
+        "--in-process-gpu",
+        "--ozone-platform=x11",
+    ])
     env = {
         **os.environ,
         "APPDIR": str(app_dir),
         "XDG_CONFIG_HOME": str(cfg),
         "DISPLAY": os.environ.get("DISPLAY", ":99"),
         "NAUKRI_LAUNCHER_HANDOFF": str(HANDOFF_PATH),
+        "ELECTRON_EXTRA_LAUNCH_ARGS": _electron_flags,
     }
     if dbus_addr:
         env["DBUS_SESSION_BUS_ADDRESS"] = dbus_addr
     with log_path.open("wb") as log:
         return await asyncio.create_subprocess_exec(
             str(app_dir / "AppRun"),
-            "--no-sandbox", "--disable-gpu",
-            "--ozone-platform=x11",
             env=env, stdout=log, stderr=asyncio.subprocess.STDOUT,
             start_new_session=True,
         )
