@@ -30,14 +30,10 @@ RUN rm -rf /var/lib/apt/lists/* \
     supervisor \
     websockify \
     libgtk-3-0 \
-    dbus \
     libnotify4 \
     libxss1 \
     libsecret-1-0 \
     libxtst6 \
-    fonts-liberation \
-    libgl1-mesa-dri \
-    libgl1-mesa-glx \
     squashfs-tools \
     && rm -rf /var/lib/apt/lists/*
 
