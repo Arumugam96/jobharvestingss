@@ -30,10 +30,12 @@ RUN rm -rf /var/lib/apt/lists/* \
     supervisor \
     websockify \
     libgtk-3-0 \
+    dbus \
     libnotify4 \
     libxss1 \
     libsecret-1-0 \
     libxtst6 \
+    fonts-liberation \
     squashfs-tools \
     && rm -rf /var/lib/apt/lists/*
 

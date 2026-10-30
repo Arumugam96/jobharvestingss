@@ -151,7 +151,7 @@ async def _ensure_dbus() -> str | None:
             logger.info("dbus_session_started", address=addr)
             return addr
     except Exception as exc:
-        logger.debug("dbus_session_start_failed", error=str(exc))
+        logger.warning("dbus_session_start_failed", error=str(exc))
     return None
 
 
