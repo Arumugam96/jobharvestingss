@@ -53,6 +53,7 @@ python-dateutil>=2.9.0
 # ── Excel Export ─────────────────────────────────────────────────────────────────
 pandas>=2.2.0
 openpyxl>=3.1.0
+xlrd>=2.0.1            # legacy .xls uploads (Demand Search); without it .xls is rejected with a clear message
 
 # ── Dev / Test ──────────────────────────────────────────────────────────────────
 pytest==8.3.4

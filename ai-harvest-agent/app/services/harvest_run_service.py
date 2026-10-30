@@ -60,6 +60,21 @@ JOB_SORT_FIELDS = {
     "job_poster_name",
 }
 
+# Source of Demand Search jobs (app/services/demand_service.py): uploaded client
+# requirements searched on Resdex, never harvested and never contacted. They are
+# kept out of every harvest view (GET /jobs unless source=Demand is asked for,
+# /jobs/facets, the downloads) and out of the daily harvest counters.
+DEMAND_SOURCE = "Demand"
+
+
+def _not_demand_job():
+    return func.lower(ScrapedJobORM.source) != DEMAND_SOURCE.lower()
+
+
+def _not_demand_run():
+    return or_(HarvestRunORM.source.is_(None), HarvestRunORM.source != DEMAND_SOURCE)
+
+
 # Contact-availability tokens accepted by GET /jobs' `contact` filter — mirrors
 # the UI's jobMatchesContact() (harvest-agent/src/lib/contactFilter.js).
 # Positive tokens match rows that HAVE the channel, no_* tokens rows missing it,
@@ -682,7 +697,7 @@ class HarvestRunService:
         )
         result = await self._db.execute(
             select(func.coalesce(func.sum(HarvestRunORM.combined_count), 0))
-            .where(HarvestRunORM.created_at >= start)
+            .where(HarvestRunORM.created_at >= start, _not_demand_run())  # Demand isn't harvesting
         )
         return int(result.scalar_one() or 0)
 
@@ -699,7 +714,7 @@ class HarvestRunService:
         result = await self._db.execute(
             select(func.count())
             .select_from(ScrapedJobORM)
-            .where(ScrapedJobORM.created_at >= start)
+            .where(ScrapedJobORM.created_at >= start, _not_demand_job())
         )
         return int(result.scalar_one() or 0)
 
@@ -797,6 +812,8 @@ class HarvestRunService:
             stmt = stmt.where(func.lower(ScrapedJobORM.company_country) == company_country.lower())
         if source:
             stmt = stmt.where(func.lower(ScrapedJobORM.source) == source.lower())
+        else:
+            stmt = stmt.where(_not_demand_job())  # Demand jobs only when asked for by name
         if hiring_entity:
             stmt = stmt.where(func.lower(ScrapedJobORM.hiring_entity) == hiring_entity.lower())
         if work_mode:
@@ -843,9 +860,11 @@ class HarvestRunService:
         Company/Job/POC dropdown options or its header/footer stat counts from
         the loaded rows — this returns them across the entire scraped_jobs
         table in one call (GET /jobs/facets). Distincts are global, not scoped
-        to the active filters."""
+        to the active filters. Demand Search jobs are left out (as in GET /jobs)."""
         async def _distinct(col) -> list[str]:
-            result = await self._db.execute(apply_tenant(select(col).distinct(), ScrapedJobORM.tenant_id))
+            result = await self._db.execute(apply_tenant(
+                select(col).distinct().where(_not_demand_job()), ScrapedJobORM.tenant_id,
+            ))
             return sorted(v for v in result.scalars() if v)
 
         companies  = await _distinct(ScrapedJobORM.company)
@@ -879,6 +898,7 @@ class HarvestRunService:
             )
             .select_from(ScrapedJobORM)
             .outerjoin(RecruiterORM, ScrapedJobORM.recruiter_id == RecruiterORM.id)
+            .where(_not_demand_job())
         )
         stats_stmt = apply_tenant(stats_stmt, ScrapedJobORM.tenant_id)  # scope stats to the tenant
         row = (await self._db.execute(stats_stmt)).one()
@@ -927,9 +947,11 @@ class HarvestRunService:
 
     async def list_all_jobs_for_report(self) -> list[ScrapedJobORM]:
         """Every scraped job on record, newest posting first — the dataset
-        behind GET /download/{json,excel}, matching what GET /jobs lists."""
+        behind GET /download/{json,excel}, matching what GET /jobs lists (so no
+        Demand Search jobs)."""
         stmt = apply_tenant(
-            select(ScrapedJobORM).order_by(ScrapedJobORM.posted_date.desc()),
+            select(ScrapedJobORM).where(_not_demand_job())
+            .order_by(ScrapedJobORM.posted_date.desc()),
             ScrapedJobORM.tenant_id,  # exports must not leak other tenants' jobs
         )
         result = await self._db.execute(stmt)

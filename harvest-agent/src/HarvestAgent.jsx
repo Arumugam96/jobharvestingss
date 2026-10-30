@@ -22,6 +22,7 @@ import SourceRunsPage from "./pages/SourcesPage";
 import LeadIntelligencePage from "./pages/LeadIntelligencePage";
 import RecruiterContactFinderPage from "./pages/RecruiterContactFinderPage";
 import RuleEngineRedesign from "./pages/RuleEngineRedesign";
+import DemandSearchPage from "./demand/DemandSearchPage";
 
 /* Per-tenant route guard: a page whose feature flag is off for the current
  * tenant redirects to /jobs. Presentation-level only — the backend enforces
@@ -40,6 +41,7 @@ function activeKeyFromPath(pathname) {
   if (pathname.startsWith("/leads")) return "leads";
   if (pathname.startsWith("/contacts")) return "contacts";
   if (pathname.startsWith("/outreach") || pathname.startsWith("/mail")) return "outreach";
+  if (pathname.startsWith("/demand")) return "demand";
   return "jobs"; // "/", "/jobs", "/jobs/:id"
 }
 
@@ -236,6 +238,9 @@ export default function HarvestAgent({ onLogout }) {
           <Route path="/rules" element={<FeatureGate feature="rules"><RulesRoute /></FeatureGate>} />
           <Route path="/outreach" element={<FeatureGate feature="outreach"><OutreachHistoryPage /></FeatureGate>} />
           <Route path="/mail/:id" element={<FeatureGate feature="outreach"><OutreachThreadPage /></FeatureGate>} />
+          {/* Demand Search — landing, batch (?batch=) and job (?batch=&job=) views on
+              one route: /demand/... itself is proxied to the API by nginx. */}
+          <Route path="/demand" element={<FeatureGate feature="demand"><DemandSearchPage /></FeatureGate>} />
           <Route path="*" element={<NotFound />} />
         </Route>
       </Routes>

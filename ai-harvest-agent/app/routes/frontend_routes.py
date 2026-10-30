@@ -38,6 +38,7 @@ from pydantic import BaseModel
 from app.core.company_size import band_to_tier
 from app.services.harvest_run_service import (
     CONTACT_FILTER_TOKENS,
+    DEMAND_SOURCE,
     JOB_SORT_FIELDS,
     HarvestRunService,
     data_source_mode,
@@ -221,6 +222,9 @@ def _apply_job_filters(jobs: list[dict], **f: Any) -> list[dict]:
         result = [j for j in result if (j.get("company_country") or "").lower() == company_country]
     if source:
         result = [j for j in result if (j.get("source") or "").lower() == source]
+    else:
+        # Same default as the DB path: Demand Search jobs only when asked for by name.
+        result = [j for j in result if (j.get("source") or "").lower() != DEMAND_SOURCE.lower()]
     if hiring_entity:
         result = [j for j in result if (j.get("hiring_entity") or "").lower() == hiring_entity]
     if work_mode:
@@ -302,7 +306,7 @@ async def list_jobs(
     size_tier:     str = Query("",                        description="Company-size tier: Small | Medium | Large | Enterprise | unknown"),
     country:       str = Query("",                        description="Filter by job-location country (UI dropdown), e.g. India"),
     company_country: str = Query("",                      description="Filter by company HQ country (UI dropdown), e.g. United States"),
-    source:        str = Query("",                        description="Filter by source: LinkedIn | Naukri | Dice"),
+    source:        str = Query("",                        description="Filter by source: LinkedIn | Naukri | Dice | Demand (Demand Search jobs are listed only when asked for)"),
     hiring_entity: str = Query("",                        description="Filter: Direct Client | GCC | Staffing Firm | Ambiguous"),
     work_mode:     str = Query("",                        description="Filter: Remote | Hybrid | Onsite"),
     run_id:        str = Query("",                        description="Filter to a single harvest run's jobs (display run id, e.g. 20260817_110703)"),

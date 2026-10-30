@@ -67,6 +67,8 @@ SEED_TENANTS = [
                 "jobs": True, "history": True, "sources": True, "leads": True, "contacts": True,
                 "outreach": True, "rules": True, "analytics": True,
                 "ruleEngineRedesign": False,
+                # Demand Search (upload client requirements → Naukri Resdex candidates).
+                "demand": True,
             },
         },
     },
@@ -83,6 +85,9 @@ SEED_TENANTS = [
                 "jobs": True, "history": True, "sources": True, "leads": True, "contacts": True,
                 "outreach": True, "rules": True, "analytics": True,
                 "ruleEngineRedesign": True,
+                # Demand Search searches Naukri Resdex (the India résumé database),
+                # so it stays off for the US workspace.
+                "demand": False,
             },
         },
     },
@@ -94,11 +99,11 @@ SEED_TENANTS = [
         "config": {
             "theme": {"accent": "#0D9488", "brand": "Meridian Staffing"},
             # Full page set like the US client, with the classic Rule Engine
-            # (the redesign stays US-only).
+            # (the redesign stays US-only) — plus Demand Search (Naukri Resdex).
             "features": {
                 "jobs": True, "history": True, "sources": True, "leads": True, "contacts": True,
                 "outreach": True, "rules": True, "analytics": True,
-                "ruleEngineRedesign": False,
+                "ruleEngineRedesign": False, "demand": True,
             },
         },
     },

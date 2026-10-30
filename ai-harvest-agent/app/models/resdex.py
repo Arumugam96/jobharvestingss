@@ -48,6 +48,10 @@ class ResdexSearchStatus:
     CAP_REACHED = "cap_reached"      # daily search / candidate cap
     ERROR = "error"
     SKIPPED_NO_JD = "skipped_no_jd"
+    # Recruiter not logged in: requirements + T1–T3 queries built and stored (for
+    # copying into Resdex by hand), Resdex not searched, no quota used. Never
+    # counted, reused or emailed as a match.
+    QUERIES_ONLY = "queries_only"
 
 
 class ResdexSearchORM(Base):

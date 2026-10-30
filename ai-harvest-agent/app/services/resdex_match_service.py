@@ -7,7 +7,8 @@ emailed are searched:
   1. select   recruiter/job-posting contacts (Apollo recruiter emails included) and,
               with RESDEX_INCLUDE_APOLLO_CONTACTS, the Apollo company HR contact;
               source in RESDEX_SOURCES, with a JD; drop targets outreach would skip anyway
-              (no Resdex quota spent on emails that won't go out)
+              (no Resdex quota spent on emails that won't go out); Demand Search
+              jobs (contact_kind "demand") are always selected
   2. reuse    a matched search for the same tenant + job_url within
               RESDEX_REUSE_DAYS instead of searching again
   3. extract  JD → requirements (LLM, grounded; no-LLM fallback) → relaxation
@@ -73,9 +74,21 @@ SkipCheck = Callable[[dict], Awaitable[bool]]
 # `since`); the default raises the global "login needed" request and waits.
 LoginWaiter = Callable[[datetime], Awaitable[bool]]
 
+# on_stage(stage) — progress hook for callers that show live per-job steps (the
+# Demand Search batch page): "requirements" before the LLM extraction, "searching"
+# before the browser batch. Never awaited for reused jobs.
+StageHook = Callable[[str], Awaitable[None]]
+
+# contact_kind of a Demand Search job (app/services/demand_service.py): an uploaded
+# client requirement with no contact at all — always searched, whatever
+# RESDEX_SOURCES / RESDEX_INCLUDE_* say (those gate harvest outreach only).
+DEMAND_CONTACT_KIND = "demand"
+
 # Batch outcomes that mean "a person must log in" — retried once after a login.
 _LOGIN_STATUSES = (ResdexSearchStatus.SESSION_EXPIRED, ResdexSearchStatus.SESSION_BUSY)
 RESDEX_LOGIN_REASON = "Resdex candidate search needs the Naukri recruiter login"
+# error of a QUERIES_ONLY search (no recruiter login → queries built, not searched).
+QUERIES_ONLY_REASON = "Recruiter not logged in — queries only"
 
 # Concurrent LLM calls (requirements / profile extraction) across jobs.
 _LLM_CONCURRENCY = 2
@@ -388,7 +401,8 @@ async def _recent_matches(tenant_id: str, job_urls: list[str], reuse_days: int
 async def prepare_resdex_candidates(
     targets: list[dict], *, run_id: str, skip_check: SkipCheck | None = None,
     batch_runner: BatchRunner | None = None, llm: Any = None,
-    login_waiter: LoginWaiter | None = None,
+    login_waiter: LoginWaiter | None = None, reuse: bool = True,
+    on_stage: StageHook | None = None, queries_only: bool = False,
 ) -> dict[str, list[dict]]:
     """{target job_url: [candidate dicts incl. "id" and "search_id"]} for the
     outreach targets that got Resdex candidates. Never raises — {} on any failure.
@@ -401,11 +415,22 @@ async def prepare_resdex_candidates(
     awaited (default — only with the real runner — raises the global "Naukri
     recruiter login needed" request and waits up to LOGIN_WAIT_S). If the person
     logged in, those jobs are searched again ONCE; otherwise their session_expired
-    records are kept and the emails go out without candidates, as before."""
+    records are kept and the emails go out without candidates, as before.
+
+    ``reuse=False`` skips the RESDEX_REUSE_DAYS reuse and always searches afresh
+    (Demand Search's single-job "Re-run Resdex search"); ``on_stage`` see StageHook.
+
+    Queries-only mode: when the recorded recruiter session (naukri_recruiter_agent.
+    read_status — no browser) is logged out — checked with the real runner only —
+    or ``queries_only=True``, the requirements and T1–T3 queries are still built
+    and stored as QUERIES_ONLY searches (no browser, no quota, no login wait).
+    Jobs whose browser check still finds the session gone after the one login
+    wait above end QUERIES_ONLY too, instead of session_expired."""
     try:
         return await _prepare(
             targets, run_id=run_id, skip_check=skip_check, batch_runner=batch_runner, llm=llm,
-            login_waiter=login_waiter,
+            login_waiter=login_waiter, reuse=reuse, on_stage=on_stage,
+            queries_only=queries_only,
         )
     except Exception as exc:
         logger.warning("resdex_prepare_failed", run_id=run_id, error=str(exc))
@@ -435,10 +460,11 @@ async def _select(targets: list[dict], settings: Any, skip_check: SkipCheck | No
 
     for t in targets or []:
         view = t.get("view") or {}
-        if t.get("contact_kind") not in kinds:
+        demand = t.get("contact_kind") == DEMAND_CONTACT_KIND
+        if not demand and t.get("contact_kind") not in kinds:
             _drop(f"contact_{t.get('contact_kind') or 'unknown'}_not_enabled")
             continue
-        if (view.get("source") or "").strip().lower() not in sources:
+        if not demand and (view.get("source") or "").strip().lower() not in sources:
             _drop("source_not_enabled")
             continue
         norm = normalize_job_url(t.get("job_url") or view.get("job_url"))
@@ -467,6 +493,7 @@ async def _select(targets: list[dict], settings: Any, skip_check: SkipCheck | No
 async def _prepare(
     targets: list[dict], *, run_id: str, skip_check: SkipCheck | None,
     batch_runner: BatchRunner | None, llm: Any, login_waiter: LoginWaiter | None = None,
+    reuse: bool = True, on_stage: StageHook | None = None, queries_only: bool = False,
 ) -> dict[str, list[dict]]:
     settings = get_settings()
     if not settings.resdex_enabled:
@@ -500,7 +527,9 @@ async def _prepare(
             continue
         searchable[norm] = view
 
-    reused = await _recent_matches(tenant_id, list(searchable), int(settings.resdex_reuse_days))
+    reused = await _recent_matches(
+        tenant_id, list(searchable), int(settings.resdex_reuse_days) if reuse else 0,
+    )
     for norm, cands in reused.items():
         _assign(norm, cands)
         searchable.pop(norm, None)
@@ -509,6 +538,7 @@ async def _prepare(
     if not searchable:
         return out
 
+    await _stage(on_stage, "requirements")
     if llm is None:
         llm = _default_llm(settings)
     timeout_s = float(settings.resdex_llm_timeout_s)
@@ -534,15 +564,33 @@ async def _prepare(
     if not jobs:
         return out
 
+    # Logged out before the batch → no browser, no quota, no login wait: store the
+    # queries only. (A session recorded as logged in that turns out expired still
+    # gets the one login wait below.)
+    if queries_only or (batch_runner is None and not _recruiter_logged_in()):
+        for job in jobs:
+            await _record(tenant_id=tenant_id, run_id=run_id, job_url=job.job_url,
+                          target=selected[job.job_url][0],
+                          status=ResdexSearchStatus.QUERIES_ONLY,
+                          requirements=requirements[job.job_url], result=_queries_only(job))
+        logger.info("resdex_queries_only", run_id=run_id, jobs=len(jobs))
+        return out
+
     runner = batch_runner or _default_batch_runner
     waiter = login_waiter if login_waiter is not None else (
         _default_login_waiter if batch_runner is None else None
     )
     batch_started = datetime.now(timezone.utc)
+    await _stage(on_stage, "searching")
     try:
         results = dict(await runner(jobs, headless=False, min_results=_MIN_RESULTS) or {})
         if waiter is not None:
             await _retry_after_login(runner, waiter, jobs, results, batch_started, run_id)
+        # Still no login after the one wait → keep the built queries (queries only).
+        for job in jobs:
+            r = results.get(job.job_url)
+            if isinstance(r, ResdexBatchResult) and r.status in _LOGIN_STATUSES and not r.cards:
+                results[job.job_url] = _queries_only(job)
     except Exception as exc:
         logger.warning("resdex_batch_failed", run_id=run_id, jobs=len(jobs), error=str(exc))
         results = {}
@@ -598,6 +646,38 @@ async def _prepare(
         ),
     )
     return out
+
+
+def _recruiter_logged_in() -> bool:
+    """The recorded Naukri recruiter session (no browser launch); unsure → True, so
+    the browser check inside the batch decides."""
+    try:
+        from app.agents.naukri_recruiter_agent import read_status
+
+        return bool(read_status().get("logged_in"))
+    except Exception as exc:
+        logger.debug("resdex_recruiter_status_unreadable", error=str(exc))
+        return True
+
+
+def _queries_only(job: ResdexJobQuery) -> ResdexBatchResult:
+    """A QUERIES_ONLY outcome carrying the first tier's query + filters; searches_used
+    stays 0, so no tier is shown as searched (frontend_routes._resdex_tier_views)."""
+    first = job.tiers[0]
+    return ResdexBatchResult(
+        status=ResdexSearchStatus.QUERIES_ONLY, tier=first.tier, query=first.query,
+        filters=dict(first.filters or {}), searches_used=0, error=QUERIES_ONLY_REASON,
+    )
+
+
+async def _stage(hook: StageHook | None, stage: str) -> None:
+    """Call the progress hook; a failing hook never affects the search."""
+    if hook is None:
+        return
+    try:
+        await hook(stage)
+    except Exception as exc:
+        logger.debug("resdex_stage_hook_failed", stage=stage, error=str(exc))
 
 
 async def _retry_after_login(

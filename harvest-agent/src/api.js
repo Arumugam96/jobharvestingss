@@ -597,4 +597,6 @@ export function downloadExcelUrl() {
   return `${API_BASE}/download/excel`;
 }
 
-export { ApiError, API_BASE };
+// request / uploadRequest are also exported for feature-local clients (src/demand/
+// demandApi.js) so they share the cookie, dev-tenant header and error handling.
+export { ApiError, API_BASE, request, uploadRequest };

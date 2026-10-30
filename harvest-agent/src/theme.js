@@ -131,6 +131,8 @@ export const SRC_TONES = {
   // Home Feed leads — a distinct purple tone so they read differently from the
   // LinkedIn Jobs source everywhere a SourceChip appears (Jobs table, Run History).
   "LinkedIn Feed": { background: "#F5F3FF", color: "#6D28D9" },
+  // Demand Search jobs (uploaded client requirements, see src/demand/) — teal.
+  Demand: { background: "#F0FDFA", color: "#0F766E" },
 };
 
 export const STATUS_TONES = {

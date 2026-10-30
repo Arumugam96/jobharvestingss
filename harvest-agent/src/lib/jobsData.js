@@ -16,9 +16,11 @@ const SOURCE_DISPLAY = {
   naukri: "Naukri",
   dice: "Dice",
   "linkedin feed": "LinkedIn Feed",
+  demand: "Demand",
 };
 // Preferred order of the Source filter's options; any other source sorts after, A→Z.
-export const SOURCE_ORDER = ["LinkedIn", "Naukri", "Dice", "LinkedIn Feed"];
+// "Demand" (Demand Search uploads) is hidden from GET /jobs unless picked here.
+export const SOURCE_ORDER = ["LinkedIn", "Naukri", "Dice", "LinkedIn Feed", "Demand"];
 
 export function canonicalSource(raw) {
   const s = raw == null ? "" : String(raw).trim();
@@ -151,7 +153,9 @@ function mapApiJobFields(j) {
     salary: j.salary || "",
     jobType: j.job_type || "",
     workMode: j.work_mode || "",
-    applyLink: j.job_url || "",
+    // Only a real web link is an apply link — Demand Search rows carry a synthetic
+    // demand://jd/… key in job_url.
+    applyLink: /^https?:\/\//i.test(j.job_url || "") ? j.job_url : "",
     companyUrl: j.company_url || "",
     // Company-size band + friendly tier (Small/Medium/Large/Enterprise or "" ⇒
     // Unknown) captured at harvest — drives the display-only Company-size filter.

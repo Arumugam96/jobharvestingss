@@ -68,16 +68,24 @@ def _skills_text(skills: Any) -> str:
 
 def build_requirements_content(job: dict) -> str:
     """The extract_json content for one job — header fields, then the full JD
-    (bounded: keeps the head, which carries the requirement sections)."""
+    (bounded: keeps the head, which carries the requirement sections).
+
+    A Demand Search job (app/services/demand_service.py) carries the uploaded
+    file's optional Skills / Experience / Location in the same fields, plus an
+    optional ``client`` — added as one extra header line only when present, so
+    harvest jobs get exactly the content they always did. They are context for
+    the extraction, not overrides: grounding still checks every value."""
     jd = (job.get("job_description") or "").strip()
     if len(jd) > JD_MAX_CHARS:
         jd = jd[:JD_MAX_CHARS] + " …"
+    client = (job.get("client") or "").strip()
     return (
         f"Job title: {(job.get('job_title') or '').strip() or 'unknown'}\n"
         f"Skills listed on the posting: {_skills_text(job.get('skills')) or 'none'}\n"
         f"Experience: {(job.get('experience') or '').strip() or 'not stated'}\n"
-        f"Location: {(job.get('location') or '').strip() or 'not stated'}\n\n"
-        f"Job description:\n{jd}"
+        f"Location: {(job.get('location') or '').strip() or 'not stated'}\n"
+        + (f"Client: {client}\n" if client else "")
+        + f"\nJob description:\n{jd}"
     )
 
 

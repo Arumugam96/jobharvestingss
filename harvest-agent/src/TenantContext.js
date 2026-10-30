@@ -8,7 +8,7 @@ import { createContext, useContext } from "react";
  *
  * Shape: { id, name, type: "internal"|"client", region, theme: {accent, brand},
  *          features: {jobs, history, rules, sources, leads, outreach, analytics,
- *                     ruleEngineRedesign} }
+ *                     ruleEngineRedesign, demand} }
  */
 
 // Default slip = internal, full access — used for the AUTH_ENABLED=false dev
@@ -22,6 +22,7 @@ export const INTERNAL_TENANT = {
   features: {
     jobs: true, history: true, sources: true, leads: true, contacts: true,
     outreach: true, rules: true, analytics: true, ruleEngineRedesign: false,
+    demand: true,
   },
 };
 

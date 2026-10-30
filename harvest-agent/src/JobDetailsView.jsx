@@ -185,6 +185,11 @@ const RESDEX_STATUS = {
     tone: "neutral", Icon: FileText, title: "Skipped — no job description", badge: "Skipped",
     text: "There was no description or skill list to build a Resdex search from.",
   },
+  // Recruiter not logged in: requirements + T1–T3 queries built, Resdex not searched.
+  queries_only: {
+    tone: "neutral", Icon: Search, title: "Queries ready, not searched", badge: "Queries only · not searched", login: true,
+    text: "Connect the Naukri recruiter session and re-run to find candidates, or copy a query into Resdex by hand.",
+  },
 };
 
 const asList = (v) => (Array.isArray(v) ? v : v == null || v === "" ? [] : [v]);
@@ -543,7 +548,7 @@ function ResdexCandidatesSection({ resdex, onLogin }) {
           <span className="ha-src-tag" title="Contact the search was run for">{sourceLabel}</span>
         )}
         {emailedN > 0 && <span className="ha-rx-acc-meta">{emailedN} in email</span>}
-        {resdex.searched_at && <span className="ha-rx-when">Searched {fmtWhen(resdex.searched_at)}</span>}
+        {resdex.searched_at && <span className="ha-rx-when">{resdex.status === "queries_only" ? "Queries built" : "Searched"} {fmtWhen(resdex.searched_at)}</span>}
         <ChevronDown size={16} className="ha-rx-chev" style={{ transform: open ? "rotate(180deg)" : "none" }} />
       </button>
 

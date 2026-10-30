@@ -49,6 +49,7 @@ from app.routes.prospect_routes import router as prospect_intelligence_router
 from app.routes.recruiter_routes import router as recruiter_discovery_router
 from app.routes.recruiter_finder_routes import router as recruiter_finder_router
 from app.routes.recruiter_finder_routes import webhook_router as recruiter_finder_webhook_router
+from app.routes.demand_routes import router as demand_router
 from app.routes.lead_intelligence_routes import router as lead_intelligence_router
 from app.routes.outreach_routes import router as outreach_router, webhook_router as outreach_webhook_router
 from app.services.job_tracker import JobTracker
@@ -726,6 +727,7 @@ def create_app() -> FastAPI:
     app.include_router(prospect_intelligence_router, dependencies=protected)  # POST /run-prospect-intelligence
     app.include_router(recruiter_discovery_router, dependencies=protected)    # POST /run-recruiter-discovery
     app.include_router(recruiter_finder_router, dependencies=protected)       # POST /recruiter-finder/* (Apollo Contact Finder)
+    app.include_router(demand_router, dependencies=protected)                 # /demand/* (Demand Search: upload → Resdex candidates)
     app.include_router(lead_intelligence_router, dependencies=protected)      # POST /run-lead-intelligence, GET /lead-intelligence, /download/lead-intelligence/*
     app.include_router(outreach_router, dependencies=protected)               # POST /outreach/generate-email, /generate-linkedin, /send-email
     # Mailjet delivery-event webhook — unauthenticated (Mailjet has no login

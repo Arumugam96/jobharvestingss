@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import {
   SlidersHorizontal, LayoutList, History, Send, BarChart3, Radar, UserSearch, LogOut,
-  ChevronsLeft, ChevronsRight, Contact,
+  ChevronsLeft, ChevronsRight, Contact, FileSpreadsheet,
 } from "lucide-react";
 import HealthBadge from "./HealthBadge";
 import { useTenant } from "../TenantContext";
@@ -34,7 +34,7 @@ import { useTenant } from "../TenantContext";
  * is presentation only; the backend enforces access independently.
  *
  * Nav keys line up with HarvestAgent's `activePage` values
- * ("rules" | "jobs" | "history" | "sources" | "leads" | "outreach"); pass the
+ * ("rules" | "jobs" | "demand" | "history" | "sources" | "leads" | "outreach"); pass the
  * current one as `activePage` to highlight it. "Analytics" has no target yet,
  * so it renders as an inert item (no onClick).
  */
@@ -156,6 +156,9 @@ export default function Sidebar({ activePage, onNavigate = () => {}, jobsCount, 
             <div className="ha-navhead"><span>Operations</span></div>
             {hasFeature("jobs") && (
               <NavItem glyph={LayoutList} active={activePage === "jobs"} badge={jobsCount} onClick={() => go("jobs")}>Harvested Jobs</NavItem>
+            )}
+            {hasFeature("demand") && (
+              <NavItem glyph={FileSpreadsheet} active={activePage === "demand"} onClick={() => go("demand")}>Demand Search</NavItem>
             )}
             {hasFeature("history") && (
               <NavItem glyph={History} active={activePage === "history"} badge={runsCount} onClick={() => go("history")}>Run History</NavItem>
