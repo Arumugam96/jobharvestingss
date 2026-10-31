@@ -285,12 +285,12 @@ class Settings(BaseSettings):
     # How long a detail page is "read" once loaded (random scrolls down / back
     # up). Spent ON the job page and deducted from the gap above, so the
     # visit rate is unchanged — the time just moves from the SRP to the JD.
-    naukri_detail_dwell_min_s: int = 30
-    naukri_detail_dwell_max_s: int = 45
+    naukri_detail_dwell_min_s: int = 20
+    naukri_detail_dwell_max_s: int = 35
     naukri_backoff_max_multiplier: float = 2.0     # cap on the adaptive slow-down
     naukri_backoff_clean_streak: int = 10          # clean detail pages before easing back one step
     # A longer "coffee break" every N detail pages.
-    naukri_break_every_details: int = 20           # 0 = never
+    naukri_break_every_details: int = 50           # 0 = never
     naukri_break_min_s: int = 60
     naukri_break_max_s: int = 90
     # On a blocked detail page: cool down, then retry that job once.
