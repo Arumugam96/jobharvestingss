@@ -3,6 +3,9 @@ import { useSearchParams } from "react-router-dom";
 import { Search, Mail } from "lucide-react";
 import EmailComposeModal from "./EmailComposeModal";
 import LinkedInMessageModal from "./LinkedInMessageModal";
+import PhoneVerifyModal, {
+  PhoneVerifyStyles, PhoneVerifyButton, PhoneVerifyBadge, loadPhoneVerifications, savePhoneVerifications,
+} from "./PhoneVerify";
 import { getOutreachStatus } from "../api";
 import { C } from "../theme";
 import {
@@ -111,6 +114,17 @@ export default function JobsTable({
   // Fetched for the visible page rows so a sent recruiter shows a green icon that
   // survives refresh; clicking a sent email icon opens the follow-up composer.
   const [outreachStatus, setOutreachStatus] = useState({});
+  // Manual mobile verification per job id (UI-only, browser-local — see PhoneVerify.jsx).
+  const [phoneVerify, setPhoneVerify] = useState(loadPhoneVerifications);
+  const [phoneModal, setPhoneModal] = useState(null); // { job, phone, pocName }
+  const savePhoneResult = useCallback((jobId, result) => {
+    setPhoneVerify((prev) => {
+      const next = { ...prev };
+      if (result) next[jobId] = result; else delete next[jobId];
+      savePhoneVerifications(next);
+      return next;
+    });
+  }, []);
   const noDataTimer = useRef(null);
   const showNoData = useCallback((jobId, channel) => {
     setNoDataMsg({ jobId, channel });
@@ -347,7 +361,7 @@ export default function JobsTable({
                 <PlainHeader label="Company size" width={130} />
                 <SortHeader label="POC" col="poc" sort={sort} setSort={setSort} width={140} />
                 <PlainHeader label="Email" width={230} />
-                <PlainHeader label="Mobile" width={150} />
+                <PlainHeader label="Mobile" width={190} />
                 <th className="ha-th ha-th-pin" style={{ textAlign: "center", width: 130, minWidth: 130 }}>Contact</th>
                 <SortHeader label="Source" col="source" sort={sort} setSort={setSort} width={100} />
                 <SortHeader label="Posted date" col="posted" sort={sort} setSort={setSort} width={120} />
@@ -384,7 +398,18 @@ export default function JobsTable({
                     <DualContact parts={c.emailParts} link="mailto:" cls="ha-mail" />
                   </td>
                   <td className="ha-td" style={{ whiteSpace: "nowrap" }}>
-                    <DualContact parts={c.phoneParts} link="tel:" cls="ha-tel" />
+                    {c.phone ? (
+                      <div className="pvm-cell">
+                        <PhoneVerifyButton verified={phoneVerify[j.id]?.phone === c.phone}
+                          onClick={() => setPhoneModal({ job: j, phone: c.phone, pocName: c.pocName })} />
+                        <div className="pvm-val"><DualContact parts={c.phoneParts} link="tel:" cls="ha-tel" /></div>
+                        {/* A stored result only applies while the row still shows the same number. */}
+                        <PhoneVerifyBadge result={phoneVerify[j.id]?.phone === c.phone ? phoneVerify[j.id] : null}
+                          onEdit={() => setPhoneModal({ job: j, phone: c.phone, pocName: c.pocName })} />
+                      </div>
+                    ) : (
+                      <DualContact parts={c.phoneParts} link="tel:" cls="ha-tel" />
+                    )}
                   </td>
                   <td className="ha-td ha-td-pin">
                     <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
@@ -465,6 +490,17 @@ export default function JobsTable({
           parentOutreachId={emailModal.parentOutreachId}
           onClose={() => setEmailModal(null)}
           onSent={refreshOutreachStatus}
+        />
+      )}
+      <PhoneVerifyStyles />
+      {phoneModal && (
+        <PhoneVerifyModal
+          phone={phoneModal.phone}
+          pocName={phoneModal.pocName}
+          company={phoneModal.job.company}
+          initial={phoneVerify[phoneModal.job.id]?.phone === phoneModal.phone ? phoneVerify[phoneModal.job.id] : null}
+          onSave={(result) => savePhoneResult(phoneModal.job.id, result)}
+          onClose={() => setPhoneModal(null)}
         />
       )}
       {linkedinModalJob && (
