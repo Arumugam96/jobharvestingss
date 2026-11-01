@@ -74,7 +74,12 @@ def build_requirements_content(job: dict) -> str:
     file's optional Skills / Experience / Location in the same fields, plus an
     optional ``client`` — added as one extra header line only when present, so
     harvest jobs get exactly the content they always did. They are context for
-    the extraction, not overrides: grounding still checks every value."""
+    the extraction, not overrides: grounding still checks every value.
+
+    A manually entered Demand job may also carry ``metadata`` — extra text fields
+    (budget, work_mode, notice_period …) — appended as one "Key: value" line each
+    (humanized key, whitespace collapsed) after the standard fields; no metadata →
+    the content is unchanged."""
     jd = (job.get("job_description") or "").strip()
     if len(jd) > JD_MAX_CHARS:
         jd = jd[:JD_MAX_CHARS] + " …"
@@ -85,8 +90,27 @@ def build_requirements_content(job: dict) -> str:
         f"Experience: {(job.get('experience') or '').strip() or 'not stated'}\n"
         f"Location: {(job.get('location') or '').strip() or 'not stated'}\n"
         + (f"Client: {client}\n" if client else "")
+        + _metadata_lines(job.get("metadata"))
         + f"\nJob description:\n{jd}"
     )
+
+
+def humanize_key(key: str) -> str:
+    """``work_mode`` → ``Work mode``."""
+    text = " ".join(str(key or "").replace("_", " ").split())
+    return text[:1].upper() + text[1:]
+
+
+def _metadata_lines(meta: Any) -> str:
+    if not isinstance(meta, dict):
+        return ""
+    lines = []
+    for k, v in meta.items():
+        value = " ".join(str(v or "").split()) if isinstance(v, str) else ""
+        label = humanize_key(k)
+        if value and label:
+            lines.append(f"{label}: {value}\n")
+    return "".join(lines)
 
 
 def _job_matcher(job: dict) -> TextMatcher:

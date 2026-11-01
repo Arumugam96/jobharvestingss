@@ -49,7 +49,7 @@ from app.models.recruiter_finder import (
     RecruiterFinderJobORM,
     RecruiterFinderRevealLogORM,
 )
-from app.services import recruiter_finder_budget
+from app.services import apollo_budget, recruiter_finder_budget
 from app.services.harvest_run_service import db_read, db_write
 
 logger = structlog.get_logger(__name__)
@@ -369,6 +369,10 @@ async def process_delivery(
                 row.credits_charged = cost
                 if cost:
                     await recruiter_finder_budget._charge(db, today, row.tenant_id, cost)
+                    # A delivered phone is a real Apollo charge on the shared account —
+                    # count it on the global counter + ledger too (already incurred,
+                    # so an unconditional add, same as the Finder charge above).
+                    await apollo_budget._settle(db, today, 0, cost, "finder", "phone_webhook")
                 counts["found"] += 1
             else:
                 row.status = NOT_FOUND

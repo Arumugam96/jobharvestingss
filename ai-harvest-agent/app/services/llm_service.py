@@ -225,6 +225,7 @@ class LLMService:
     """Anthropic Claude/openrouter/LocalLLM client with retry logic and tool-use support."""
 
     def __init__(self, settings: Settings) -> None:
+        self._anthropic_api_key = settings.anthropic_api_key
         self.anthropic_client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
         self.anthropic_model = settings.anthropic_model
         self.anthropic_max_tokens = settings.anthropic_max_tokens
@@ -232,17 +233,9 @@ class LLMService:
         self._extraction_llm_model = settings.extraction_llm_model
         self._local_llm_url = settings.local_llm_url
         self._local_llm_model = settings.local_llm_model
-        # Circuit breaker: once the local LLM is confirmed down (connection
-        # refused / timeout / HTTP error) during this run, short-circuit every
-        # subsequent local call so we don't re-pay the full timeout per job.
-        # Run-scoped — a new run builds a fresh LLMService, so this never
-        # poisons a later healthy run.
         self._local_llm_down = False
         self._openrouter_api_key = settings.openrouter_api_key
         self._openrouter_model = settings.openrouter_model
-        # Single failover provider tried when the primary extraction provider is
-        # down (EXTRACTION_FALLBACK_MODEL). "" = no failover. Resolved through the
-        # same mapping as the primary (_resolve_target_string).
         self._extraction_fallback_model = settings.extraction_fallback_model
         self._debug_seq = 0
         self._usage: dict[str, _ProviderUsage] = {
@@ -349,14 +342,11 @@ class LLMService:
         provider — Returns (text, input_tokens, output_tokens, provider, model). Set
         json_mode=True to ask the provider for a JSON object (Ollama format=json /
         OpenRouter response_format); leave False for plain text. `model` overrides
-        only the Claude model id (local/OpenRouter models come from config).
-
-        Routes through the same provider-failover core as extract_json (local →
-        single configured fallback), so outreach generation survives a local-LLM
-        outage too. log_calls=False keeps generation out of the per-instance call
-        log (the outreach flow writes its own audit row via the returned meta)."""
+        the model id ONLY when the provider in use is Claude (local/OpenRouter models
+        always come from config).
+        """
         text, provider, resolved, input_tokens, output_tokens = await self._complete_text_with_failover(
-            prompt, system, json_mode=json_mode, claude_model=model, log_calls=False,
+            prompt, system, json_mode=json_mode, llm_model=model, log_calls=False,
         )
         return text, input_tokens, output_tokens, provider, resolved
 
@@ -367,18 +357,22 @@ class LLMService:
         the same selection extraction and generation use. Callers (e.g.
         OutreachService) use it to stamp the provider/model on an audit row even
         when the call itself fails before generate_text() can report them back."""
-        return self._resolve_extraction_target()
+        return self._resolve_target_string(self._extraction_llm_model)
 
     def provider_chain(self) -> list[tuple[str, str]]:
         """Public accessor for the ordered (provider, model) failover chain —
         lets callers check a provider is configured before relying on it."""
-        return self._provider_chain()
+        return self._llm_chain()
 
-    def _resolve_extraction_target(self) -> tuple[str, str]:
-        """The primary (provider, model) extract_json()/generate_text() call, driven
-        by EXTRACTION_LLM_MODEL. Delegates to _resolve_target_string so the primary
-        and the EXTRACTION_FALLBACK_MODEL fallback resolve through the same mapping."""
-        return self._resolve_target_string(self._extraction_llm_model)
+    def provider_ready(self, provider: str) -> bool:
+        """Whether ``provider`` has the credentials / endpoint it needs: Claude and
+        OpenRouter need an API key; a local (Ollama) provider only needs a URL —
+        reachability is learned on the first call (the circuit breaker)."""
+        if provider == _PROVIDER_CLAUDE:
+            return bool(self._anthropic_api_key)
+        if provider == _PROVIDER_OPENROUTER:
+            return bool(self._openrouter_api_key)
+        return bool(self._local_llm_url)
 
     def _resolve_target_string(self, raw: str) -> tuple[str, str]:
         """
@@ -407,12 +401,12 @@ class LLMService:
             return _PROVIDER_OPENROUTER, self._openrouter_model
         return _PROVIDER_OLLAMA, raw
 
-    def _provider_chain(self) -> list[tuple[str, str]]:
+    def _llm_chain(self) -> list[tuple[str, str]]:
         """Ordered (provider, model) pairs to try: the primary extraction target
         first, then AT MOST ONE configured fallback (EXTRACTION_FALLBACK_MODEL).
         The fallback is skipped when unset or when it resolves to the same provider
         as the primary — so the worst case is one extra call, never a long chain."""
-        primary = self._resolve_extraction_target()
+        primary = self._resolve_target_string(self._extraction_llm_model)
         chain = [primary]
         fb_raw = (self._extraction_fallback_model or "").strip()
         if fb_raw:
@@ -429,26 +423,28 @@ class LLMService:
         json_mode: bool,
         call_type: str = LlmCallType.JOB_HARVEST,
         job_url: str | None = None,
-        claude_model: str | None = None,
+        llm_model: str | None = None,
         log_calls: bool = True,
         validate: "Callable[[str], None] | None" = None,
     ) -> tuple[str, str, str, int | None, int | None]:
-        """Reusable provider-failover core shared by extract_json (extraction) and generate_text (outreach email/LinkedIn generation).
-
-        Tries the two-provider chain (local first, then the single configured fallback) until one returns text; 
-        only LLMUnavailableError (provider down) triggers failover — any other error propagates immediately. Raises
+        """
+        Tries the two-provider chain (local first, then the single configured fallback)
+        until one returns text; only LLMUnavailableError (provider down) triggers
+        failover — any other error propagates immediately. Raises
         LLMUnavailableError only when EVERY provider in the chain is unavailable.
 
         When log_calls=True (extraction) a call-log entry is appended for EVERY
         attempt, so the failed-local + successful-fallback pair are both visible in
         the llm_calls audit. generate_text passes log_calls=False to preserve its
         original behaviour (its outreach audit row is written separately by the
-        caller). Returns (text, provider, model, input_tokens, output_tokens)."""
-        chain = self._provider_chain()
+        caller). ``llm_model`` overrides the model id only for a Claude provider in
+        the chain; other providers keep their configured model. Returns
+        (text, provider, model, input_tokens, output_tokens)."""
+        chain = self._llm_chain()
         last_exc: LLMUnavailableError | None = None
         for provider, model in chain:
-            if provider == _PROVIDER_CLAUDE and claude_model:
-                model = claude_model
+            if provider == _PROVIDER_CLAUDE and llm_model:
+                model = llm_model
             retry_token = _retry_attempts.set(0)
             start = time.monotonic()
             # Wall-clock instant this provider attempt began — recorded on the
@@ -533,7 +529,7 @@ class LLMService:
     def _local_llm_unavailable_msg(self, model: str, url: str, reason: str) -> str:
         name = self._local_llm_model or model
         return (
-            f"SightSpectrum's Local LLM '{name}' at {url} is unavailable ({reason}) — the server "
+            f"SightSpectrum's Local LLM '{name}' is unavailable ({reason}) — the server "
             f"may be shut down. Contact the admin team."
         )
 
@@ -578,7 +574,7 @@ class LLMService:
         if system:
             payload["system"] = system
 
-        logger.info("local_llm_request_started", url=url, model=model, prompt_chars=len(prompt))
+        logger.info("local_llm_request_started", model=model, prompt_chars=len(prompt))
         try:
             async with httpx.AsyncClient(timeout=_LOCAL_LLM_TIMEOUT_S) as client:
                 response = await client.post(url, json=payload)
@@ -753,7 +749,7 @@ class LLMService:
         )
         logger.info(
             "llm_extraction_started",
-            providers=[p for p, _ in self._provider_chain()],
+            providers=[p for p, _ in self._llm_chain()],
             content_chars=len(content), prompt_chars=len(prompt),
         )
 

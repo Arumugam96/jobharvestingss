@@ -234,7 +234,27 @@ export function mapJobToDetail(j) {
   };
 }
 
+// Whole-run wall time in seconds (started → completed, which now includes the
+// post-harvest Resdex/outreach phase), or null while running / when unknown.
+export function runDurationSeconds(startedAt, completedAt) {
+  if (!startedAt || !completedAt) return null;
+  const ms = Date.parse(completedAt) - Date.parse(startedAt);
+  return Number.isFinite(ms) && ms >= 0 ? Math.round(ms / 1000) : null;
+}
+
+// 5400 → "1h 30m", 125 → "2m 5s", 42 → "42s"; "—" for null/undefined.
+export function fmtSeconds(sec) {
+  if (sec == null || !Number.isFinite(Number(sec))) return "—";
+  const s = Math.max(0, Math.round(Number(sec)));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (h) return `${h}h ${m}m`;
+  if (m) return `${m}m ${s % 60}s`;
+  return `${s}s`;
+}
+
 export function mapRun(entry) {
+  const phases = entry.phase_timings || {};
   return {
     runId: entry.run_id,
     sources: entry.sources || [],
@@ -244,6 +264,16 @@ export function mapRun(entry) {
     status: entry.status || "no_results",
     startedAt: entry.started_at || "",
     completedAt: entry.completed_at || "",
+    // Scrape end + per-phase seconds (scrape / Resdex & outreach). Absent on
+    // runs that predate the post-harvest phase split.
+    scrapeCompletedAt: entry.scrape_completed_at || "",
+    durationS: runDurationSeconds(entry.started_at, entry.completed_at),
+    phaseTimings: {
+      scrapeS: phases.scrape_s ?? null,
+      postHarvestS: phases.outreach_s != null || phases.resdex_sweep_s != null
+        ? (phases.outreach_s || 0) + (phases.resdex_sweep_s || 0)
+        : null,
+    },
     jobsFound: entry.jobs_found ?? 0,
     verifiedJobs: entry.verified_jobs ?? 0,
     directClients: entry.direct_clients ?? 0,

@@ -17,7 +17,6 @@ Apollo/LinkedIn fetching lives in the agent.
 """
 from __future__ import annotations
 
-import re
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -25,23 +24,8 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.job_url import normalize_company_key  # noqa: F401 — re-exported
 from app.models.harvest_run import CompanyORM
-
-_LEGAL_SUFFIXES = re.compile(
-    r"\b(inc|incorporated|ltd|limited|llc|llp|pvt|private|corp|corporation|co|plc|gmbh|"
-    r"technologies|technology|solutions|services|systems|labs|software)\b"
-)
-_PUNCT = re.compile(r"[^\w\s]")
-_WS = re.compile(r"\s+")
-
-
-def normalize_company_key(company_name: str) -> str:
-    """Stable dedup key for a company name — lower-cased, legal/industry suffixes
-    and punctuation stripped, whitespace collapsed. "" for a blank name."""
-    text = (company_name or "").lower()
-    text = _LEGAL_SUFFIXES.sub("", text)
-    text = _PUNCT.sub(" ", text)
-    return _WS.sub(" ", text).strip()
 
 
 async def get_companies_by_keys(db: AsyncSession, keys: set[str]) -> dict[str, CompanyORM]:

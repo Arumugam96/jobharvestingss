@@ -616,6 +616,19 @@ def _otp_identity_from(settings: Settings) -> dict:
     return out
 
 
+def report_identity_from(settings: Settings, display_name: str | None) -> dict:
+    """The From identity for the harvest-report email: the dedicated no-reply
+    address (OTP_FROM_EMAIL, see _otp_identity_from) shown under ``display_name``
+    (NotificationConfig.email_cover_label, e.g. "SS Harvest Notification"). CR/LF
+    are stripped and whitespace collapsed so a config value can never inject a
+    header; a blank label keeps the OTP_FROM_NAME default."""
+    out = dict(_otp_identity_from(settings))
+    name = " ".join((display_name or "").split())
+    if name:
+        out["Name"] = name
+    return out
+
+
 def _parse_from(from_header: str, fallback_email: str) -> dict:
     """Turn a resolved RFC From header ("Name <addr>" or "addr") into a Mailjet
     ``{"Email","Name"}`` object (harvest report — configured sender identity).
@@ -680,6 +693,11 @@ class EmailSender:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
 
+    @property
+    def settings(self) -> Settings:
+        """The settings this sender was built with (read-only)."""
+        return self._settings
+
     async def send_otp(self, recipient: str, otp: str) -> None:
         settings = self._settings
         log = logger.bind(recipient=recipient)
@@ -729,6 +747,7 @@ class EmailSender:
         is_automation: bool = False,
         candidate_block: str = "",
         candidate_html: str = "",
+        sender_identity: dict | None = None,
     ) -> str | None:
         """Generic Mailjet send with attachments — same transport/credentials as
         send_otp. Attachments come as file paths and/or as in-memory
@@ -744,8 +763,13 @@ class EmailSender:
         becomes the shared "harvest agent" identity (the same "SS" sender the OTP
         email uses), and `from_email`/`reply_to` are set as the Reply-To so
         recruiter replies reach the salesperson. Callers that omit `from_email`
-        (the harvest report) send under the configured sender identity resolved by
-        _resolve_sender.
+        send under the configured sender identity resolved by _resolve_sender.
+
+        `sender_identity` (the harvest report — see report_identity_from) is a
+        ready-made Mailjet ``{"Email","Name"}`` From used as-is: it is NOT an
+        outreach send, so no Reply-To / OUTREACH_EXTRA_REPLY_TO addresses are added
+        (unless `reply_to` is passed explicitly). It takes precedence over
+        `from_email`.
 
         HTML alternative part: pass `html_body` to supply a fully-formed HTML
         body (the harvest report renders its own) — `body` stays as the plain-text
@@ -776,9 +800,14 @@ class EmailSender:
         #  * Outreach (caller passes `from_email`) → shared "SS" identity; the
         #    sender's own address becomes the Reply-To so the recruiter's reply
         #    still reaches the salesperson.
-        #  * Harvest report (no `from_email`) → configured sender identity
+        #  * Neither `from_email` nor `sender_identity` → configured sender identity
         #    (see _resolve_sender).
-        if from_email:
+        #  * Explicit `sender_identity` (harvest report) → used as-is, never
+        #    treated as outreach (no Reply-To extras).
+        if sender_identity:
+            sender = dict(sender_identity)
+            from_email = None
+        elif from_email:
             sender = _shared_identity_from(settings)
         else:
             from_header, envelope_from = _resolve_sender(settings)
@@ -820,8 +849,8 @@ class EmailSender:
         # Reply-To addresses on outreach sends (from_email set). The extras are
         # NEVER recipients of this email — a recruiter's reply reaches them only
         # because their mail client addresses every Reply-To when they hit Reply
-        # (RFC 5322 permits multiple Reply-To mailboxes). The harvest report has no
-        # from_email, so it never gets the extras.
+        # (RFC 5322 permits multiple Reply-To mailboxes). The harvest report passes
+        # sender_identity (from_email cleared above), so it never gets the extras.
         reply_addrs: list[str] = []
         primary = (reply_to or from_email or "").strip()
         if primary:

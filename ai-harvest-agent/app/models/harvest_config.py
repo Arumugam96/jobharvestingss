@@ -204,11 +204,15 @@ class NotificationConfig(BaseModel):
     PUT /harvest-config without a code change.
 
     subject_template supports {run_id}, {status}, {total_jobs} placeholders.
+    email_cover_label is the display name of the report sender (the From address
+    is Settings.otp_from_email). report_format=None sends the email with no
+    attachments (summary only).
     """
-    enabled:           bool                              = False
-    recipients:        list[str]                         = Field(default_factory=list)
-    report_format:     Literal["excel", "json", "both"]  = "both"
-    subject_template:  str                                = "Harvest Report — {run_id} ({status}, {total_jobs} jobs)"
+    enabled:           bool                                   = False
+    recipients:        list[str]                              = Field(default_factory=list)
+    email_cover_label: str                                    = "SS Harvest Notification"
+    report_format:     Literal["excel", "json", "both"] | None = "both"
+    subject_template:  str = "Harvest Report — {run_id} ({status}, {total_jobs} jobs)"
 
 
 # ══════════════════════════════════════════════════════════════════════════════

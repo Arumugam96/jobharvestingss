@@ -76,6 +76,16 @@ class HarvestRunORM(Base):
     report_pending: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # When the scrape itself finished (jobs persisted) — the run stays "running"
+    # through the post-harvest Resdex/outreach phase until completed_at. Lets
+    # fail_stale_running close a run cut short in that phase as success.
+    scrape_completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Wall-clock seconds per phase: {"scrape_s", "outreach_s", "resdex_sweep_s"}.
+    phase_timings: Mapped[dict | None] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -446,3 +456,26 @@ class ApolloPurposeUsageORM(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+
+class ApolloCreditLedgerORM(Base):
+    """Append-only log of Apollo credits ACTUALLY consumed (app/services/apollo_budget.py).
+
+    The daily counters above hold pre-flight reservations that ``apollo_budget.settle``
+    reconciles down to the real charge once Apollo responds; this ledger records one
+    row per call that really consumed credits (the response's ``credits_consumed`` when
+    Apollo reports it, else the billable records it returned — never failed / empty /
+    no-match / free-search calls). Timestamped so a harvest run can report the credits
+    it spent between its start and its report (``apollo_budget.credits_between``).
+    Global (not tenant-scoped) — like the counters, it tracks one shared API key.
+    """
+    __tablename__ = "apollo_credit_ledger"
+    __table_args__ = (Index("ix_apollo_credit_ledger_created_at", "created_at"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    purpose: Mapped[str] = mapped_column(String(20), nullable=False, default="")
+    endpoint: Mapped[str] = mapped_column(String(60), nullable=False, default="")
+    credits: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

@@ -223,6 +223,18 @@ def _ensure_harvest_runs_columns(sync_conn) -> None:
             f"ALTER TABLE harvest_runs ADD COLUMN source_status {json_type}"
         ))
         logger.info("harvest_runs_column_added", column="source_status")
+    # scrape_completed_at + phase_timings: the run stays "running" through the
+    # post-harvest Resdex/outreach phase; scrape end + per-phase seconds are
+    # recorded separately. Nullable, no default. Mirrored in alembic 0027.
+    ts_type = "TIMESTAMPTZ" if sync_conn.dialect.name == "postgresql" else "TIMESTAMP"
+    json_type = "JSONB" if sync_conn.dialect.name == "postgresql" else "JSON"
+    for col, col_type in (
+        ("scrape_completed_at", ts_type),
+        ("phase_timings",       json_type),
+    ):
+        if col not in existing_cols:
+            sync_conn.execute(sa_text(f"ALTER TABLE harvest_runs ADD COLUMN {col} {col_type}"))
+            logger.info("harvest_runs_column_added", column=col)
 
 
 def _ensure_email_outreach_columns(sync_conn) -> None:

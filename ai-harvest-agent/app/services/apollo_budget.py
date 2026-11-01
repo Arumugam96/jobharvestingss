@@ -22,6 +22,15 @@ Atomicity: the gate is a single conditional ``UPDATE ... WHERE count + cost <= c
 whose row-count tells us whether the bump was allowed — row-locked in Postgres and
 globally serialized in SQLite, so two concurrent callers can't both pass at the limit.
 
+Reserve, then settle: ``try_consume`` is a PRE-FLIGHT reservation of the most a call
+could cost (so the caps can never be overshot by concurrent callers). Once Apollo
+responds, ApolloClient calls ``settle(reserved, consumed)`` with what the call ACTUALLY
+cost — the response's ``credits_consumed`` when Apollo reports it, else the billable
+records it returned (0 for a failed / empty / no-match call) — which releases the
+unused part of the reservation from both counters and appends the real charge to the
+`apollo_credit_ledger`. So the counters (and usage_today / usage_this_month) reflect
+credits Apollo actually charged, not calls attempted.
+
 Best-effort: a DB error fails **open** (allows the call, logs a warning), consistent
 with the app's other best-effort DB helpers (db_read/db_write) — the per-run caps still
 bound usage, and a DB outage means little is running anyway. ``cap <= 0`` = unlimited.
@@ -31,6 +40,7 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 
 import structlog
+from sqlalchemy import func, select
 from sqlalchemy import text as sa_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -193,6 +203,95 @@ async def try_consume(
     except Exception as exc:
         logger.warning("apollo_budget_check_failed", error=str(exc))
         return True  # fail-open: don't block enrichment on a DB blip
+
+
+async def _release(db: AsyncSession, today, cost: int, purpose: str | None) -> None:
+    """Give back ``cost`` unused reserved credits on ``today``'s global row (and the
+    ``purpose`` row), clamped at 0 (no commit — the caller owns the transaction)."""
+    await db.execute(
+        sa_text(
+            "UPDATE apollo_daily_usage "
+            "SET count = CASE WHEN count > :n THEN count - :n ELSE 0 END, "
+            "updated_at = CURRENT_TIMESTAMP WHERE usage_date = :d"
+        ),
+        {"n": cost, "d": today},
+    )
+    if purpose:
+        await db.execute(
+            sa_text(
+                "UPDATE apollo_purpose_usage "
+                "SET count = CASE WHEN count > :n THEN count - :n ELSE 0 END, "
+                "updated_at = CURRENT_TIMESTAMP WHERE usage_date = :d AND purpose = :p"
+            ),
+            {"n": cost, "d": today, "p": purpose},
+        )
+
+
+async def _settle(
+    db: AsyncSession, today, reserved: int, consumed: int, purpose: str | None, endpoint: str
+) -> None:
+    """Reconcile a reservation of ``reserved`` credits to the ``consumed`` amount Apollo
+    actually charged (no commit — the caller owns the transaction): release the unused
+    part, or — when Apollo charged MORE than reserved (already incurred, can't be
+    refused) — add the overage unconditionally. Logs the real charge to the ledger."""
+    from app.models.harvest_run import ApolloCreditLedgerORM
+
+    reserved, consumed = max(0, int(reserved)), max(0, int(consumed))
+    if consumed < reserved:
+        await _release(db, today, reserved - consumed, purpose)
+    elif consumed > reserved:
+        extra = consumed - reserved
+        await _reserve(db, today, 0, extra)  # cap 0 = unconditional bump
+        if purpose:
+            await _reserve_purpose(db, today, purpose, 0, extra)
+    if consumed > 0:
+        db.add(ApolloCreditLedgerORM(
+            created_at=datetime.now(timezone.utc),
+            purpose=purpose or "", endpoint=endpoint[:60], credits=consumed,
+        ))
+
+
+async def settle(
+    reserved: int, consumed: int, *, purpose: str | None = None, endpoint: str = ""
+) -> None:
+    """Reconcile a ``try_consume(reserved)`` reservation to the ``consumed`` credits the
+    Apollo response actually indicated (see module docstring). Best-effort — never
+    raises; a DB error leaves the (conservative, over-counted) reservation in place."""
+    settings = get_settings()
+    try:
+        factory = get_session_factory(settings)
+        async with factory() as db:
+            await _settle(db, _utc_today(), reserved, consumed, purpose, endpoint)
+            await db.commit()
+    except Exception as exc:
+        logger.warning(
+            "apollo_budget_settle_failed",
+            reserved=reserved, consumed=consumed, endpoint=endpoint, error=str(exc),
+        )
+
+
+async def credits_between(
+    start: datetime, end: datetime | None = None, *, purpose: str | None = "enrichment"
+) -> int | None:
+    """Credits Apollo actually charged (ledger) between ``start`` and ``end`` (default
+    now), for ``purpose`` (None = every purpose). Used for a harvest run's "credits this
+    run" figure. None on any DB error so callers can fall back to another figure."""
+    from app.models.harvest_run import ApolloCreditLedgerORM as L
+
+    settings = get_settings()
+    end = end or datetime.now(timezone.utc)
+    try:
+        factory = get_session_factory(settings)
+        async with factory() as db:
+            q = select(func.coalesce(func.sum(L.credits), 0)).where(
+                L.created_at >= start, L.created_at <= end
+            )
+            if purpose:
+                q = q.where(L.purpose == purpose)
+            return int((await db.execute(q)).scalar() or 0)
+    except Exception as exc:
+        logger.warning("apollo_budget_credits_between_failed", error=str(exc))
+        return None
 
 
 async def remaining_today(*, cap: int | None = None, purpose: str | None = None) -> int | None:

@@ -108,7 +108,7 @@ _LIST_FIELDS = ("previous_roles", "preferred_locations", "skills")
 
 def resdex_llm_settings(settings: Any) -> Any:
     """``settings`` with the extraction model swapped for RESDEX_LLM_MODEL when set
-    (same pattern as jd_llm_enrichment.naukri_llm_settings); unset → unchanged, so
+    (a ``model_copy`` of the app settings); unset → unchanged, so
     Resdex inherits EXTRACTION_LLM_MODEL."""
     model = (getattr(settings, "resdex_llm_model", "") or "").strip()
     if not model:

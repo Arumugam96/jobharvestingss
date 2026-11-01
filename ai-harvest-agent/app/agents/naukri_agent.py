@@ -100,7 +100,6 @@ from app.services.jd_llm_enrichment import (
     is_flat_description,
     llm_configured,
     llm_extract_contacts,
-    naukri_llm_settings,
     llm_restructure_description,
 )
 
@@ -1309,7 +1308,6 @@ class NaukriAgent:
             return None
         if not self._llm_resolved:
             self._llm_resolved = True
-            settings = naukri_llm_settings(settings)
             if not llm_configured(settings):
                 self._llm_off_reason = "llm_not_configured"
                 logger.warning(

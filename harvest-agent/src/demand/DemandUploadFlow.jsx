@@ -1,16 +1,18 @@
 import { useEffect, useRef, useState } from "react";
 import {
   FileSpreadsheet, FileText, CheckCircle2, XCircle, RotateCcw, Check, X, AlertTriangle, Upload,
-  ChevronRight, KeyRound, Gauge, Clock, Lock, Monitor, Search, Loader2, Info,
+  ChevronRight, KeyRound, Gauge, Clock, Lock, Monitor, Search, Loader2, Info, PencilLine,
 } from "lucide-react";
-import { demandError, demandUpload, demandValidate } from "./demandApi";
+import { demandError, demandUpload, demandValidate, validateJson } from "./demandApi";
 import {
-  Stepper, Note, HarvestRunningModal, sessionState, fmtDuration, fmtAgo, fmtDay, SESSION_TIP,
+  Stepper, Note, HarvestRunningModal, sessionState, fmtDuration, fmtAgo, fmtDay, SESSION_TIP, MANUAL_STEPS,
 } from "./demandUi";
 
 /* Steps 2 and 3 of a new Demand Search batch: validation (POST /demand/validate —
  * nothing is saved) and pre-flight (session, shared quota, duration, Start →
- * POST /demand/upload). */
+ * POST /demand/upload). Manually entered jobs use the same two steps:
+ * ManualReviewStep (POST /demand/validate-json) and PreflightStep with an onStart
+ * that calls POST /demand/create. */
 
 const FIELD_LABELS = {
   job_title: "Job Title", job_description: "Job Description", skills: "Skills",
@@ -89,6 +91,79 @@ export function ValidationStep({ file, initial, onReplace, onCancel, onContinue 
   );
 }
 
+// ── Step 2 (manual entry): POST /demand/validate-json ─────────────────────────
+
+/** payload: {batch_name, jobs: [{job_title, job_description, metadata}]}. */
+export function ManualReviewStep({ payload, initial, onEdit, onContinue }) {
+  const [preview, setPreview] = useState(initial || null);
+  const [invalid, setInvalid] = useState(null);   // 422 detail
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (initial) return undefined;
+    let alive = true;
+    setPreview(null); setInvalid(null); setError("");
+    validateJson(payload)
+      .then((res) => { if (alive) setPreview(res); })
+      .catch((err) => {
+        if (!alive) return;
+        const e = demandError(err);
+        if (e.status === 422) setInvalid(e.detail?.message ? e.detail : { message: e.message });
+        else setError(e.message);
+      });
+    return () => { alive = false; };
+  }, [payload, initial]);
+
+  const n = payload.jobs.length;
+  let body;
+  if (error) {
+    body = (
+      <div className="dm-summary">
+        <div className="ha-errbanner">{error}</div>
+        <div className="dm-foot"><button type="button" className="ha-btn ha-btn-secondary" onClick={onEdit}>Back to edit</button></div>
+      </div>
+    );
+  } else if (invalid) {
+    const errs = invalid.errors || [];
+    body = (
+      <div className="dm-summary">
+        <div className="dm-state bad" role="alert">
+          <span className="dm-state-ico"><AlertTriangle size={18} /></span>
+          <h4>{invalid.title || "The jobs need fixing"}</h4>
+          <p>{invalid.message}</p>
+          {errs.length > 0 && (
+            <ul className="dm-errlist" style={{ marginTop: 6 }}>
+              {errs.map((x, i) => (
+                <li key={i}>{x.job ? `Job ${x.job}` : "Batch"}{x.key ? ` · ${x.key}` : x.field ? ` · ${x.field}` : ""}: {x.message}</li>
+              ))}
+            </ul>
+          )}
+          <div className="dm-state-acts">
+            <button type="button" className="ha-btn ha-btn-primary ha-btn-sm" onClick={onEdit}>Back to edit</button>
+            <span>Nothing was saved.</span>
+          </div>
+        </div>
+      </div>
+    );
+  } else if (!preview) {
+    body = <div className="dm-soft" style={{ display: "flex", gap: 8, alignItems: "center" }}><Loader2 size={16} className="ha-spin" /> Checking {plural(n, "job")}…</div>;
+  } else {
+    body = <ValidationSummary manual preview={preview} onReplace={onEdit} onCancel={onEdit} onContinue={() => onContinue(preview)} />;
+  }
+
+  return (
+    <>
+      <PageHead sub="Check the jobs before anything is searched. Nothing is saved until you start the batch." />
+      <div className="ha-pagebody">
+        <div className="ha-card dm-card">
+          <Stepper active={2} steps={MANUAL_STEPS} />
+          {body}
+        </div>
+      </div>
+    </>
+  );
+}
+
 function FileErrorState({ file, err, onChoose }) {
   const headers = err.headers_found || [];
   const mapping = err.mapping || {};
@@ -122,33 +197,46 @@ function FileErrorState({ file, err, onChoose }) {
   );
 }
 
-function ValidationSummary({ preview, onReplace, onCancel, onContinue }) {
+function ValidationSummary({ preview, onReplace, onCancel, onContinue, manual = false }) {
   const p = preview;
   const mapping = p.mapping || {};
   const reuse = p.reuse || [];
   const invalid = p.invalid || [];
   const optional = Object.keys(FIELD_LABELS).filter((f) => !REQUIRED.includes(f) && mapping[f]);
+  const unit = manual ? "job" : "row";
+  const rowLbl = manual ? "Job" : "Row";
   return (
     <div className="dm-summary">
-      <div className="dm-filechip">
-        <div className="dm-fic"><FileSpreadsheet size={18} /></div>
-        <div>
-          <div className="dm-fname">{p.filename}</div>
-          <div className="dm-fmeta dm-num">
-            {p.size_label}{p.sheet ? ` · Sheet "${p.sheet}"` : ""} · {plural(p.total_rows, "row")} parsed (max 50)
+      {manual ? (
+        <div className="dm-filechip">
+          <div className="dm-fic"><PencilLine size={18} /></div>
+          <div>
+            <div className="dm-fname">{p.filename || "Manual entry"}</div>
+            <div className="dm-fmeta dm-num">{plural(p.total_rows, "job")} entered (max 50)</div>
           </div>
+          <button type="button" className="ha-btn ha-btn-secondary ha-btn-sm" onClick={onReplace}>Edit jobs</button>
         </div>
-        <button type="button" className="ha-btn ha-btn-secondary ha-btn-sm" onClick={onReplace}>Replace file</button>
-      </div>
+      ) : (
+        <div className="dm-filechip">
+          <div className="dm-fic"><FileSpreadsheet size={18} /></div>
+          <div>
+            <div className="dm-fname">{p.filename}</div>
+            <div className="dm-fmeta dm-num">
+              {p.size_label}{p.sheet ? ` · Sheet "${p.sheet}"` : ""} · {plural(p.total_rows, "row")} parsed (max 50)
+            </div>
+          </div>
+          <button type="button" className="ha-btn ha-btn-secondary ha-btn-sm" onClick={onReplace}>Replace file</button>
+        </div>
+      )}
 
       <div className="dm-valrow" aria-label="Validation summary">
-        <span className="dm-valchip total dm-num">{plural(p.total_rows, "row")}</span>
+        <span className="dm-valchip total dm-num">{plural(p.total_rows, unit)}</span>
         <span className="dm-valchip ready dm-num"><CheckCircle2 size={14} /> {p.valid_rows} valid</span>
         {invalid.length > 0 && <span className="dm-valchip miss dm-num"><XCircle size={14} /> {invalid.length} invalid, will be skipped</span>}
         {reuse.length > 0 && <span className="dm-valchip reuse dm-num"><RotateCcw size={14} /> {reuse.length} will reuse an existing match</span>}
       </div>
 
-      <div>
+      {!manual && <div>
         <div className="dm-blk-lbl">
           Column mapping <span className="lc" style={{ color: "#047857" }}>· detected automatically</span>
           <span className="lc">· optional columns are sent to the LLM as extra context</span>
@@ -160,18 +248,18 @@ function ValidationSummary({ preview, onReplace, onCancel, onContinue }) {
             <span className="dm-mapchip off">Ignored: {p.ignored_headers.map((h) => `"${h}"`).join(", ")}</span>
           )}
         </div>
-      </div>
+      </div>}
 
       {invalid.length > 0 && (
         <div>
           <div className="dm-blk-lbl">
-            {plural(invalid.length, "row")} will be skipped
-            <span className="lc">· fix them in the file and upload it again, or continue without them</span>
+            {plural(invalid.length, unit)} will be skipped
+            <span className="lc">· {manual ? "edit the jobs to fix them" : "fix them in the file and upload it again"}, or continue without them</span>
           </div>
           <div className="dm-issues">
             {invalid.map((i) => (
               <div key={i.row} className="dm-issue">
-                <span className="rn">Row {i.row}</span>
+                <span className="rn">{rowLbl} {i.row}</span>
                 <span><b>{i.reason}</b>{i.fix && <span className="fix">{i.fix}</span>}</span>
               </div>
             ))}
@@ -184,7 +272,7 @@ function ValidationSummary({ preview, onReplace, onCancel, onContinue }) {
           <b>Will reuse existing match (no quota used):</b>{" "}
           {reuse.map((r, i) => (
             <span key={r.row}>
-              {i ? (i === reuse.length - 1 ? " and " : ", ") : ""}row {r.row} {r.job_title} (searched {fmtDay(r.searched_at)}, {plural(r.candidates, "candidate")})
+              {i ? (i === reuse.length - 1 ? " and " : ", ") : ""}{unit} {r.row} {r.job_title} (searched {fmtDay(r.searched_at)}, {plural(r.candidates, "candidate")})
             </span>
           ))}
           . Each was searched in the last {p.reuse_days || 14} days. To search again, open the job after the batch finishes and choose "Re-run Resdex search".
@@ -192,13 +280,13 @@ function ValidationSummary({ preview, onReplace, onCancel, onContinue }) {
       )}
 
       <div>
-        <div className="dm-blk-lbl">Preview <span className="lc">· first {(p.preview || []).length} rows</span></div>
+        <div className="dm-blk-lbl">Preview <span className="lc">· first {plural((p.preview || []).length, unit)}</span></div>
         <div className="dm-tbl-wrap">
           <div className="dm-tbl-scroll">
             <table className="dm-mini">
               <thead>
                 <tr>
-                  <th style={{ width: 56 }}>Row</th><th style={{ width: 210 }}>Job title</th><th style={{ width: 130 }}>Client</th>
+                  <th style={{ width: 56 }}>{rowLbl}</th><th style={{ width: 210 }}>Job title</th><th style={{ width: 130 }}>Client</th>
                   <th style={{ width: 110 }}>Location</th><th style={{ width: 70 }}>Exp</th><th>Job description</th>
                   <th style={{ width: 170 }}>Skills</th><th style={{ width: 130 }}>Check</th>
                 </tr>
@@ -226,10 +314,10 @@ function ValidationSummary({ preview, onReplace, onCancel, onContinue }) {
       </div>
 
       <div className="dm-foot">
-        <span className="left">{plural(p.new_searches ?? p.valid_rows, "new search", "new searches")} + {reuse.length} reused. Invalid rows are not saved.</span>
-        <button type="button" className="ha-btn ha-btn-secondary" onClick={onCancel}>Cancel</button>
+        <span className="left">{plural(p.new_searches ?? p.valid_rows, "new search", "new searches")} + {reuse.length} reused. Invalid {unit}s are not saved.</span>
+        <button type="button" className="ha-btn ha-btn-secondary" onClick={onCancel}>{manual ? "Back to edit" : "Cancel"}</button>
         <button type="button" className="ha-btn ha-btn-primary" onClick={onContinue} disabled={!p.valid_rows}>
-          Continue with {plural(p.valid_rows, "row")} <ChevronRight size={16} />
+          Continue with {plural(p.valid_rows, unit)} <ChevronRight size={16} />
         </button>
       </div>
     </div>
@@ -245,9 +333,11 @@ const WHY = (
   </p>
 );
 
-export function PreflightStep({ file, preview, sess, onBack, onStarted }) {
+/** Start → ``onStart(batchName)`` when given (manual entry → POST /demand/create),
+ * else POST /demand/upload with ``file``. */
+export function PreflightStep({ file, preview, sess, onBack, onStarted, onStart, defaultName, manual = false }) {
   const { usage, refresh, connect, connecting, note } = sess;
-  const [name, setName] = useState((preview.filename || "").replace(/\.[^.]+$/, ""));
+  const [name, setName] = useState(defaultName ?? (preview.filename || "").replace(/\.[^.]+$/, ""));
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState("");
   const [modal, setModal] = useState(null);
@@ -276,7 +366,7 @@ export function PreflightStep({ file, preview, sess, onBack, onStarted }) {
     setStarting(true);
     setError("");
     try {
-      const res = await demandUpload(file, name);
+      const res = onStart ? await onStart(name) : await demandUpload(file, name);
       onStarted(res);
     } catch (err) {
       const e = demandError(err);
@@ -328,7 +418,7 @@ export function PreflightStep({ file, preview, sess, onBack, onStarted }) {
       <PageHead sub="Check the session and today's Resdex quota before starting." />
       <div className="ha-pagebody">
         <div className="ha-card dm-card">
-          <Stepper active={3} />
+          <Stepper active={3} steps={manual ? MANUAL_STEPS : undefined} />
           <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
             {!enabled && <div className="ha-errbanner">Resdex is disabled on this server (RESDEX_ENABLED=false), so Demand Search can't start.</div>}
             <div className="dm-pf-grid">

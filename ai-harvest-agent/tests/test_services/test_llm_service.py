@@ -95,7 +95,7 @@ SAMPLE_EXTRACTED = {
 )
 def test_resolve_extraction_target(extraction_llm_model, expected_provider, expected_model) -> None:
     svc = LLMService(_settings(extraction_llm_model=extraction_llm_model))
-    provider, model = svc._resolve_extraction_target()
+    provider, model = svc.resolve_target()
     assert provider == expected_provider
     assert model == expected_model
 

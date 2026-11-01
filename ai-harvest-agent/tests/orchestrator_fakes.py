@@ -204,8 +204,9 @@ class RecordingRunService:
     async def bulk_insert_scraped_jobs(self, run_pk: str, jobs: list[dict]) -> None:
         self._rec("bulk_insert_scraped_jobs", jobs=jobs)
 
-    async def replace_run_jobs(self, run_pk: str, jobs: list[dict]) -> None:
+    async def replace_run_jobs(self, run_pk: str, jobs: list[dict]) -> bool:
         self._rec("replace_run_jobs", jobs=jobs)
+        return True
 
     async def bulk_insert_llm_calls(self, run_pk: str, calls: list[dict]) -> None:
         self._rec("bulk_insert_llm_calls", calls=calls)

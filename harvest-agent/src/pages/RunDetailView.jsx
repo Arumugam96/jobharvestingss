@@ -5,7 +5,9 @@ import { C } from "../theme";
 import ThemeStyles from "../components/ThemeStyles";
 import { SourceChip, StatusPill, Select, fmtDate } from "../components/ui";
 import JobsTable, { PAGE_SIZE_OPTIONS } from "../components/JobsTable";
-import { mapRun, fetchAllJobs, jobContact, pocKindLabel, partSourceLabel } from "../lib/jobsData";
+import {
+  mapRun, fetchAllJobs, jobContact, pocKindLabel, partSourceLabel, fmtSeconds,
+} from "../lib/jobsData";
 
 // Labels for the Run Detail classification cards / active-filter chip.
 const BUCKET_LABELS = {
@@ -151,6 +153,18 @@ export default function RunDetailView({ runId, onBack, onView }) {
                       <div>
                         <div style={{ fontSize: 11, color: C.textSoft, fontWeight: 600, letterSpacing: ".05em", textTransform: "uppercase" }}>Completed</div>
                         <div style={{ fontSize: 14, fontWeight: 600, color: C.text, marginTop: 3 }}>{fmtDate(entry.completedAt)}</div>
+                      </div>
+                      <div>
+                        <div style={{ fontSize: 11, color: C.textSoft, fontWeight: 600, letterSpacing: ".05em", textTransform: "uppercase" }}>Duration</div>
+                        <div style={{ fontSize: 14, fontWeight: 600, color: C.text, marginTop: 3 }}>
+                          {entry.status === "running" ? "—" : fmtSeconds(entry.durationS)}
+                        </div>
+                        {entry.phaseTimings.scrapeS != null && (
+                          <div style={{ fontSize: 12, color: C.textSoft, marginTop: 2 }}>
+                            Scrape {fmtSeconds(entry.phaseTimings.scrapeS)}
+                            {entry.phaseTimings.postHarvestS != null && <> · Resdex &amp; outreach {fmtSeconds(entry.phaseTimings.postHarvestS)}</>}
+                          </div>
+                        )}
                       </div>
                     </div>
                   </div>

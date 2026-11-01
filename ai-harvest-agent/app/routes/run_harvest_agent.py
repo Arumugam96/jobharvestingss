@@ -33,6 +33,7 @@ Poll GET /harvest-status/{job_id} for progress and final results.
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
@@ -197,6 +198,12 @@ def _run_to_history_entry(run: HarvestRunORM) -> dict[str, Any]:
         "staffing_firms": run.staffing_firms,
         "ambiguous":      run.ambiguous,
         "error":          run.error,
+        # Post-harvest phase split: scrape end + {"scrape_s","outreach_s","resdex_sweep_s"}.
+        "scrape_completed_at": (
+            run.scrape_completed_at.isoformat()
+            if getattr(run, "scrape_completed_at", None) else ""
+        ),
+        "phase_timings":  getattr(run, "phase_timings", None) or {},
     }
 
 
@@ -598,9 +605,19 @@ async def _run_harvest_background_impl(
     # Reconcile: replace_run_jobs atomically deletes the provisional rows written
     # incrementally during the scrape and inserts the final classified/deduped
     # set, so the end state is exactly result.all_jobs with no duplicates.
+    persisted = False
     if run_pk:
         scraped_dicts = [j.to_dict() for j in result.all_jobs]
-        await db_write(lambda db: HarvestRunService(db).replace_run_jobs(run_pk, scraped_dicts))
+        persisted = await db_write(
+            lambda db: HarvestRunService(db).replace_run_jobs(run_pk, scraped_dicts)
+        ) is True
+        if not persisted:
+            # The DB still holds the provisional incremental rows (or nothing) —
+            # never report from those; fall back to the in-memory final list.
+            log.error(
+                "harvest_final_persist_failed", jobs=len(scraped_dicts),
+                note="report built from the in-memory job list",
+            )
         await db_write(lambda db: HarvestRunService(db).bulk_insert_llm_calls(run_pk, result.llm_calls))
         await _persist_reenrich_queue(run_pk, result.reenrich_queue, log)
 
@@ -608,10 +625,10 @@ async def _run_harvest_background_impl(
     # gathered so far (the scrape loops break and return early — see
     # linkedin_agent). Persist them exactly like a normal completion, but mark
     # the run "stopped", flag its report as owed (report_pending), and skip the
-    # email — the next successful run merges these jobs into its own report.
+    # post-harvest phase + email — the next successful run merges these jobs
+    # into its own report.
     stopped = run_guard.is_stop_requested()
 
-    # ── Update run history ────────────────────────────────────────────────────
     status_str = "stopped" if stopped else ("success" if result.total_jobs > 0 else "no_results")
     # LinkedIn stopped on an extraction-LLM outage but the other source(s)
     # completed: the run still succeeds (status above is unchanged); the outage
@@ -622,11 +639,101 @@ async def _run_harvest_background_impl(
     )
     if outage_note:
         log.warning("harvest_linkedin_llm_outage_isolated", error=result.llm_outage, status=status_str)
+
+    phase_timings: dict[str, float] = {
+        "scrape_s": round((result.completed_at - result.started_at).total_seconds(), 1),
+    }
+
+    # ── This run's rows (report attachments, insights, outreach) ─────────────
+    # Built from the DB so the recruiter-merged email/phone (scraped_job_view) is
+    # what recipients see; the ORM rows also carry contact provenance (linked
+    # recruiter) for the insights and are what outreach needs. Falls back to the
+    # in-memory scraped list if the DB mirror failed.
+    run_rows: list = []
+    report_dicts: list[dict] = []
+    if run_pk and persisted:
+        run_rows = list(
+            await db_read(lambda db: HarvestRunService(db).list_jobs_for_run(run_pk)) or []
+        )
+        if run_rows:
+            report_dicts = merged_job_dicts(run_rows)
+    if not report_dicts:
+        report_dicts = [j.to_dict() for j in result.all_jobs]
+
+    # ── Deferred reports owed by previously user-stopped runs ─────────────────
+    # Their jobs ride along in THIS report's attachments (and get this run's
+    # outreach pass) — but never in this run's counts. Only when notifications
+    # are enabled — otherwise leave them pending rather than silently clearing a
+    # report that never actually went out. Cleared after the email is sent.
+    pending_runs: list = []
+    pending_rows: list = []
+    pending_dicts: list[dict] = []
+    if not stopped and config.notifications.enabled:
+        pending = await db_read(lambda db: HarvestRunService(db).list_pending_report_runs()) or []
+        for pend in pending:
+            if pend.id == run_pk:
+                continue
+            pend_rows = await db_read(
+                lambda db, pend_pk=pend.id: HarvestRunService(db).list_jobs_for_run(pend_pk)
+            ) or []
+            pending_runs.append(pend)
+            pending_rows.extend(pend_rows)
+            pending_dicts.extend(merged_job_dicts(pend_rows))
+
+    # ── Post-harvest phase: Resdex search + outreach, Apollo Resdex sweep ─────
+    # The run stays "running" (scrape_completed_at marks the scrape end) until
+    # this phase finishes, so the duration covers it and a restart mid-phase is
+    # reconciled as success (fail_stale_running). A user stop skips it entirely.
+    if not stopped:
+        post_msg = "Post-harvest: Resdex search & outreach…"
+        JobTracker.update(job_id, progress=80, message=post_msg)
+        if run_pk:
+            await db_write(lambda db: HarvestRunService(db).update_run(
+                run_pk,
+                progress            = 80,
+                message             = post_msg,
+                scrape_completed_at = result.completed_at,
+                combined_count      = result.total_jobs,
+            ))
+
+        # Automated end-of-harvest outreach (best-effort): an initial recruiter
+        # email for every harvested job with a resolvable email, logged to
+        # email_outreach. Gated by OUTREACH_AUTO_SEND_ON_HARVEST; idempotent via
+        # initial_email_sent. Runs over this run's rows + any deferred runs' rows.
+        from app.services.auto_outreach_service import run_auto_outreach_after_harvest
+
+        t0 = time.monotonic()
+        try:
+            await run_auto_outreach_after_harvest(
+                run_rows + pending_rows, run_id=run_id,
+                company_sizes=config.filters.company_sizes,
+            )
+        except Exception as exc:
+            log.exception("harvest_post_outreach_failed", error=str(exc))
+        phase_timings["outreach_s"] = round(time.monotonic() - t0, 1)
+
+        # Apollo-contact Resdex catch-up (best-effort): earlier jobs whose
+        # Apollo-enriched contact arrived after their own harvest get the same
+        # Resdex search + outreach now — still inside this run's single-flight
+        # guard, so the recruiter browser profile is never shared. Off unless
+        # RESDEX_ENABLED and RESDEX_INCLUDE_APOLLO_CONTACTS; honours a stop request.
+        from app.services.outreach_sweep_service import run_apollo_resdex_sweep
+
+        t0 = time.monotonic()
+        try:
+            await run_apollo_resdex_sweep(run_id=run_id, company_sizes=config.filters.company_sizes)
+        except Exception as exc:
+            log.exception("harvest_post_resdex_sweep_failed", error=str(exc))
+        phase_timings["resdex_sweep_s"] = round(time.monotonic() - t0, 1)
+
+    # ── Final status: only now is the run complete ───────────────────────────
+    finished = result.completed_at if stopped else datetime.now(timezone.utc)
+    elapsed_seconds = (finished - result.started_at).total_seconds()
     history_entry = RunHistoryService.make_entry(
         run_id          = run_id,
         sources         = result.sources_executed,
         started_at      = result.started_at,
-        completed_at    = result.completed_at,
+        completed_at    = finished,
         status          = status_str,
         jobs_found      = result.total_jobs,
         verified_jobs   = result.verified_jobs,
@@ -641,7 +748,6 @@ async def _run_harvest_background_impl(
     except Exception as exc:
         log.warning("history_save_failed", error=str(exc))
 
-    elapsed_seconds = (result.completed_at - result.started_at).total_seconds()
     log.info(
         "harvest_completed",
         run_id         = run_id,
@@ -653,6 +759,7 @@ async def _run_harvest_background_impl(
         ambiguous      = result.ambiguous,
         sources        = result.sources_executed,
         runtime_min    = round(elapsed_seconds / 60, 1),
+        phase_timings  = phase_timings,
         combined_path  = result.combined_path,
         token_usage    = result.token_usage.get("total", {}),
     )
@@ -670,7 +777,7 @@ async def _run_harvest_background_impl(
         status       = status_str,
         progress     = 100,
         message      = final_message,
-        completed_at = result.completed_at.isoformat(),
+        completed_at = finished.isoformat(),
         excel_path   = result.excel_path   or "",
         json_path    = result.combined_path or "",
         token_usage  = result.token_usage,
@@ -680,24 +787,26 @@ async def _run_harvest_background_impl(
     if run_pk:
         await db_write(lambda db: HarvestRunService(db).update_run(
             run_pk,
-            status          = status_str,
-            progress        = 100,
-            message         = final_message,
-            error           = outage_note or None,
-            source_status   = final_sources,
-            completed_at    = result.completed_at,
-            excel_path      = result.excel_path or None,
-            json_path       = result.combined_path or None,
-            token_usage     = result.token_usage,
-            verified_jobs   = result.verified_jobs,
-            direct_clients  = result.direct_clients,
-            gcc             = result.gcc,
-            staffing_firms  = result.staffing_firms,
-            ambiguous       = result.ambiguous,
-            sources         = result.sources_executed,
+            status              = status_str,
+            progress            = 100,
+            message             = final_message,
+            error               = outage_note or None,
+            source_status       = final_sources,
+            completed_at        = finished,
+            scrape_completed_at = result.completed_at,
+            phase_timings       = phase_timings,
+            excel_path          = result.excel_path or None,
+            json_path           = result.combined_path or None,
+            token_usage         = result.token_usage,
+            verified_jobs       = result.verified_jobs,
+            direct_clients      = result.direct_clients,
+            gcc                 = result.gcc,
+            staffing_firms      = result.staffing_firms,
+            ambiguous           = result.ambiguous,
+            sources             = result.sources_executed,
             # A stopped run with jobs owes a deferred report; a stopped run with
             # zero jobs has nothing to defer.
-            report_pending  = stopped and result.total_jobs > 0,
+            report_pending      = stopped and result.total_jobs > 0,
         ))
 
     # A user-stopped run defers its report: jobs are saved and flagged
@@ -707,90 +816,55 @@ async def _run_harvest_background_impl(
         return
 
     # ── Email the report to configured recipients (best-effort) ──────────────
-    # Attachments are built in memory from this run's DB rows so the
-    # recruiter-merged email/phone (scraped_job_view) is what recipients see;
-    # falls back to the in-memory scraped list if the DB mirror failed.
-    report_dicts: list[dict] = []
-    # ORM rows kept alongside the dicts purely to compute the email insights
-    # (source split + local-LLM/Apollo contact provenance) — provenance lives on
-    # the linked recruiter, which the dicts/UI view don't carry.
-    insight_rows: list = []
-    if run_pk:
-        run_rows = await db_read(lambda db: HarvestRunService(db).list_jobs_for_run(run_pk))
-        if run_rows:
-            report_dicts = merged_job_dicts(run_rows)
-            insight_rows = list(run_rows)
-    if not report_dicts:
-        report_dicts = [j.to_dict() for j in result.all_jobs]
-
-    # ── Flush any deferred reports owed by previously user-stopped runs ───────
-    # Their jobs are merged into THIS report so a single email carries both.
-    # Only when notifications are enabled — otherwise leave them pending rather
-    # than silently clearing a report that never actually went out.
-    total_for_email = result.total_jobs
-    if config.notifications.enabled:
-        pending_runs = await db_read(lambda db: HarvestRunService(db).list_pending_report_runs()) or []
-        merged_pending = 0
-        for pend in pending_runs:
-            if pend.id == run_pk:
-                continue
-            pend_rows = await db_read(lambda db: HarvestRunService(db).list_jobs_for_run(pend.id))
-            if pend_rows:
-                report_dicts = report_dicts + merged_job_dicts(pend_rows)
-                insight_rows = insight_rows + list(pend_rows)
-                merged_pending += len(pend_rows)
-            await db_write(lambda db: HarvestRunService(db).clear_report_pending(pend.id))
-        if merged_pending:
-            total_for_email = len(report_dicts)
-            log.info("deferred_reports_merged", runs=len(pending_runs), jobs=merged_pending)
-
-    # Report-email-only insights (never surfaced in the UI) built from the DB
-    # rows: with/without LinkedIn, records carrying email/phone, and how many
-    # contacts came from the local LLM/scrape vs paid Apollo enrichment.
-    insights = compute_harvest_insights(insight_rows) if insight_rows else None
+    # Report-email-only insights (never surfaced in the UI) from THIS run's rows:
+    # distinct postings (the same posting on two sources counts once), source
+    # split, contactability and contact provenance. Deferred runs' jobs are only
+    # in the attachments, noted as "+N jobs from earlier stopped run(s)".
+    insights = compute_harvest_insights(run_rows) if run_rows else None
+    if insights is not None:
+        if pending_dicts:
+            insights["deferred_jobs"] = len(pending_dicts)
+        # Every credit Apollo actually CHARGED since this run started — harvest
+        # enrichment, Recruiter Finder, phone webhooks alike (apollo_credit_ledger) —
+        # distinct from insights["apollo_enriched"], the number of postings whose
+        # contact is Apollo-sourced.
+        run_credits = await _apollo_credits_since(result.started_at, log)
+        if run_credits is not None:
+            insights["apollo_credits_run"] = run_credits
 
     await send_harvest_report(
         EmailSender(get_settings()),
         config.notifications,
         run_id      = run_id,
         status      = status_str,
-        total_jobs  = total_for_email,
+        total_jobs  = insights["total"] if insights else result.total_jobs,
         sources     = result.sources_executed,
-        job_dicts   = report_dicts,
+        job_dicts   = report_dicts + pending_dicts,
         insights    = insights,
         run_timing  = {
-            "started":  result.started_at,
-            "completed": result.completed_at,
+            "started":    result.started_at,
+            "completed":  finished,
             "duration_s": elapsed_seconds,
+            "phases":     phase_timings,
         },
     )
+    for pend in pending_runs:
+        await db_write(
+            lambda db, pend_pk=pend.id: HarvestRunService(db).clear_report_pending(pend_pk)
+        )
+    if pending_runs:
+        log.info("deferred_reports_merged", runs=len(pending_runs), jobs=len(pending_dicts))
 
-    # ── Automated end-of-harvest outreach (best-effort, never raises) ─────────
-    # Send an initial recruiter email for every harvested job with a resolvable
-    # email and log it to the email_outreach table (visible in the Mail-logs UI).
-    # Gated by OUTREACH_AUTO_SEND_ON_HARVEST; idempotent via initial_email_sent.
-    # Reuse the ORM rows already loaded for the report (this run + any flushed
-    # deferred runs, recruiter eager-loaded); reload only if that set is empty.
-    from app.services.auto_outreach_service import run_auto_outreach_after_harvest
 
-    outreach_rows = insight_rows
-    if not outreach_rows and run_pk:
-        outreach_rows = await db_read(
-            lambda db: HarvestRunService(db).list_jobs_for_run(run_pk)
-        ) or []
-    await run_auto_outreach_after_harvest(
-        outreach_rows or [], run_id=run_id, company_sizes=config.filters.company_sizes,
-    )
+async def _apollo_credits_since(started_at: datetime, log: Any) -> int | None:
+    """Apollo credits charged for every purpose since ``started_at`` (None if unknown)."""
+    try:
+        from app.services import apollo_budget
 
-    # ── Apollo-contact Resdex catch-up (best-effort, never raises) ────────────
-    # Earlier jobs whose Apollo-enriched contact arrived after their own harvest
-    # (Contact Finder / prospect intelligence / Apollo sweep) get the same Resdex
-    # search + outreach now — still inside this run's single-flight guard, so the
-    # recruiter browser profile is never shared. Off unless RESDEX_ENABLED and
-    # RESDEX_INCLUDE_APOLLO_CONTACTS; bounded by RESDEX_APOLLO_SWEEP_MAX_JOBS.
-    from app.services.outreach_sweep_service import run_apollo_resdex_sweep
-
-    await run_apollo_resdex_sweep(run_id=run_id, company_sizes=config.filters.company_sizes)
+        return await apollo_budget.credits_between(started_at, purpose=None)
+    except Exception as exc:
+        log.warning("harvest_apollo_credits_lookup_failed", error=str(exc))
+        return None
 
 
 # ══════════════════════════════════════════════════════════════════════════════

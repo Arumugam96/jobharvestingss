@@ -6,6 +6,7 @@ import {
 } from "../components/ui";
 import { getRunHistoryContactMatch, ApiError } from "../api";
 import { CONTACT_FILTER_OPTIONS } from "../lib/contactFilter";
+import { fmtSeconds } from "../lib/jobsData";
 import { useHarvestData } from "../HarvestDataContext";
 import { useTenant } from "../TenantContext";
 
@@ -77,6 +78,7 @@ export default function RunHistoryPage({ runs, loading, error, onRefresh, onNavi
         case "status": return a.status.localeCompare(b.status) * dir;
         case "started": return a.startedAt.localeCompare(b.startedAt) * dir;
         case "completed": return a.completedAt.localeCompare(b.completedAt) * dir;
+        case "duration": return ((a.durationS ?? -1) - (b.durationS ?? -1)) * dir;
         case "jobsFound": return (a.jobsFound - b.jobsFound) * dir;
         default: return 0;
       }
@@ -84,9 +86,9 @@ export default function RunHistoryPage({ runs, loading, error, onRefresh, onNavi
   }, [runs, filters, startDate, endDate, query, sort, contactMatch]);
 
   function exportCsv() {
-    const header = ["Run ID", "Sources", "Status", "Started", "Completed", "Jobs found", "Verified", "Direct clients", "GCC", "Staffing firms", "Ambiguous"];
+    const header = ["Run ID", "Sources", "Status", "Started", "Completed", "Duration (s)", "Jobs found", "Verified", "Direct clients", "GCC", "Staffing firms", "Ambiguous"];
     const lines = filtered.map((r) =>
-      [r.runId, r.sources.join("|"), r.status, r.startedAt, r.completedAt, r.jobsFound, r.verifiedJobs, r.directClients, r.gcc, r.staffingFirms, r.ambiguous]
+      [r.runId, r.sources.join("|"), r.status, r.startedAt, r.completedAt, r.durationS ?? "", r.jobsFound, r.verifiedJobs, r.directClients, r.gcc, r.staffingFirms, r.ambiguous]
         .map((c) => '"' + String(c).replace(/"/g, '""') + '"').join(","));
     // Prepend a UTF-8 BOM so Excel detects the encoding — without it Excel reads
     // the file as Windows-1252 and turns the "—" placeholder into "â€"".
@@ -151,7 +153,7 @@ export default function RunHistoryPage({ runs, loading, error, onRefresh, onNavi
 
         <div className="ha-card" style={{ overflow: "hidden" }}>
           <div className="ha-table-scroll">
-            <table className="ha-table" style={{ minWidth: 1100 }}>
+            <table className="ha-table" style={{ minWidth: 1200 }}>
               <thead className="ha-thead">
                 <tr>
                   <SortHeader label="Run ID" col="runId" sort={sort} setSort={setSort} width={190} />
@@ -159,13 +161,14 @@ export default function RunHistoryPage({ runs, loading, error, onRefresh, onNavi
                   <SortHeader label="Status" col="status" sort={sort} setSort={setSort} width={120} />
                   <SortHeader label="Started" col="started" sort={sort} setSort={setSort} width={150} />
                   <SortHeader label="Completed" col="completed" sort={sort} setSort={setSort} width={150} />
+                  <SortHeader label="Duration" col="duration" sort={sort} setSort={setSort} width={110} />
                   <SortHeader label="Jobs found" col="jobsFound" sort={sort} setSort={setSort} width={100} />
                   <PlainHeader label="Breakdown" width={220} />
                 </tr>
               </thead>
               <tbody>
                 {(loading || contactLoading) && (
-                  <tr><td className="ha-td" colSpan={7} style={{ textAlign: "center", padding: "48px 16px", color: "#94A3B8" }}>
+                  <tr><td className="ha-td" colSpan={8} style={{ textAlign: "center", padding: "48px 16px", color: "#94A3B8" }}>
                     {loading ? "Loading run history…" : "Filtering runs by contact…"}
                   </td></tr>
                 )}
@@ -183,6 +186,15 @@ export default function RunHistoryPage({ runs, loading, error, onRefresh, onNavi
                     <td className="ha-td"><StatusPill status={r.status} /></td>
                     <td className="ha-td" style={{ whiteSpace: "nowrap", color: C.textSoft }}>{fmtDate(r.startedAt)}</td>
                     <td className="ha-td" style={{ whiteSpace: "nowrap", color: C.textSoft }}>{fmtDate(r.completedAt)}</td>
+                    <td
+                      className="ha-td"
+                      style={{ whiteSpace: "nowrap", color: C.textSoft }}
+                      title={r.phaseTimings.scrapeS != null
+                        ? `Scrape ${fmtSeconds(r.phaseTimings.scrapeS)} · Resdex & outreach ${fmtSeconds(r.phaseTimings.postHarvestS)}`
+                        : undefined}
+                    >
+                      {r.status === "running" ? "—" : fmtSeconds(r.durationS)}
+                    </td>
                     <td className="ha-td" style={{ fontWeight: 600 }}>
                       <AnimatedNumber value={r.jobsFound} />
                       <span style={{ fontSize: 11, fontWeight: 500, color: C.textSoft, marginLeft: 4 }}>{isFeed ? "leads" : "jobs"}</span>
@@ -204,7 +216,7 @@ export default function RunHistoryPage({ runs, loading, error, onRefresh, onNavi
                   );
                 })}
                 {!loading && !contactLoading && !error && !contactError && filtered.length === 0 && (
-                  <tr><td className="ha-td" colSpan={7} style={{ textAlign: "center", padding: "48px 16px", color: "#94A3B8" }}>
+                  <tr><td className="ha-td" colSpan={8} style={{ textAlign: "center", padding: "48px 16px", color: "#94A3B8" }}>
                     No runs match your search. Trigger a harvest from the Rule Engine to see history here.
                   </td></tr>
                 )}

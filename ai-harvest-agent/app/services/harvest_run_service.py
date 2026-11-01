@@ -527,13 +527,15 @@ class HarvestRunService:
         indexed, so this is cheap. Recruiters are NOT touched (they persist)."""
         await self._db.execute(delete(ScrapedJobORM).where(ScrapedJobORM.run_id == run_pk))
 
-    async def replace_run_jobs(self, run_pk: str, jobs: list[dict[str, Any]]) -> None:
+    async def replace_run_jobs(self, run_pk: str, jobs: list[dict[str, Any]]) -> bool:
         """Atomically swap a run's scraped jobs for a new set (delete + insert in
         the same session/transaction), so the run's rows are never briefly empty
         for a concurrent reader. Used to reconcile provisional incremental rows
-        with the final canonical list at end-of-run."""
+        with the final canonical list at end-of-run. Returns True once both steps
+        ran, so a db_write caller can tell success from a swallowed failure (None)."""
         await self.delete_jobs_for_run(run_pk)
         await self.bulk_insert_scraped_jobs(run_pk, jobs)
+        return True
 
     async def bulk_insert_llm_calls(self, run_pk: str, calls: list[dict[str, Any]]) -> None:
         if not calls:
@@ -655,18 +657,33 @@ class HarvestRunService:
         return [r for r in result.scalars() if r]
 
     async def fail_stale_running(self, message: str = "Interrupted by a server restart") -> int:
-        """Mark every still-'running' run as 'failed'. A harvest executes in a
-        detached asyncio task that does NOT survive a process restart, so any
-        row left 'running' at startup is stale. Without this the single-flight
-        guard's DB backstop (get_active_run) would see a dead run and reject
-        every new start with 409 forever. Mirrors JobTracker.load_from_disk's
-        in-memory reconciliation. Returns the number of rows updated."""
+        """Reconcile every still-'running' run. A harvest executes in a detached
+        asyncio task that does NOT survive a process restart, so any row left
+        'running' at startup is stale. Without this the single-flight guard's DB
+        backstop (get_active_run) would see a dead run and reject every new start
+        with 409 forever. Mirrors JobTracker.load_from_disk's in-memory
+        reconciliation.
+
+        A run whose scrape had already finished (scrape_completed_at set — its jobs
+        are persisted; only the post-harvest Resdex/outreach phase was cut short) is
+        closed as 'success'; every other running row is marked 'failed'. Returns the
+        total number of rows updated."""
+        now = datetime.now(timezone.utc)
+        post_harvest_msg = "Post-harvest phase interrupted by a server restart"
+        scraped = await self._db.execute(
+            update(HarvestRunORM)
+            .where(
+                HarvestRunORM.status == "running",
+                HarvestRunORM.scrape_completed_at.is_not(None),
+            )
+            .values(status="success", message=post_harvest_msg, progress=100, completed_at=now)
+        )
         result = await self._db.execute(
             update(HarvestRunORM)
             .where(HarvestRunORM.status == "running")
             .values(status="failed", message=message, error=message, progress=100)
         )
-        return result.rowcount or 0
+        return (scraped.rowcount or 0) + (result.rowcount or 0)
 
     async def get_active_run(self) -> HarvestRunORM | None:
         """The most-recent still-running harvest (any source, orchestrator or
@@ -927,9 +944,11 @@ class HarvestRunService:
     async def list_jobs_for_run(self, run_pk: str) -> list[ScrapedJobORM]:
         """All of one run's scraped jobs — used to build the post-harvest
         report (JSON/Excel) from the DB instead of harvest-time files."""
-        result = await self._db.execute(
-            select(ScrapedJobORM).where(ScrapedJobORM.run_id == run_pk)
+        stmt = apply_tenant(
+            select(ScrapedJobORM).where(ScrapedJobORM.run_id == run_pk),
+            ScrapedJobORM.tenant_id,
         )
+        result = await self._db.execute(stmt)
         return list(result.scalars())
 
     async def recent_harvested_job_urls(self, within_days: int) -> set[str]:
@@ -967,6 +986,7 @@ class HarvestRunService:
             .where(HarvestRunORM.report_pending.is_(True))
             .order_by(HarvestRunORM.created_at.asc())
         )
+        stmt = apply_tenant(stmt, HarvestRunORM.tenant_id)  # never merge another tenant's run
         result = await self._db.execute(stmt)
         return list(result.scalars())
 

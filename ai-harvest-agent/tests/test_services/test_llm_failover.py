@@ -48,18 +48,18 @@ def _anthropic_response(text: str) -> dict:
 
 def test_provider_chain_no_fallback() -> None:
     svc = LLMService(_settings(extraction_llm_model="ollama", extraction_fallback_model=""))
-    assert svc._provider_chain() == [("ollama", "llama3.1:8b")]
+    assert svc.provider_chain() == [("ollama", "llama3.1:8b")]
 
 
 def test_provider_chain_with_fallback() -> None:
     svc = LLMService(_settings(extraction_llm_model="ollama", extraction_fallback_model="claude"))
-    assert svc._provider_chain() == [("ollama", "llama3.1:8b"), ("claude", "claude-sonnet-4-6")]
+    assert svc.provider_chain() == [("ollama", "llama3.1:8b"), ("claude", "claude-sonnet-4-6")]
 
 
 def test_provider_chain_skips_duplicate_provider() -> None:
     # Fallback resolves to the same provider as primary → no second attempt.
     svc = LLMService(_settings(extraction_llm_model="ollama", extraction_fallback_model="mistral"))
-    assert svc._provider_chain() == [("ollama", "llama3.1:8b")]
+    assert svc.provider_chain() == [("ollama", "llama3.1:8b")]
 
 
 # ── Failover behaviour ────────────────────────────────────────────────────────

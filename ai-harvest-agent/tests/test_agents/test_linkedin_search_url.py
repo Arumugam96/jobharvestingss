@@ -12,7 +12,7 @@ from __future__ import annotations
 from urllib.parse import parse_qs, urlparse
 
 from app.agents.linkedin_agent import LinkedInAgent
-from app.models.harvest_models import FiltersConfig
+from app.models.harvest_config import FiltersConfig
 
 
 def _params(**kw) -> dict[str, list[str]]:

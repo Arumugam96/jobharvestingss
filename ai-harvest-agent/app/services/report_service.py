@@ -16,6 +16,7 @@ from typing import Any
 
 import structlog
 
+from app.core.job_url import posting_key
 from app.models.harvest_run import ScrapedJobORM
 from app.services.excel_export_service import ExcelExportService
 from app.services.harvest_run_service import scraped_job_view
@@ -64,6 +65,47 @@ def build_excel_report_bytes(job_dicts: list[dict[str, Any]]) -> bytes:
     return ExcelExportService().build_bytes(job_dicts)
 
 
+def _has(value: Any) -> bool:
+    return bool(value and str(value).strip())
+
+
+def _contact_score(job: ScrapedJobORM) -> int:
+    """How much contact data a row carries (job value, else linked recruiter's)."""
+    r = job.recruiter
+    return sum((
+        _has(job.email_id) or _has(getattr(r, "official_email_id", "")),
+        _has(job.contact_number) or _has(getattr(r, "contact_number", "")),
+        _has(job.linkedin_profile_url) or _has(getattr(r, "linkedin_profile_url", "")),
+        _has(job.job_poster_name) or _has(getattr(r, "name", "")),
+    ))
+
+
+def distinct_postings(jobs: list[ScrapedJobORM]) -> tuple[list[ScrapedJobORM], int]:
+    """Collapse rows that are the same posting (app/core/job_url.posting_key —
+    company + title + city, URL fallback) — e.g. one role found on LinkedIn AND Naukri, or
+    reposted under a new URL. Keeps, per posting, the row with the most contact data
+    (first seen on a tie); rows with no usable key are never collapsed. Returns
+    (distinct rows in first-seen order, number of postings seen on 2+ sources)."""
+    kept: dict[str, ScrapedJobORM] = {}
+    sources: dict[str, set[str]] = {}
+    out: list[ScrapedJobORM | str] = []
+    for j in jobs:
+        key = posting_key(j.company, j.job_title, j.job_url, getattr(j, "location", ""))
+        if not key:
+            out.append(j)
+            continue
+        sources.setdefault(key, set()).add(j.source or "")
+        best = kept.get(key)
+        if best is None:
+            kept[key] = j
+            out.append(key)
+        elif _contact_score(j) > _contact_score(best):
+            kept[key] = j
+    distinct = [kept[x] if isinstance(x, str) else x for x in out]
+    cross_source = sum(1 for srcs in sources.values() if len(srcs) > 1)
+    return distinct, cross_source
+
+
 def compute_harvest_insights(jobs: list[ScrapedJobORM]) -> dict[str, Any]:
     """Summary counts for the post-harvest report EMAIL (nothing in this is
     surfaced in the UI) — computed straight off the run's ScrapedJobORM rows and
@@ -77,10 +119,15 @@ def compute_harvest_insights(jobs: list[ScrapedJobORM]) -> dict[str, Any]:
       * per-source contacts — email / phone / linkedin per source
       * contact provenance  — free contacts (scraped on the page / extracted by
         the local LLM) vs paid Apollo enrichments (recruiter.enrichment_source
-        == "apollo")"""
-    def _has(value: Any) -> bool:
-        return bool(value and str(value).strip())
+        == "apollo")
 
+    Counts are over DISTINCT postings (distinct_postings): the same posting found
+    on two sources counts once. ``total`` is that distinct count, ``total_rows`` the
+    raw row count and ``cross_source_duplicates`` the postings seen on 2+ sources.
+    ``apollo_enriched`` counts postings whose contact came from an Apollo-sourced
+    recruiter — NOT credits spent (see apollo_budget.credits_between)."""
+    total_rows = len(jobs)
+    jobs, cross_source_duplicates = distinct_postings(jobs)
     total = len(jobs)
     linkedin = naukri = dice = 0
     with_email = with_phone = with_contact = with_linkedin = 0
@@ -135,6 +182,8 @@ def compute_harvest_insights(jobs: list[ScrapedJobORM]) -> dict[str, Any]:
 
     return {
         "total":               total,
+        "total_rows":          total_rows,
+        "cross_source_duplicates": cross_source_duplicates,
         "linkedin":            linkedin,
         "non_linkedin":        naukri + dice,
         "naukri":              naukri,

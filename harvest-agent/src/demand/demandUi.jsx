@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   CheckCircle2, RotateCcw, Search, FileSearch, Gauge, Lock, XCircle, Square, Clock, Loader2, Check,
-  AlertTriangle, X, Hand,
+  AlertTriangle, X, Hand, FileSpreadsheet, PencilLine,
 } from "lucide-react";
 import { startNaukriRecruiterLogin } from "../api";
 import { C, STATUS_TONES, GLASS_MODAL } from "../theme";
@@ -78,12 +78,24 @@ export function BatchStatusPill({ status }) {
   );
 }
 
+/** How a batch was created (batch header source_kind; older batches are files). */
+export function SourceKindChip({ kind }) {
+  const manual = kind === "manual";
+  return (
+    <span className={`dm-chip ${manual ? "query" : "nf"}`} title={manual ? "Jobs entered manually" : "Uploaded spreadsheet"}>
+      {manual ? <PencilLine size={12} /> : <FileSpreadsheet size={12} />} {manual ? "Manual" : "File"}
+    </span>
+  );
+}
+
 const STEPS = ["Upload", "Validate & map", "Pre-flight", "Search", "Results"];
 
-export function Stepper({ active }) {
+export const MANUAL_STEPS = ["Enter jobs", "Validate", "Pre-flight", "Search", "Results"];
+
+export function Stepper({ active, steps = STEPS }) {
   return (
     <div className="dm-stepper" aria-label="Progress">
-      {STEPS.map((s, i) => {
+      {steps.map((s, i) => {
         const n = i + 1;
         const cls = n < active ? "done" : n === active ? "active" : "";
         return (
@@ -245,7 +257,6 @@ export function SessionQuotaPills({ usage }) {
       </div>
       <div className="dm-pill-sub">
         {checked ? `Last checked ${fmtAgo(checked)}. ` : "No recruiter check on record yet. "}
-        Checked again when the batch starts. The quota is shared with harvest outreach.
       </div>
     </div>
   );
@@ -516,6 +527,63 @@ const styles = `
   .dm-modal-acts{display:flex;justify-content:flex-end;}
   .dm-x{border:0;background:none;cursor:pointer;color:#64748B;padding:4px;border-radius:6px;display:grid;place-items:center;}
   .dm-x:hover{background:#F1F5F9;}
+
+  /* Landing tabs + segmented control */
+  .dm-tabbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px;}
+  .dm-tabs{display:inline-flex;gap:2px;padding:3px;border-radius:10px;background:#F1F5F9;border:1px solid #E2E8F0;}
+  .dm-tab{border:0;background:none;cursor:pointer;font:inherit;font-size:13px;font-weight:600;color:#475569;padding:7px 14px;border-radius:8px;display:inline-flex;align-items:center;gap:6px;}
+  .dm-tab:hover{color:${C.text};}
+  .dm-tab[aria-selected="true"]{background:#fff;color:${C.primary};box-shadow:0 1px 3px rgba(15,23,42,.12);}
+  .dm-tab:focus-visible{outline:2px solid ${C.primary};outline-offset:2px;}
+  .dm-tabbar .ha-btn{margin-left:auto;}
+  .dm-seg{display:inline-flex;gap:2px;padding:3px;border-radius:9px;background:#F1F5F9;border:1px solid #E2E8F0;margin-bottom:14px;}
+  .dm-seg button{border:0;background:none;cursor:pointer;font:inherit;font-size:12.5px;font-weight:600;color:#475569;padding:6px 12px;border-radius:7px;display:inline-flex;align-items:center;gap:6px;}
+  .dm-seg button[aria-checked="true"]{background:#fff;color:${C.primary};box-shadow:0 1px 3px rgba(15,23,42,.12);}
+  .dm-seg button:focus-visible{outline:2px solid ${C.primary};outline-offset:2px;}
+  .dm-filters{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;margin-bottom:12px;}
+  .dm-filters .ha-filter-search{flex:1 1 220px;min-width:180px;}
+  .dm-date{display:flex;flex-direction:column;gap:4px;font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:${C.textSoft};}
+  .dm-date .ha-input{min-width:140px;}
+  .dm-pagenav{display:flex;align-items:center;gap:8px;justify-content:flex-end;flex-wrap:wrap;font-size:12.5px;color:${C.textSoft};padding-top:10px;}
+  .dm-pagenav .left{margin-right:auto;}
+  .dm-group{display:flex;flex-direction:column;gap:6px;}
+  .dm-group-h{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12.5px;color:${C.textSoft};padding:0 2px;}
+  .dm-group-h .ha-link{font-weight:700;font-size:13.5px;}
+  .dm-jobstats{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin-bottom:12px;}
+  @media(max-width:700px){.dm-jobstats{grid-template-columns:repeat(2,minmax(0,1fr));}}
+
+  /* Manual entry */
+  .dm-man-grid{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:16px;align-items:start;}
+  @media(max-width:1000px){.dm-man-grid{grid-template-columns:1fr;}}
+  .dm-man-list{display:flex;flex-direction:column;gap:12px;}
+  .dm-jobcard{border:1px solid #E2E8F0;border-radius:12px;padding:14px;background:rgba(255,255,255,.8);display:flex;flex-direction:column;gap:12px;}
+  .dm-jobcard.has-err{border-color:#FECACA;}
+  .dm-jobcard-h{display:flex;align-items:center;gap:8px;}
+  .dm-jobcard-h .n{font-size:12px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:${C.textSoft};}
+  .dm-jobcard-h .acts{margin-left:auto;display:flex;gap:8px;align-items:center;}
+  .dm-field.wide{max-width:none;}
+  .dm-field textarea.ha-input{min-height:120px;resize:vertical;font:inherit;font-size:13px;line-height:1.45;}
+  .dm-field .ha-input.is-err{border-color:#F87171;}
+  .dm-ferr{font-size:12px;color:#B91C1C;}
+  .dm-fhint{display:flex;justify-content:space-between;gap:8px;font-size:11.5px;color:${C.textSoft};}
+  .dm-fhint .bad{color:#B91C1C;font-weight:600;}.dm-fhint .good{color:#047857;font-weight:600;}
+  .dm-meta{border:1px dashed #DBE3EE;border-radius:10px;padding:10px;display:flex;flex-direction:column;gap:8px;}
+  .dm-meta-h{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+  .dm-meta-h .t{font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:${C.textSoft};margin-right:auto;}
+  .dm-meta .dm-seg{margin-bottom:0;}
+  .dm-kv{display:grid;grid-template-columns:minmax(0,200px) minmax(0,1fr) auto;gap:6px 8px;align-items:start;}
+  .dm-kv .ha-input{font-size:13px;}
+  .dm-kv .dm-ferr{grid-column:1 / -1;margin-top:-2px;}
+  .dm-quick{display:flex;flex-wrap:wrap;gap:5px;align-items:center;font-size:11.5px;color:${C.textSoft};}
+  .dm-quick button{font:inherit;font-size:11.5px;padding:2px 9px;border-radius:999px;border:1px solid #DBE7FF;background:#F5F8FF;color:#1E40AF;cursor:pointer;}
+  .dm-quick button:disabled{opacity:.45;cursor:default;}
+  .dm-meta textarea.ha-input{min-height:110px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px;}
+  .dm-errlist{margin:0;padding-left:18px;font-size:12px;color:#B91C1C;display:flex;flex-direction:column;gap:2px;}
+  .dm-aside{position:sticky;top:12px;display:flex;flex-direction:column;gap:10px;font-size:12.5px;color:#334155;}
+  .dm-aside h4{margin:0;font-size:13px;}
+  .dm-aside ul{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:4px;}
+  .dm-aside code{font-size:11.5px;background:#F1F5F9;padding:0 4px;border-radius:4px;}
+  .dm-x.sm{padding:6px;}
 
   @media(max-width:900px){.dm-up-grid,.dm-pf-grid{grid-template-columns:1fr;}.dm-pillstack{align-items:flex-start;}.dm-pillrow{justify-content:flex-start;}.dm-pill-sub{text-align:left;}}
   @media(max-width:520px){.dm-runstats{grid-template-columns:repeat(2,minmax(0,1fr));}.dm-step-line{width:14px;margin:0 6px;}.dm-step-t{display:none;}}

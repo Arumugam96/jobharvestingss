@@ -52,6 +52,7 @@ from app.models.harvest_run import HarvestRunORM
 from app.models.resdex import ResdexSearchORM, ResdexSearchStatus
 from app.services import resdex_match_service as rms
 from app.services import run_guard
+from app.services.demand_import import SOURCE_FILE, SOURCE_MANUAL
 from app.services.harvest_run_service import (
     DEMAND_SOURCE,
     HarvestRunService,
@@ -230,6 +231,7 @@ async def _claim(job_id: str | None, run_id: str) -> None:
 def _snapshot(preview: dict, *, batch_name: str, uploaded_by: str) -> dict:
     return {
         "kind": "demand",
+        "source_kind": preview.get("source_kind") or SOURCE_FILE,
         "filename": preview["filename"],
         "batch_name": (batch_name or "").strip()[:200] or preview["filename"].rsplit(".", 1)[0],
         "uploaded_by": uploaded_by or "",
@@ -245,6 +247,7 @@ def _snapshot(preview: dict, *, batch_name: str, uploaded_by: str) -> dict:
                 "row": r["row"], "job_id": None, "job_url": r["job_url"],
                 "job_title": r["job_title"], "client": r["client"], "location": r["location"],
                 "experience": r["experience"], "skills": r["skills_text"],
+                "metadata": dict(r.get("metadata") or {}),
                 "reuse_expected": bool(r.get("reuse")),
                 "status": ROW_QUEUED, "sub_step": "", "candidates": 0, "top_coverage": None,
                 "tier": 0, "searches_used": 0, "searched_at": None, "reused_from": None,
@@ -356,7 +359,8 @@ async def _load_run(run_pk: str) -> HarvestRunORM | None:
 
 async def _target(job_id: str | None, row: dict) -> dict | None:
     """The prepare_resdex_candidates target for one row: the stored job's view
-    (title, JD, Skills, Experience, Location) plus the Client column as context."""
+    (title, JD, Skills, Experience, Location) plus the Client column and any
+    manual-entry metadata as context (resdex_prompts.build_requirements_content)."""
     if not job_id:
         return None
     job = await db_read(lambda db: HarvestRunService(db).get_scraped_job_by_id(job_id))
@@ -364,6 +368,8 @@ async def _target(job_id: str | None, row: dict) -> dict | None:
         return None
     view = scraped_job_view(job)
     view["client"] = row.get("client") or ""
+    if row.get("metadata"):
+        view["metadata"] = dict(row["metadata"])
     return {
         "view": view, "job_id": job.id, "job_url": job.job_url,
         "contact_kind": rms.DEMAND_CONTACT_KIND, "contact_origin": "demand",
@@ -671,6 +677,12 @@ def _live_rows(run: HarvestRunORM) -> list[dict]:
     return rows
 
 
+def source_kind(snap: dict) -> str:
+    """"manual" for a batch typed into the UI, else "file" (older batches have no
+    source_kind — they were all uploads)."""
+    return SOURCE_MANUAL if (snap or {}).get("source_kind") == SOURCE_MANUAL else SOURCE_FILE
+
+
 def batch_header(run: HarvestRunORM) -> dict:
     snap = run.filters_snapshot if isinstance(run.filters_snapshot, dict) else {}
     rows = _live_rows(run)
@@ -683,6 +695,7 @@ def batch_header(run: HarvestRunORM) -> dict:
         "error": run.error or "",
         "progress": run.progress,
         "filename": snap.get("filename", ""),
+        "source_kind": source_kind(snap),
         "batch_name": snap.get("batch_name", ""),
         "uploaded_by": snap.get("uploaded_by", ""),
         "sheet": snap.get("sheet", ""),
@@ -718,6 +731,138 @@ async def list_batches(limit: int = 100) -> list[dict]:
         h.pop("invalid", None)
         out.append(h)
     return out
+
+
+BATCH_STATUS_ALIASES = {"completed": "success"}
+
+
+def _aware(dt: Any) -> datetime | None:
+    if dt is None:
+        return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
+async def _demand_runs(status: str | None = None) -> list[HarvestRunORM]:
+    """Every Demand batch of this tenant (optionally one run status), newest first."""
+    async def _q(db):
+        stmt = (
+            select(HarvestRunORM)
+            .options(noload(HarvestRunORM.jobs))
+            .where(HarvestRunORM.source == DEMAND_SOURCE)
+            .order_by(HarvestRunORM.created_at.desc())
+        )
+        if status:
+            stmt = stmt.where(HarvestRunORM.status == status)
+        stmt = apply_tenant(stmt, HarvestRunORM.tenant_id)
+        return list((await db.execute(stmt)).scalars().all())
+
+    runs = await db_read(_q)
+    if runs is None:
+        raise DemandError(503, "db_unavailable", "Database unavailable.")
+    return runs
+
+
+def _run_in_filters(run: HarvestRunORM, *, source: str | None, date_from: Any,
+                    date_to: Any) -> bool:
+    """Batch-level filters: source (file | manual) and the uploaded date range
+    (inclusive UTC days, on started_at / created_at)."""
+    snap = run.filters_snapshot if isinstance(run.filters_snapshot, dict) else {}
+    if source and source_kind(snap) != source:
+        return False
+    if date_from or date_to:
+        when = _aware(run.started_at or run.created_at)
+        if when is None:
+            return False
+        day = when.astimezone(timezone.utc).date()
+        if date_from and day < date_from:
+            return False
+        if date_to and day > date_to:
+            return False
+    return True
+
+
+def _uploaded_on(run: HarvestRunORM) -> str:
+    created = run.created_at or run.started_at
+    return created.strftime("%Y-%m-%d") if created else ""
+
+
+async def search_batches(*, q: str = "", status: str = "", source: str = "",
+                         date_from: Any = None, date_to: Any = None, limit: int = 20,
+                         offset: int = 0) -> dict:
+    """GET /demand/batches with filters: q (batch name, file, uploader, run id),
+    run status (running | success/completed | stopped | failed), source (file |
+    manual), uploaded date range; newest first, paged. Returns {total (matching),
+    limit, offset, batches}."""
+    status = (status or "").strip().lower()
+    status = BATCH_STATUS_ALIASES.get(status, status)
+    needle = (q or "").strip().lower()
+    out = []
+    for r in await _demand_runs(status or None):
+        if not _run_in_filters(r, source=source or None, date_from=date_from, date_to=date_to):
+            continue
+        h = batch_header(r)
+        if needle and needle not in " ".join(
+            str(h.get(k) or "") for k in ("batch_name", "filename", "uploaded_by", "run_id")
+        ).lower():
+            continue
+        h.pop("invalid", None)
+        h["uploaded_on"] = _uploaded_on(r)
+        out.append(h)
+    limit = max(1, min(100, int(limit or 20)))
+    offset = max(0, int(offset or 0))
+    return {"total": len(out), "limit": limit, "offset": offset,
+            "batches": out[offset:offset + limit]}
+
+
+def row_matches_status(row: dict, status: str) -> bool:
+    """The status filter of the jobs table (DemandJobsTable.rowMatchesStatus)."""
+    st = row.get("status") or ROW_QUEUED
+    if not status or status == "all":
+        return True
+    if status == "active":
+        return st in ACTIVE_ROW_STATUSES
+    if status == "finished":
+        return st not in ACTIVE_ROW_STATUSES
+    if status == "attention":
+        return st in ATTENTION_ROW_STATUSES
+    return st == status
+
+
+async def list_jobs(*, q: str = "", status: str = "", source: str = "", date_from: Any = None,
+                    date_to: Any = None, limit: int = 50, offset: int = 0) -> dict:
+    """GET /demand/jobs — every Demand job of this tenant across batches: each
+    batch's live rows (the GET /demand/batches/{run_id} row shape) plus run_id,
+    batch_name, source_kind, batch_status, uploaded_on and started_at. Newest
+    batch first, then row order. ``counts`` (summarize_rows) covers every job
+    matching q / source / dates — before the status filter, so the page's stat
+    buttons keep their numbers while one is selected. Returns {total (matching),
+    limit, offset, counts, jobs}."""
+    needle = (q or "").strip().lower()
+    pool: list[dict] = []
+    for run in await _demand_runs():
+        if not _run_in_filters(run, source=source or None, date_from=date_from, date_to=date_to):
+            continue
+        snap = run.filters_snapshot if isinstance(run.filters_snapshot, dict) else {}
+        extra = {
+            "run_id": run.run_id, "batch_name": snap.get("batch_name", "") or run.run_id,
+            "source_kind": source_kind(snap), "batch_status": run.status,
+            "uploaded_on": _uploaded_on(run), "started_at": _iso(run.started_at or run.created_at),
+        }
+        for r in _live_rows(run):
+            row = {k: v for k, v in r.items() if k != "job_url"}
+            row.update(extra)
+            if needle and needle not in " ".join(
+                str(row.get(k) or "") for k in ("job_title", "client", "location", "skills",
+                                                "batch_name")
+            ).lower():
+                continue
+            pool.append(row)
+    counts = summarize_rows(pool)
+    shown = [r for r in pool if row_matches_status(r, (status or "").strip().lower())]
+    limit = max(1, min(100, int(limit or 50)))
+    offset = max(0, int(offset or 0))
+    return {"total": len(shown), "limit": limit, "offset": offset, "counts": counts,
+            "jobs": shown[offset:offset + limit]}
 
 
 async def _get_run(run_id: str) -> HarvestRunORM | None:
@@ -761,6 +906,7 @@ async def get_job(job_id: str) -> dict:
         "context": {
             "skills": row.get("skills") or "", "experience": row.get("experience") or "",
             "location": row.get("location") or "", "client": row.get("client") or "",
+            "metadata": dict(row.get("metadata") or {}),
         },
         "job_url": job.job_url,
     }

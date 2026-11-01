@@ -7,7 +7,7 @@ enrichment sub-cap (APOLLO_ENRICHMENT_DAILY_CAP) layered under the global ceilin
 """
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import text
@@ -172,3 +172,41 @@ async def test_unlimited_enrichment_cap_is_counted_not_capped(budget_db, monkeyp
     usage = await apollo_budget.usage_today()
     assert usage["global_used"] == 5 and usage["enrichment_used"] == 3
     assert usage["global_remaining"] is None and usage["enrichment_remaining"] is None
+
+
+# ── Reserve → settle: count only what Apollo actually charged ─────────────────
+
+@pytest.mark.asyncio
+async def test_settle_releases_unused_reservation(budget_db, monkeypatch) -> None:
+    _caps(monkeypatch, global_cap=10, enrichment_cap=5)
+    assert await apollo_budget.try_consume(1, purpose="enrichment") is True
+    assert await apollo_budget.try_consume(10 - 1, purpose="finder") is True  # global full
+    # A no-match / empty / failed call consumed nothing → the hold is given back.
+    await apollo_budget.settle(1, 0, purpose="enrichment", endpoint="people/match")
+    assert await _counts(budget_db) == (9, {"enrichment": 0, "finder": 9})
+    assert await apollo_budget.remaining_today(purpose="enrichment") == 1
+    assert await apollo_budget.credits_between(datetime(2000, 1, 1, tzinfo=timezone.utc)) == 0
+
+
+@pytest.mark.asyncio
+async def test_settle_bulk_uses_reported_consumption_and_ledgers_it(budget_db, monkeypatch) -> None:
+    _caps(monkeypatch, global_cap=50, enrichment_cap=0)
+    start = datetime.now(timezone.utc) - timedelta(seconds=1)
+    assert await apollo_budget.try_consume(10, purpose="enrichment") is True
+    await apollo_budget.settle(10, 3, purpose="enrichment", endpoint="people/bulk_match")
+    assert await _counts(budget_db) == (3, {"enrichment": 3})
+    assert await apollo_budget.credits_between(start) == 3
+    assert await apollo_budget.credits_between(start, purpose="finder") == 0
+    assert await apollo_budget.credits_between(start, purpose=None) == 3
+
+
+@pytest.mark.asyncio
+async def test_settle_overage_is_added_and_release_never_goes_negative(budget_db, monkeypatch) -> None:
+    _caps(monkeypatch, global_cap=5, enrichment_cap=0)
+    assert await apollo_budget.try_consume(1, purpose="finder") is True
+    # Apollo charged more than reserved (e.g. a synchronous phone) — already incurred.
+    await apollo_budget.settle(1, 9, purpose="finder", endpoint="people/match")
+    assert await _counts(budget_db) == (9, {"finder": 9})
+    # A release larger than the counter clamps at 0.
+    await apollo_budget.settle(20, 0, purpose="finder")
+    assert await _counts(budget_db) == (0, {"finder": 0})

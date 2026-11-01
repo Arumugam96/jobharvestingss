@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowLeft, FileSpreadsheet, Search, Info, Square, Check, Loader2, Gauge } from "lucide-react";
+import { ArrowLeft, FileSpreadsheet, PencilLine, Search, Info, Square, Check, Loader2, Gauge } from "lucide-react";
 import { SourceChip } from "../components/ui";
 import { demandError, getDemandBatch, getDemandUsage, stopDemandBatch } from "./demandApi";
 import {
@@ -116,9 +116,13 @@ export default function DemandBatchView({ runId, onBack, onOpenJob }) {
             {batch.batch_name && <div className="dm-sub">{batch.run_id}</div>}
             <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap", alignItems: "center" }}>
               <SourceChip source="Demand" />
-              <span className="ha-pill dm-pill" style={{ background: "#F1F5F9", color: "#475569" }}><FileSpreadsheet size={12} /> {batch.filename}</span>
+              {batch.source_kind === "manual" ? (
+                <span className="ha-pill dm-pill" style={{ background: "#F1F5F9", color: "#475569" }}><PencilLine size={12} /> Entered manually</span>
+              ) : (
+                <span className="ha-pill dm-pill" style={{ background: "#F1F5F9", color: "#475569" }}><FileSpreadsheet size={12} /> {batch.filename}</span>
+              )}
               <span className="dm-soft" style={{ fontSize: 12 }}>
-                {batch.total_rows} rows uploaded{batch.invalid_rows ? ` · ${batch.invalid_rows} skipped` : ""}
+                {batch.total_rows} {batch.source_kind === "manual" ? "jobs entered" : "rows uploaded"}{batch.invalid_rows ? ` · ${batch.invalid_rows} skipped` : ""}
               </span>
             </div>
             <div className="dm-meta-row">

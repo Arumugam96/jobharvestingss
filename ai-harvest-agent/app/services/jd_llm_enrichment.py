@@ -94,39 +94,15 @@ def words_preserved(original: str | None, candidate: str | None) -> bool:
     return word_sequence(original) == word_sequence(candidate)
 
 
-def provider_ready(provider: str, settings: Any) -> bool:
-    """Whether an LLMService provider has the credentials / endpoint it needs.
-    A local (Ollama) provider only needs a URL — reachability is learned on the
-    first call (LLMService's circuit breaker)."""
-    if provider == "claude":
-        return bool(getattr(settings, "anthropic_api_key", ""))
-    if provider == "openrouter":
-        return bool(getattr(settings, "openrouter_api_key", ""))
-    return bool(getattr(settings, "local_llm_url", ""))
-
-
-def naukri_llm_settings(settings: Any) -> Any:
-    """``settings`` with the extraction provider swapped for NAUKRI_LLM_MODEL /
-    NAUKRI_LLM_FALLBACK_MODEL when set, so this pass can use a stronger model
-    than the app-wide EXTRACTION_LLM_MODEL. Unset → ``settings`` unchanged."""
-    model = (getattr(settings, "naukri_llm_model", "") or "").strip()
-    if not model:
-        return settings
-    fallback = (getattr(settings, "naukri_llm_fallback_model", "") or "").strip()
-    return settings.model_copy(
-        update={"extraction_llm_model": model, "extraction_fallback_model": fallback},
-    )
-
-
 def llm_configured(settings: Any) -> bool:
     """True when at least one provider in the extraction chain
     (EXTRACTION_LLM_MODEL + EXTRACTION_FALLBACK_MODEL) is usable."""
     from app.services.llm_service import LLMService
     try:
-        chain = LLMService(settings).provider_chain()
+        svc = LLMService(settings)
+        return any(svc.provider_ready(p) for p, _model in svc.provider_chain())
     except Exception:
         return False
-    return any(provider_ready(provider, settings) for provider, _model in chain)
 
 
 # ── Grounding of the LLM's contact proposal ─────────────────────────────────────

@@ -309,12 +309,6 @@ class Settings(BaseSettings):
     naukri_llm_timeout_s: float = 45.0        # per LLM call
     naukri_llm_concurrency: int = 2           # LLM calls in flight alongside the detail loop
     naukri_llm_max_calls_per_run: int = 1000  # cost backstop (0 = unlimited)
-    # Provider for THIS pass only (same strings as EXTRACTION_LLM_MODEL, e.g.
-    # "claude", "claude-sonnet-…", "ollama", "openrouter/<id>"). Empty = inherit
-    # EXTRACTION_LLM_MODEL / EXTRACTION_FALLBACK_MODEL. Lets contact accuracy use
-    # a stronger model while the rest of the app stays on a local LLM.
-    naukri_llm_model: str = ""
-    naukri_llm_fallback_model: str = ""
 
     # ---------------       DICE Configurations     -------------
     dice_email:    str = ""

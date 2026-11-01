@@ -28,6 +28,7 @@ def _no_org_cache_db(monkeypatch):
         return None
     monkeypatch.setattr("app.services.company_enrichment_service.get_session_factory", _unavailable)
     monkeypatch.setattr("app.services.apollo_budget.remaining_today", _unlimited)
+    monkeypatch.setattr("app.services.apollo_budget.settle", _unlimited)  # no DB settle
 
 
 # ── Fakes ─────────────────────────────────────────────────────────────────────
@@ -416,3 +417,81 @@ async def test_discovery_searches_per_company_location(engine, monkeypatch) -> N
         })
     assert len(rows) == 2
     assert all(r.hr_contact_email for r in rows.values())
+
+
+# ── Credit settlement: only responses that actually consumed credits count ────
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "call, response, reserved, consumed",
+    [
+        # people/match: revealed email → 1; matched but locked email / no match → 0.
+        ("match", {"person": {"id": "p1", "email": "a@acme.com"}}, 1, 1),
+        ("match", {"person": {"id": "p1", "email": "email_not_unlocked@domain.com"}}, 1, 0),
+        ("match", {"person": None}, 1, 0),
+        # organizations/enrich: an org returned → 1; nothing → 0.
+        ("org", {"organization": {"id": "o1", "name": "Acme"}}, 1, 1),
+        ("org", {}, 1, 0),
+        # mixed_companies/search: a non-empty page → 1; empty page → 0.
+        ("search", {"organizations": [{"id": "o1", "name": "Acme"}]}, 1, 1),
+        ("search", {"organizations": []}, 1, 0),
+        # bulk_match: the response's own credits_consumed wins over our estimate.
+        ("bulk", {"credits_consumed": 1, "matches": [
+            {"id": "a", "email": "a@x.com"}, {"id": "b", "email": "b@x.com"}, None]}, 3, 1),
+        ("bulk", {"matches": [{"id": "a", "email": "a@x.com"}, None, None]}, 3, 1),
+    ],
+)
+async def test_reservation_is_settled_to_actual_consumption(
+    monkeypatch, call, response, reserved, consumed
+) -> None:
+    client = ApolloClient(_fake_settings())
+    settled: list[tuple] = []
+
+    async def _allowed(endpoint, cost=1):
+        return True
+
+    async def _fake_request(path, *, params=None, json=None):
+        return response
+
+    async def _settle(endpoint, r, c):
+        settled.append((endpoint, r, c))
+
+    monkeypatch.setattr(client, "_reserve_credit", _allowed)
+    monkeypatch.setattr(client, "_request", _fake_request)
+    monkeypatch.setattr(client, "_settle_credit", _settle)
+
+    if call == "match":
+        await client.match_person_by_id("p1")
+    elif call == "org":
+        await client.enrich_organization("acme.com")
+    elif call == "search":
+        await client.search_organization("Acme")
+    else:
+        await client.bulk_enrich_people([{"name": "A"}, {"name": "B"}, {"name": "C"}])
+    assert len(settled) == 1
+    assert settled[0][1:] == (reserved, consumed)
+
+
+@pytest.mark.asyncio
+async def test_failed_call_releases_its_reservation(monkeypatch) -> None:
+    from app.services.apollo_client import ApolloAPIError
+
+    client = ApolloClient(_fake_settings())
+    settled: list[tuple] = []
+
+    async def _allowed(endpoint, cost=1):
+        return True
+
+    async def _boom(path, *, params=None, json=None):
+        raise ApolloAPIError("down")
+
+    async def _settle(endpoint, r, c):
+        settled.append((endpoint, r, c))
+
+    monkeypatch.setattr(client, "_reserve_credit", _allowed)
+    monkeypatch.setattr(client, "_request", _boom)
+    monkeypatch.setattr(client, "_settle_credit", _settle)
+
+    with pytest.raises(ApolloAPIError):
+        await client.enrich_person_by_linkedin("https://www.linkedin.com/in/x")
+    assert settled == [("people/match", 1, 0)]

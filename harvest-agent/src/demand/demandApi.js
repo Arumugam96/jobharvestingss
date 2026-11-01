@@ -32,9 +32,48 @@ export function demandUpload(file, batchName) {
   return uploadRequest("/demand/upload", fd);
 }
 
-/** GET /demand/batches — this tenant's batches, newest first. */
+function qs(params) {
+  const usp = new URLSearchParams();
+  Object.entries(params || {}).forEach(([k, v]) => {
+    if (v !== undefined && v !== null && v !== "" && v !== "all") usp.set(k, v);
+  });
+  const s = usp.toString();
+  return s ? `?${s}` : "";
+}
+
+/** POST /demand/validate-json — check manually entered jobs; writes nothing.
+ * body: {batch_name, jobs: [{job_title, job_description, metadata: {key: "text"}}]}.
+ * Same response as demandValidate (filename "Manual entry", source_kind "manual");
+ * 422 {code: "invalid_jobs", errors: [{job, field, key, message}]} for bad metadata. */
+export function validateJson(body) {
+  return request("/demand/validate-json", { method: "POST", body: JSON.stringify(body) });
+}
+
+/** POST /demand/create — start a batch from manual jobs; 202 {job_id, run_id}
+ * (same errors as demandUpload). */
+export function createManual(body) {
+  return request("/demand/create", { method: "POST", body: JSON.stringify(body) });
+}
+
+/** GET /demand/batches — this tenant's batches, newest first.
+ * params: q, status (running|completed|stopped|failed), source (file|manual),
+ * date_from, date_to (YYYY-MM-DD), limit (≤100, default 20), offset.
+ * → {total, limit, offset, batches}. */
+export function listBatches(params = {}) {
+  return request(`/demand/batches${qs(params)}`);
+}
+
+/** Back-compat alias (first page of batches). */
 export function getDemandBatches() {
-  return request("/demand/batches");
+  return listBatches();
+}
+
+/** GET /demand/jobs — every Demand job across batches (batch-page row shape + run_id,
+ * batch_name, source_kind, uploaded_on). params: q, status (jobs-table filter
+ * values), source, date_from, date_to, limit (≤100), offset.
+ * → {total, limit, offset, counts, jobs}. */
+export function listJobs(params = {}) {
+  return request(`/demand/jobs${qs(params)}`);
 }
 
 /** GET /demand/batches/{run_id} — header + every row's live / final status. */

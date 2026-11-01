@@ -15,7 +15,16 @@ mixed_companies/search (1 per page). All of them reserve against the per-UTC-day
 with ``purpose="enrichment"`` (the default: harvest/maintenance enrichment), also
 against the separate enrichment sub-cap; Recruiter Finder builds its clients with
 ``purpose="finder"`` so it only hits the global ceiling. Only the people listing
-(mixed_people/api_search) is free and ungated. Callers are responsible for
+(mixed_people/api_search) is free and ungated.
+
+The reservation is only a PRE-FLIGHT hold on the most a call could cost (it keeps the
+caps un-overshootable); Apollo charges "only if credit-consuming data is found". So
+after every reserved call the client SETTLES the reservation to what the response
+actually indicates (``apollo_budget.settle``): bulk_match's reported
+``credits_consumed`` when present, else the billable data returned — 1 per person whose
+email was revealed (+8 for a synchronously returned phone), 1 per organization returned
+by enrich / per non-empty company-search page — and 0 for a failed, empty or no-match
+call. The daily counters therefore track credits really charged. Callers are responsible for
 gating/caching (see ``apollo_enrichment.apollo_contact_fallback`` for reveals and
 ``company_enrichment_service.resolve_apollo_org``, which caches the org id per company).
 
@@ -34,6 +43,7 @@ and the result's ``phone_requested`` is False — no webhook will follow.
 """
 from __future__ import annotations
 
+import math
 from typing import Any
 from urllib.parse import urlencode
 
@@ -304,11 +314,16 @@ class ApolloClient:
         if not await self._reserve_credit("people/match"):
             return ApolloPersonResult.no_match()
 
-        data, phone_requested = await self._reveal_request(
-            "/people/match", params=params, want_phone=want_phone, context=linkedin_url,
-        )
-        result = ApolloPersonResult.from_person(data.get("person"))
-        result.phone_requested = phone_requested and result.matched
+        consumed = 0
+        try:
+            data, phone_requested = await self._reveal_request(
+                "/people/match", params=params, want_phone=want_phone, context=linkedin_url,
+            )
+            result = ApolloPersonResult.from_person(data.get("person"))
+            result.phone_requested = phone_requested and result.matched
+            consumed = _reported_credits(data, _person_credits(result))
+        finally:
+            await self._settle_credit("people/match", 1, consumed)
         self._log_result("people/match", linkedin_url, result)
         return result
 
@@ -341,12 +356,17 @@ class ApolloClient:
         if not await self._reserve_credit("people/match"):
             return ApolloPersonResult.no_match()
 
-        data, phone_requested = await self._reveal_request(
-            "/people/match", params=params, json={"id": person_id},
-            want_phone=want_phone, context=person_id,
-        )
-        result = ApolloPersonResult.from_person(data.get("person"))
-        result.phone_requested = phone_requested and result.matched
+        consumed = 0
+        try:
+            data, phone_requested = await self._reveal_request(
+                "/people/match", params=params, json={"id": person_id},
+                want_phone=want_phone, context=person_id,
+            )
+            result = ApolloPersonResult.from_person(data.get("person"))
+            result.phone_requested = phone_requested and result.matched
+            consumed = _reported_credits(data, _person_credits(result))
+        finally:
+            await self._settle_credit("people/match", 1, consumed)
         self._log_result("people/match", person_id, result)
         return result
 
@@ -367,12 +387,20 @@ class ApolloClient:
         if not await self._reserve_credit("mixed_companies/search"):
             return None
 
-        data = await self._request(
-            "/mixed_companies/search",
-            json={"q_organization_name": company_name, "page": 1, "per_page": per_page},
-        )
-        orgs = data.get("organizations") or data.get("accounts") or []
-        if not isinstance(orgs, list) or not orgs:
+        consumed = 0
+        try:
+            data = await self._request(
+                "/mixed_companies/search",
+                json={"q_organization_name": company_name, "page": 1, "per_page": per_page},
+            )
+            orgs = data.get("organizations") or data.get("accounts") or []
+            if not isinstance(orgs, list):
+                orgs = []
+            # 1 credit per page of results — an empty page returned nothing billable.
+            consumed = _reported_credits(data, 1 if orgs else 0)
+        finally:
+            await self._settle_credit("mixed_companies/search", 1, consumed)
+        if not orgs:
             logger.info("apollo_org_search_no_match", company=company_name)
             return None
 
@@ -456,9 +484,14 @@ class ApolloClient:
             return None
         if not await self._reserve_credit("organizations/enrich"):
             return None
-        data = await self._request("/organizations/enrich", params={"domain": domain})
-        org = data.get("organization") or data.get("org")
-        result = ApolloOrgResult.from_dict(org)
+        consumed = 0
+        try:
+            data = await self._request("/organizations/enrich", params={"domain": domain})
+            org = data.get("organization") or data.get("org")
+            result = ApolloOrgResult.from_dict(org)
+            consumed = _reported_credits(data, 1 if result else 0)
+        finally:
+            await self._settle_credit("organizations/enrich", 1, consumed)
         logger.info(
             "apollo_org_enriched",
             domain=domain,
@@ -499,18 +532,27 @@ class ApolloClient:
             }
             if want_phone:
                 payload["webhook_url"] = self._webhook_url_for(webhook_ref)
-            data, phone_requested = await self._reveal_request(
-                "/people/bulk_match", json=payload, want_phone=want_phone, context="bulk_match",
-            )
-            matches = data.get("matches")
-            if not isinstance(matches, list):
-                matches = []
-            for i, person in enumerate(chunk):
-                match = matches[i] if i < len(matches) else None
-                result = ApolloPersonResult.from_person(match)
-                result.phone_requested = phone_requested and result.matched
-                self._log_result("people/bulk_match", person.get("linkedin_url", ""), result)
-                results.append(result)
+            consumed = 0
+            chunk_results: list[ApolloPersonResult] = []
+            try:
+                data, phone_requested = await self._reveal_request(
+                    "/people/bulk_match", json=payload, want_phone=want_phone,
+                    context="bulk_match",
+                )
+                matches = data.get("matches")
+                if not isinstance(matches, list):
+                    matches = []
+                for i, person in enumerate(chunk):
+                    match = matches[i] if i < len(matches) else None
+                    result = ApolloPersonResult.from_person(match)
+                    result.phone_requested = phone_requested and result.matched
+                    self._log_result("people/bulk_match", person.get("linkedin_url", ""), result)
+                    chunk_results.append(result)
+                # bulk_match reports its real charge in ``credits_consumed``.
+                consumed = _reported_credits(data, sum(_person_credits(r) for r in chunk_results))
+            finally:
+                await self._settle_credit("people/bulk_match", len(chunk), consumed)
+            results.extend(chunk_results)
         return results
 
     # ── Internals ──────────────────────────────────────────────────────────────
@@ -533,6 +575,20 @@ class ApolloClient:
                 "apollo_daily_cap_reached", endpoint=endpoint, cost=cost, purpose=self.purpose
             )
         return allowed
+
+    async def _settle_credit(self, endpoint: str, reserved: int, consumed: int) -> None:
+        """Reconcile a ``_reserve_credit(reserved)`` hold to the ``consumed`` credits the
+        response indicated (0 when the call failed / returned nothing billable): the
+        unused part goes back to the daily counters and the real charge is ledgered.
+        Best-effort, never raises — see apollo_budget.settle."""
+        from app.services import apollo_budget
+
+        if consumed != reserved:
+            logger.info(
+                "apollo_credit_settled", endpoint=endpoint, reserved=reserved,
+                consumed=consumed, purpose=self.purpose,
+            )
+        await apollo_budget.settle(reserved, consumed, purpose=self.purpose, endpoint=endpoint)
 
     def _webhook_url_for(self, ref: str = "") -> str:
         """The configured webhook URL plus our ``token`` (authenticates the unsigned
@@ -668,6 +724,34 @@ class ApolloClient:
             )
         else:
             logger.info("apollo_matched_no_contact", endpoint=endpoint, linkedin_url=linkedin_url)
+
+
+# Apollo bills 1 credit for a revealed email / demographic record and 8 more for a
+# returned mobile phone ("credits are charged only if credit-consuming data is found").
+_EMAIL_CREDITS = 1
+_PHONE_CREDITS = 8
+
+
+def _person_credits(result: ApolloPersonResult) -> int:
+    """Credits a match result evidently consumed when Apollo doesn't report it: 1 when
+    an email (primary or personal) was actually revealed, +8 for a phone returned
+    synchronously; 0 for no match or a match that revealed nothing (locked email). An
+    asynchronously delivered phone is charged on webhook delivery (apollo_phone_service)."""
+    if not result.matched:
+        return 0
+    credits = _EMAIL_CREDITS if (result.email or result.secondary_email) else 0
+    if result.phone:
+        credits += _PHONE_CREDITS
+    return credits
+
+
+def _reported_credits(data: Any, fallback: int) -> int:
+    """The response's own ``credits_consumed`` (bulk_match reports it; it can be a
+    decimal on some plans — rounded UP so we never under-count), else ``fallback``."""
+    reported = data.get("credits_consumed") if isinstance(data, dict) else None
+    if isinstance(reported, (int, float)) and not isinstance(reported, bool) and reported >= 0:
+        return int(math.ceil(reported))
+    return max(0, int(fallback))
 
 
 def _is_webhook_rejection(exc: ApolloAPIError) -> bool:
