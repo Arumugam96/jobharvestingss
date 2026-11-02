@@ -662,6 +662,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception as exc:
         logger.warning("apollo_phone_expiry_setup_failed", error=str(exc))
 
+    # Apollo's own credit counter, read every 15 min (free call) so the harvest report
+    # can show true "credits today" (diff vs. the last reading before IST midnight).
+    try:
+        from app.services.apollo_credit_usage import snapshot_job
+        if settings.apollo_api_key:
+            scheduler.schedule_interval_job(
+                job_id           = "apollo_credit_snapshot",
+                job_fn           = snapshot_job,
+                interval_seconds = 900,
+                name             = "Apollo credit usage snapshot",
+            )
+    except Exception as exc:
+        logger.warning("apollo_credit_snapshot_setup_failed", error=str(exc))
+
     yield  # ← app runs here
 
     # ── Shutdown ──────────────────────────────────────────────────────────────

@@ -317,6 +317,11 @@ async def _run_harvest_background_impl(
     # so a logout is surfaced (global login banner) while this long run proceeds.
     _start_recruiter_preflight(enabled)
 
+    # Apollo's own credit reading before any enrichment — the report's "credits this
+    # run" is the reading at report time minus this one (None → snapshot fallback).
+    from app.services import apollo_credit_usage
+    apollo_start = await apollo_credit_usage.take_snapshot()
+
     # Per-source live status (GET /harvest-status `sources`): every enabled source
     # starts "pending"; the orchestrator's SourceStatusTracker then reports each
     # source's own state/count/message via _on_source_status below. `latest`
@@ -821,14 +826,18 @@ async def _run_harvest_background_impl(
     # split, contactability and contact provenance. Deferred runs' jobs are only
     # in the attachments, noted as "+N jobs from earlier stopped run(s)".
     insights = compute_harvest_insights(run_rows) if run_rows else None
+    # Apollo's own credit figures (cycle / today / this run) — None if unreachable.
+    apollo_usage = await apollo_credit_usage.report_usage(apollo_start, result.started_at)
     if insights is not None:
         if pending_dicts:
             insights["deferred_jobs"] = len(pending_dicts)
-        # Every credit Apollo actually CHARGED since this run started — harvest
-        # enrichment, Recruiter Finder, phone webhooks alike (apollo_credit_ledger) —
-        # distinct from insights["apollo_enriched"], the number of postings whose
-        # contact is Apollo-sourced.
-        run_credits = await _apollo_credits_since(result.started_at, log)
+        # Every credit Apollo CHARGED the account since this run started (its own
+        # counter; falls back to the local apollo_credit_ledger) — distinct from
+        # insights["apollo_enriched"], the number of postings whose contact is
+        # Apollo-sourced.
+        run_credits = (apollo_usage or {}).get("run")
+        if run_credits is None:
+            run_credits = await _apollo_credits_since(result.started_at, log)
         if run_credits is not None:
             insights["apollo_credits_run"] = run_credits
 
@@ -841,6 +850,7 @@ async def _run_harvest_background_impl(
         sources     = result.sources_executed,
         job_dicts   = report_dicts + pending_dicts,
         insights    = insights,
+        apollo_usage = apollo_usage,
         run_timing  = {
             "started":    result.started_at,
             "completed":  finished,

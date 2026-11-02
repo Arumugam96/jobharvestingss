@@ -479,3 +479,25 @@ class ApolloCreditLedgerORM(Base):
     purpose: Mapped[str] = mapped_column(String(20), nullable=False, default="")
     endpoint: Mapped[str] = mapped_column(String(60), nullable=False, default="")
     credits: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
+class ApolloCreditSnapshotORM(Base):
+    """Point-in-time readings of Apollo's OWN credit counter (POST
+    /usage_stats/credit_usage_stats → ``lead_credit``), taken every 15 min and at each
+    harvest run's start (app/services/apollo_credit_usage.py).
+
+    Apollo only reports usage for the whole billing cycle, so "credits today" / "credits
+    this run" are the difference between two readings. Unlike the ledger above (what
+    this app inferred it spent), these count EVERY credit the account was charged —
+    including Apollo-UI exports and charges the app can't see in a response.
+    """
+    __tablename__ = "apollo_credit_snapshots"
+    __table_args__ = (Index("ix_apollo_credit_snapshots_taken_at", "taken_at"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    taken_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    consumed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    credit_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cycle_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

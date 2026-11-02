@@ -49,10 +49,6 @@ def _esc(value: object) -> str:
     return html_lib.escape(str(value if value is not None else ""))
 
 
-def _pct(part: int, total: int) -> str:
-    return f"{round(part * 100 / total)}%" if total else "0%"
-
-
 def _to_ist(value: object) -> datetime | None:
     if not isinstance(value, datetime):
         return None
@@ -155,15 +151,6 @@ def _render_body(
         if g("apollo_credits_run") is not None:
             lines += f"Apollo credits (this run): {g('apollo_credits_run')}\n"
         lines += f"Apollo-sourced contacts: {g('apollo_enriched', 0)}\n\n"
-        nk = ps.get("Naukri", {})
-        if nk.get("jobs"):
-            lines += (
-                "Naukri detail\n"
-                f"- Email scraped: {nk.get('email', 0)}\n"
-                f"- Phone scraped: {nk.get('phone', 0)}\n"
-                f"- LinkedIn profile: {nk.get('linkedin', 0)}\n"
-                f"- Poster name: {nk.get('poster_name', 0)}\n\n"
-            )
     if attachment_names:
         lines += "The extracted jobs are attached to this email.\n\n"
     lines += "Regards,\nSightspectrum Harvest Agent"
@@ -309,8 +296,7 @@ def _doc(title: str, inner_rows: str, bar_color: str, bar_gradient: str) -> str:
 
 # ── HTML email template ──────────────────────────────────────────────────────
 # Single combined template: top bar → header → hero metric → stat pills →
-# run details → source breakdown table → Naukri detail → Apollo credits →
-# contact coverage gauges → footer.
+# run details → source breakdown table → Apollo credits → footer.
 
 def _render_body_html(
     run_id: str,
@@ -481,60 +467,7 @@ def _render_body_html(
                   for v in (total, with_email, with_phone, with_linkedin))
         + "</tr>"
     )
-    email_pct = round(with_email * 100 / total) if total else 0
-    phone_pct = round(with_phone * 100 / total) if total else 0
-    li_pct = round(with_linkedin * 100 / total) if total else 0
-    small = f"padding:4px 0 0;font-size:11px;color:{_MUTED};"
-    breakdown = (
-        _section_title("Source Breakdown")
-        + _table(src_rows)
-        + _table("<tr>" + _cell(_bar(email_pct, "#0ea5e9", height=4), "padding:12px 0 0;")
-                 + "</tr>")
-        + _table(
-            "<tr>"
-            + _cell(f"{email_pct}% with email", small + "text-align:left;", 'width="33%"')
-            + _cell(f"{phone_pct}% with phone", small + "text-align:center;", 'width="34%"')
-            + _cell(f"{li_pct}% with LinkedIn", small + "text-align:right;", 'width="33%"')
-            + "</tr>"
-        )
-    )
-
-    # ── Naukri detail ────────────────────────────────────────────────────
-    nk = ps.get("Naukri", {})
-    naukri_html = ""
-    if nk.get("jobs"):
-        nk_jobs = nk["jobs"]
-
-        def _nk_card(label: str, val: int, color: str) -> str:
-            inner = _split_pair(
-                _esc(label),
-                f'<span style="font-size:20px;font-weight:900;color:{color};">{_esc(val)}</span>'
-                f'<span style="font-size:10px;font-weight:600;color:{_MUTED};">'
-                f"&nbsp;{_pct(val, nk_jobs)}</span>",
-                f"font-size:12px;color:{_MUTED};", "",
-            )
-            return _cell(
-                _table("<tr>" + _bg_cell(inner, "#ffffff", "padding:12px 14px;") + "</tr>"),
-                "padding:6px;", 'width="50%" valign="top"',
-            )
-
-        grid = _table(
-            "<tr>"
-            + _nk_card("Email scraped", nk.get("email", 0), "#0ea5e9")
-            + _nk_card("Phone scraped", nk.get("phone", 0), "#6366f1")
-            + "</tr><tr>"
-            + _nk_card("LinkedIn profile", nk.get("linkedin", 0), "#10b981")
-            + _nk_card("Poster name", nk.get("poster_name", 0), _INK)
-            + "</tr>"
-        )
-        naukri_html = _divider(0) + _row(
-            _section_title("Naukri Source Detail")
-            + _table("<tr>" + _bg_cell(
-                f'<div style="font-size:13px;font-weight:800;color:#6366f1;margin:0 0 8px;">'
-                f"Scraping Extraction &middot; {_esc(nk_jobs)} jobs</div>{grid}",
-                "#eef2ff", "padding:16px 12px;",
-            ) + "</tr>")
-        )
+    breakdown = _section_title("Source Breakdown") + _table(src_rows)
 
     # ── Apollo credits ───────────────────────────────────────────────────
     apollo_html = ""
@@ -572,8 +505,11 @@ def _render_body_html(
                 "padding:6px;", 'width="33%" valign="top"',
             )
 
+        # Apollo's billing cycle (e.g. 25th → 25th) when known, else the calendar month.
+        cycle_end = _to_ist(am.get("cycle_end"))
+        period = "this billing cycle" if cycle_end else "this month"
         monthly_inner = _split_pair(
-            "Monthly Remaining", _esc(monthly_rem_label),
+            "Cycle Remaining" if cycle_end else "Monthly Remaining", _esc(monthly_rem_label),
             f"font-size:11px;color:{_MUTED};font-weight:600;text-transform:uppercase;"
             "letter-spacing:0.04em;",
             "font-size:20px;font-weight:900;color:#059669;",
@@ -583,8 +519,10 @@ def _render_body_html(
                 _table("<tr>" + _cell(_bar(monthly_pct, monthly_bar_color), "padding:10px 0 0;")
                        + "</tr>")
                 + f'<div style="font-size:11px;color:{_MUTED};margin-top:4px;">'
-                f"{_esc(monthly_used)} of {_esc(monthly_cap)} credits used this month "
-                f"({monthly_pct}%)</div>"
+                f"{_esc(monthly_used)} of {_esc(monthly_cap)} credits used {period} "
+                f"({monthly_pct}%)"
+                + (f" &middot; resets {_esc(cycle_end.strftime('%d %b %Y'))}" if cycle_end else "")
+                + "</div>"
             )
         apollo_html = _divider(0) + _row(
             _section_title("Apollo Credits")
@@ -602,26 +540,6 @@ def _render_body_html(
             )
         )
 
-    # ── Coverage gauges ──────────────────────────────────────────────────
-    def _gauge(label: str, pct: int, count: int, color: str) -> str:
-        return _cell(
-            _split_pair(_esc(label), f"{pct}%", "font-size:13px;font-weight:600;",
-                        f"font-size:18px;font-weight:900;color:{color};")
-            + _table("<tr>" + _cell(_bar(pct, color, track="#f1f5f9"), "padding:6px 0 0;")
-                     + "</tr>")
-            + f'<div style="font-size:11px;color:{_MUTED};margin-top:3px;">'
-            f"{_esc(count)} of {_esc(total)} jobs</div>",
-            "padding:0 8px;", 'width="33%" valign="top"',
-        )
-
-    coverage = _section_title("Contact Coverage") + _table(
-        "<tr>"
-        + _gauge("Email", email_pct, with_email, "#0ea5e9")
-        + _gauge("Phone", phone_pct, with_phone, "#6366f1")
-        + _gauge("LinkedIn", li_pct, with_linkedin, "#10b981")
-        + "</tr>"
-    )
-
     footer = f"{_esc(_attachment_note(attachment_names))}<br>Sightspectrum Harvest Agent"
 
     rows = (
@@ -632,10 +550,7 @@ def _render_body_html(
         + _row(details)
         + _divider()
         + _row(breakdown)
-        + naukri_html
         + apollo_html
-        + _divider(0)
-        + _row(coverage)
         + _divider(0)
         + _row(footer, "20px 32px", f"text-align:center;font-size:12px;color:{_MUTED};")
     )
@@ -685,6 +600,7 @@ async def send_harvest_report(
     insights: dict | None = None,
     run_timing: dict | None = None,
     error: str = "",
+    apollo_usage: dict | None = None,
 ) -> None:
     """Email the harvest report (or a failure alert) to notifications.recipients,
     if enabled. The JSON/Excel attachments are built in memory from job_dicts
@@ -754,6 +670,18 @@ async def send_harvest_report(
             apollo_monthly = await usage_this_month()
         except Exception:
             log.warning("harvest_report_apollo_usage_fetch_failed")
+        # Prefer Apollo's own counter (apollo_credit_usage.report_usage) over the local
+        # reservation counters, which can't see every charge.
+        if apollo_usage:
+            apollo_daily = dict(apollo_daily or {})
+            if apollo_usage.get("today") is not None:
+                apollo_daily["global_used"] = apollo_usage["today"]
+            apollo_monthly = {
+                "monthly_used": apollo_usage["consumed"],
+                "monthly_cap": apollo_usage["limit"],
+                "monthly_remaining": apollo_usage["left_over"],
+                "cycle_end": apollo_usage.get("cycle_end"),
+            }
 
     attachment_names = [name for name, _ in attachments]
     body = _render_body(

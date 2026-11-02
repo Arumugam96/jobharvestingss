@@ -74,6 +74,8 @@ _BOOLEAN_SWITCH = "#booleanKeywordsSearch"
 _SEARCH_BTN = "#adv-search-btn"
 _SUGGESTION = ".opt.tuple-wrap"
 _MAX_LOCATIONS = 3
+_ACTIVE_IN_BOX = ".active-in-wrap"                 # "Active in - 6 months" beside Search candidates
+_ACTIVE_IN_VALUE = ".active-in-wrap .selected-value"
 _MONTH_MS = 30 * 24 * 3600 * 1000
 
 _LINKS_JS = """() => {
@@ -388,6 +390,30 @@ class ResdexCandidateAgent:
         await box.first.fill("")
         return False
 
+    async def _set_active_in(self, label: str) -> str:
+        """Pick `label` (e.g. "15 days") in the form's "Active in -" dropdown and
+        return the value the form shows afterwards ("" if the dropdown is missing).
+        An option that isn't offered is abandoned (Escape) — the form keeps its
+        default, never a different period."""
+        page = self._page
+        current = page.locator(_ACTIVE_IN_VALUE)
+        if not await current.count():
+            return ""
+        shown = (await current.first.inner_text()).strip()
+        if shown.lower() == label.lower():
+            return shown
+        await self._click(page.locator(f"{_ACTIVE_IN_BOX} [role=button]").first)
+        await page.wait_for_timeout(random.randint(600, 1_100))
+        option = page.locator(_ACTIVE_IN_BOX).get_by_text(label, exact=True)
+        if not await option.count():
+            option = page.get_by_role("option", name=label, exact=True)
+        if await option.count():
+            await self._click(option.first)
+            await page.wait_for_timeout(random.randint(400, 900))
+        else:
+            await page.keyboard.press("Escape")
+        return (await current.first.inner_text()).strip()
+
     async def _read_results(self) -> bool:
         """Scroll through the result list and dwell a random
         resdex_results_dwell_min_s..max_s like a recruiter skimming it. Never
@@ -410,6 +436,8 @@ class ResdexCandidateAgent:
     async def search(self, tier: ResdexTier) -> tuple[list[ResdexCard], int, dict[str, Any]]:
         """Run one search. Returns (cards, total_results, applied) where `applied`
         records which filters actually made it into the form."""
+        from app.config import get_settings
+
         page = self._page
         f = tier.filters or {}
         await self._open_form()
@@ -429,6 +457,18 @@ class ResdexCandidateAgent:
         added = [c for c in (f.get("locations") or [])[:_MAX_LOCATIONS] if await self._add_location(c)]
         if added:
             applied["locations"] = added
+        active_in = (get_settings().resdex_active_in or "").strip()
+        if active_in:
+            try:
+                shown = await self._set_active_in(active_in)
+            except Exception as exc:  # noqa: BLE001 — never fail a search over this filter
+                logger.warning("resdex_active_in_failed", wanted=active_in, error=str(exc)[:200])
+                shown = ""
+            if shown:
+                applied["active_in"] = shown
+            if shown.lower() != active_in.lower():
+                logger.warning("resdex_active_in_not_applied",
+                               wanted=active_in, shown=shown or None)
 
         try:
             async with page.expect_response(

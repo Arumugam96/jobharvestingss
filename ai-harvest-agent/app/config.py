@@ -241,6 +241,10 @@ class Settings(BaseSettings):
     resdex_candidates_per_job: int = 3
     resdex_min_skill_coverage: float = 0.6     # share of mandatory skills a pick must show
     resdex_active_within_months: int = 3       # Resdex "active in" filter (0 = off)
+    # Option picked in the search form's own "Active in -" dropdown (next to
+    # "Search candidates") before every search, by its visible label, e.g.
+    # "15 days". "" = leave Resdex's default (6 months).
+    resdex_active_in: str = "15 days"
     resdex_max_searches_per_job: int = 3       # relaxation ladder T1..T3
     # 1 | 2 | 3 = ONE search per job with only that ladder tier's query + filters
     # (resdex_max_searches_per_job is then ignored); 0 = the full ladder above.
