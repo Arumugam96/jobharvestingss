@@ -209,7 +209,7 @@ export default function DemandManualEntry({ draft, setDraft, onReview }) {
             <section key={job.id} className={"dm-jobcard" + (c.total ? " has-err" : "")} aria-label={`Job ${i + 1}`}>
               <div className="dm-jobcard-h">
                 <span className="n">Job {i + 1}</span>
-                <span className={`dm-chip ${c.total ? "fail" : "done"}`}><span className="d" />{c.total ? `${c.total} ${c.total === 1 ? "issue" : "issues"}` : "Ready"}</span>
+                <span className={`dm-chip ${c.total ? "fail" : "done"}`}><span className="d" />{c.title || c.jd ? "Required fields" : c.total ? "Check metadata" : "Ready"}</span>
                 <div className="acts">
                   {n > 1 && (
                     <button type="button" className="ha-btn ha-btn-secondary ha-btn-sm" onClick={() => removeJob(job.id)}>
@@ -311,7 +311,7 @@ export default function DemandManualEntry({ draft, setDraft, onReview }) {
 
         <div className="dm-foot">
           <span className="left">
-            {issues ? <span style={{ color: "#B91C1C", fontWeight: 600 }}>Fix {issues} {issues === 1 ? "issue" : "issues"} to continue</span>
+            {issues ? <span style={{ color: "#B91C1C", fontWeight: 600 }}>Fill in the required fields to continue</span>
               : `${n} ${n === 1 ? "job" : "jobs"} ready. Nothing is saved until you start the batch.`}
           </span>
           <button type="button" className="ha-btn ha-btn-primary" disabled={issues > 0} onClick={onReview}>

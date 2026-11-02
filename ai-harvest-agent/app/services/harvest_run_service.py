@@ -870,17 +870,20 @@ class HarvestRunService:
         result = await self._db.execute(stmt)
         return list(result.scalars()), total
 
-    async def job_facets(self) -> dict[str, Any]:
+    async def job_facets(self, demand: bool = False) -> dict[str, Any]:
         """Distinct dropdown values + whole-dataset stats for the jobs page.
 
         GET /jobs is paginated server-side, so the UI can no longer derive its
         Company/Job/POC dropdown options or its header/footer stat counts from
         the loaded rows — this returns them across the entire scraped_jobs
         table in one call (GET /jobs/facets). Distincts are global, not scoped
-        to the active filters. Demand Search jobs are left out (as in GET /jobs)."""
+        to the active filters. Demand Search jobs are left out (as in GET /jobs),
+        unless ``demand`` — then the facets cover only Demand jobs."""
+        scope = (func.lower(ScrapedJobORM.source) == DEMAND_SOURCE.lower()) if demand else _not_demand_job()
+
         async def _distinct(col) -> list[str]:
             result = await self._db.execute(apply_tenant(
-                select(col).distinct().where(_not_demand_job()), ScrapedJobORM.tenant_id,
+                select(col).distinct().where(scope), ScrapedJobORM.tenant_id,
             ))
             return sorted(v for v in result.scalars() if v)
 
@@ -915,7 +918,7 @@ class HarvestRunService:
             )
             .select_from(ScrapedJobORM)
             .outerjoin(RecruiterORM, ScrapedJobORM.recruiter_id == RecruiterORM.id)
-            .where(_not_demand_job())
+            .where(scope)
         )
         stats_stmt = apply_tenant(stats_stmt, ScrapedJobORM.tenant_id)  # scope stats to the tenant
         row = (await self._db.execute(stats_stmt)).one()

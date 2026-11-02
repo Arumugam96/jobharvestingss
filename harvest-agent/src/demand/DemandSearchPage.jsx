@@ -1,18 +1,21 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
-import { Upload, History, Search, Info, FileSpreadsheet, PencilLine, Plus, ListChecks, Layers, ChevronLeft, ChevronRight } from "lucide-react";
+import { Upload, History, Search, Info, FileSpreadsheet, PencilLine, Plus, ListChecks, ChevronLeft, ChevronRight } from "lucide-react";
 import LiveBrowserView from "../components/LiveBrowserView";
 import { Select } from "../components/ui";
-import { createManual, demandError, listBatches, listJobs } from "./demandApi";
+import JobsPage from "../pages/JobsPage";
+import { useHarvestData } from "../HarvestDataContext";
+import { createManual, demandError, listBatches /* , listJobs */ } from "./demandApi";
 import {
-  DemandStyles, Stepper, SessionQuotaPills, BatchStatusPill, Note, useDemandUsage, fmtWhen, isActiveRow,
-  SourceKindChip, MANUAL_STEPS,
+  DemandStyles, SessionQuotaPills, BatchStatusPill, Note, useDemandUsage, fmtWhen,
+  SourceKindChip,
 } from "./demandUi";
 import { ValidationStep, PreflightStep, ManualReviewStep } from "./DemandUploadFlow";
 import DemandManualEntry, { checkDraft, newDraft } from "./DemandManualEntry";
 import DemandBatchView from "./DemandBatchView";
 import DemandJobDetail from "./DemandJobDetail";
-import DemandJobsTable from "./DemandJobsTable";
+import DemandProcessing from "./DemandProcessing";
+// import DemandJobsTable from "./DemandJobsTable"; // All jobs tab now uses the Harvested Jobs table
 
 /* Demand Search — client job requirements (uploaded as a spreadsheet or entered
  * manually) searched on Naukri Resdex for matching candidates. One SPA route,
@@ -22,7 +25,10 @@ import DemandJobsTable from "./DemandJobsTable";
  *   /demand[?view=new]          landing, New search tab: upload file | enter
  *                               manually → validate → pre-flight → start
  *   /demand?view=batches        landing, Batches tab (filters, paging)
- *   /demand?view=jobs           landing, All jobs tab (every batch's jobs)
+ *   /demand?view=jobs           Demand jobs: the Harvested Jobs page/table and
+ *                               job detail page, reused for source=Demand only
+ *   /demand?processing=<run_id> progress of a just-started batch; opens
+ *                               ?view=jobs when every row has finished
  *   /demand?batch=<run_id>      batch page: processing + results on one page
  *   /demand?batch=…&job=<id>    Demand job page (Resdex candidates, re-run)
  *
@@ -35,6 +41,7 @@ export default function DemandSearchPage() {
   const location = useLocation();
   const batch = params.get("batch");
   const job = params.get("job");
+  const processing = params.get("processing");
   const here = location.pathname + location.search;
 
   const openBatch = useCallback((runId) => navigate(
@@ -45,10 +52,14 @@ export default function DemandSearchPage() {
     { state: { from: here } },
   ), [navigate, here]);
 
+  if (!job && !batch && !processing && params.get("view") === "jobs") return <DemandJobsView />;
+
   return (
     <main className="ha-main">
       <DemandStyles />
-      {job ? (
+      {processing ? (
+        <DemandProcessing key={processing} runId={processing} onDone={() => navigate("/demand?view=jobs", { replace: true })} />
+      ) : job ? (
         <DemandJobDetail
           jobId={job}
           runId={batch}
@@ -63,11 +74,30 @@ export default function DemandSearchPage() {
   );
 }
 
+// ── Demand jobs: the Harvested Jobs page + job detail page, Demand rows only ───
+
+function DemandJobsView() {
+  const { pageSizeSel, setPageSizeSel } = useHarvestData();
+  const navigate = useNavigate();
+  return (
+    <JobsPage
+      demand
+      onNavigate={(key) => navigate(`/${key}`)}
+      onNewSearch={() => navigate("/demand?view=new")}
+      onView={(dv) => navigate(`/jobs/${encodeURIComponent(dv.job.id)}`, { state: { job: dv.job, from: "/demand?view=jobs" } })}
+      pageSizeSel={pageSizeSel} onPageSizeChange={setPageSizeSel}
+    />
+  );
+}
+
 // ── Landing: New search | Batches | All jobs ──────────────────────────────────
 
 const VIEWS = [
   { key: "new", label: "New search", Icon: Upload },
-  { key: "batches", label: "Batches", Icon: Layers },
+  // Batches tab hidden for now — processed jobs are listed in the All jobs table.
+  // A separate batch record will be revisited later; BatchesTab is kept below.
+  // { key: "batches", label: "Batches", Icon: Layers },  // re-add Layers to the lucide import
+  // "All jobs" is the Harvested Jobs page reused for Demand (DemandJobsView).
   { key: "jobs", label: "All jobs", Icon: ListChecks },
 ];
 
@@ -93,9 +123,12 @@ function DemandLanding({ onOpenBatch, onOpenJob }) {
     setManualPreview(null);
     setStep("mreview");
   };
+  // Once a batch (file or manual) is started, show its progress; when every row
+  // has finished, the Demand jobs table opens. Previously: onOpenBatch(res.run_id).
   const started = (res) => {
     if (step === "mpreflight") { setDraft(newDraft()); setPayload(null); setManualPreview(null); }
-    onOpenBatch(res.run_id);
+    reset();
+    navigate(`/demand?processing=${encodeURIComponent(res.run_id)}`);
   };
 
   const onNew = view === "new";
@@ -135,8 +168,10 @@ function DemandLanding({ onOpenBatch, onOpenJob }) {
                 manual={<DemandManualEntry draft={draft} setDraft={setDraft} onReview={reviewManual} />}
               />
             )}
-            {view === "batches" && <BatchesTab onOpenBatch={onOpenBatch} />}
-            {view === "jobs" && <JobsTab onOpenBatch={onOpenBatch} onOpenJob={onOpenJob} />}
+            {/* Batches tab hidden for now (see VIEWS).
+            {view === "batches" && <BatchesTab onOpenBatch={onOpenBatch} />} */}
+            {/* Demand "All jobs" table replaced by the Harvested Jobs page (DemandJobsView).
+            {view === "jobs" && <JobsTab onOpenBatch={onOpenBatch} onOpenJob={onOpenJob} />} */}
           </div>
         </>
       )}
@@ -175,15 +210,12 @@ function UploadCard({ onFile, mode, setMode, manual }) {
   const pick = () => document.getElementById(inputId)?.click();
   return (
     <div className="ha-card dm-card">
-      <div className="dm-sec-title">
-        <h3><Upload size={16} /> New Demand Search batch</h3>
-        <span className="dm-soft" style={{ fontSize: 12 }}>One role per {mode === "manual" ? "job" : "row"} · candidates come from Naukri Resdex</span>
+      <div style={{ display: "flex", justifyContent: "flex-end" }}>
+        <div className="dm-seg" role="radiogroup" aria-label="How to add jobs">
+          <button type="button" role="radio" aria-checked={mode !== "manual"} onClick={() => setMode("upload")}><Upload size={13} /> Upload file</button>
+          <button type="button" role="radio" aria-checked={mode === "manual"} onClick={() => setMode("manual")}><PencilLine size={13} /> Add manually</button>
+        </div>
       </div>
-      <div className="dm-seg" role="radiogroup" aria-label="How to add jobs">
-        <button type="button" role="radio" aria-checked={mode !== "manual"} onClick={() => setMode("upload")}><Upload size={13} /> Upload file</button>
-        <button type="button" role="radio" aria-checked={mode === "manual"} onClick={() => setMode("manual")}><PencilLine size={13} /> Enter manually</button>
-      </div>
-      <Stepper active={1} steps={mode === "manual" ? MANUAL_STEPS : undefined} />
       {mode === "manual" ? manual : (
       <div className="dm-up-grid">
         <button
@@ -313,6 +345,7 @@ const BATCH_STATUS_OPTIONS = [
   { value: "stopped", label: "Stopped" }, { value: "failed", label: "Failed" },
 ];
 
+// eslint-disable-next-line no-unused-vars -- Batches tab hidden for now (see VIEWS)
 function BatchesTab({ onOpenBatch }) {
   const f = useListFilters();
   const [status, setStatus] = useState("all");
@@ -394,109 +427,112 @@ function BatchesTab({ onOpenBatch }) {
   );
 }
 
-// ── All jobs tab ──────────────────────────────────────────────────────────────
+// ── All jobs tab (commented out) ──────────────────────────────────────────────
+// Demand jobs are now shown on the Harvested Jobs page reused for Demand
+// (DemandJobsView). The Demand-specific jobs table below is kept for later.
+// // ── All jobs tab ──────────────────────────────────────────────────────────────
 
-const JOB_PAGE = 50;
-const POLL_MS = 8000;
+// const JOB_PAGE = 50;
+// const POLL_MS = 8000;
 
-/** Consecutive jobs of the same batch → [{run_id, batch_name, …, rows}] (the API
- * returns newest batch first, then row order). Each group renders the batch
- * page's own DemandJobsTable, so the Uploaded column and "in this batch" heading
- * stay true. */
-function groupByBatch(jobs) {
-  const groups = [];
-  jobs.forEach((j) => {
-    const last = groups[groups.length - 1];
-    if (last && last.run_id === j.run_id) last.rows.push(j);
-    else groups.push({ run_id: j.run_id, batch_name: j.batch_name, source_kind: j.source_kind, batch_status: j.batch_status,
-      uploaded_on: j.uploaded_on, started_at: j.started_at, rows: [j] });
-  });
-  return groups;
-}
+// /** Consecutive jobs of the same batch → [{run_id, batch_name, …, rows}] (the API
+//  * returns newest batch first, then row order). Each group renders the batch
+//  * page's own DemandJobsTable, so the Uploaded column and "in this batch" heading
+//  * stay true. */
+// function groupByBatch(jobs) {
+//   const groups = [];
+//   jobs.forEach((j) => {
+//     const last = groups[groups.length - 1];
+//     if (last && last.run_id === j.run_id) last.rows.push(j);
+//     else groups.push({ run_id: j.run_id, batch_name: j.batch_name, source_kind: j.source_kind, batch_status: j.batch_status,
+//       uploaded_on: j.uploaded_on, started_at: j.started_at, rows: [j] });
+//   });
+//   return groups;
+// }
 
-function JobsTab({ onOpenBatch, onOpenJob }) {
-  const f = useListFilters();
-  const [status, setStatus] = useState("all");
-  const [data, setData] = useState(null);         // GET /demand/jobs result
-  const [error, setError] = useState("");
-  const [tick, setTick] = useState(0);
-  const { setOffset } = f;
-  useEffect(() => { setOffset(0); }, [status, setOffset]);
-  const key = JSON.stringify({ ...f.params, status, offset: f.offset });
+// function JobsTab({ onOpenBatch, onOpenJob }) {
+//   const f = useListFilters();
+//   const [status, setStatus] = useState("all");
+//   const [data, setData] = useState(null);         // GET /demand/jobs result
+//   const [error, setError] = useState("");
+//   const [tick, setTick] = useState(0);
+//   const { setOffset } = f;
+//   useEffect(() => { setOffset(0); }, [status, setOffset]);
+//   const key = JSON.stringify({ ...f.params, status, offset: f.offset });
 
-  useEffect(() => {
-    let alive = true;
-    setError("");
-    listJobs({ ...JSON.parse(key), limit: JOB_PAGE })
-      .then((res) => { if (alive) setData(res); })
-      .catch((err) => { if (alive) { setData({ total: 0, jobs: [], counts: {} }); setError(demandError(err).message); } });
-    return () => { alive = false; };
-  }, [key, tick]);
+//   useEffect(() => {
+//     let alive = true;
+//     setError("");
+//     listJobs({ ...JSON.parse(key), limit: JOB_PAGE })
+//       .then((res) => { if (alive) setData(res); })
+//       .catch((err) => { if (alive) { setData({ total: 0, jobs: [], counts: {} }); setError(demandError(err).message); } });
+//     return () => { alive = false; };
+//   }, [key, tick]);
 
-  const jobs = useMemo(() => data?.jobs || [], [data]);
-  // Live statuses while any listed job is still queued / in progress.
-  const live = jobs.some(isActiveRow);
-  useEffect(() => {
-    if (!live) return undefined;
-    const t = setTimeout(() => setTick((n) => n + 1), POLL_MS);
-    return () => clearTimeout(t);
-  }, [live, data]);
+//   const jobs = useMemo(() => data?.jobs || [], [data]);
+//   // Live statuses while any listed job is still queued / in progress.
+//   const live = jobs.some(isActiveRow);
+//   useEffect(() => {
+//     if (!live) return undefined;
+//     const t = setTimeout(() => setTick((n) => n + 1), POLL_MS);
+//     return () => clearTimeout(t);
+//   }, [live, data]);
 
-  const groups = useMemo(() => groupByBatch(jobs), [jobs]);
-  const c = data?.counts || {};
-  const stats = [
-    ["all", c.total, "All jobs", "#0F172A"],
-    ["matched", c.matched, "Matched", "#047857"],
-    ["reused", c.reused, "Reused (no quota)", "#2563EB"],
-    ["no_results", c.no_results, "No match", "#475569"],
-    ["attention", c.attention, "Needs attention", "#B91C1C"],
-  ];
+//   const groups = useMemo(() => groupByBatch(jobs), [jobs]);
+//   const c = data?.counts || {};
+//   const stats = [
+//     ["all", c.total, "All jobs", "#0F172A"],
+//     ["matched", c.matched, "Matched", "#047857"],
+//     ["reused", c.reused, "Reused (no quota)", "#2563EB"],
+//     ["no_results", c.no_results, "No match", "#475569"],
+//     ["attention", c.attention, "Needs attention", "#B91C1C"],
+//   ];
 
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      <div className="ha-card dm-card">
-        <div className="dm-jobstats">
-          {stats.map(([k, value, label, color]) => (
-            <button
-              key={k} type="button"
-              className={"ha-runstat ha-runstat-btn" + (status === k && k !== "all" ? " ha-runstat-active" : "")}
-              aria-pressed={status === k && k !== "all"}
-              onClick={() => setStatus(status === k || k === "all" ? "all" : k)}
-            >
-              <b style={{ color }}>{value ?? 0}</b><span>{label}</span>
-            </button>
-          ))}
-        </div>
-        <ListFilters f={f} searchLabel="Search all Demand jobs" placeholder="Search title, client, skill or batch…" />
-        {error && <div className="ha-errbanner">{error}</div>}
-        <div className="dm-soft" style={{ fontSize: 12 }}>
-          {data === null ? "Loading…" : `${data.total} ${data.total === 1 ? "job" : "jobs"} across ${groups.length} ${groups.length === 1 ? "batch" : "batches"} on this page.`}
-          {live && " Statuses refresh while jobs are running."}
-        </div>
-      </div>
+//   return (
+//     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+//       <div className="ha-card dm-card">
+//         <div className="dm-jobstats">
+//           {stats.map(([k, value, label, color]) => (
+//             <button
+//               key={k} type="button"
+//               className={"ha-runstat ha-runstat-btn" + (status === k && k !== "all" ? " ha-runstat-active" : "")}
+//               aria-pressed={status === k && k !== "all"}
+//               onClick={() => setStatus(status === k || k === "all" ? "all" : k)}
+//             >
+//               <b style={{ color }}>{value ?? 0}</b><span>{label}</span>
+//             </button>
+//           ))}
+//         </div>
+//         <ListFilters f={f} searchLabel="Search all Demand jobs" placeholder="Search title, client, skill or batch…" />
+//         {error && <div className="ha-errbanner">{error}</div>}
+//         <div className="dm-soft" style={{ fontSize: 12 }}>
+//           {data === null ? "Loading…" : `${data.total} ${data.total === 1 ? "job" : "jobs"} across ${groups.length} ${groups.length === 1 ? "batch" : "batches"} on this page.`}
+//           {live && " Statuses refresh while jobs are running."}
+//         </div>
+//       </div>
 
-      {data !== null && jobs.length === 0 && !error && (
-        <div className="ha-card dm-card dm-empty">
-          {f.active || status !== "all" ? "No jobs match your filters. Clear a filter to see more." : "No Demand jobs yet. Start a batch from the New search tab."}
-        </div>
-      )}
+//       {data !== null && jobs.length === 0 && !error && (
+//         <div className="ha-card dm-card dm-empty">
+//           {f.active || status !== "all" ? "No jobs match your filters. Clear a filter to see more." : "No Demand jobs yet. Start a batch from the New search tab."}
+//         </div>
+//       )}
 
-      {groups.map((g) => (
-        <div key={`${g.run_id}-${g.rows[0]?.job_id || g.rows[0]?.row}`} className="dm-group">
-          <div className="dm-group-h">
-            <button type="button" className="ha-link" onClick={() => onOpenBatch(g.run_id)}>{g.batch_name || g.run_id}</button>
-            <SourceKindChip kind={g.source_kind} />
-            <BatchStatusPill status={g.batch_status} />
-            <span className="dm-num">{fmtWhen(g.started_at)}</span>
-          </div>
-          <DemandJobsTable
-            rows={g.rows} uploadedOn={g.uploaded_on} status={status} onStatusChange={setStatus}
-            onOpenJob={(r) => onOpenJob(r.run_id, r.job_id)}
-          />
-        </div>
-      ))}
+//       {groups.map((g) => (
+//         <div key={`${g.run_id}-${g.rows[0]?.job_id || g.rows[0]?.row}`} className="dm-group">
+//           <div className="dm-group-h">
+//             <button type="button" className="ha-link" onClick={() => onOpenBatch(g.run_id)}>{g.batch_name || g.run_id}</button>
+//             <SourceKindChip kind={g.source_kind} />
+//             <BatchStatusPill status={g.batch_status} />
+//             <span className="dm-num">{fmtWhen(g.started_at)}</span>
+//           </div>
+//           <DemandJobsTable
+//             rows={g.rows} uploadedOn={g.uploaded_on} status={status} onStatusChange={setStatus}
+//             onOpenJob={(r) => onOpenJob(r.run_id, r.job_id)}
+//           />
+//         </div>
+//       ))}
 
-      <PageNav total={data?.total || 0} offset={f.offset} size={JOB_PAGE} onPage={f.setOffset} unit="jobs" />
-    </div>
-  );
-}
+//       <PageNav total={data?.total || 0} offset={f.offset} size={JOB_PAGE} onPage={f.setOffset} unit="jobs" />
+//     </div>
+//   );
+// }

@@ -75,6 +75,9 @@ export default function JobsTable({
   // Client mode only: the parent has stamped `hasResdex` on its rows (from
   // GET /jobs?contact=resdex), so the Contact filter can offer the Resdex group.
   resdexAvailable = false,
+  // Pins the Source filter to one source (the Demand jobs page: "Demand") — the
+  // dropdown offers only that source.
+  lockedSource = "",
 }) {
   // When `urlState`, the filter/search/sort/page state is mirrored to the URL
   // query string (so /jobs?company=…&page=2 is shareable and survives a refresh).
@@ -93,7 +96,7 @@ export default function JobsTable({
           country: searchParams.get("country") || "all",
           companyCountry: searchParams.get("companyCountry") || "all",
         }
-      : { source: "all", company: "all", contact: [], job: "all", poc: "all", size: "all", country: "all", companyCountry: "all" }
+      : { source: lockedSource || "all", company: "all", contact: [], job: "all", poc: "all", size: "all", country: "all", companyCountry: "all" }
   );
   const [query, setQuery] = useState(() => (urlState ? searchParams.get("q") || "" : ""));
   const [sort, setSort] = useState(() =>
@@ -158,12 +161,13 @@ export default function JobsTable({
   // GET /jobs' `source` param matches case-insensitively. A deep-linked value
   // that isn't in the list is kept so the select never shows a stale "All".
   const sourceOptions = useMemo(() => {
+    if (lockedSource) return [{ value: lockedSource, label: lockedSource }];
     const list = serverMode
       ? [...SOURCE_ORDER]
       : sortSources(Array.from(new Set(jobs.map((j) => jobContact(j).source).filter((s) => s && s !== "—"))));
     if (filters.source !== "all" && !list.includes(filters.source)) list.push(filters.source);
     return [{ value: "all", label: "All sources" }, ...list.map((s) => ({ value: s, label: s }))];
-  }, [serverMode, jobs, filters.source]);
+  }, [serverMode, jobs, filters.source, lockedSource]);
   // Job-location country and company-HQ country dropdown options — whole-dataset
   // facets in server mode, distinct-from-loaded-rows in client mode (Run Detail).
   const countries = useMemo(

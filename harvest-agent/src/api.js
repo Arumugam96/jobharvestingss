@@ -100,9 +100,10 @@ export function getJobs(params = {}) {
 
 /** GET /jobs/facets — distinct Company/Job/POC dropdown values + whole-dataset
  * stat counts. The jobs page is paginated server-side, so filter options and
- * header stats come from here instead of the loaded rows. */
-export function getJobsFacets() {
-  return request("/jobs/facets");
+ * header stats come from here instead of the loaded rows. `{source: "Demand"}`
+ * returns the facets of Demand Search jobs only. */
+export function getJobsFacets(params = {}) {
+  return request(`/jobs/facets${qs(params)}`);
 }
 
 /** GET /jobs/{id} — one job record by id (deep links / refresh on the detail page). */

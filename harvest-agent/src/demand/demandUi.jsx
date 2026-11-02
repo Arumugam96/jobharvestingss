@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  CheckCircle2, RotateCcw, Search, FileSearch, Gauge, Lock, XCircle, Square, Clock, Loader2, Check,
+  CheckCircle2, RotateCcw, Search, FileSearch, Gauge, Lock, XCircle, Square, Clock, Loader2,
   AlertTriangle, X, Hand, FileSpreadsheet, PencilLine,
 } from "lucide-react";
 import { startNaukriRecruiterLogin } from "../api";
@@ -85,30 +85,6 @@ export function SourceKindChip({ kind }) {
     <span className={`dm-chip ${manual ? "query" : "nf"}`} title={manual ? "Jobs entered manually" : "Uploaded spreadsheet"}>
       {manual ? <PencilLine size={12} /> : <FileSpreadsheet size={12} />} {manual ? "Manual" : "File"}
     </span>
-  );
-}
-
-const STEPS = ["Upload", "Validate & map", "Pre-flight", "Search", "Results"];
-
-export const MANUAL_STEPS = ["Enter jobs", "Validate", "Pre-flight", "Search", "Results"];
-
-export function Stepper({ active, steps = STEPS }) {
-  return (
-    <div className="dm-stepper" aria-label="Progress">
-      {steps.map((s, i) => {
-        const n = i + 1;
-        const cls = n < active ? "done" : n === active ? "active" : "";
-        return (
-          <div key={s} className="dm-step-wrap">
-            {i > 0 && <div className={"dm-step-line" + (n <= active ? " done" : "")} />}
-            <div className={"dm-step " + cls} aria-current={n === active ? "step" : undefined}>
-              <span className="dm-dot">{n < active ? <Check size={14} /> : n}</span>
-              <span className="dm-step-t">{s}</span>
-            </div>
-          </div>
-        );
-      })}
-    </div>
   );
 }
 
@@ -344,15 +320,6 @@ const styles = `
   .dm-soft{color:${C.textSoft};}
   .dm-num{font-variant-numeric:tabular-nums;}
 
-  .dm-stepper{display:flex;align-items:center;flex-wrap:wrap;gap:6px 0;margin:2px 0 16px;}
-  .dm-step-wrap{display:flex;align-items:center;}
-  .dm-step{display:inline-flex;align-items:center;gap:8px;font-size:12.5px;color:${C.textSoft};font-weight:600;}
-  .dm-dot{width:24px;height:24px;border-radius:50%;display:grid;place-items:center;font-size:12px;font-weight:700;background:#F1F5F9;color:#64748B;border:1px solid #E2E8F0;}
-  .dm-step.active{color:${C.primary};}.dm-step.active .dm-dot{background:${C.primary};color:#fff;border-color:${C.primary};}
-  .dm-step.done{color:#047857;}.dm-step.done .dm-dot{background:#ECFDF5;color:#047857;border-color:#A7F3D0;}
-  .dm-step-line{width:34px;height:2px;background:#E2E8F0;margin:0 10px;border-radius:2px;}
-  .dm-step-line.done{background:#A7F3D0;}
-
   .dm-up-grid{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:16px;}
   .dm-drop{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;text-align:center;min-height:190px;
     border:2px dashed #DBE7FF;background:${C.pale};border-radius:12px;padding:24px 20px;cursor:pointer;transition:background .15s,border-color .15s;font:inherit;color:${C.text};}
@@ -586,6 +553,6 @@ const styles = `
   .dm-x.sm{padding:6px;}
 
   @media(max-width:900px){.dm-up-grid,.dm-pf-grid{grid-template-columns:1fr;}.dm-pillstack{align-items:flex-start;}.dm-pillrow{justify-content:flex-start;}.dm-pill-sub{text-align:left;}}
-  @media(max-width:520px){.dm-runstats{grid-template-columns:repeat(2,minmax(0,1fr));}.dm-step-line{width:14px;margin:0 6px;}.dm-step-t{display:none;}}
+  @media(max-width:520px){.dm-runstats{grid-template-columns:repeat(2,minmax(0,1fr));}}
   @media (prefers-reduced-motion: reduce){.dm-live .d{animation:none;}.dm-sw-track,.dm-sw-thumb,.dm-bigbar i{transition:none;}}
 `;

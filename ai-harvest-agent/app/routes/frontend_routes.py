@@ -445,7 +445,12 @@ async def list_jobs(
         "from the loaded rows."
     ),
 )
-async def job_facets() -> dict:
+async def job_facets(
+    source: str = Query("", description="'Demand' = facets of Demand Search jobs only (left out otherwise)"),
+) -> dict:
+    # isinstance: a direct call (tests) gets the Query(...) default object.
+    demand = isinstance(source, str) and source.strip().lower() == DEMAND_SOURCE.lower()
+
     def _facets_from_json() -> dict:
         jobs = _load_all_jobs()
 
@@ -480,7 +485,7 @@ async def job_facets() -> dict:
     mode = data_source_mode()
     result, _used = await resolve_read(
         mode,
-        lambda: db_read(lambda db: HarvestRunService(db).job_facets()),
+        lambda: db_read(lambda db: HarvestRunService(db).job_facets(demand=demand)),
         _facets_from_json,
     )
     # db_read returns None on a DB error in "database" mode — keep the shape.

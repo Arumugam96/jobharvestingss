@@ -690,6 +690,11 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
   }, [job.id]);
   useEffect(() => { refreshOutreach(); }, [refreshOutreach]);
 
+  // Demand Search jobs (uploaded / manually added requirements) have no company,
+  // poster, contact or outreach — those sections are hidden; the JD and the
+  // Naukri Resdex candidates are what the page shows for them.
+  const isDemand = (job.source || "").toLowerCase() === "demand";
+
   const emailSent = !!outreach.email;
   const liSent = !!outreach.linkedin;
 
@@ -736,9 +741,11 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
           <div style={{ minWidth: 0 }}>
           <div className="ha-hero-meta">
             <span className="ha-source">{job.source}</span>
-            <span className="ha-hero-company">
-              <Building2 size={15} /> {job.company}
-            </span>
+            {!isDemand && (
+              <span className="ha-hero-company">
+                <Building2 size={15} /> {job.company}
+              </span>
+            )}
           </div>
           <h1 className="ha-title">{job.jobTitle}</h1>
           <div className="ha-chips">
@@ -748,7 +755,7 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
             <span className="ha-chip"><Calendar size={14} /> {job.postedDate || "—"}</span>
           </div>
           </div>
-          {detail && (
+          {detail && !isDemand && (
             <OutreachEmailStrip
               emails={detail.emails}
               onCompose={job.id && job.email ? () => setEmailModal({ job, followup: false }) : null}
@@ -756,6 +763,7 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
           )}
         </header>
 
+        {!isDemand && (
         <section className="ha-section ha-poc">
           <div className="ha-label"><UserCircle size={14} /> Point of Contact</div>
           <div className="ha-poc-body">
@@ -828,8 +836,9 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
             </div>
           </div>
         </section>
+        )}
 
-        {hasCompanyContact && (
+        {!isDemand && hasCompanyContact && (
           <section className="ha-section ha-poc ha-enriched">
             <div className="ha-label">
               <Building2 size={14} /> Enriched Contact
@@ -900,7 +909,7 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
           <div className="ha-rx-err">Couldn't load Naukri Resdex candidates / outreach email details.</div>
         )}
 
-        <div className="ha-grid">
+        <div className="ha-grid" style={isDemand ? { gridTemplateColumns: "minmax(0, 1fr)" } : undefined}>
           <main className="ha-main">
             <section className="ha-section">
               <div className="ha-label"><FileText size={14} /> Job Description</div>
@@ -917,6 +926,7 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
             </section>
           </main>
 
+          {!isDemand && (
           <aside className="ha-rail">
             <section className="ha-section ha-company">
               <div className="ha-label"><Building2 size={14} /> Company</div>
@@ -975,6 +985,7 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
               </div>
             </section>
           </aside>
+          )}
         </div>
       </div>
 

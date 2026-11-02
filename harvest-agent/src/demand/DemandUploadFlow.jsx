@@ -5,7 +5,7 @@ import {
 } from "lucide-react";
 import { demandError, demandUpload, demandValidate, validateJson } from "./demandApi";
 import {
-  Stepper, Note, HarvestRunningModal, sessionState, fmtDuration, fmtAgo, fmtDay, SESSION_TIP, MANUAL_STEPS,
+  Note, HarvestRunningModal, sessionState, fmtDuration, fmtAgo, fmtDay, SESSION_TIP,
 } from "./demandUi";
 
 /* Steps 2 and 3 of a new Demand Search batch: validation (POST /demand/validate —
@@ -83,7 +83,6 @@ export function ValidationStep({ file, initial, onReplace, onCancel, onContinue 
       <div className="ha-pagebody">
         <div className="ha-card dm-card">
           {replaceInput}
-          <Stepper active={2} />
           {body}
         </div>
       </div>
@@ -156,7 +155,6 @@ export function ManualReviewStep({ payload, initial, onEdit, onContinue }) {
       <PageHead sub="Check the jobs before anything is searched. Nothing is saved until you start the batch." />
       <div className="ha-pagebody">
         <div className="ha-card dm-card">
-          <Stepper active={2} steps={MANUAL_STEPS} />
           {body}
         </div>
       </div>
@@ -418,7 +416,6 @@ export function PreflightStep({ file, preview, sess, onBack, onStarted, onStart,
       <PageHead sub="Check the session and today's Resdex quota before starting." />
       <div className="ha-pagebody">
         <div className="ha-card dm-card">
-          <Stepper active={3} steps={manual ? MANUAL_STEPS : undefined} />
           <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
             {!enabled && <div className="ha-errbanner">Resdex is disabled on this server (RESDEX_ENABLED=false), so Demand Search can't start.</div>}
             <div className="dm-pf-grid">

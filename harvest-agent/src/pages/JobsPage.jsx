@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
-import { SlidersHorizontal, Download, RefreshCw, FileJson, FileSpreadsheet } from "lucide-react";
+import { SlidersHorizontal, Download, RefreshCw, FileJson, FileSpreadsheet, Upload } from "lucide-react";
 import { getJobs, getJobsFacets, ApiError, downloadJsonUrl, downloadExcelUrl } from "../api";
 import { C } from "../theme";
 import { Select, StatCard } from "../components/ui";
@@ -15,8 +15,17 @@ import { useTenant } from "../TenantContext";
 // handleParamsChange, which fetches exactly that slice from GET /jobs; dropdown
 // options and the header/footer stat counts come from GET /jobs/facets so they
 // still span the whole dataset.
-export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeChange, urlState = false }) {
-  const { jobsViewRef } = useHarvestData();
+//
+// `demand` reuses this page for Demand Search jobs (/demand?view=jobs): rows and
+// facets are fetched with source=Demand, the Source filter is pinned to Demand,
+// the harvest-only header actions are hidden and `onNewSearch` adds a "New
+// search" button. It keeps its own view cache, apart from Harvested Jobs'.
+const DEMAND_SOURCE = "Demand";
+
+export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeChange, urlState = false, demand = false, onNewSearch }) {
+  const { jobsViewRef: sharedViewRef } = useHarvestData();
+  const demandViewRef = useRef(null);
+  const jobsViewRef = demand ? demandViewRef : sharedViewRef;
   // Tenants without the rules feature (e.g. the India client) shouldn't see the
   // Rule Engine shortcut — FeatureGate would bounce the navigation anyway.
   const { hasFeature } = useTenant();
@@ -94,7 +103,7 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
 
   const fetchFacets = useCallback(async () => {
     try {
-      const f = await getJobsFacets();
+      const f = await getJobsFacets(demand ? { source: DEMAND_SOURCE } : {});
       setFacets(f);
       // Facets are whole-dataset (filter-independent), so cache them globally.
       jobsViewRef.current = { ...(jobsViewRef.current || {}), facets: f };
@@ -102,7 +111,7 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
       // Dropdowns fall back to "All"-only and stats render as 0; the jobs
       // fetch's own error banner covers a backend outage.
     }
-  }, [jobsViewRef]);
+  }, [jobsViewRef, demand]);
   useEffect(() => { fetchFacets(); }, [fetchFacets]);
 
   const refresh = useCallback(() => {
@@ -113,8 +122,8 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
   // Date range is a server-side filter now (date_from/date_to) — JobsTable
   // folds these into every emitted params object.
   const serverExtraParams = useMemo(
-    () => ({ date_from: startDate, date_to: endDate }),
-    [startDate, endDate]
+    () => ({ date_from: startDate, date_to: endDate, ...(demand ? { source: DEMAND_SOURCE } : {}) }),
+    [startDate, endDate, demand]
   );
 
   const stats = facets?.stats || {};
@@ -145,7 +154,7 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
       const blob = new Blob([String.fromCharCode(0xFEFF) + [header.join(","), ...lines].join("\n")], { type: "text/csv;charset=utf-8;" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
-      a.href = url; a.download = "harvested-jobs.csv"; a.click();
+      a.href = url; a.download = demand ? "demand-jobs.csv" : "harvested-jobs.csv"; a.click();
       URL.revokeObjectURL(url);
     } catch (err) {
       setPageError(
@@ -162,24 +171,33 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
     <main className="ha-main">
       <div className="ha-pagehead">
         <div className="ha-pagehead-titles">
-          <h1>Harvested Jobs</h1>
+          <h1>{demand ? "Demand Jobs" : "Harvested Jobs"}</h1>
           <p className="ha-sub">
-            {pageLoading && !facets ? "Loading…" : `${stats.total || 0} harvested posting${(stats.total || 0) === 1 ? "" : "s"} · ${stats.qualified || 0} qualified · ${stats.flagged || 0} flagged`}
+            {pageLoading && !facets ? "Loading…" : demand
+              ? `${stats.total || 0} Demand Search job${(stats.total || 0) === 1 ? "" : "s"} from uploaded and manually added requirements`
+              : `${stats.total || 0} harvested posting${(stats.total || 0) === 1 ? "" : "s"} · ${stats.qualified || 0} qualified · ${stats.flagged || 0} flagged`}
           </p>
         </div>
         <div className="ha-pagehead-actions">
           <button className="ha-btn ha-btn-secondary" onClick={refresh} disabled={pageLoading} title="Refresh">
             <RefreshCw size={16} className={pageLoading ? "ha-spin" : ""} /> Refresh
           </button>
-          {hasFeature("rules") && (
+          {!demand && hasFeature("rules") && (
             <button className="ha-btn ha-btn-secondary" onClick={() => onNavigate("rules")}><SlidersHorizontal size={16} /> Rule Engine</button>
           )}
-          <a className="ha-btn ha-btn-secondary" href={downloadJsonUrl()} title="GET /download/json — latest combined harvest JSON">
-            <FileJson size={16} /> JSON
-          </a>
-          <a className="ha-btn ha-btn-secondary" href={downloadExcelUrl()} title="GET /download/excel — latest combined harvest Excel">
-            <FileSpreadsheet size={16} /> Excel
-          </a>
+          {!demand && (
+            <a className="ha-btn ha-btn-secondary" href={downloadJsonUrl()} title="GET /download/json — latest combined harvest JSON">
+              <FileJson size={16} /> JSON
+            </a>
+          )}
+          {!demand && (
+            <a className="ha-btn ha-btn-secondary" href={downloadExcelUrl()} title="GET /download/excel — latest combined harvest Excel">
+              <FileSpreadsheet size={16} /> Excel
+            </a>
+          )}
+          {demand && onNewSearch && (
+            <button className="ha-btn ha-btn-secondary" onClick={onNewSearch}><Upload size={16} /> New search</button>
+          )}
           <button className="ha-btn ha-btn-primary" onClick={exportCsv} disabled={exporting}>
             <Download size={16} /> {exporting ? "Exporting…" : "Export CSV"}
           </button>
@@ -202,7 +220,7 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
           </div>
         </div>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
-          <StatCard value={stats.total || 0} label="Total harvested" color={C.accent} />
+          <StatCard value={stats.total || 0} label={demand ? "Total Demand jobs" : "Total harvested"} color={C.accent} />
           <StatCard value={stats.companies || 0} label="Companies sourced" color={C.primary} />
           <StatCard value={stats.pocs || 0} label="POCs identified" color={C.primary} />
         </div>
@@ -219,7 +237,10 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
           minWidth={1410}
           pageSize={Number(pageSizeSel)}
           urlState={urlState}
-          emptyMessage="No postings match your search. Run a harvest from the Rule Engine to collect jobs."
+          lockedSource={demand ? DEMAND_SOURCE : ""}
+          emptyMessage={demand
+            ? "No Demand jobs match your search. Upload or add requirements from New search."
+            : "No postings match your search. Run a harvest from the Rule Engine to collect jobs."}
         />
 
         <div style={{ display: "flex", justifyContent: "space-between", padding: "0 4px", fontSize: 12, color: C.textSoft }}>
