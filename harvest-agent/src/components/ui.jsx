@@ -296,7 +296,17 @@ export function MultiSelect({ label, options, selected, onChange }) {
 // that opens in a new tab. Otherwise it's a button: `available` rows call
 // `onClick` (open the Email/LinkedIn composer); unavailable rows also call
 // `onClick` (to surface the "no data" inline message) but render greyed out.
-export function ContactActionBtn({ glyph: Glyph, title, available, href, onClick, sent = false, sentTitle }) {
+export function ContactActionBtn({ glyph: Glyph, title, available, href, onClick, sent = false, sentTitle, disabledTitle }) {
+  // disabledTitle: the channel is not offered for this row (Demand Search jobs are
+  // never contacted) — an inert, greyed icon that opens nothing.
+  if (disabledTitle) {
+    return (
+      <button type="button" className="ha-cbtn ha-cbtn-off" disabled title={disabledTitle}
+        style={{ cursor: "not-allowed", opacity: 0.5 }}>
+        <Glyph size={16} />
+      </button>
+    );
+  }
   if (href) {
     return (
       <a className="ha-cbtn ha-cbtn-on" href={href} target="_blank" rel="noreferrer" title={title}>

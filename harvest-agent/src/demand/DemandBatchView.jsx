@@ -3,7 +3,7 @@ import { ArrowLeft, FileSpreadsheet, PencilLine, Search, Info, Square, Check, Lo
 import { SourceChip } from "../components/ui";
 import { demandError, getDemandBatch, getDemandUsage, stopDemandBatch } from "./demandApi";
 import {
-  BatchStatusPill, Switch, ROW_META, isActiveRow, fmtWhen, fmtDuration, QUOTA_TIP,
+  BatchStatusPill, Switch, ROW_META, isActiveRow, fmtWhen, fmtDuration, QUOTA_TIP, subStepLabel,
 } from "./demandUi";
 import DemandJobsTable from "./DemandJobsTable";
 
@@ -190,7 +190,7 @@ function ListChip({ r }) {
   else if (r.status === "no_results") label = "No results";
   else if (r.status === "queries_only") label = "Queries only";
   else if (r.status === "session_expired") label = "Session expired";
-  else if (r.status === "in_progress") label = r.sub_step === "searching" ? "Searching Resdex" : "Extracting requirements";
+  else if (r.status === "in_progress") label = subStepLabel(r);
   return (
     <span className={`dm-chip ${meta.chip}`}>
       {r.status === "in_progress" ? <Loader2 size={11} className="ha-spin" /> : <span className="d" />}{label}
@@ -232,7 +232,7 @@ function ProcessingPanel({ batch, usage, running, onStopped }) {
   else if (batch.status === "failed") chip = <span className="dm-live ended"><span className="d" />Finished early</span>;
   else if (ended) chip = <span className="dm-live ended"><span className="d" />Finished</span>;
   else if (stopping) chip = <span className="dm-live paused"><span className="d" />Stopping</span>;
-  else chip = <span className="dm-live"><span className="d" />{cur?.sub_step === "requirements" ? "Extracting" : "Searching"}</span>;
+  else chip = <span className="dm-live"><span className="d" />{cur?.sub_step === "searching" ? "Searching" : "Extracting"}</span>;
 
   let current;
   if (batch.status === "stopped") current = `Stopped after ${done} of ${total} rows. Finished rows and their candidates are saved.`;

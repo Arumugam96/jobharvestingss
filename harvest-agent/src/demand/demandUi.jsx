@@ -39,7 +39,9 @@ export const ATTENTION = ["cap_reached", "session_expired", "error"];
 export const ACTIVE = ["queued", "in_progress"];
 export const isActiveRow = (r) => ACTIVE.includes(r?.status);
 
-const SUB_STEP = { requirements: "Extracting requirements", searching: "Searching Resdex" };
+const SUB_STEP = {
+  extracting: "Extracting JD details", requirements: "Extracting requirements", searching: "Searching Resdex",
+};
 export const subStepLabel = (r) => SUB_STEP[r?.sub_step] || "In progress";
 
 const TONES = {

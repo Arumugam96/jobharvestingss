@@ -205,13 +205,20 @@ class BusinessFilterService:
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
-    def classify_all(self, jobs: list[UnifiedJob], cfg: FiltersConfig) -> list[UnifiedJob]:
-        """Annotate every job with domain / hiring_entity / is_gcc / job_type."""
+    def classify_all(self, jobs: list[UnifiedJob], cfg: FiltersConfig, *,
+                     track_ambiguous: bool = True) -> list[UnifiedJob]:
+        """Annotate every job with domain / hiring_entity / is_gcc / job_type.
+
+        ``track_ambiguous=False`` classifies without appending unknown companies to
+        ambiguous_companies.json — Demand Search passes it so client names never
+        land in that harvest master list."""
         for j in jobs:
             if not j.domain or j.domain == "Any":
                 j.domain = self._infer_domain(j)
             if not j.hiring_entity or j.hiring_entity == "Any":
-                j.is_gcc, j.hiring_entity = self._infer_hiring_entity(j)
+                j.is_gcc, j.hiring_entity = self._infer_hiring_entity(
+                    j, track_ambiguous=track_ambiguous,
+                )
             j.job_type = self._infer_job_type(j)
         return jobs
 
@@ -279,7 +286,8 @@ class BusinessFilterService:
 
     # ── Hiring entity ──────────────────────────────────────────────────────────
 
-    def _infer_hiring_entity(self, j: UnifiedJob) -> tuple[bool, str]:
+    def _infer_hiring_entity(self, j: UnifiedJob, *,
+                             track_ambiguous: bool = True) -> tuple[bool, str]:
         """Returns (is_gcc, hiring_entity_label).
 
         All master-list matching is whole-word (see _PhraseMatcher)."""
@@ -335,7 +343,7 @@ class BusinessFilterService:
             return False, "Direct Client"
 
         # ── Ambiguous: not in any list ────────────────────────────────────────
-        if not is_placeholder_company(j.company):
+        if track_ambiguous and not is_placeholder_company(j.company):
             _append_ambiguous(j.company)
         return False, "Ambiguous"
 

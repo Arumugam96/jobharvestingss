@@ -31,6 +31,9 @@ import {
   Lock,
   Monitor,
   Search,
+  Clock,
+  Laptop,
+  Tags,
 } from "lucide-react";
 
 const WhatsAppIcon = ({ size = 16 }) => (
@@ -690,10 +693,17 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
   }, [job.id]);
   useEffect(() => { refreshOutreach(); }, [refreshOutreach]);
 
-  // Demand Search jobs (uploaded / manually added requirements) have no company,
-  // poster, contact or outreach — those sections are hidden; the JD and the
-  // Naukri Resdex candidates are what the page shows for them.
+  // Demand Search jobs (uploaded / manually added requirements) are never contacted:
+  // no outreach email strip, no WhatsApp/Email/LinkedIn actions, no Apollo enriched
+  // contact and no Links (job_url is a synthetic demand:// key). What the JD
+  // extraction found — client company, point of contact, company size,
+  // classification, experience / work mode / skills — is shown display-only.
   const isDemand = (job.source || "").toLowerCase() === "demand";
+  const hasCompany = !!job.company && job.company !== "—";
+  const workModeLabel = job.workMode && job.workMode !== "not_specified"
+    ? job.workMode.charAt(0).toUpperCase() + job.workMode.slice(1)
+    : "";
+  const skills = Array.isArray(job.skills) ? job.skills : [];
 
   const emailSent = !!outreach.email;
   const liSent = !!outreach.linkedin;
@@ -741,7 +751,7 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
           <div style={{ minWidth: 0 }}>
           <div className="ha-hero-meta">
             <span className="ha-source">{job.source}</span>
-            {!isDemand && (
+            {(!isDemand || hasCompany) && (
               <span className="ha-hero-company">
                 <Building2 size={15} /> {job.company}
               </span>
@@ -753,6 +763,15 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
             <span className="ha-chip"><Briefcase size={14} /> {job.jobType || "—"}</span>
             <span className="ha-chip ha-chip-accent"><Banknote size={14} /> {job.salary || "—"}</span>
             <span className="ha-chip"><Calendar size={14} /> {job.postedDate || "—"}</span>
+            {isDemand && job.experience && (
+              <span className="ha-chip"><Clock size={14} /> {job.experience}</span>
+            )}
+            {isDemand && workModeLabel && (
+              <span className="ha-chip"><Laptop size={14} /> {workModeLabel}</span>
+            )}
+            {isDemand && job.employmentType && (
+              <span className="ha-chip"><Briefcase size={14} /> {job.employmentType}</span>
+            )}
           </div>
           </div>
           {detail && !isDemand && (
@@ -763,7 +782,6 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
           )}
         </header>
 
-        {!isDemand && (
         <section className="ha-section ha-poc">
           <div className="ha-label"><UserCircle size={14} /> Point of Contact</div>
           <div className="ha-poc-body">
@@ -803,6 +821,7 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
               </div>
             </div>
 
+            {!isDemand && (
             <div className="ha-actions">
               <ContactAction
                 glyph={WhatsAppIcon}
@@ -834,9 +853,9 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
                 href={!job.id && job.linkedin ? job.linkedin : null}
               />
             </div>
+            )}
           </div>
         </section>
-        )}
 
         {!isDemand && hasCompanyContact && (
           <section className="ha-section ha-poc ha-enriched">
@@ -909,8 +928,16 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
           <div className="ha-rx-err">Couldn't load Naukri Resdex candidates / outreach email details.</div>
         )}
 
-        <div className="ha-grid" style={isDemand ? { gridTemplateColumns: "minmax(0, 1fr)" } : undefined}>
+        <div className="ha-grid">
           <main className="ha-main">
+            {isDemand && skills.length > 0 && (
+              <section className="ha-section ha-skills-section">
+                <div className="ha-label"><Tags size={14} /> Skills</div>
+                <div className="ha-skills">
+                  {skills.map((s) => <span key={s} className="ha-skill">{s}</span>)}
+                </div>
+              </section>
+            )}
             <section className="ha-section">
               <div className="ha-label"><FileText size={14} /> Job Description</div>
               {job.jdHtml ? (
@@ -926,7 +953,6 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
             </section>
           </main>
 
-          {!isDemand && (
           <aside className="ha-rail">
             <section className="ha-section ha-company">
               <div className="ha-label"><Building2 size={14} /> Company</div>
@@ -935,6 +961,7 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
                   <span className="ha-company-key"><Users size={13} /> Size</span>
                   <CompanySizeBadge band={job.companySize} tier={job.companySizeTier} />
                 </div>
+                {!isDemand && (
                 <div className="ha-company-item">
                   <span className="ha-company-key"><MapPin size={13} /> Headquarters</span>
                   <span className="ha-company-val">
@@ -942,6 +969,7 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
                       <span className="ha-muted">—</span>}
                   </span>
                 </div>
+                )}
               </div>
             </section>
             <section className="ha-section">
@@ -971,6 +999,7 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
                 </div>
               </div>
             </section>
+            {!isDemand && (
             <section className="ha-section">
               <div className="ha-label"><Link2 size={14} /> Links</div>
               <div className="ha-rows">
@@ -984,8 +1013,8 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
                 </div>
               </div>
             </section>
+            )}
           </aside>
-          )}
         </div>
       </div>
 
@@ -1231,6 +1260,10 @@ const styles = `
     color: #1E40AF; margin-bottom: 14px; }
   .ha-label svg { color: #2563EB; }
 
+  .ha-skills-section { margin-bottom: 18px; }
+  .ha-skills { display: flex; flex-wrap: wrap; gap: 7px; }
+  .ha-skill { font-size: 12.5px; font-weight: 500; color: #1D4ED8; background: #EFF4FF;
+    border: 1px solid #DBE6FF; padding: 4px 11px; border-radius: 999px; }
   .ha-jd { font-size: 14.5px; line-height: 1.7; color: #334155; margin: 0; white-space: pre-wrap; }
   /* Rich (HTML) description branch — real block elements, so no pre-wrap. */
   .ha-jd-html { white-space: normal; }

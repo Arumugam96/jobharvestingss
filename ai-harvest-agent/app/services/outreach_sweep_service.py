@@ -37,7 +37,12 @@ from app.models.recruiter import RecruiterORM
 from app.models.resdex import ResdexSearchORM, ResdexSearchStatus
 from app.services.auto_outreach_service import run_auto_outreach_after_harvest
 from app.services.config_service import ConfigService
-from app.services.harvest_run_service import _normalized_job_url, _txt_expr, db_read
+from app.services.harvest_run_service import (
+    _normalized_job_url,
+    _not_demand_job,
+    _txt_expr,
+    db_read,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -67,7 +72,8 @@ async def _list_emailable_jobs(db, limit: int) -> list[ScrapedJobORM]:
     stmt = (
         select(ScrapedJobORM)
         .outerjoin(RecruiterORM, ScrapedJobORM.recruiter_id == RecruiterORM.id)
-        .where(or_(job_has_email, recruiter_has_email))
+        # Demand Search jobs are never emailed, even when their JD carried an email.
+        .where(or_(job_has_email, recruiter_has_email), _not_demand_job())
         .order_by(ScrapedJobORM.posted_date.desc())
         .limit(limit)
     )

@@ -1,16 +1,17 @@
 import { useCallback, useEffect, useState } from "react";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
-import { Upload, History, Search, Info, FileSpreadsheet, PencilLine, Plus, ListChecks, ChevronLeft, ChevronRight } from "lucide-react";
+import { Upload, History, Search, Info, FileSpreadsheet, PencilLine, Plus, Loader2, ListChecks, ChevronLeft, ChevronRight } from "lucide-react";
 import LiveBrowserView from "../components/LiveBrowserView";
 import { Select } from "../components/ui";
 import JobsPage from "../pages/JobsPage";
 import { useHarvestData } from "../HarvestDataContext";
-import { createManual, demandError, listBatches /* , listJobs */ } from "./demandApi";
+import { createManual, demandError, demandUpload, listBatches /* , listJobs */ } from "./demandApi";
 import {
-  DemandStyles, SessionQuotaPills, BatchStatusPill, Note, useDemandUsage, fmtWhen,
+  DemandStyles, SessionQuotaPills, BatchStatusPill, Note, useDemandUsage, fmtWhen, HarvestRunningModal,
   SourceKindChip,
 } from "./demandUi";
-import { ValidationStep, PreflightStep, ManualReviewStep } from "./DemandUploadFlow";
+// Review + pre-flight steps are skipped for now (see DemandLanding.startBatch).
+// import { ValidationStep, PreflightStep, ManualReviewStep } from "./DemandUploadFlow";
 import DemandManualEntry, { checkDraft, newDraft } from "./DemandManualEntry";
 import DemandBatchView from "./DemandBatchView";
 import DemandJobDetail from "./DemandJobDetail";
@@ -128,60 +129,75 @@ function DemandLanding({ onOpenBatch, onOpenJob }) {
   const setView = (v) => navigate(`/demand?view=${v}`);
   const sess = useDemandUsage();
   const [mode, setMode] = useState("upload");      // New search: upload | manual
-  // home → validate → preflight (file) | home → mreview → mpreflight (manual)
-  const [step, setStep] = useState("home");
-  const [file, setFile] = useState(null);
-  const [preview, setPreview] = useState(null);   // POST /demand/validate result
   const [draft, setDraft] = useState(newDraft);   // manual jobs being edited
-  const [payload, setPayload] = useState(null);   // the reviewed manual jobs
-  const [manualPreview, setManualPreview] = useState(null); // POST /demand/validate-json result
+  const [starting, setStarting] = useState(false);
+  const [startError, setStartError] = useState("");
+  const [harvestModal, setHarvestModal] = useState(null); // another harvest / batch is running
 
-  const chooseFile = (f) => { if (f) { setFile(f); setPreview(null); setStep("validate"); } };
-  const reset = () => { setFile(null); setPreview(null); setStep("home"); };
-  const reviewManual = () => {
-    setPayload({ batch_name: draft.batchName.trim(), jobs: checkDraft(draft).payloadJobs });
-    setManualPreview(null);
-    setStep("mreview");
+  // The review (validate) and pre-flight pages are skipped for now: choosing a
+  // file or pressing Start on the manual jobs starts the batch straight away
+  // (the backend still validates and skips invalid rows), then the processing
+  // screen shows its progress and opens the Demand jobs table when it is done.
+  // Previous flow, kept below commented out:
+  //   file:   home → validate (ValidationStep) → preflight (PreflightStep)
+  //   manual: home → mreview (ManualReviewStep) → mpreflight (PreflightStep)
+  const startBatch = async (create, onOk) => {
+    if (starting) return;
+    setStarting(true);
+    setStartError("");
+    try {
+      const res = await create();
+      if (onOk) onOk();
+      navigate(`/demand?processing=${encodeURIComponent(res.run_id)}`);
+    } catch (err) {
+      const e = demandError(err);
+      if (e.code === "harvest_running") setHarvestModal(e.detail?.harvest || {});
+      else {
+        setStartError(e.message);
+        if ((e.code || "").startsWith("session")) sess.refresh();
+      }
+    } finally {
+      setStarting(false);
+    }
   };
-  // Once a batch (file or manual) is started, show its progress; when every row
-  // has finished, the Demand jobs table opens. Previously: onOpenBatch(res.run_id).
-  const started = (res) => {
-    if (step === "mpreflight") { setDraft(newDraft()); setPayload(null); setManualPreview(null); }
-    reset();
-    navigate(`/demand?processing=${encodeURIComponent(res.run_id)}`);
+  const chooseFile = (f) => {
+    if (f) startBatch(() => demandUpload(f, (f.name || "").replace(/\.[^.]+$/, "")));
   };
+  const startManual = () => startBatch(
+    () => createManual({ batch_name: draft.batchName.trim(), jobs: checkDraft(draft).payloadJobs }),
+    () => setDraft(newDraft()),
+  );
 
   const onNew = view === "new";
   return (
     <>
       {sess.live && <LiveBrowserView title="Naukri recruiter login — live browser" onClose={() => { sess.setLive(false); sess.refresh(); }} />}
-      {(!onNew || step === "home") && (
-        <>
-          <div className="ha-pagehead">
-            <div className="ha-pagehead-titles">
-              <h1>Demand Search</h1>
-              <p className="ha-sub">Upload or enter client job requirements and find matching Naukri Resdex candidates for each role.</p>
-            </div>
-            <div className="ha-pagehead-actions"><SessionQuotaPills usage={sess.usage} /></div>
-          </div>
-          <div className="ha-pagebody">
-            <DemandTabs view={view} onSelect={setView} />
-            {sess.usage && !sess.usage.resdex_enabled && (
-              <div className="ha-errbanner">Resdex is disabled on this server (RESDEX_ENABLED=false), so Demand Search can't search for candidates.</div>
-            )}
-            {onNew && (
-              <UploadCard
-                onFile={chooseFile} mode={mode} setMode={setMode}
-                manual={<DemandManualEntry draft={draft} setDraft={setDraft} onReview={reviewManual} />}
-              />
-            )}
-            {/* Batches tab hidden for now (see VIEWS).
-            {view === "batches" && <BatchesTab onOpenBatch={onOpenBatch} />} */}
-            {/* Demand "All jobs" table replaced by the Harvested Jobs page (DemandJobsView).
-            {view === "jobs" && <JobsTab onOpenBatch={onOpenBatch} onOpenJob={onOpenJob} />} */}
-          </div>
-        </>
-      )}
+      {harvestModal && <HarvestRunningModal info={harvestModal} onClose={() => setHarvestModal(null)} />}
+      <div className="ha-pagehead">
+        <div className="ha-pagehead-titles">
+          <h1>Demand Search</h1>
+          <p className="ha-sub">Upload or enter client job requirements and find matching Naukri Resdex candidates for each role.</p>
+        </div>
+        <div className="ha-pagehead-actions"><SessionQuotaPills usage={sess.usage} /></div>
+      </div>
+      <div className="ha-pagebody">
+        <DemandTabs view={view} onSelect={setView} />
+        {sess.usage && !sess.usage.resdex_enabled && (
+          <div className="ha-errbanner">Resdex is disabled on this server (RESDEX_ENABLED=false), so Demand Search can't search for candidates.</div>
+        )}
+        {startError && <div className="ha-errbanner">{startError}</div>}
+        {onNew && (
+          <UploadCard
+            onFile={chooseFile} mode={mode} setMode={setMode} starting={starting}
+            manual={<DemandManualEntry draft={draft} setDraft={setDraft} onReview={startManual} starting={starting} />}
+          />
+        )}
+        {/* Batches tab hidden for now (see VIEWS).
+        {view === "batches" && <BatchesTab onOpenBatch={onOpenBatch} />} */}
+        {/* Demand "All jobs" table replaced by the Harvested Jobs page (DemandJobsView).
+        {view === "jobs" && <JobsTab onOpenBatch={onOpenBatch} onOpenJob={onOpenJob} />} */}
+      </div>
+      {/* Review + pre-flight pages, skipped for now (see startBatch above).
       {onNew && step === "validate" && file && (
         <ValidationStep
           file={file} initial={preview} onReplace={chooseFile} onCancel={reset}
@@ -206,12 +222,12 @@ function DemandLanding({ onOpenBatch, onOpenJob }) {
           onStart={(name) => createManual({ ...payload, batch_name: name })}
           onBack={() => setStep("mreview")} onStarted={started}
         />
-      )}
+      )} */}
     </>
   );
 }
 
-function UploadCard({ onFile, mode, setMode, manual }) {
+function UploadCard({ onFile, mode, setMode, manual, starting = false }) {
   const [dragging, setDragging] = useState(false);
   const inputId = "dm-file-input";
   const pick = () => document.getElementById(inputId)?.click();
@@ -229,12 +245,13 @@ function UploadCard({ onFile, mode, setMode, manual }) {
           type="button"
           className={"dm-drop" + (dragging ? " is-drag" : "")}
           onClick={pick}
+          disabled={starting}
           onDragOver={(e) => { e.preventDefault(); if (e.dataTransfer) e.dataTransfer.dropEffect = "copy"; setDragging(true); }}
           onDragLeave={() => setDragging(false)}
-          onDrop={(e) => { e.preventDefault(); setDragging(false); const f = e.dataTransfer?.files?.[0]; if (f) onFile(f); }}
+          onDrop={(e) => { e.preventDefault(); setDragging(false); const f = e.dataTransfer?.files?.[0]; if (f && !starting) onFile(f); }}
         >
-          <span className="dm-drop-ic"><Upload size={24} /></span>
-          <h4>Drop an Excel or CSV file here</h4>
+          <span className="dm-drop-ic">{starting ? <Loader2 size={24} className="ha-spin" /> : <Upload size={24} />}</span>
+          <h4>{starting ? "Starting the search…" : "Drop an Excel or CSV file here"}</h4>
           <p>or <span className="u">browse your computer</span>. The file needs a <b>Job Title</b> and a <b>Job Description</b> column.</p>
         </button>
         <input id={inputId} type="file" accept=".xlsx,.xls,.csv" style={{ display: "none" }}

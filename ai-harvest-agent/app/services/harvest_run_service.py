@@ -537,6 +537,27 @@ class HarvestRunService:
         await self.bulk_insert_scraped_jobs(run_pk, jobs)
         return True
 
+    async def update_scraped_job_fields(self, job_id: str, values: dict[str, Any]) -> bool:
+        """Direct column update of one job row (tenant-scoped). Unlike
+        bulk_insert_scraped_jobs it attaches nothing — no recruiter upsert, no
+        Apollo company cache, no company+location HR contact — so Demand Search
+        can store JD-derived fields (incl. company / poster name) without any
+        Apollo-derived data. A new ``location`` re-derives country/state
+        (parse_location) unless the caller passes them. Returns True when a row
+        was updated."""
+        values = {k: v for k, v in values.items() if hasattr(ScrapedJobORM, k)}
+        if not values:
+            return False
+        if "location" in values:
+            _city, state, country = parse_location(values["location"] or "")
+            values.setdefault("state", state)
+            values.setdefault("country", country)
+        stmt = apply_tenant(
+            update(ScrapedJobORM).where(ScrapedJobORM.id == job_id), ScrapedJobORM.tenant_id,
+        ).values(**values)
+        res = await self._db.execute(stmt)
+        return bool(res.rowcount)
+
     async def bulk_insert_llm_calls(self, run_pk: str, calls: list[dict[str, Any]]) -> None:
         if not calls:
             return

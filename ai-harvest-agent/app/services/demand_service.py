@@ -23,7 +23,7 @@ A batch reuses the harvest plumbing end to end:
            the same RESDEX_DELAY_* gap / RESDEX_BREAK_* break keeps the cadence a
            single long batch would have.
 
-Row statuses: queued, in_progress (sub_step requirements | searching), matched,
+Row statuses: queued, in_progress (sub_step extracting | requirements | searching), matched,
 reused, no_results, queries_only, cap_reached, session_expired, error, stopped.
 
 Without a Naukri recruiter login a batch still runs, in queries-only mode: each
@@ -51,7 +51,7 @@ from app.core.tenant_context import apply_tenant, get_current_tenant_id
 from app.models.harvest_run import HarvestRunORM
 from app.models.resdex import ResdexSearchORM, ResdexSearchStatus
 from app.services import resdex_match_service as rms
-from app.services import run_guard
+from app.services import demand_enrichment, run_guard
 from app.services.demand_import import SOURCE_FILE, SOURCE_MANUAL
 from app.services.harvest_run_service import (
     DEMAND_SOURCE,
@@ -467,8 +467,19 @@ async def _row_gap(searches_total: int, breaks_taken: int) -> tuple[bool, int]:
 
 async def _search_row(run_id: str, run_pk: str, snap: dict, row: dict, *, reuse: bool,
                       queries_only: bool = False) -> None:
-    """One row through prepare_resdex_candidates with live sub-steps."""
-    row.update(status=ROW_IN_PROGRESS, sub_step="requirements", error="")
+    """One row through prepare_resdex_candidates with live sub-steps: first the
+    harvest-style JD extraction (demand_enrichment — before the search so the
+    requirements prompt sees the enriched row), then the search, then the empty
+    fields back-filled from the stored requirements. Both enrichment steps are
+    best-effort and independent of the Resdex outcome (queries-only / reused rows
+    too); fill-only-empty, so a re-run never overwrites."""
+    row.update(status=ROW_IN_PROGRESS, sub_step="extracting", error="")
+    await _save(run_pk, snap)
+    try:
+        await demand_enrichment.enrich_from_jd(row.get("job_id"), row, run_pk=run_pk)
+    except Exception as exc:
+        logger.warning("demand_jd_enrich_failed", job_id=row.get("job_id"), error=str(exc))
+    row["sub_step"] = "requirements"
     await _save(run_pk, snap)
     target = await _target(row.get("job_id"), row)
     if target is None:
@@ -485,6 +496,11 @@ async def _search_row(run_id: str, run_pk: str, snap: dict, row: dict, *, reuse:
         [target], run_id=run_id, reuse=reuse, on_stage=_stage, queries_only=queries_only,
     )
     await _apply_outcome(row, norm, before, out)
+    try:
+        await demand_enrichment.backfill_from_requirements(row.get("job_id"), norm)
+    except Exception as exc:
+        logger.warning("demand_requirements_backfill_failed", job_id=row.get("job_id"),
+                       error=str(exc))
 
 
 async def _run_batch(job_id: str, run_id: str, run_pk: str) -> None:
@@ -617,7 +633,7 @@ async def rerun_job(job_id: str) -> dict:
     require_resdex_ready()
     await _claim(None, run.run_id)
     try:
-        row.update(status=ROW_IN_PROGRESS, sub_step="requirements", error="")
+        row.update(status=ROW_IN_PROGRESS, sub_step="extracting", error="")
         await _save(run.id, snap)
         asyncio.create_task(_rerun_background(run.run_id, run.id, job_id),
                             name=f"demand-rerun-{job_id}")

@@ -51,6 +51,8 @@ export const PAGE_SIZE_OPTIONS = [
 // Fallback display page size when no explicit "Rows per page" is provided.
 const DEFAULT_DISPLAY_PAGE_SIZE = 100;
 
+const NO_OUTREACH_TITLE = "No outreach for Demand Search jobs";
+
 export default function JobsTable({
   jobs,
   onView,
@@ -418,6 +420,15 @@ export default function JobsTable({
                   <td className="ha-td ha-td-pin">
                     <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
                       <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
+                        {/* Demand Search jobs are never contacted: their contact
+                            data shows in the columns, the actions stay inert. */}
+                        {c.source === "Demand" ? (
+                          <>
+                            <ContactActionBtn glyph={WhatsAppIcon} title="WhatsApp" disabledTitle={NO_OUTREACH_TITLE} />
+                            <ContactActionBtn glyph={Mail} title="Email" disabledTitle={NO_OUTREACH_TITLE} />
+                            <ContactActionBtn glyph={LinkedInIcon} title="LinkedIn" disabledTitle={NO_OUTREACH_TITLE} />
+                          </>
+                        ) : (<>
                         {/* WhatsApp is a plain wa.me link to whatever number the
                             Mobile cell shows (incl. a Company-tagged one), matching
                             the run view's phone/WhatsApp count. */}
@@ -451,6 +462,7 @@ export default function JobsTable({
                             </>
                           );
                         })()}
+                        </>)}
                       </div>
                       {noDataMsg && noDataMsg.jobId === j.id && (
                         <small style={{ color: "#B91C1C", fontSize: 11, whiteSpace: "nowrap" }}>

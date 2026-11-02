@@ -153,6 +153,11 @@ function mapApiJobFields(j) {
     salary: j.salary || "",
     jobType: j.job_type || "",
     workMode: j.work_mode || "",
+    // Experience / skills / employment type — shown on the job-detail page (Demand
+    // Search jobs get them from the upload or the JD/requirements extraction).
+    experience: j.experience || "",
+    skills: Array.isArray(j.skills) ? j.skills.filter(Boolean) : [],
+    employmentType: j.employment_type || "",
     // Only a real web link is an apply link — Demand Search rows carry a synthetic
     // demand://jd/… key in job_url.
     applyLink: /^https?:\/\//i.test(j.job_url || "") ? j.job_url : "",
@@ -193,6 +198,10 @@ export function mapJobToDetail(j) {
     company: j.company,
     location: j.location,
     jobType: j.jobType,
+    workMode: j.workMode || "",
+    experience: j.experience || "",
+    skills: j.skills || [],
+    employmentType: j.employmentType || "",
     salary: j.salary,
     postedDate: j.postedDate,
     applyLink: j.applyLink,

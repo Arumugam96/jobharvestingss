@@ -169,7 +169,7 @@ function toKv(job) {
 
 // ── UI ────────────────────────────────────────────────────────────────────────
 
-export default function DemandManualEntry({ draft, setDraft, onReview }) {
+export default function DemandManualEntry({ draft, setDraft, onReview, starting = false }) {
   const { checks, issues } = useMemo(() => checkDraft(draft), [draft]);
   const valueRefs = useRef({});
 
@@ -312,10 +312,11 @@ export default function DemandManualEntry({ draft, setDraft, onReview }) {
         <div className="dm-foot">
           <span className="left">
             {issues ? <span style={{ color: "#B91C1C", fontWeight: 600 }}>Fill in the required fields to continue</span>
-              : `${n} ${n === 1 ? "job" : "jobs"} ready. Nothing is saved until you start the batch.`}
+              : `${n} ${n === 1 ? "job" : "jobs"} ready. Nothing is saved until you start the search.`}
           </span>
-          <button type="button" className="ha-btn ha-btn-primary" disabled={issues > 0} onClick={onReview}>
-            Review {n} {n === 1 ? "job" : "jobs"} <ChevronRight size={16} />
+          {/* Was "Review N jobs" (review + pre-flight pages, skipped for now). */}
+          <button type="button" className="ha-btn ha-btn-primary" disabled={issues > 0 || starting} onClick={onReview}>
+            {starting ? "Starting…" : `Start search (${n} ${n === 1 ? "job" : "jobs"})`} <ChevronRight size={16} />
           </button>
         </div>
       </div>
