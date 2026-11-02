@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { X, Check, ShieldCheck, PhoneIncoming, PhoneMissed, Pencil } from "lucide-react";
+import { X, Check, ShieldCheck, PhoneIncoming, PhoneMissed, Pencil, CalendarClock } from "lucide-react";
 import { GLASS_MODAL, GLASS_BTN, GLASS_INPUT, GLASS_INPUT_FOCUS } from "../theme";
 
 /* Manual mobile-number verification for a Harvested Jobs row. The action button
@@ -76,6 +76,18 @@ const styles = `
 .pvm-radio input { width: 16px; height: 16px; margin: 0; cursor: pointer; flex: none; }
 .pvm-radio b { display: block; font-size: 13.5px; font-weight: 600; }
 .pvm-textarea { width: 100%; min-height: 96px; ${GLASS_INPUT} border-radius: 8px; padding: 10px 12px; font-size: 13.5px; line-height: 1.5; color: #1E293B; font-family: inherit; resize: vertical; box-sizing: border-box; }
+.pvm-opt { text-transform: none; letter-spacing: 0; font-weight: 400; color: #94A3B8; }
+.pvm-req { font-size: 12px; color: #DC2626; margin-top: -8px; }
+.pvm-toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 12px; border: 1px solid #E2E8F0; border-radius: 8px; background: rgba(255,255,255,.7); cursor: pointer; }
+.pvm-toggle-row b { display: block; font-size: 13.5px; font-weight: 600; }
+.pvm-toggle-row small { display: block; font-size: 12px; color: #64748B; margin-top: 2px; }
+.pvm-toggle { position: relative; flex: none; width: 38px; height: 22px; border-radius: 999px; background: #CBD5E1; transition: background .15s; }
+.pvm-toggle.on { background: #2563EB; }
+.pvm-toggle input { position: absolute; inset: 0; margin: 0; opacity: 0; cursor: pointer; }
+.pvm-toggle:has(input:focus-visible) { outline: 2px solid #2563EB; outline-offset: 2px; }
+.pvm-knob { position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(15,23,42,.3); transition: transform .15s; pointer-events: none; }
+.pvm-toggle.on .pvm-knob { transform: translateX(16px); }
+.pvm-pop-fu { display: inline-flex; align-items: center; gap: 5px; margin-top: 10px; font-size: 12px; font-weight: 600; color: #1D4ED8; background: #EFF4FF; border: 1px solid #DBE6FF; border-radius: 999px; padding: 2px 9px; }
 .pvm-textarea:focus { outline: none; border-color: #2563EB; box-shadow: 0 0 0 3px rgba(37,99,235,.12); ${GLASS_INPUT_FOCUS} }
 .pvm-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 13px 22px; border-top: 1px solid rgba(226,232,240,.9); background: rgba(248,250,252,.8); }
 .pvm-fbtn { display: inline-flex; align-items: center; gap: 6px; border-radius: 8px; font-size: 13px; font-weight: 600; padding: 9px 14px; cursor: pointer; font-family: inherit; border: 1px solid transparent; }
@@ -176,6 +188,7 @@ export function PhoneVerifyBadge({ result, onEdit }) {
           {result.remarks
             ? <div className="pvm-pop-text">{result.remarks}</div>
             : <div className="pvm-pop-empty">No comments added.</div>}
+          {result.followUp && <div className="pvm-pop-fu"><CalendarClock size={12} /> Follow-up required</div>}
           <div className="pvm-pop-foot">
             <span>{result.updatedAt ? fmtTime(result.updatedAt) : ""}</span>
             {onEdit && <button className="pvm-link" onClick={() => { setOpen(false); onEdit(); }}><Pencil size={12} /> Edit</button>}
@@ -190,6 +203,11 @@ export function PhoneVerifyBadge({ result, onEdit }) {
 export default function PhoneVerifyModal({ phone, pocName, company, initial = null, onSave = () => {}, onClose = () => {} }) {
   const [status, setStatus] = useState(initial?.status || "");
   const [remarks, setRemarks] = useState(initial?.remarks || "");
+  const [followUp, setFollowUp] = useState(!!initial?.followUp);
+
+  // Comments are mandatory for an answered call, optional when unanswered.
+  const commentsRequired = status === "answered";
+  const canSave = !!status && (!commentsRequired || !!remarks.trim());
 
   useEffect(() => {
     const onKey = (e) => { if (e.key === "Escape") onClose(); };
@@ -198,7 +216,8 @@ export default function PhoneVerifyModal({ phone, pocName, company, initial = nu
   }, [onClose]);
 
   const save = () => {
-    onSave({ status, remarks: remarks.trim(), phone, updatedAt: new Date().toISOString() });
+    if (!canSave) return;
+    onSave({ status, remarks: remarks.trim(), followUp, phone, updatedAt: new Date().toISOString() });
     onClose();
   };
   const clear = () => {
@@ -236,11 +255,33 @@ export default function PhoneVerifyModal({ phone, pocName, company, initial = nu
             ))}
           </div>
 
-          <span className="pvm-label">Comments</span>
+          <span className="pvm-label">
+            Comments{" "}
+            {commentsRequired
+              ? <span style={{ color: "#DC2626" }}>*</span>
+              : status === "unanswered" && <span className="pvm-opt">(optional)</span>}
+          </span>
           <textarea className="pvm-textarea" value={remarks} onChange={(e) => setRemarks(e.target.value)}
+            aria-required={commentsRequired}
+            style={commentsRequired && !remarks.trim() ? { borderColor: "#FCA5A5" } : undefined}
             placeholder={status === "unanswered"
               ? "e.g. Switched off, will retry tomorrow"
               : "e.g. Spoke to the recruiter, prefers calls after 2 PM"} />
+          {commentsRequired && !remarks.trim() && (
+            <span className="pvm-req">Comments are required for an answered call.</span>
+          )}
+
+          <label className="pvm-toggle-row">
+            <span>
+              <b>Follow-up</b>
+              <small>Mark this contact for a follow-up call.</small>
+            </span>
+            <span className={"pvm-toggle" + (followUp ? " on" : "")}>
+              <input type="checkbox" role="switch" checked={followUp} aria-checked={followUp}
+                onChange={(e) => setFollowUp(e.target.checked)} />
+              <span className="pvm-knob" />
+            </span>
+          </label>
         </div>
 
         <div className="pvm-foot">
@@ -249,8 +290,8 @@ export default function PhoneVerifyModal({ phone, pocName, company, initial = nu
           </span>
           <div style={{ display: "flex", gap: 8 }}>
             <button className="pvm-fbtn pvm-fbtn-ghost" onClick={onClose}>Cancel</button>
-            <button className="pvm-fbtn pvm-fbtn-primary" onClick={save} disabled={!status}
-              title={status ? undefined : "Choose Answered or Unanswered"}>
+            <button className="pvm-fbtn pvm-fbtn-primary" onClick={save} disabled={!canSave}
+              title={!status ? "Choose Answered or Unanswered" : !canSave ? "Add comments for an answered call" : undefined}>
               <Check size={14} /> Save
             </button>
           </div>
