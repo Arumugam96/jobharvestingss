@@ -1093,61 +1093,67 @@ def render_candidate_cards_html(cands: list[dict], job_title: str = "") -> str:
 # ── Email profile-count line (RESDEX_EMAIL_MODE=count) ────────────────────────
 
 # One is picked per job (stable digest of the job_url), so re-sends for the same job
-# read the same while different jobs vary. {count} is a bucket ("7", "20+"), {title}
-# the exact job title. Rules (tested over every entry): both placeholders exactly
-# once, no "!", URLs, bold or urgency words, and never a claim that profiles were sent.
+# read the same while different jobs vary. {count} is the bucketed phrase from
+# bucket_profile_count ("7", "around 25", "60+"). The job title is already linked in the
+# email's opening sentence, so these lines don't repeat it. Each line is the email's
+# whole value paragraph — profile count + support offer — so when it is present the
+# LLM writes no support line of its own (outreach_prompts.PROFILE_COUNT_CONTEXT_LINE).
+# Rules (tested over every entry): {count} exactly once, no "!", URLs, bold or urgency
+# words, and never a claim that profiles were sent.
 PROFILE_COUNT_LINES: tuple[str, ...] = (
-    "We currently have {count} matching profiles in our network for your {title} "
-    "requirement, and I'd be happy to discuss them with you in detail.",
-    "For the {title} role, we already have {count} relevant profiles in our network. "
-    "Happy to walk you through them whenever suits you.",
-    "Our network has {count} profiles that match your {title} requirement. "
-    "Glad to discuss them in detail if that's useful.",
-    "We've identified {count} profiles that fit your {title} opening, and I'd be glad "
-    "to share more details on a quick call.",
-    "Right now we have {count} candidates aligned with your {title} requirement. "
-    "Happy to go over them with you whenever convenient.",
-    "We have {count} suitable profiles for the {title} position in our talent pool, "
-    "and I can walk you through them in detail.",
-    "For your {title} opening, there are {count} matching profiles in our network. "
-    "Let me know if you'd like to discuss them.",
-    "We already have {count} profiles lined up that match your {title} needs, and I'd "
-    "be happy to discuss them further.",
-    "Our team has {count} relevant profiles for the {title} role ready to discuss "
-    "whenever it suits you.",
-    "There are {count} profiles in our network that closely match your {title} "
-    "requirement. Happy to share details on a short call.",
-    "We're tracking {count} candidates whose experience fits your {title} role, and "
-    "I'd welcome the chance to discuss them in detail.",
-    "We have {count} profiles that line up well with your {title} requirement. "
-    "Glad to walk you through them if helpful.",
-    "For the {title} position, our network currently holds {count} matching profiles. "
-    "Happy to discuss them with you in more detail.",
-    "We can already point to {count} profiles that suit your {title} role. "
-    "Let me know a convenient time to go over them.",
+    "We have {count} relevant profiles that align with your requirements and would be "
+    "happy to support your current and upcoming IT hiring needs.",
+    "We currently have {count} relevant profiles that match your requirements and would "
+    "be glad to support your current and upcoming IT hiring needs.",
+    "We have {count} profiles that align well with your requirements and would be happy "
+    "to support your current and upcoming IT hiring needs.",
+    "Our network has {count} relevant profiles that fit your requirements, and we would "
+    "be happy to support your current and upcoming IT hiring needs.",
+    "We already have {count} relevant profiles aligned with your requirements and would "
+    "be glad to support your current and upcoming IT hiring needs.",
+    "We have {count} suitable profiles that match your requirements and would be happy "
+    "to support your current and upcoming IT hiring needs.",
 )
 # Stand-in for a missing job title ("your current requirement", "the current role").
 _NO_TITLE = "current"
 # Searches whose result count may be quoted: real profiles cleared the skill bar
 # (CAP_REACHED = picks found but the daily candidate cap kept them from being stored).
 _COUNTABLE_STATUSES = (ResdexSearchStatus.MATCHED, ResdexSearchStatus.CAP_REACHED)
+# Counts below _COUNT_EXACT_BELOW are quoted exactly; larger ones (still under the cap)
+# are rounded down to a multiple of _COUNT_ROUND_STEP and phrased "around N".
+_COUNT_EXACT_BELOW = 10
+_COUNT_ROUND_STEP = 5
 
 
-def bucket_profile_count(n: Any, min_count: int | None = None) -> str | None:
-    """The rounded count quoted in the email, or None below ``min_count`` (default
-    RESDEX_EMAIL_MIN_COUNT): 3–9 exact, then "10+", "20+", "50+", "100+", "500+"."""
+def bucket_profile_count(
+    n: Any, min_count: int | None = None, max_count: int | None = None,
+) -> str | None:
+    """The count phrase quoted in the email, or None below ``min_count`` (default
+    RESDEX_EMAIL_MIN_COUNT). Never states more than ``max_count`` (default
+    RESDEX_EMAIL_MAX_COUNT, 60):
+
+        min..9          → exact            ("7")
+        10..max-1       → rounded DOWN to a multiple of 5, "around N"  ("around 25")
+        ≥ max           → "<max>+"         ("60+")
+
+    Rounding is always down, so the email never overstates the real Resdex count, and
+    the "around N" value is always below the cap. ``max_count`` ≤ 0 disables the cap."""
     try:
         n = int(n) if not isinstance(n, bool) else 0
     except (TypeError, ValueError):
         return None
+    settings = get_settings()
     if min_count is None:
-        min_count = int(getattr(get_settings(), "resdex_email_min_count", 3))
+        min_count = int(getattr(settings, "resdex_email_min_count", 3))
+    if max_count is None:
+        max_count = int(getattr(settings, "resdex_email_max_count", 60))
     if n <= 0 or n < min_count:
         return None
-    for floor in (500, 100, 50, 20, 10):
-        if n >= floor:
-            return f"{floor}+"
-    return str(n)
+    if max_count > 0 and n >= max_count:
+        return f"{max_count}+"
+    if n < _COUNT_EXACT_BELOW:
+        return str(n)
+    return f"around {n - n % _COUNT_ROUND_STEP}"
 
 
 def format_profile_count_line(n: Any, job_title: str, job_url: str) -> str:
@@ -1157,7 +1163,7 @@ def format_profile_count_line(n: Any, job_title: str, job_url: str) -> str:
     count = bucket_profile_count(n)
     if count is None:
         return ""
-    title = " ".join((job_title or "").split()) or _NO_TITLE
+    title = " ".join((job_title or "").split()) or _NO_TITLE  # for lines quoting {title}
     key = normalize_job_url(job_url) or (job_url or "").strip()
     digest = hashlib.sha256(key.encode("utf-8")).digest()
     line = PROFILE_COUNT_LINES[int.from_bytes(digest[:8], "big") % len(PROFILE_COUNT_LINES)]

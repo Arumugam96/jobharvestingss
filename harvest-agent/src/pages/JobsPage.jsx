@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
-import { SlidersHorizontal, Download, RefreshCw, FileJson, FileSpreadsheet, Upload } from "lucide-react";
+import { SlidersHorizontal, Download, RefreshCw, FileJson, FileSpreadsheet } from "lucide-react";
 import { getJobs, getJobsFacets, ApiError, downloadJsonUrl, downloadExcelUrl } from "../api";
 import { C } from "../theme";
 import { Select, StatCard } from "../components/ui";
@@ -18,11 +18,12 @@ import { useTenant } from "../TenantContext";
 //
 // `demand` reuses this page for Demand Search jobs (/demand?view=jobs): rows and
 // facets are fetched with source=Demand, the Source filter is pinned to Demand,
-// the harvest-only header actions are hidden and `onNewSearch` adds a "New
-// search" button. It keeps its own view cache, apart from Harvested Jobs'.
+// the harvest-only header actions are hidden and `demandTabs` (the Demand Search
+// New search | All jobs tabs) render at the top. It keeps its own view cache,
+// apart from Harvested Jobs'.
 const DEMAND_SOURCE = "Demand";
 
-export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeChange, urlState = false, demand = false, onNewSearch }) {
+export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeChange, urlState = false, demand = false, demandTabs = null }) {
   const { jobsViewRef: sharedViewRef } = useHarvestData();
   const demandViewRef = useRef(null);
   const jobsViewRef = demand ? demandViewRef : sharedViewRef;
@@ -195,9 +196,6 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
               <FileSpreadsheet size={16} /> Excel
             </a>
           )}
-          {demand && onNewSearch && (
-            <button className="ha-btn ha-btn-secondary" onClick={onNewSearch}><Upload size={16} /> New search</button>
-          )}
           <button className="ha-btn ha-btn-primary" onClick={exportCsv} disabled={exporting}>
             <Download size={16} /> {exporting ? "Exporting…" : "Export CSV"}
           </button>
@@ -205,6 +203,7 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
       </div>
 
       <div className="ha-pagebody">
+        {demand && demandTabs}
         {pageError && <div className="ha-errbanner">{pageError}</div>}
 
         <div className="ha-daterow">

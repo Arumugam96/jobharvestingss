@@ -5,26 +5,34 @@ The initial outreach email is a short BDE-style note:
 
     Hi <First>,
 
-    I'm <Name>, a <Role> at SightSpectrum. I noticed your <Platform> posting for
-    <Job Title> at <Company> and wanted to connect.
+    I'm <Sender first name> from SightSpectrum. I came across your <Platform> post
+    regarding the <Job Title> requirement and wanted to connect.
 
-    <contract IT staffing value + audience ask (vendor onboarding / priority roles)>
+    <support paragraph>   — either the Resdex profile-count line ("We have around 15
+                            relevant profiles that align with your requirements and would
+                            be happy to support your current and upcoming IT hiring
+                            needs.") or, without a count, the LLM's support sentence
 
-    <short, low-pressure question>
+    <quick-call question>
 
-then a deterministic closing (contact block, website link, sign-off). The greeting,
-the "I'm <Name>, a <Role> at SightSpectrum." intro and the closing are added by code
-(append_closing); the LLM writes only the body — the job-reference sentence that
-continues the intro's paragraph, the value/ask paragraph and the closing question —
-kept general and varied, with no quantified claims (candidate counts, turnaround
-windows, pricing), so the mail reads as 1:1 correspondence rather than a promotional
-blast. When LLM generation fails, render_email_fallback builds the same shape from
-the job context.
+    <warm closing line>
 
-Audiences steer the phrasing and the ask:
+    Best regards,
+    <Sender first name>
+
+The greeting, the "I'm <Name> from SightSpectrum." intro, the profile-count line and the
+sign-off are added by code (append_closing); the LLM writes only the body — the
+job-reference sentence that continues the intro's paragraph, the support sentence
+(skipped when the count line is present), the call question and the closing line. The
+model never writes counts, so the only number in the email is the capped Resdex count
+(resdex_match_service.bucket_profile_count — never above RESDEX_EMAIL_MAX_COUNT, i.e.
+"60+"). When LLM generation fails, render_email_fallback builds the same shape from the
+job context.
+
+Audiences steer the phrasing of the support sentence:
   * active client  — a company already on ss_active_clients.json
   * new client     — everyone else ("unknown" when the company can't be identified)
-The initial-email prompt sends the per-audience ask (_EMAIL_ASK); follow-ups send
+The initial-email prompt sends the per-audience note (_EMAIL_ASK); follow-ups send
 the broader positioning note (_AUDIENCE).
 
 Everything is plain text (bodies contain no markdown/HTML); email_service renders
@@ -88,22 +96,23 @@ _AUDIENCE = {
     ),
 }
 
-# Per-audience ask for the INITIAL email only (build_email_prompt) — what the value
-# paragraph should ask for. Follow-ups keep the broader _AUDIENCE note above.
+# Per-audience note for the INITIAL email only (build_email_prompt) — how the support
+# sentence should read. The ask itself is always the quick call (EMAIL_SYSTEM_PROMPT).
+# Follow-ups keep the broader _AUDIENCE note above.
 _EMAIL_ASK = {
     "active": (
-        "This company is an existing SightSpectrum client. Acknowledge the existing "
-        "partnership in a few words only — don't describe or invent specific past work, "
-        "placements, or people — and invite them to share their priority/upcoming "
-        "requirements. Do NOT ask about vendor onboarding."
+        "This company is an existing SightSpectrum client. In the support sentence you may "
+        "acknowledge the existing partnership in a few words only — don't describe or "
+        "invent specific past work, placements, or people. Do NOT ask about vendor "
+        "onboarding."
     ),
     "new": (
-        "This company is a new prospect. Ask whether they're open to working with "
-        "additional staffing vendors and, if so, about their vendor onboarding process."
+        "This company is a new prospect. Offer to support their current and upcoming IT "
+        "hiring needs; don't imply any existing relationship."
     ),
     "unknown": (
-        "The company could not be identified. Ask whether they're open to working with "
-        "additional staffing vendors and, if so, about their vendor onboarding process."
+        "The company could not be identified. Offer to support their current and upcoming "
+        "IT hiring needs; don't imply any existing relationship."
     ),
 }
 
@@ -124,25 +133,30 @@ OFFER_LINE = (
 # Low-pressure CTA line — the fallback uses this verbatim; the LLM writes its own
 # closing question from the intent described in the system prompt.
 CTA_LINE = "Would it help if I shared a few relevant profiles, or would a quick call be easier?"
-# Value/ask + CTA lines for the INITIAL-email fallback (render_email_fallback) only —
-# OFFER_LINE / CTA_LINE above stay as the follow-up fallback's lines.
-INTRO_OFFER_NEW = (
-    "We'd be interested in supporting your current and upcoming IT hiring requirements. "
-    "Are you open to working with additional staffing vendors? If so, could you share "
-    "your vendor onboarding process?"
-)
+# Lines for the INITIAL-email fallback (render_email_fallback) only — OFFER_LINE /
+# CTA_LINE above stay as the follow-up fallback's lines. The support line is skipped
+# when a Resdex profile-count line is present (that line carries the support offer).
+INTRO_OFFER_NEW = "We would be happy to support your current and upcoming IT hiring needs."
 INTRO_OFFER_ACTIVE = (
-    "As your existing staffing partner, we'd be glad to support this role and any other "
-    "current or upcoming requirements; please feel free to share your priority roles."
+    "As your existing staffing partner, we would be happy to support your current and "
+    "upcoming IT hiring needs."
 )
-INTRO_CTA = "Looking forward to connecting."
-# Hardcoded sender title in the sign-off.
-SENDER_TITLE = "Business Development Executive, SightSpectrum"
+INTRO_CALL_LINE = (
+    "Would you be available for a quick call sometime this week to discuss how we can "
+    "collaborate?"
+)
+INTRO_CTA = "Looking forward to connecting with you!"
 # Company name used in the intro line and the email signature.
 COMPANY_NAME = "SightSpectrum"
-# Role-only fallback title (no company) for the intro + signature when a sender isn't
-# listed in SENDER_IDENTITIES — derived from SENDER_TITLE so the two stay in sync.
-DEFAULT_ROLE = SENDER_TITLE.split(",")[0].strip()
+# Sign-off line opening the closing block. email_service keys the HTML signature card
+# off it (SIGN_OFF_LEADS), so change it here only.
+SIGN_OFF = "Best regards,"
+# Sign-off openings email_service recognises — the current one plus the legacy
+# "Regards," so bodies drafted before the change still render their signature card.
+SIGN_OFF_LEADS = (SIGN_OFF.lower(), "regards,")
+# Role title shown on the HTML signature card for a sender not listed in
+# SENDER_IDENTITIES (listed senders carry their own "title").
+DEFAULT_ROLE = "Business Development Executive"
 
 DECK_LINK_TEMPLATE = "More about us: {url}"
 
@@ -159,6 +173,16 @@ def _strip_trailing_closing(pitch: str) -> str:
     duplicated. Only strips a trailing block (sign-off phrases, lines containing
     an email address, or blanks) — body content before it is left untouched."""
     lines = (pitch or "").rstrip().splitlines()
+    # A model-written "Best regards,\n<Name>[\n<Title>]" block: the name/title lines don't
+    # look like sign-off phrases, so the loop below would stop on them and leave the
+    # sign-off in. Cut from a sign-off line near the end when only short lines follow it.
+    for k in range(len(lines) - 1, max(-1, len(lines) - 6), -1):
+        s = lines[k].strip().lower()
+        if any(s.startswith(m) for m in _SIGNOFF_MARKERS):
+            tail = [t.strip() for t in lines[k + 1:] if t.strip()]
+            if all(len(t.split()) <= 6 and not t.endswith(("?", ".")) for t in tail):
+                lines = lines[:k]
+            break
     i = len(lines) - 1
     while i >= 0:
         s = lines[i].strip().lower()
@@ -197,26 +221,16 @@ def _greeting_on_own_line(body: str) -> str:
 def _build_sign_off(sender_email: str) -> str:
     """Sign-off block:
 
-        Regards,
-        <Full name or First>       (only when a name resolves)
-        <Role Title>, SightSpectrum
-        <sender_email>             (only when present)
+        Best regards,
+        <First name>               (the sender's first name — same name as the intro)
 
-    Name and title come from resolve_identity so the plain-text sign-off matches the HTML
-    signature and the intro. The name line is dropped for role mailboxes with no derivable
-    name; the email line is left as plain text here and becomes a bold clickable mailto link
-    when the email is sent as HTML (where email_service replaces this whole block with a
-    formatted signature card)."""
+    The name comes from resolve_identity so it matches the intro ("I'm <First> from …").
+    A role mailbox with no derivable name signs as "<COMPANY_NAME> Team". In the HTML part
+    email_service keeps the "Best regards," line and draws the signature card (full name,
+    title, contact details) from the same identity in place of the name line."""
     identity = resolve_identity(sender_email)
-    name = identity["full"] or identity["first"]
-    email = identity["email"]
-    lines = ["Regards,"]
-    if name:
-        lines.append(name)
-    lines.append(f"{identity['title']}, {COMPANY_NAME}")
-    if email:
-        lines.append(email)
-    return "\n".join(lines)
+    name = identity["first"] or identity["full"] or f"{COMPANY_NAME} Team"
+    return f"{SIGN_OFF}\n{name}"
 
 
 # A leading sentence that is ONLY a self-introduction, which the model may write despite
@@ -335,10 +349,8 @@ def append_closing(
 
         More about us: <deck_url>        (when deck_url is set)
 
-        Regards,                         (sign-off block — ALWAYS LAST)
-        <Name>
-        <Role Title>, SightSpectrum
-        <sender_email>
+        Best regards,                    (sign-off block — ALWAYS LAST)
+        <First name>
     """
     body = _ensure_greeting(
         _insert_after_greeting(_greeting_on_own_line(_strip_trailing_closing(pitch)), intro),
@@ -365,31 +377,38 @@ EMAIL_SYSTEM_PROMPT = """
 You write short, natural outreach emails for SightSpectrum, an IT staffing company.
 
 CONTEXT:
-You're writing to a recruiter or hiring manager who posted an IT job. The goal is simply to open a conversation about a staffing partnership — mention the role you saw, say we'd be interested in supporting their current and upcoming IT hiring, and make the ask given in the "Ask —" line of the request. End on a light, friendly note.
+You're writing to a recruiter or hiring manager who posted an IT job. The goal is simply to open a conversation: mention the role you saw, offer to support their current and upcoming IT hiring, and ask for a quick call.
 
 WHAT THE APPLICATION ADDS (do NOT write these):
-The greeting ("Hi <Name>,") and the sender's introduction ("I'm <Name>, from SightSpectrum.") are added before your text, and the contact details, website link and sign-off after it. Your text continues straight after that introduction, so don't greet, introduce yourself or the company again ("introduce ourselves / SightSpectrum"), or name SightSpectrum. Write as "I" for yourself (e.g. "I came across…") and "we" for the company.
+The greeting ("Hi <first name>,") and the sender's introduction ("I'm <sender name> from SightSpectrum.") are added before your text, and the sign-off with the sender's name after it. Your text continues straight after that introduction, so don't greet, introduce yourself or the company again, or name SightSpectrum. Write as "I" for yourself (e.g. "I came across…") and "we" for the company.
 
 WHAT TO WRITE:
-The email BODY only — short (roughly 40–90 words), in a few short paragraphs separated by blank lines. How you phrase and structure it is up to you; write it the way a person would naturally write a quick work email.
+The email BODY only — these short paragraphs, in this order, separated by blank lines (roughly 35–70 words in total):
+1. Opening — one sentence: you came across their posting regarding the role and wanted to connect.
+2. Support — one sentence: we would be happy to support their current and upcoming IT hiring needs (follow the "Ask —" line of the request). SKIP this paragraph entirely when the request says a profile paragraph is added automatically — that paragraph already makes this offer.
+3. Call — one question: are they available for a quick call sometime this week to discuss how we can collaborate.
+4. Closing — one short, warm line looking forward to connecting.
+Keep exactly this structure; you may vary the wording lightly from email to email.
 
 A few facts must be right:
-* Always mention the role you saw in the first sentence, using the job title EXACTLY as given in the context (same wording and capitalization) — even for an existing client.
-* Name the platform only as given in "Job posting source" (e.g. "your Naukri posting"). Never assume LinkedIn; if the source is unknown, say "your job posting" and name no platform. If the company is unknown, leave it out.
+* Mention the role in the opening sentence, using the job title EXACTLY as given in the context (same wording and capitalization) — even for an existing client.
+* Name the platform only as given in "Job posting source" (e.g. "your Naukri post"). Never assume LinkedIn; if the source is unknown, say "your job posting" and name no platform. You don't need to name the company.
 
-EXAMPLE (for tone only — do NOT copy its wording or follow its structure):
-I came across your Naukri posting for Senior Data Engineer at Acme Corp and wanted to reach out about a possible staffing partnership. We'd be keen to support your current and upcoming IT hiring.
+EXAMPLE (fictional role and platform — copy the shape and tone, never these values; take the real ones from the request):
+I came across your Naukri post regarding the Senior Data Engineer requirement and wanted to connect.
 
-Are you open to working with additional vendors at the moment? If so, could you share your vendor onboarding process?
+We would be happy to support your current and upcoming IT hiring needs.
 
-Looking forward to connecting.
+Would you be available for a quick call sometime this week to discuss how we can collaborate?
+
+Looking forward to connecting with you!
 
 KEEP IN MIND:
-* Plain, polite, everyday English; natural contractions are fine. Vary the wording from email to email.
+* Plain, polite, everyday English; natural contractions are fine.
 * Avoid sales hype, exaggerated enthusiasm, and filler like "I hope this email finds you well".
 * Don't invent facts, candidate details, previous conversations, or past work together, and don't promise candidates for the role.
-* Don't mention candidate counts, fees, discounts, guarantees, deadlines, or urgency.
-* Don't add a sign-off, signature, phone number, URL, or email address, and never output bracketed placeholders such as [Name] or [Job Title].
+* Never write a number of candidates or profiles — don't mention candidates, profiles, counts, fees, discounts, guarantees, or deadlines.
+* Don't add a sign-off, signature, your name, phone number, URL, or email address, and never output bracketed placeholders such as [Name] or [Job Title].
 
 SUBJECT:
 Write a short, relevant subject line connected to the actual job. Keep it natural and specific, without clickbait or promotional wording.
@@ -538,11 +557,12 @@ def job_platform(job: dict) -> str:
     return ""
 
 
-def posting_phrase(job: dict) -> str:
+def posting_phrase(job: dict, noun: str = "posting") -> str:
     """"your Naukri posting" / "your LinkedIn posting" / "your Dice posting", or the
-    neutral "your job posting" when the platform is unknown."""
+    neutral "your job posting" when the platform is unknown. `noun` swaps the word
+    ("post" → "your LinkedIn post"); the unknown-platform form is always "your job posting"."""
     platform = job_platform(job)
-    return f"your {platform} posting" if platform else "your job posting"
+    return f"your {platform} {noun}" if platform else "your job posting"
 
 
 # Post-check for LLM output: the model sometimes defaults to "LinkedIn" whatever the
@@ -642,10 +662,13 @@ def _platform_context_line(job: dict) -> str:
             "and do NOT name any job platform (LinkedIn, Naukri, Dice, etc.)."
         )
     others = " or ".join(p for p in PLATFORM_NAMES if p != platform)
-    example = f"your {platform} posting for {title}" if title else f"your {platform} posting"
+    example = (
+        f"your {platform} post regarding the {title} requirement" if title
+        else f"your {platform} post"
+    )
     return (
         f"Job posting source: {platform} — this role was posted on {platform}. When you "
-        f"reference the posting, call it their {platform} posting (e.g. \"{example}\"). "
+        f"reference the posting, call it their {platform} post (e.g. \"{example}\"). "
         f"Do NOT say it was posted on {others}."
     )
 
@@ -700,12 +723,6 @@ def _job_context(job: dict, include_description: bool = True, greet: bool = True
 
 # ── Email ────────────────────────────────────────────────────────────────────
 
-def _article(word: str) -> str:
-    """Indefinite article for `word` — "an" before a vowel sound, else "a". Good enough
-    for role titles ("a Business Development Executive", "an HR Recruiter")."""
-    return "an" if word[:1].lower() in "aeiou" else "a"
-
-
 def build_greeting(job: dict) -> str:
     """Deterministic recipient greeting placed at the very top of the email: 'Hi <First>,'
     when a recipient name is known, else a neutral 'Hello,'. Used by both the LLM path
@@ -723,20 +740,18 @@ def build_greeting(job: dict) -> str:
 def build_intro(sender_email: str, job: dict) -> str:
     """Deterministic self-introduction, placed right after the greeting:
 
-        I'm <First>, a <Role Title> at SightSpectrum.
+        I'm <First> from SightSpectrum.
 
-    The name/title come from resolve_identity(sender_email) so the intro matches the
-    sign-off/signature. The posting reference is NOT hard-coded here — the LLM writes it
-    as the first body sentence (using the exact job title, which
-    email_service._outreach_body_to_html then links to the posting), and append_closing
-    merges this intro in front of it as one opening paragraph. When no first name
-    resolves (a role mailbox), drops the personal "I'm <name>" opener for a neutral variant.
-    `job` is accepted for call-site compatibility but is no longer used."""
-    identity = resolve_identity(sender_email)
-    first = identity["first"]
-    role = identity["title"]
+    The name comes from resolve_identity(sender_email) so the intro matches the sign-off.
+    The posting reference is NOT hard-coded here — the LLM writes it as the first body
+    sentence (using the exact job title, which email_service._outreach_body_to_html then
+    links to the posting), and append_closing merges this intro in front of it as one
+    opening paragraph. When no first name resolves (a role mailbox), drops the personal
+    "I'm <name>" opener for a neutral variant. `job` is accepted for call-site
+    compatibility but is no longer used."""
+    first = resolve_identity(sender_email)["first"]
     if first:
-        return f"I'm {first}, {_article(role)} {role} at {COMPANY_NAME}."
+        return f"I'm {first} from {COMPANY_NAME}."
     return f"I'm reaching out from {COMPANY_NAME}."
 
 
@@ -748,12 +763,17 @@ CANDIDATES_CONTEXT_LINE = (
 )
 
 # Extra prompt line, only when the Resdex profile-count line follows the body
-# (RESDEX_EMAIL_MODE=count). That line — "we have 20+ matching profiles…" — is added
-# deterministically (resdex_match_service.format_profile_count_line), never by the
-# model, so EMAIL_SYSTEM_PROMPT's "Don't mention candidate counts" rule still holds.
+# (RESDEX_EMAIL_MODE=count). That line — "We have around 15 relevant profiles … happy to
+# support your current and upcoming IT hiring needs." — is added deterministically
+# (resdex_match_service.format_profile_count_line, count capped at RESDEX_EMAIL_MAX_COUNT),
+# never by the model, so it replaces the model's support paragraph and the system
+# prompt's "never write a number of candidates" rule still holds.
 PROFILE_COUNT_CONTEXT_LINE = (
-    "A one-line note about matching profiles is placed right after the opening — "
-    "do not mention candidates, profiles or counts yourself."
+    "A profile paragraph is added automatically right after your opening sentence — it "
+    "states our matching profiles and offers support for their current and upcoming IT "
+    "hiring needs. So SKIP the support paragraph: write only the opening sentence, the "
+    "call question and the closing line, and do not mention candidates, profiles or "
+    "counts yourself."
 )
 
 
@@ -810,27 +830,30 @@ def render_email_fallback(
     contact_block: str = "", candidate_block: str = "", profile_count_line: str = "",
 ) -> tuple[str, str]:
     """Deterministic fallback used when LLM generation fails — builds the same shape the
-    LLM path assembles (greeting + self-intro merged with the posting reference + offer/ask
-    + CTA) directly from the job context, with the same closing appended. The posting
-    reference is written here as the first body line; append_closing merges the intro in
-    front of it. An existing ("active") client gets the partnership/priority-roles line
-    (INTRO_OFFER_ACTIVE); any other `client_type` is treated as a new/unknown prospect and
-    gets the vendor-onboarding line (INTRO_OFFER_NEW). `contact_block` (automated sends)
-    is placed above the sign-off, mirroring the LLM path; `candidate_block` (Resdex
-    matching profiles) sits between the body and the contact block; `profile_count_line`
-    (Resdex count note) is inserted as the second content paragraph."""
-    company = (job.get("company") or "").strip() or _GENERIC_COMPANY
+    LLM path assembles (greeting + self-intro merged with the posting reference + support
+    line + call question + closing line) directly from the job context, with the same
+    closing appended. The posting reference is written here as the first body line;
+    append_closing merges the intro in front of it. An existing ("active") client gets the
+    partnership support line (INTRO_OFFER_ACTIVE); any other `client_type` gets
+    INTRO_OFFER_NEW. When `profile_count_line` (Resdex count note) is given it takes the
+    support line's place — it is inserted as the second content paragraph and already
+    carries the support offer. `contact_block` (automated sends) is placed above the
+    sign-off, mirroring the LLM path; `candidate_block` (Resdex matching profiles) sits
+    between the body and the contact block."""
     title = (job.get("job_title") or "").strip()
 
     greeting = build_greeting(job)
-    posting = posting_phrase(job)
+    posting = posting_phrase(job, noun="post")
     reference = (
-        f"I noticed {posting} for {title} at {company} and wanted to connect."
+        f"I came across {posting} regarding the {title} requirement and wanted to connect."
         if title
-        else f"I noticed {posting} at {company} and wanted to connect."
+        else f"I came across {posting} and wanted to connect."
     )
-    offer = INTRO_OFFER_ACTIVE if client_type == "active" else INTRO_OFFER_NEW
-    body = "\n\n".join([reference, offer, INTRO_CTA])
+    lines = [reference]
+    if not (profile_count_line or "").strip():
+        lines.append(INTRO_OFFER_ACTIVE if client_type == "active" else INTRO_OFFER_NEW)
+    lines += [INTRO_CALL_LINE, INTRO_CTA]
+    body = "\n\n".join(lines)
     intro = build_intro(sender_email, job)
     return build_email_subject(job), append_closing(
         body, sender_email, deck_url, contact_block, intro=intro, greeting=greeting,

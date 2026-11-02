@@ -35,7 +35,7 @@ import httpx
 import structlog
 
 from app.config import Settings
-from app.prompts.outreach_prompts import COMPANY_NAME, resolve_identity
+from app.prompts.outreach_prompts import COMPANY_NAME, SIGN_OFF_LEADS, resolve_identity
 
 logger = structlog.get_logger(__name__)
 
@@ -75,13 +75,15 @@ _RETRYABLE_SMTP_ERRORS = (
 # Kept as a name because auto_outreach_service imports it; an empty block is a no-op.
 AUTOMATION_CONTACT_BLOCK = ""
 
-_SIGNOFF_LEAD = "regards,"
+_SIGNOFF_LEAD = SIGN_OFF_LEADS  # "best regards," (current) / "regards," (legacy bodies)
 _WEBSITE_LEAD = "more about us"
 
 
-def _insert_above_signoff(body: str, block: str, lead: str = _SIGNOFF_LEAD) -> str:
+def _insert_above_signoff(
+    body: str, block: str, lead: str | tuple[str, ...] = _SIGNOFF_LEAD,
+) -> str:
     """Insert `block` (its own blank-line-separated paragraph) immediately ABOVE the
-    paragraph that starts with `lead` (default: the trailing "Regards," sign-off), so
+    paragraph that starts with `lead` (default: the trailing "Best regards," sign-off), so
     that anchor paragraph — and everything after it — stays last in the email. Falls
     back to appending at the end only if no matching paragraph can be found."""
     text = (body or "").rstrip()
@@ -286,10 +288,11 @@ def _outreach_body_to_html(
     link to the posting that opens in a new tab — the raw URL itself is never shown. All
     other text is HTML-escaped verbatim.
 
-    The trailing sign-off ("Regards, / name / title / email") is NOT rendered as plain
-    lines — it is replaced by a formatted business-card signature (render_signature_html):
-    the "Regards," line is kept, then the signature card is built from the sender identity
-    (resolve_identity, keyed by the email in the sign-off) plus the website (deck) link
+    The trailing sign-off ("Best regards, / name"; legacy "Regards, / name / title / email")
+    is NOT rendered as plain lines — it is replaced by a formatted business-card signature
+    (render_signature_html): the "Best regards," line is kept, then the signature card is
+    built from the sender identity (resolve_identity — the email in a legacy sign-off, else
+    ACTIVE_SENDER_EMAIL, else the signed name) plus the website (deck) link
     parsed from the body. `logo_available` toggles the logo cell so the card only points at
     the inline logo when it's actually attached to the message.
 
@@ -315,7 +318,7 @@ def _outreach_body_to_html(
         if pos == 0 or (pos > 0 and text[pos - 1] == "\n"):
             cards_start = text.count("\n", 0, pos)
             cards_end = cards_start + block.count("\n")
-    # Split off the sign-off ("Regards, …"): everything from that line down is replaced by
+    # Split off the sign-off ("Best regards, …"): everything from that line down is replaced by
     # the formatted signature card. The lines above keep the normal per-line rendering.
     signoff_start = next(
         (i for i, ln in enumerate(all_lines) if ln.strip().lower().startswith(_SIGNOFF_LEAD)),
@@ -383,9 +386,12 @@ def _outreach_body_to_html(
                 sender_email = em.group(0)
                 break
         identity = resolve_identity(sender_email)
-        out_lines.append(html_lib.escape(signoff_lines[0].strip()))  # "Regards,"
+        # The sign-off now carries only the sender's first name (no email), so when no
+        # identity resolves, keep the name written under "Best regards," on the card.
+        signed_name = next((ln.strip() for ln in signoff_lines[1:] if ln.strip()), "")
+        out_lines.append(html_lib.escape(signoff_lines[0].strip()))  # "Best regards,"
         out_lines.append(render_signature_html(
-            name=identity["full"] or identity["first"] or COMPANY_NAME,
+            name=identity["full"] or identity["first"] or signed_name or COMPANY_NAME,
             title=identity["title"],
             phone=identity["phone"],
             email=identity["email"],

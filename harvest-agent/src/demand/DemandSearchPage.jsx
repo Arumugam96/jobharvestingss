@@ -82,8 +82,8 @@ function DemandJobsView() {
   return (
     <JobsPage
       demand
+      demandTabs={<><DemandStyles /><DemandTabs view="jobs" onSelect={(v) => navigate(`/demand?view=${v}`)} /></>}
       onNavigate={(key) => navigate(`/${key}`)}
-      onNewSearch={() => navigate("/demand?view=new")}
       onView={(dv) => navigate(`/jobs/${encodeURIComponent(dv.job.id)}`, { state: { job: dv.job, from: "/demand?view=jobs" } })}
       pageSizeSel={pageSizeSel} onPageSizeChange={setPageSizeSel}
     />
@@ -100,6 +100,26 @@ const VIEWS = [
   // "All jobs" is the Harvested Jobs page reused for Demand (DemandJobsView).
   { key: "jobs", label: "All jobs", Icon: ListChecks },
 ];
+
+/** New search | All jobs — on the landing page and on top of the Demand jobs page. */
+function DemandTabs({ view, onSelect }) {
+  return (
+    <div className="dm-tabbar">
+      <div className="dm-tabs" role="tablist" aria-label="Demand Search views">
+        {VIEWS.map(({ key, label, Icon }) => (
+          <button key={key} type="button" role="tab" className="dm-tab" aria-selected={view === key} onClick={() => onSelect(key)}>
+            <Icon size={14} /> {label}
+          </button>
+        ))}
+      </div>
+      {view !== "new" && (
+        <button type="button" className="ha-btn ha-btn-primary ha-btn-sm" onClick={() => onSelect("new")}>
+          <Plus size={14} /> New batch
+        </button>
+      )}
+    </div>
+  );
+}
 
 function DemandLanding({ onOpenBatch, onOpenJob }) {
   const [params] = useSearchParams();
@@ -145,20 +165,7 @@ function DemandLanding({ onOpenBatch, onOpenJob }) {
             <div className="ha-pagehead-actions"><SessionQuotaPills usage={sess.usage} /></div>
           </div>
           <div className="ha-pagebody">
-            <div className="dm-tabbar">
-              <div className="dm-tabs" role="tablist" aria-label="Demand Search views">
-                {VIEWS.map(({ key, label, Icon }) => (
-                  <button key={key} type="button" role="tab" className="dm-tab" aria-selected={view === key} onClick={() => setView(key)}>
-                    <Icon size={14} /> {label}
-                  </button>
-                ))}
-              </div>
-              {!onNew && (
-                <button type="button" className="ha-btn ha-btn-primary ha-btn-sm" onClick={() => setView("new")}>
-                  <Plus size={14} /> New batch
-                </button>
-              )}
-            </div>
+            <DemandTabs view={view} onSelect={setView} />
             {sess.usage && !sess.usage.resdex_enabled && (
               <div className="ha-errbanner">Resdex is disabled on this server (RESDEX_ENABLED=false), so Demand Search can't search for candidates.</div>
             )}

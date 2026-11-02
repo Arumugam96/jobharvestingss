@@ -116,6 +116,7 @@ class OutreachService:
         (after the intro + job reference) so the count reads as part of the pitch. If
         both are given, `candidate_block` wins and `profile_count_line` is ignored."""
         if candidate_block.strip():
+            profile_count_line = ""  # candidate_block wins — never both in one email
             prompt = outreach_prompts.build_email_prompt(
                 client_type, tone, job, sender_email, candidates_included=True,
             )

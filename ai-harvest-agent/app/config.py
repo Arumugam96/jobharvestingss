@@ -212,6 +212,10 @@ class Settings(BaseSettings):
     resdex_email_mode: str = "count"
     # Count mode: below this many Resdex results the line is left out.
     resdex_email_min_count: int = 3
+    # Count mode: the quoted count never goes above this — at or past it the email says
+    # "60+"; below it counts ≥ 10 are rounded DOWN to a multiple of 5 ("around 25").
+    # 0 disables the cap.
+    resdex_email_max_count: int = 60
     # "✓ Naukri Verified" badge on EVERY Resdex candidate card (email text + HTML
     # parts, job detail page), whatever the candidate's status. False hides it.
     resdex_show_naukri_verified: bool = True
