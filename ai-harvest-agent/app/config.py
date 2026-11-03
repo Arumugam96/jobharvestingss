@@ -122,7 +122,7 @@ class Settings(BaseSettings):
     outreach_company_reply_pause_days: int = 30
 
     # ── Recruiter Contact Finder (app/services/recruiter_finder_service.py) ───────
-    recruiter_finder_daily_cap: int = 50
+    recruiter_finder_daily_cap: int = 100
     # Finder credits charged per phone — only when Apollo's webhook actually delivers
     # one (an email stays 1 credit, charged on a hit).
     recruiter_finder_phone_credit_cost: int = 8
