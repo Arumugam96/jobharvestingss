@@ -136,7 +136,8 @@ class RecruiterFinderItemORM(Base):
     email_status: Mapped[str] = mapped_column(String(30), nullable=False, default="")
     phone: Mapped[str] = mapped_column(String(50), nullable=False, default="")
     # PENDING (Apollo webhook outstanding) | VERIFIED | PUBLIC | NOT_FOUND |
-    # SKIPPED_BUDGET | UNAVAILABLE — '' when no phone was asked for.
+    # BUDGET_EXCEEDED (SKIPPED_BUDGET on older rows) | UNAVAILABLE — '' when no phone
+    # was asked for.
     phone_status: Mapped[str] = mapped_column(String(20), nullable=False, default="", server_default="")
     # Apollo person id of the revealed contact (correlates the async phone delivery).
     apollo_person_id: Mapped[str | None] = mapped_column(String(60), nullable=True)

@@ -91,7 +91,7 @@ def _recruiter_email_status(outcome: dict) -> str:
 def _recruiter_phone_status(outcome: dict) -> str:
     """Phone status written to `recruiters`: PENDING while Apollo's webhook is
     outstanding (resolved by apollo_phone_service on delivery/expiry), else the usual
-    PUBLIC/NOT_FOUND. SKIPPED_BUDGET/UNAVAILABLE are Finder-only and never stored there."""
+    PUBLIC/NOT_FOUND. BUDGET_EXCEEDED/UNAVAILABLE are Finder-only and never stored there."""
     if outcome.get("phone_status") == apollo_phone_service.PS_PENDING:
         return apollo_phone_service.PS_PENDING
     return "PUBLIC" if outcome.get("phone") else "NOT_FOUND"
@@ -125,7 +125,7 @@ def _completed_outcome(
         "email": email,
         "email_status": email_status,
         "phone": phone,
-        # PENDING while Apollo's webhook is outstanding; SKIPPED_BUDGET / UNAVAILABLE when
+        # PENDING while Apollo's webhook is outstanding; BUDGET_EXCEEDED / UNAVAILABLE when
         # no phone request went out; '' when no phone was asked for.
         "phone_status": phone_status or ("PUBLIC" if phone else ""),
         # Correlation ref of the outstanding phone request (internal — links the
@@ -183,13 +183,13 @@ class _PhoneCtx:
 
     async def begin(self, *, person_id: str | None = None, item_id: str | None = None) -> tuple[str, str]:
         """(ref, phone_status). An empty ref means "request no phone"; phone_status says
-        why ('' = not asked, UNAVAILABLE = no webhook, SKIPPED_BUDGET = can't afford)."""
+        why ('' = not asked, UNAVAILABLE = no webhook, BUDGET_EXCEEDED = can't afford)."""
         if not self.want_phone:
             return "", ""
         if not self.enabled:
             return "", apollo_phone_service.PS_UNAVAILABLE
         if not await apollo_phone_service.can_afford_phone(self.tenant, self.cap, extra_cost=self.email_cost):
-            return "", apollo_phone_service.PS_SKIPPED_BUDGET
+            return "", apollo_phone_service.PS_BUDGET_EXCEEDED
         ref = await apollo_phone_service.begin_request(
             tenant_id=self.tenant, apollo_person_id=person_id, requested_by=self.requested_by,
             finder_job_id=self.job_id, finder_item_id=item_id,
@@ -274,7 +274,7 @@ async def _person_lookup(client: ApolloClient, item: dict, pctx: _PhoneCtx) -> d
             )
             return results[0] if results else None
     person, ref, ps = await _reveal(pctx, call, item_id=item.get("id"))
-    if person is None and not ref and ps == apollo_phone_service.PS_SKIPPED_BUDGET:
+    if person is None and not ref and ps == apollo_phone_service.PS_BUDGET_EXCEEDED:
         return _blank_outcome("over_budget", error=_PHONE_BUDGET_MSG, phone_status=ps)
     if person is None or not person.matched:
         return _blank_outcome("not_found", phone_status=ps)

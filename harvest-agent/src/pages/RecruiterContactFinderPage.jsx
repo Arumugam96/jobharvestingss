@@ -98,8 +98,10 @@ function maxCredits(reveal, phoneCost, n) {
 const PHONE_MUTED = {
   NOT_FOUND: ["no phone", "No phone number found for this contact"],
   UNAVAILABLE: ["unavailable", "Phone lookup is unavailable right now, or phone reveal isn't configured"],
-  SKIPPED_BUDGET: ["skipped · budget", "Today's credit budget couldn't cover a phone for this contact"],
+  BUDGET_EXCEEDED: ["skipped · budget", "Today's credit budget couldn't cover a phone for this contact"],
 };
+// Contacts revealed before the rename carry the old status name.
+PHONE_MUTED.SKIPPED_BUDGET = PHONE_MUTED.BUDGET_EXCEEDED;
 const DNC_CLEAN = new Set(["", "not_found", "not_on_list", "unknown", "not_applicable"]);
 
 // One phone cell: PENDING → spinner chip; a number (+ DNC tag if flagged); otherwise a
