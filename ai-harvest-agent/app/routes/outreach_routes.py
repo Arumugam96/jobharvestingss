@@ -37,6 +37,7 @@ from app.models.outreach import EmailOutreachORM
 from app.services.active_clients import classify_client
 from app.services.email_service import EmailSender, render_outreach_email_html
 from app.services.harvest_run_service import HarvestRunService, insert_llm_call, scraped_job_view
+from app.services.job_assignment_service import ensure_job_access
 from app.services.llm_service import LLMService
 from app.services.outreach_service import OutreachService
 from app.services.outreach_log_service import (
@@ -122,10 +123,12 @@ class LogLinkedinRequest(BaseModel):
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-async def _load_job_view(db: AsyncSession, job_id: str) -> dict:
+async def _load_job_view(db: AsyncSession, job_id: str, user: AuthenticatedUser) -> dict:
     job = await HarvestRunService(db).get_scraped_job_by_id(job_id)
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Job {job_id} not found")
+    # Outreach on a job someone else has assigned to themselves is theirs alone.
+    ensure_job_access(job.assigned_to_email, user)
     view = scraped_job_view(job)
     view["_recruiter_id"] = job.recruiter_id  # ORM-only field, not in the public view
     return view
@@ -145,7 +148,7 @@ async def generate_email(
     """Draft a recruiter outreach email for a job. Audience (active/new/unknown)
     is derived from the company; tone is the requested mode. Records the LLM call
     in `llm_calls` (call_type=email_generation)."""
-    view = await _load_job_view(db, body.job_id)
+    view = await _load_job_view(db, body.job_id, current_user)
     tone = body.mode if body.mode in TONES else "Formal"
     client_type = classify_client(view.get("company") or "")
     deck_url = get_settings().outreach_deck_url
@@ -199,7 +202,7 @@ async def generate_linkedin(
 ) -> dict:
     """Draft a single generic LinkedIn outreach message for a job. Records the
     LLM call in `llm_calls` (call_type=linkedin_generation)."""
-    view = await _load_job_view(db, body.job_id)
+    view = await _load_job_view(db, body.job_id, current_user)
 
     draft = await OutreachService(llm_service).generate_linkedin(view, regenerate=body.regenerate)
 
@@ -261,6 +264,7 @@ async def send_email(
     if body.job_id:
         job = await HarvestRunService(db).get_scraped_job_by_id(body.job_id)
         if job is not None:
+            ensure_job_access(job.assigned_to_email, current_user)
             company = job.company or ""
             recruiter_id = job.recruiter_id
             client_type = classify_client(company)
@@ -352,7 +356,7 @@ async def generate_followup(
     The prior message is the explicit `parent_outreach_id` if given, else the
     latest successfully-sent email for the job/recruiter. Records the LLM call in
     `llm_calls` (call_type=email_followup)."""
-    view = await _load_job_view(db, body.job_id)
+    view = await _load_job_view(db, body.job_id, current_user)
     tone = body.mode if body.mode in TONES else "Formal"
     client_type = classify_client(view.get("company") or "")
     deck_url = get_settings().outreach_deck_url
@@ -422,6 +426,7 @@ async def log_linkedin_sent(
     job = await HarvestRunService(db).get_scraped_job_by_id(body.job_id)
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Job {body.job_id} not found")
+    ensure_job_access(job.assigned_to_email, current_user)
 
     company = job.company or ""
     row = EmailOutreachORM(

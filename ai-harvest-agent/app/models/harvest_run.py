@@ -192,6 +192,15 @@ class ScrapedJobORM(Base):
     # Nullable: rows from every other source/flow (LinkedIn Jobs/Naukri/Dice) leave
     # it NULL, so it never affects their reads.
     lead_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # ── Self-assignment ("Assign to me" on the Harvested Jobs table) ─────────────
+    # Claimed by one user, the job is locked to them: anyone else can still see the
+    # row in the list but can't open its detail or run outreach on it (see
+    # app/services/job_assignment_service.py). NULL assigned_to_email = unassigned.
+    # assigned_to_name is the display name derived from the email at claim time.
+    assigned_to_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    assigned_to_name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    assigned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    assignment_note: Mapped[str] = mapped_column(Text, nullable=False, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     # Real scrape/collection instant (app-set in the orchestrator converters);
     # distinct from created_at, which is the batch-insert time. Nullable — NULL on

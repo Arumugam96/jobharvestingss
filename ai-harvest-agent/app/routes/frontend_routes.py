@@ -31,11 +31,13 @@ from pathlib import Path
 from typing import Any
 
 import structlog
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import Response
 from pydantic import BaseModel
 
 from app.core.company_size import band_to_tier
+from app.core.dependencies import get_current_user
+from app.models.auth import AuthenticatedUser
 from app.services.harvest_run_service import (
     CONTACT_FILTER_TOKENS,
     DEMAND_SOURCE,
@@ -47,6 +49,7 @@ from app.services.harvest_run_service import (
     resolve_read,
     scraped_job_view,
 )
+from app.services.job_assignment_service import ensure_job_access
 from app.services.report_service import (
     build_excel_report_bytes,
     build_json_report_bytes,
@@ -510,7 +513,10 @@ def _get_job_from_json(job_id: str) -> dict | None:
     description = "Returns the complete record for a single harvested job by its id.",
     responses   = {404: {"description": "Job not found"}},
 )
-async def get_job(job_id: str) -> dict:
+async def get_job(
+    job_id: str,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> dict:
     """
     Returns one job record by `id` — the DB row's real primary key when read
     from the database, or a 16-char hex hash of the job URL when read from
@@ -530,6 +536,8 @@ async def get_job(job_id: str) -> dict:
             status_code = 404,
             detail      = f"Job '{job_id}' not found. Run a harvest first or check the id.",
         )
+    # A job someone else has assigned to themselves is locked to them.
+    ensure_job_access(job.get("assigned_to"), current_user)
     return job
 
 
@@ -746,7 +754,10 @@ async def _job_outreach_detail(db: Any, job_id: str) -> dict:
     ),
     responses   = {404: {"description": "Job not found"}, 503: {"description": "Database unavailable"}},
 )
-async def get_job_outreach_detail(job_id: str) -> dict:
+async def get_job_outreach_detail(
+    job_id: str,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> dict:
     """Database only — Resdex searches and email sends live solely in the DB,
     so there is no JSON-fallback variant of this read."""
     result = await db_read(lambda db: _job_outreach_detail(db, job_id))
@@ -754,6 +765,7 @@ async def get_job_outreach_detail(job_id: str) -> dict:
         raise HTTPException(status_code=503, detail="Database unavailable.")
     if result["job"] is None:
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
+    ensure_job_access(result["job"].assigned_to_email, current_user)
     return {
         "job_id":  job_id,
         "job_url": result["job_url"],

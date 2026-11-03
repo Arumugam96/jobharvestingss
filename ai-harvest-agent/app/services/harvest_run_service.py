@@ -35,6 +35,7 @@ from app.core.dependencies import get_session_factory
 from app.core.job_url import normalize_job_url
 from app.core.location import normalize_location_key, parse_location
 from app.core.tenant_context import apply_tenant, bind_session_tenant, get_current_tenant_id
+from app.services.job_assignment_service import assignment_view
 from app.core.text_formatting import html_description_to_text, normalize_job_title
 from app.models.harvest_run import (
     CompanyLocationContactORM,
@@ -1401,6 +1402,9 @@ def scraped_job_view(job: ScrapedJobORM) -> dict[str, Any]:
         # LinkedIn Home Feed leads carry an LLM lead-quality score; NULL for every
         # other source, so the UI shows a confidence badge only on feed leads.
         "lead_confidence":        lead_confidence,
+        # Self-assignment lock ({email, name, assigned_at, note} or None) — see
+        # app/services/job_assignment_service.py.
+        "assigned_to":            assignment_view(job),
     }
 
 

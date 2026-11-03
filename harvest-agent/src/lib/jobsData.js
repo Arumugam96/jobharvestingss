@@ -181,6 +181,8 @@ function mapApiJobFields(j) {
     // them. passed_filter defaults to true for legacy rows lacking the column.
     passedFilter: j.passed_filter !== false,
     filterReason: j.filter_reason || "",
+    // Self-assignment lock: {email, name, assigned_at, note} or null (unassigned).
+    assignedTo: j.assigned_to || null,
   };
 }
 

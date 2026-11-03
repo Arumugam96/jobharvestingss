@@ -45,6 +45,7 @@ from app.routes.login_required_routes import router as login_required_router
 from app.routes.dice_routes import router as dice_agent_router
 from app.routes.run_harvest_agent import router as run_harvest_agent_router
 from app.routes.frontend_routes import router as frontend_router
+from app.routes.job_assignment_routes import router as job_assignment_router
 from app.routes.prospect_routes import router as prospect_intelligence_router
 from app.routes.recruiter_routes import router as recruiter_discovery_router
 from app.routes.recruiter_finder_routes import router as recruiter_finder_router
@@ -108,6 +109,11 @@ def _ensure_scraped_jobs_columns(sync_conn) -> None:
         ("company_contact_phone",    "ALTER TABLE scraped_jobs ADD COLUMN company_contact_phone VARCHAR(50) NOT NULL DEFAULT ''"),
         ("company_contact_location", "ALTER TABLE scraped_jobs ADD COLUMN company_contact_location TEXT NOT NULL DEFAULT ''"),
         ("company_contact_source",   "ALTER TABLE scraped_jobs ADD COLUMN company_contact_source VARCHAR(30) NOT NULL DEFAULT ''"),
+        # Self-assignment lock ("Assign to me"). Mirrored in alembic 0028.
+        ("assigned_to_email", "ALTER TABLE scraped_jobs ADD COLUMN assigned_to_email VARCHAR(255)"),
+        ("assigned_to_name",  "ALTER TABLE scraped_jobs ADD COLUMN assigned_to_name VARCHAR(255) NOT NULL DEFAULT ''"),
+        ("assigned_at",       f"ALTER TABLE scraped_jobs ADD COLUMN assigned_at {ts_type}"),
+        ("assignment_note",   "ALTER TABLE scraped_jobs ADD COLUMN assignment_note TEXT NOT NULL DEFAULT ''"),
     ]
     for name, ddl in pending:
         if name not in existing_cols:
@@ -742,6 +748,7 @@ def create_app() -> FastAPI:
     protected = [Depends(get_current_user)]
     app.include_router(auth_router)                   # POST /auth/request-otp, /auth/verify-otp, GET /auth/me
     app.include_router(frontend_router, dependencies=protected)               # GET /jobs, /lead-intelligence, /download/*, /health
+    app.include_router(job_assignment_router, dependencies=protected)         # POST/DELETE /jobs/{id}/assign ("Assign to me")
     app.include_router(run_harvest_agent_router, dependencies=protected)      # POST /run-harvest-agent, GET /harvest-status/{id}, /run-history
     app.include_router(linkedin_agent_router, dependencies=protected)         # POST /run-linkedin-agent  +  results endpoints
     app.include_router(linkedin_feed_router, dependencies=protected)          # POST /run-linkedin-feed-agent (Home Feed leads)

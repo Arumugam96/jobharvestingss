@@ -119,6 +119,22 @@ export function getJobOutreachDetail(jobId) {
   return request(`/jobs/${encodeURIComponent(jobId)}/outreach-detail`);
 }
 
+/** POST /jobs/{id}/assign — "Assign to me", with an optional note. Returns
+ * { job_id, assigned_to: {email, name, assigned_at, note} }; 409 when someone
+ * else already holds the job. Once assigned, only the assignee can open the job
+ * or run outreach on it. */
+export function assignJob(jobId, note = "") {
+  return request(`/jobs/${encodeURIComponent(jobId)}/assign`, {
+    method: "POST",
+    body: JSON.stringify({ note }),
+  });
+}
+
+/** DELETE /jobs/{id}/assign — release a job you assigned to yourself (403 for anyone else). */
+export function unassignJob(jobId) {
+  return request(`/jobs/${encodeURIComponent(jobId)}/assign`, { method: "DELETE" });
+}
+
 /** GET /harvest-config — current Rule Engine configuration. */
 export function getHarvestConfig() {
   return request("/harvest-config");

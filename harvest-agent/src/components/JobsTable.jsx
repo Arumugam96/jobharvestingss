@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Search, Mail } from "lucide-react";
+import { Search, Mail, Lock } from "lucide-react";
 import EmailComposeModal from "./EmailComposeModal";
 import LinkedInMessageModal from "./LinkedInMessageModal";
 import PhoneVerifyModal, {
   PhoneVerifyStyles, PhoneVerifyButton, PhoneVerifyBadge, loadPhoneVerifications, savePhoneVerifications,
 } from "./PhoneVerify";
+import AssignJobModal, { AssignJobStyles, AssignCell, useCurrentUserEmail, isAssignedToOther } from "./AssignJob";
 import { getOutreachStatus } from "../api";
 import { C } from "../theme";
 import {
@@ -114,7 +115,7 @@ export default function JobsTable({
   // emailModal carries follow-up context: { job, followup, parentOutreachId }.
   const [emailModal, setEmailModal] = useState(null);
   const [linkedinModalJob, setLinkedinModalJob] = useState(null);
-  const [noDataMsg, setNoDataMsg] = useState(null); // { jobId, channel }
+  const [noDataMsg, setNoDataMsg] = useState(null); // { jobId, text }
   // DB-backed "already contacted" state per job id: { [jobId]: { email?, linkedin? } }.
   // Fetched for the visible page rows so a sent recruiter shows a green icon that
   // survives refresh; clicking a sent email icon opens the follow-up composer.
@@ -130,12 +131,19 @@ export default function JobsTable({
       return next;
     });
   }, []);
+  // "Assign to me": the logged-in user, the open modal, and assignments changed
+  // in this session (overlaid on the server's row.assignedTo until the next fetch).
+  const myEmail = useCurrentUserEmail();
+  const [assignModalJob, setAssignModalJob] = useState(null);
+  const [assignOverrides, setAssignOverrides] = useState({}); // { [jobId]: assignedTo | null }
+  const assignedOf = (j) => (j.id in assignOverrides ? assignOverrides[j.id] : j.assignedTo);
   const noDataTimer = useRef(null);
-  const showNoData = useCallback((jobId, channel) => {
-    setNoDataMsg({ jobId, channel });
+  const showRowMsg = useCallback((jobId, text) => {
+    setNoDataMsg({ jobId, text });
     if (noDataTimer.current) clearTimeout(noDataTimer.current);
     noDataTimer.current = setTimeout(() => setNoDataMsg(null), 3000);
   }, []);
+  const showNoData = useCallback((jobId, channel) => showRowMsg(jobId, `No ${channel} available`), [showRowMsg]);
   useEffect(() => () => { if (noDataTimer.current) clearTimeout(noDataTimer.current); }, []);
 
   // Server mode gets its dropdown options from GET /jobs/facets (they must span
@@ -322,8 +330,8 @@ export default function JobsTable({
   useEffect(() => { refreshOutreachStatus(); }, [refreshOutreachStatus]);
 
   // Columns: Job title, Company, Company size, POC, Email,
-  // Mobile, Contact,Source, Posted date
-  const colCount = 9;
+  // Mobile, Contact,Source, Posted date, Action
+  const colCount = 10;
 
   return (
     <>
@@ -371,6 +379,7 @@ export default function JobsTable({
                 <th className="ha-th ha-th-pin" style={{ textAlign: "center", width: 130, minWidth: 130 }}>Contact</th>
                 <SortHeader label="Source" col="source" sort={sort} setSort={setSort} width={100} />
                 <SortHeader label="Posted date" col="posted" sort={sort} setSort={setSort} width={120} />
+                <PlainHeader label="Action" width={150} />
               </tr>
             </thead>
             <tbody>
@@ -383,15 +392,26 @@ export default function JobsTable({
                 // One normalized contact view per row — the cells below read the
                 // same values the filters, run stats and CSV export count.
                 const c = jobContact(j);
+                // Assigned to someone else: the row stays visible but locked — no
+                // detail, phone verification or outreach (the backend enforces it too).
+                const assignedTo = assignedOf(j);
+                const locked = isAssignedToOther(assignedTo, myEmail);
+                const lockedMsg = locked ? `Assigned to ${assignedTo.name}` : "";
                 return (
-                <tr key={j.id} className="ha-row">
+                <tr key={j.id} className={"ha-row" + (locked ? " ajm-locked" : "")}>
                   <td className="ha-td">
-                    <span className="ha-link" role="button" tabIndex={0} style={{ cursor: "pointer" }}
-                      title="View details"
-                      onClick={() => onView({ mode: "view", job: mapJobToDetail(j) })}
-                      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onView({ mode: "view", job: mapJobToDetail(j) }); } }}>
-                      {j.title}
-                    </span>
+                    {locked ? (
+                      <span title={`${lockedMsg} — only they can open it`} style={{ display: "inline-flex", alignItems: "center", gap: 6, color: C.textSoft }}>
+                        <Lock size={13} style={{ flex: "none" }} /> {j.title}
+                      </span>
+                    ) : (
+                      <span className="ha-link" role="button" tabIndex={0} style={{ cursor: "pointer" }}
+                        title="View details"
+                        onClick={() => onView({ mode: "view", job: mapJobToDetail(j) })}
+                        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onView({ mode: "view", job: mapJobToDetail(j) }); } }}>
+                        {j.title}
+                      </span>
+                    )}
                   </td>
                   <td className="ha-td" style={{ color: C.text }}>{j.company}</td>
                   <td className="ha-td">
@@ -404,7 +424,7 @@ export default function JobsTable({
                     <DualContact parts={c.emailParts} link="mailto:" cls="ha-mail" />
                   </td>
                   <td className="ha-td" style={{ whiteSpace: "nowrap" }}>
-                    {c.phone ? (
+                    {c.phone && !locked ? (
                       <div className="pvm-cell">
                         <PhoneVerifyButton verified={phoneVerify[j.id]?.phone === c.phone}
                           onClick={() => setPhoneModal({ job: j, phone: c.phone, pocName: c.pocName })} />
@@ -419,6 +439,14 @@ export default function JobsTable({
                   </td>
                   <td className="ha-td ha-td-pin">
                     <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
+                      {locked ? (
+                        <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
+                          {[["WhatsApp", WhatsAppIcon], ["Email", Mail], ["LinkedIn", LinkedInIcon]].map(([title, glyph]) => (
+                            <ContactActionBtn key={title} glyph={glyph} title={`${title} — ${lockedMsg}`} available={false}
+                              onClick={() => showRowMsg(j.id, lockedMsg)} />
+                          ))}
+                        </div>
+                      ) : (
                       <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
                         {/* Demand Search jobs are never contacted: their contact
                             data shows in the columns, the actions stay inert. */}
@@ -464,15 +492,19 @@ export default function JobsTable({
                         })()}
                         </>)}
                       </div>
+                      )}
                       {noDataMsg && noDataMsg.jobId === j.id && (
                         <small style={{ color: "#B91C1C", fontSize: 11, whiteSpace: "nowrap" }}>
-                          No {noDataMsg.channel} available
+                          {noDataMsg.text}
                         </small>
                       )}
                     </div>
                   </td>
                   <td className="ha-td"><SourceChip source={c.source} /></td>
                   <td className="ha-td" style={{ whiteSpace: "nowrap", color: C.textSoft }}>{j.postedDate || "—"}</td>
+                  <td className="ha-td ajm-action">
+                    <AssignCell assignedTo={assignedTo} myEmail={myEmail} onOpen={() => setAssignModalJob(j)} />
+                  </td>
                 </tr>
                 );
               })}
@@ -509,6 +541,15 @@ export default function JobsTable({
         />
       )}
       <PhoneVerifyStyles />
+      <AssignJobStyles />
+      {assignModalJob && (
+        <AssignJobModal
+          job={assignModalJob}
+          assignedTo={assignedOf(assignModalJob)}
+          onChange={(next) => setAssignOverrides((prev) => ({ ...prev, [assignModalJob.id]: next }))}
+          onClose={() => setAssignModalJob(null)}
+        />
+      )}
       {phoneModal && (
         <PhoneVerifyModal
           phone={phoneModal.phone}
