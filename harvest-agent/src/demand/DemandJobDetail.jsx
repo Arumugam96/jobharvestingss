@@ -53,7 +53,9 @@ function filterChips(filters) {
   const out = [];
   if (f.min_exp != null || f.max_exp != null) out.push(["Experience", `${f.min_exp ?? "any"}–${f.max_exp ?? "any"} yrs`]);
   if (asList(f.locations).length) out.push(["Locations", asList(f.locations).join(", ")]);
-  if (f.active_within_months) out.push(["Active within", `${f.active_within_months} months`]);
+  const activeIn = f.active_in || f.applied?.active_in;
+  if (activeIn) out.push(["Active in", activeIn]);
+  else if (f.active_within_months) out.push(["Active within", `${f.active_within_months} months`]);
   return out;
 }
 

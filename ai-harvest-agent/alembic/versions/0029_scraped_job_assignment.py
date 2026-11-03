@@ -11,8 +11,8 @@ Mirrors the runtime ADD COLUMN backfill in app/main.py
 (_ensure_scraped_jobs_columns) — create_all never alters an existing table.
 Idempotent (safe alongside create_all).
 
-Revision ID: 0028
-Revises: 0027
+Revision ID: 0029
+Revises: 0028
 Create Date: 2026-11-02
 
 """
@@ -23,8 +23,8 @@ from sqlalchemy import inspect as sa_inspect
 from sqlalchemy import text as sa_text
 
 # revision identifiers, used by Alembic.
-revision = "0028"
-down_revision = "0027"
+revision = "0029"
+down_revision = "0028"
 branch_labels = None
 depends_on = None
 

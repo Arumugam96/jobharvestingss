@@ -61,6 +61,7 @@ async def engine():
     import app.models.apollo_phone  # noqa: F401 — registers apollo_phone_requests / apollo_webhook_events
     import app.models.outreach  # noqa: F401 — registers email_outreach on Base.metadata
     import app.models.resdex  # noqa: F401 — registers resdex_searches / resdex_candidates / resdex_daily_usage
+    import app.models.phone_call_log  # noqa: F401 — registers phone_call_logs
 
     eng = create_async_engine(TEST_DB_URL, echo=False)
     async with eng.begin() as conn:

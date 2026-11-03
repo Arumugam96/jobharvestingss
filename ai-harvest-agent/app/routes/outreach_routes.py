@@ -264,6 +264,8 @@ async def send_email(
     if body.job_id:
         job = await HarvestRunService(db).get_scraped_job_by_id(body.job_id)
         if job is not None:
+            # Only job-linked sends are assignment-guarded; a send without job_id is
+            # recruiter-level (not tied to any one job), so it stays unguarded.
             ensure_job_access(job.assigned_to_email, current_user)
             company = job.company or ""
             recruiter_id = job.recruiter_id
@@ -494,6 +496,12 @@ async def outreach_history(
     + linkedin) for that contact. With neither: the server-paginated + filtered
     recent-outreach list for the Mail logs page. Each item carries the resolved
     contact_name (Contact column) plus the Mailjet delivery-engagement fields."""
+    if job_id:
+        # A job's thread belongs to its assignee, like the job's detail and outreach.
+        # An unknown job_id keeps the old behaviour (an empty / orphan-row thread).
+        job = await HarvestRunService(db).get_scraped_job_by_id(job_id)
+        if job is not None:
+            ensure_job_access(job.assigned_to_email, current_user)
     if job_id or recruiter_id:
         rows = await thread_messages(db, job_id=job_id, recruiter_id=recruiter_id, limit=limit)
         names = await contact_names_for_rows(db, rows)

@@ -11,20 +11,30 @@ import { GLASS_MODAL, GLASS_BTN, GLASS_INPUT, GLASS_INPUT_FOCUS } from "../theme
  * Styling uses the `ajm-` prefix. */
 
 // The logged-in user's email, fetched once per page load and shared by every row.
+// Once known it's cached so later mounts (e.g. the job detail page) start with it
+// instead of flashing the "still loading → locked" state.
 let mePromise = null;
+let meEmail = "";
 export function useCurrentUserEmail() {
-  const [email, setEmail] = useState("");
+  const [email, setEmail] = useState(meEmail);
   useEffect(() => {
     let cancelled = false;
     if (!mePromise) mePromise = getMe().catch(() => { mePromise = null; return null; });
-    mePromise.then((me) => { if (!cancelled && me?.email) setEmail(me.email); });
+    mePromise.then((me) => {
+      if (me?.email) meEmail = me.email;
+      if (!cancelled && me?.email) setEmail(me.email);
+    });
     return () => { cancelled = true; };
   }, []);
   return email;
 }
 
+// True when the job is held by someone other than the current user. While
+// `myEmail` is still loading ("" until GET /auth/me resolves) any assigned job
+// counts as locked — the owner briefly sees their own row locked rather than
+// everyone else briefly seeing someone else's job as open.
 export const isAssignedToOther = (assignedTo, myEmail) =>
-  !!assignedTo && !!myEmail && assignedTo.email.toLowerCase() !== myEmail.toLowerCase();
+  !!assignedTo && (!myEmail || (assignedTo.email || "").toLowerCase() !== myEmail.toLowerCase());
 
 const initials = (name) =>
   (name || "?").split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join("");
@@ -79,7 +89,9 @@ export function AssignJobStyles() {
 }
 
 /* The Action cell: "Self-assign" when free, a green "You" chip when it's yours
- * (click to update/release), a grey lock chip with the owner's name otherwise. */
+ * (click to update/release), a grey lock chip with the owner's name otherwise.
+ * The "You" chip only renders once `myEmail` is known (isAssignedToOther treats
+ * an unknown user as "someone else"). */
 export function AssignCell({ assignedTo, myEmail, onOpen }) {
   if (!assignedTo) {
     return (

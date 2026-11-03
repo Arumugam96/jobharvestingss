@@ -831,13 +831,12 @@ async def _run_harvest_background_impl(
     if insights is not None:
         if pending_dicts:
             insights["deferred_jobs"] = len(pending_dicts)
-        # Every credit Apollo CHARGED the account since this run started (its own
-        # counter; falls back to the local apollo_credit_ledger) — distinct from
-        # insights["apollo_enriched"], the number of postings whose contact is
-        # Apollo-sourced.
-        run_credits = (apollo_usage or {}).get("run")
-        if run_credits is None:
-            run_credits = await _apollo_credits_since(result.started_at, log)
+        # Credits this run's API enrichment calls consumed (the local
+        # apollo_credit_ledger, purpose="enrichment") — not Apollo's account-wide
+        # counter, which also counts UI exports, Recruiter Finder lookups and charges
+        # outside the app. Distinct from insights["apollo_enriched"], the number of
+        # postings whose contact is Apollo-sourced.
+        run_credits = await _apollo_credits_since(result.started_at, log)
         if run_credits is not None:
             insights["apollo_credits_run"] = run_credits
 
@@ -867,11 +866,12 @@ async def _run_harvest_background_impl(
 
 
 async def _apollo_credits_since(started_at: datetime, log: Any) -> int | None:
-    """Apollo credits charged for every purpose since ``started_at`` (None if unknown)."""
+    """Apollo credits the app's API enrichment calls consumed since ``started_at``
+    (None if unknown)."""
     try:
         from app.services import apollo_budget
 
-        return await apollo_budget.credits_between(started_at, purpose=None)
+        return await apollo_budget.credits_between(started_at, purpose="enrichment")
     except Exception as exc:
         log.warning("harvest_apollo_credits_lookup_failed", error=str(exc))
         return None

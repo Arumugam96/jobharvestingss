@@ -40,6 +40,7 @@ from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import structlog
+from sqlalchemy import select
 
 from app.config import get_settings
 from app.core.company_size import minimum_floor, size_meets_floor
@@ -187,6 +188,14 @@ def _no_email_resdex_targets(job_rows: list[ScrapedJobORM]) -> list[dict]:
     return out
 
 
+async def _job_assigned(db, job_id: str | None) -> bool:
+    """True when the job row is currently claimed by a user (assigned_to_email set)."""
+    if not job_id:
+        return False
+    stmt = select(ScrapedJobORM.assigned_to_email).where(ScrapedJobORM.id == job_id)
+    return bool((await db.execute(stmt)).scalar_one_or_none())
+
+
 async def _skip_reason(
     target: dict, *, replied_companies: set[str], today_start: datetime, claimed: set[str],
     dry_run: bool = False,
@@ -194,7 +203,8 @@ async def _skip_reason(
     """Why this target must NOT be emailed now, or None when it may be.
 
     The returned verdict maps 1:1 to the ``skipped_<verdict>`` counts key, checked in
-    this order: unsubscribed, company_replied, then one DB read for suppressed /
+    this order: unsubscribed, company_replied, then one DB read for assigned (the job
+    was claimed via "Assign to me") / suppressed /
     replied / already / duplicate_posting / recent_recipient / location_today
     ("error" when that read fails — never send unverified), then the in-run
     ``claimed`` address set (recent_recipient). When eligible the address is
@@ -215,6 +225,8 @@ async def _skip_reason(
     # One read for do-not-contact + already-contacted + duplicate-posting
     # + the per-recipient / per-company+location daily limits.
     async def _checks(db):
+        if await _job_assigned(db, job_id):
+            return "assigned"
         if await is_suppressed(db, email):
             return "suppressed"
         if await recipient_has_replied(db, email):
@@ -287,7 +299,7 @@ async def run_auto_outreach_after_harvest(
         "skipped_unsubscribed": 0, "skipped_no_email": 0,
         "skipped_below_size": 0, "skipped_duplicate_posting": 0, "skipped_error": 0,
         "skipped_recent_recipient": 0, "skipped_replied": 0,
-        "skipped_company_replied": 0, "skipped_location_today": 0,
+        "skipped_company_replied": 0, "skipped_location_today": 0, "skipped_assigned": 0,
         "resdex_jobs_with_candidates": 0, "resdex_jobs_with_count": 0,
     }
     try:
@@ -300,7 +312,16 @@ async def run_auto_outreach_after_harvest(
             return {"enabled": False, **counts}
 
         floor = minimum_floor(company_sizes or [])
-        targets, no_email, below_size = _dedupe_targets(job_rows or [], floor)
+        # A job someone claimed ("Assign to me") is theirs to work — never email its
+        # contact automatically. Dropped before dedup so another, unclaimed posting
+        # of the same contact can still carry the email. (_skip_reason re-checks the
+        # DB right before each send for a claim made after these rows were read.)
+        unassigned = [j for j in (job_rows or []) if not getattr(j, "assigned_to_email", None)]
+        counts["skipped_assigned"] = len(job_rows or []) - len(unassigned)
+        if counts["skipped_assigned"]:
+            logger.info("auto_outreach_skipped_assigned", run_id=run_id,
+                        skipped_assigned=counts["skipped_assigned"])
+        targets, no_email, below_size = _dedupe_targets(unassigned, floor)
         counts["skipped_no_email"] = no_email
         counts["skipped_below_size"] = below_size
         resdex_only: list[dict] = (
@@ -311,7 +332,7 @@ async def run_auto_outreach_after_harvest(
             logger.info(
                 "auto_outreach_no_targets", run_id=run_id,
                 skipped_no_email=no_email, skipped_below_size=below_size,
-                min_company_size_floor=floor,
+                skipped_assigned=counts["skipped_assigned"], min_company_size_floor=floor,
             )
             return {"enabled": send, "eligible": 0, **counts}
 

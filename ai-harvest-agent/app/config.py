@@ -424,6 +424,10 @@ class Settings(BaseSettings):
     outreach_auto_reply_to: str = ""
     outreach_extra_reply_to: str = ""
 
+    # ── Phone call verification (app/services/phone_verification_service.py) ─────
+    # An Unanswered call with Follow-up on reminds the caller this many hours later.
+    phone_followup_delay_hours: int = 24
+
     # ── CORS ─────────────────────────────────────────────────────────────────────
     cors_origins: str = "http://localhost:3000,http://localhost:8080"
 

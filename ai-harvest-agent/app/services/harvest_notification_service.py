@@ -115,12 +115,12 @@ def _render_body(
         f"Sources:    {', '.join(sources) or '-'}\n"
         f"Total jobs: {total}\n"
     )
-    dupes = (g("total_rows", total) or 0) - total if insights else 0
-    if dupes > 0:
-        lines += f"            ({dupes} duplicate listings across sources counted once)\n"
-    deferred = g("deferred_jobs", 0) if insights else 0
-    if deferred:
-        lines += f"            (+{deferred} jobs from earlier stopped run(s) in the attachments)\n"
+    # dupes = (g("total_rows", total) or 0) - total if insights else 0
+    # if dupes > 0:
+    #     lines += f"            ({dupes} duplicate listings across sources counted once)\n"
+    # deferred = g("deferred_jobs", 0) if insights else 0
+    # if deferred:
+    #     lines += f"            (+{deferred} jobs from earlier stopped run(s) in the attachments)\n"
     lines += "\n"
     if run_timing:
         started = _to_ist(run_timing.get("started"))
@@ -147,10 +147,11 @@ def _render_body(
                     f"- {src}: {s['jobs']} jobs, {s.get('email', 0)} email, "
                     f"{s.get('phone', 0)} phone, {s.get('linkedin', 0)} LinkedIn\n"
                 )
-        lines += f"\nContactable: {g('with_contact', 0)} of {total}\n"
+        # lines += f"\nContactable: {g('with_contact', 0)} of {total}\n"
         if g("apollo_credits_run") is not None:
-            lines += f"Apollo credits (this run): {g('apollo_credits_run')}\n"
-        lines += f"Apollo-sourced contacts: {g('apollo_enriched', 0)}\n\n"
+            lines += f"\nApollo credits (this run): {g('apollo_credits_run')}\n"
+        # lines += f"Apollo-sourced contacts: {g('apollo_enriched', 0)}\n\n"
+        lines += "\n"
     if attachment_names:
         lines += "The extracted jobs are attached to this email.\n\n"
     lines += "Regards,\nSightspectrum Harvest Agent"
@@ -335,13 +336,9 @@ def _render_body_html(
     with_email = g("with_email", 0)
     with_phone = g("with_phone", 0)
     with_linkedin = g("with_linkedin", 0)
-    with_contact = g("with_contact", 0)
-    apollo_contacts = g("apollo_enriched", 0)
-    apollo_credits_run = g("apollo_credits_run")
+    apollo_credits_run = g("apollo_credits_run")  # this run's API enrichment credits
     # One denominator everywhere (hero, Total row, gauges): distinct postings.
     total = g("total", total_jobs) if insights else total_jobs
-    total_rows = g("total_rows", total) if insights else total
-    deferred = g("deferred_jobs", 0) if insights else 0
 
     status_color = {
         "success": "#10b981", "completed": "#10b981", "failed": "#ef4444",
@@ -378,16 +375,9 @@ def _render_body_html(
         f'<div style="font-size:13px;font-weight:600;letter-spacing:0.06em;'
         f'text-transform:uppercase;color:{_MUTED};margin-top:6px;">Jobs Harvested</div>'
     )
-    notes = []
-    if total_rows > total:
-        notes.append(f"{total_rows - total} duplicate listings across sources counted once")
-    if deferred:
-        notes.append(f"+{deferred} jobs from earlier stopped run(s) included in the attachments")
-    for note in notes:
-        hero += f'<div style="font-size:12px;color:{_MUTED};margin-top:6px;">{_esc(note)}</div>'
 
     # ── Stat pills (1-row table, spacer cells between) ───────────────────
-    pills = [(duration, "Duration"), (len(sources), "Sources"), (with_contact, "Contactable")]
+    pills = [(duration, "Duration"), (len(sources), "Sources")]
     if apollo_credits_run is not None:
         pills.append((apollo_credits_run, "Apollo Credits"))
     pill_cells = []
@@ -471,18 +461,12 @@ def _render_body_html(
 
     # ── Apollo credits ───────────────────────────────────────────────────
     apollo_html = ""
-    ad = apollo_daily or {}
     am = apollo_monthly or {}
-    daily_used = ad.get("global_used", 0)
-    daily_cap = ad.get("global_cap", 0)
     monthly_used = am.get("monthly_used", 0)
     monthly_cap = am.get("monthly_cap", 0)
     monthly_remaining = am.get("monthly_remaining")
 
-    if apollo_credits_run or apollo_contacts or daily_used or monthly_used:
-        daily_label = (
-            f"{daily_used} / {daily_cap}" if daily_cap and daily_cap > 0 else str(daily_used)
-        )
+    if monthly_used or (monthly_cap and monthly_cap > 0):
         monthly_rem_label = (
             f"{monthly_remaining} / {monthly_cap}"
             if monthly_remaining is not None and monthly_cap and monthly_cap > 0
@@ -492,18 +476,6 @@ def _render_body_html(
             round(monthly_used * 100 / monthly_cap) if monthly_cap and monthly_cap > 0 else 0
         )
         monthly_bar_color = "#f59e0b" if monthly_pct < 80 else "#ef4444"
-
-        def _tile(label: str, value: object, bg: str, color: str) -> str:
-            return _cell(
-                _table("<tr>" + _bg_cell(
-                    f'<div style="font-size:11px;color:{_MUTED};font-weight:600;'
-                    f'text-transform:uppercase;letter-spacing:0.04em;">{_esc(label)}</div>'
-                    f'<div style="font-size:26px;font-weight:900;color:{color};line-height:1.2;">'
-                    f"{_esc(value)}</div>",
-                    bg, "padding:14px 16px;",
-                ) + "</tr>"),
-                "padding:6px;", 'width="33%" valign="top"',
-            )
 
         # Apollo's billing cycle (e.g. 25th → 25th) when known, else the calendar month.
         cycle_end = _to_ist(am.get("cycle_end"))
@@ -528,14 +500,8 @@ def _render_body_html(
             _section_title("Apollo Credits")
             + _table(
                 "<tr>"
-                + _tile("Credits (this run)",
-                        "-" if apollo_credits_run is None else apollo_credits_run,
-                        "#fffbeb", "#f59e0b")
-                + _tile("Used Today", daily_label, "#fef3c7", "#d97706")
-                + _tile("Apollo-sourced contacts", apollo_contacts, "#f9fafb", _INK)
-                + "</tr><tr>"
                 + _cell(_table("<tr>" + _bg_cell(monthly_inner, "#f0fdf4", "padding:14px 16px;")
-                               + "</tr>"), "padding:6px;", 'colspan="3"')
+                               + "</tr>"), "padding:6px;")
                 + "</tr>"
             )
         )

@@ -35,6 +35,7 @@ from pydantic_core import PydanticCustomError
 from app.config import get_settings
 from app.core.dependencies import get_current_user
 from app.core.job_url import normalize_job_url
+from app.models.auth import AuthenticatedUser
 from app.services import demand_service as ds
 from app.services.demand_import import (
     MAX_FILE_BYTES,
@@ -44,6 +45,8 @@ from app.services.demand_import import (
     parse_and_validate,
     parse_and_validate_rows,
 )
+from app.services.harvest_run_service import HarvestRunService, db_read
+from app.services.job_assignment_service import ensure_job_access
 from app.services.resdex_budget import usage_today
 
 logger = structlog.get_logger(__name__)
@@ -52,6 +55,15 @@ router = APIRouter(prefix="/demand", tags=["Demand Search"])
 
 def _raise(exc: ds.DemandError) -> None:
     raise HTTPException(status_code=exc.status_code, detail=exc.to_detail()) from exc
+
+
+async def _ensure_job_access(job_id: str, user: AuthenticatedUser) -> None:
+    """403 when the job is assigned ("Assign to me") to someone else. A job that is
+    missing (or a failed read) passes here, so demand_service raises its usual 404."""
+    async def _q(db):
+        job = await HarvestRunService(db).get_scraped_job_by_id(job_id)
+        return job.assigned_to_email if job is not None else None
+    ensure_job_access(await db_read(_q), user)
 
 
 async def _read_upload(file: UploadFile) -> dict:
@@ -261,12 +273,15 @@ async def stop_batch(run_id: str) -> Any:
 
 
 @router.get("/jobs/{job_id}")
-async def get_job(job_id: str) -> Any:
+async def get_job(
+    job_id: str, current_user: AuthenticatedUser = Depends(get_current_user),
+) -> Any:
     """The job, its batch + row status, the optional columns sent to the LLM and its
     latest Resdex search (requirements, tiers, candidates — the same view as GET
-    /jobs/{id}/outreach-detail)."""
+    /jobs/{id}/outreach-detail). 403 when the job is assigned to someone else."""
     from app.routes.frontend_routes import _resdex_search_view
 
+    await _ensure_job_access(job_id, current_user)
     try:
         out = await ds.get_job(job_id)
     except ds.DemandError as exc:
@@ -277,9 +292,13 @@ async def get_job(job_id: str) -> Any:
 
 
 @router.post("/jobs/{job_id}/rerun-resdex", status_code=status.HTTP_202_ACCEPTED)
-async def rerun_resdex(job_id: str) -> Any:
+async def rerun_resdex(
+    job_id: str, current_user: AuthenticatedUser = Depends(get_current_user),
+) -> Any:
     """Search Resdex again for this job only — a fresh search (the 14-day reuse is
-    skipped). Same session / single-flight checks as a batch start."""
+    skipped). Same session / single-flight checks as a batch start. 403 when the job
+    is assigned to someone else."""
+    await _ensure_job_access(job_id, current_user)
     try:
         started = await ds.rerun_job(job_id)
     except ds.DemandError as exc:

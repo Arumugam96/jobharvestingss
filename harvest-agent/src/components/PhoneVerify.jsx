@@ -1,45 +1,22 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { X, Check, ShieldCheck, PhoneIncoming, PhoneMissed, Pencil, CalendarClock } from "lucide-react";
+import { X, Check, ShieldCheck, PhoneIncoming, PhoneMissed, Pencil, CalendarClock, RefreshCw, AlertCircle } from "lucide-react";
 import { GLASS_MODAL, GLASS_BTN, GLASS_INPUT, GLASS_INPUT_FOCUS } from "../theme";
 
 /* Manual mobile-number verification for a Harvested Jobs row. The action button
  * in front of the Mobile cell opens PhoneVerifyModal, where the user records the
  * call outcome (Answered / Unanswered) plus optional comments. On save,
  * PhoneVerifyBadge next to the number shows the outcome; clicking it opens a
- * popover with the comments. UI-only for now: results live in this browser's
- * localStorage, keyed by job id, and are ignored if the row's number has since
- * changed. Styling uses the `pvm-` prefix. */
-
-const STORAGE_KEY = "ha_phone_verification";
+ * popover with the comments and who called. Results are saved server-side
+ * (POST /jobs/{id}/phone-verification) and shared with the tenant team; the
+ * table keys the latest call by job id and ignores it if the row's number has
+ * since changed. An Unanswered call with Follow-up on reminds the caller via
+ * the notification bell 24h later. Styling uses the `pvm-` prefix. */
 
 export const PHONE_STATUSES = {
   answered: { label: "Answered", color: "#047857", bg: "#F0FDF4", border: "#86EFAC", Icon: PhoneIncoming },
   unanswered: { label: "Unanswered", color: "#DC2626", bg: "#FEF2F2", border: "#FCA5A5", Icon: PhoneMissed },
 };
-
-// Results saved by the earlier checkbox version stored `verified: bool`.
-function normalize(result) {
-  if (!result || result.status) return result;
-  return { ...result, status: result.verified ? "answered" : "unanswered" };
-}
-
-export function loadPhoneVerifications() {
-  try {
-    const raw = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}") || {};
-    return Object.fromEntries(Object.entries(raw).map(([k, v]) => [k, normalize(v)]));
-  } catch {
-    return {};
-  }
-}
-
-export function savePhoneVerifications(map) {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(map));
-  } catch {
-    // storage unavailable (private window etc.) — state still lives in memory
-  }
-}
 
 const styles = `
 .pvm-btn { width: 24px; height: 24px; flex: none; display: inline-flex; align-items: center; justify-content: center; border-radius: 999px; border: 1px solid #CBD5E1; background: rgba(255,255,255,.85); color: #64748B; cursor: pointer; padding: 0; transition: background .12s, border-color .12s, color .12s; }
@@ -88,6 +65,10 @@ const styles = `
 .pvm-knob { position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(15,23,42,.3); transition: transform .15s; pointer-events: none; }
 .pvm-toggle.on .pvm-knob { transform: translateX(16px); }
 .pvm-pop-fu { display: inline-flex; align-items: center; gap: 5px; margin-top: 10px; font-size: 12px; font-weight: 600; color: #1D4ED8; background: #EFF4FF; border: 1px solid #DBE6FF; border-radius: 999px; padding: 2px 9px; }
+.pvm-hint { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #1D4ED8; margin-top: -6px; }
+.pvm-err { display: flex; align-items: center; gap: 7px; font-size: 12.5px; border-radius: 8px; padding: 8px 11px; background: #FEF2F2; border: 1px solid #FCA5A5; color: #B91C1C; }
+.pvm-spin { animation: pvm-rotate .8s linear infinite; }
+@keyframes pvm-rotate { to { transform: rotate(360deg); } }
 .pvm-textarea:focus { outline: none; border-color: #2563EB; box-shadow: 0 0 0 3px rgba(37,99,235,.12); ${GLASS_INPUT_FOCUS} }
 .pvm-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 13px 22px; border-top: 1px solid rgba(226,232,240,.9); background: rgba(248,250,252,.8); }
 .pvm-fbtn { display: inline-flex; align-items: center; gap: 6px; border-radius: 8px; font-size: 13px; font-weight: 600; padding: 9px 14px; cursor: pointer; font-family: inherit; border: 1px solid transparent; }
@@ -190,7 +171,10 @@ export function PhoneVerifyBadge({ result, onEdit }) {
             : <div className="pvm-pop-empty">No comments added.</div>}
           {result.followUp && <div className="pvm-pop-fu"><CalendarClock size={12} /> Follow-up required</div>}
           <div className="pvm-pop-foot">
-            <span>{result.updatedAt ? fmtTime(result.updatedAt) : ""}</span>
+            <span>
+              {result.updatedAt ? fmtTime(result.updatedAt) : ""}
+              {result.calledBy?.name ? `${result.updatedAt ? " · " : ""}by ${result.calledBy.name}` : ""}
+            </span>
             {onEdit && <button className="pvm-link" onClick={() => { setOpen(false); onEdit(); }}><Pencil size={12} /> Edit</button>}
           </div>
         </div>,
@@ -204,29 +188,43 @@ export default function PhoneVerifyModal({ phone, pocName, company, initial = nu
   const [status, setStatus] = useState(initial?.status || "");
   const [remarks, setRemarks] = useState(initial?.remarks || "");
   const [followUp, setFollowUp] = useState(!!initial?.followUp);
+  const [busy, setBusy] = useState(""); // "" | "save" | "clear"
+  const [error, setError] = useState("");
 
   // Comments are mandatory for an answered call, optional when unanswered.
   const commentsRequired = status === "answered";
   const canSave = !!status && (!commentsRequired || !!remarks.trim());
 
   useEffect(() => {
-    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    const onKey = (e) => { if (e.key === "Escape" && !busy) onClose(); };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [onClose, busy]);
 
+  // onSave may return a promise (the server call); the modal stays open with the
+  // error shown if it rejects, and closes only once it resolves.
+  const run = async (kind, result) => {
+    setBusy(kind);
+    setError("");
+    try {
+      await onSave(result);
+      onClose();
+    } catch (err) {
+      setError((err && err.message) || "Something went wrong. Please try again.");
+      setBusy("");
+    }
+  };
   const save = () => {
-    if (!canSave) return;
-    onSave({ status, remarks: remarks.trim(), followUp, phone, updatedAt: new Date().toISOString() });
-    onClose();
+    if (!canSave || busy) return;
+    run("save", { status, remarks: remarks.trim(), followUp, phone, updatedAt: new Date().toISOString() });
   };
   const clear = () => {
-    onSave(null);
-    onClose();
+    if (busy) return;
+    run("clear", null);
   };
 
   return (
-    <div className="pvm-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+    <div className="pvm-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget && !busy) onClose(); }}>
       <style>{styles}</style>
       <div className="pvm-card" role="dialog" aria-modal="true" aria-label="Verify mobile number">
         <div className="pvm-head">
@@ -234,7 +232,7 @@ export default function PhoneVerifyModal({ phone, pocName, company, initial = nu
             Verify mobile number
             {company && <span className="pvm-sub">· {company}</span>}
           </span>
-          <button className="pvm-close" onClick={onClose} aria-label="Close"><X size={17} /></button>
+          <button className="pvm-close" onClick={onClose} disabled={!!busy} aria-label="Close"><X size={17} /></button>
         </div>
 
         <div className="pvm-body">
@@ -282,17 +280,27 @@ export default function PhoneVerifyModal({ phone, pocName, company, initial = nu
               <span className="pvm-knob" />
             </span>
           </label>
+          {status === "unanswered" && followUp && (
+            <span className="pvm-hint"><CalendarClock size={13} /> You'll get a reminder in 24h.</span>
+          )}
+          {error && <div className="pvm-err" role="alert"><AlertCircle size={14} style={{ flex: "none" }} /> {error}</div>}
         </div>
 
         <div className="pvm-foot">
           <span>
-            {initial && <button className="pvm-fbtn pvm-fbtn-ghost" onClick={clear}>Clear status</button>}
+            {initial && (
+              <button className="pvm-fbtn pvm-fbtn-ghost" onClick={clear} disabled={!!busy}>
+                {busy === "clear" && <RefreshCw size={14} className="pvm-spin" />}
+                {busy === "clear" ? "Clearing…" : "Clear status"}
+              </button>
+            )}
           </span>
           <div style={{ display: "flex", gap: 8 }}>
-            <button className="pvm-fbtn pvm-fbtn-ghost" onClick={onClose}>Cancel</button>
-            <button className="pvm-fbtn pvm-fbtn-primary" onClick={save} disabled={!canSave}
+            <button className="pvm-fbtn pvm-fbtn-ghost" onClick={onClose} disabled={!!busy}>Cancel</button>
+            <button className="pvm-fbtn pvm-fbtn-primary" onClick={save} disabled={!canSave || !!busy}
               title={!status ? "Choose Answered or Unanswered" : !canSave ? "Add comments for an answered call" : undefined}>
-              <Check size={14} /> Save
+              {busy === "save" ? <RefreshCw size={14} className="pvm-spin" /> : <Check size={14} />}
+              {busy === "save" ? "Saving…" : "Save"}
             </button>
           </div>
         </div>

@@ -11,7 +11,7 @@ import ThemeStyles from "./components/ThemeStyles";
 import IntroSplash from "./components/IntroSplash";
 import NotificationBell from "./components/NotificationBell";
 import LoginRequiredBanner from "./components/LoginRequiredBanner";
-import { getJob } from "./api";
+import { getJob, ApiError } from "./api";
 import { mapApiJob, mapJobToDetail } from "./lib/jobsData";
 import { HarvestDataProvider, useHarvestData } from "./HarvestDataContext";
 import { useTenant } from "./TenantContext";
@@ -69,9 +69,9 @@ function AppLayout({ onLogout }) {
         railCollapsed={activeKey === "contacts"}
       />
       <Outlet />
-      {/* App-wide inbound-reply notifications (bell + toast), gated to tenants with
-          the outreach feature — it only polls the outreach endpoints. */}
-      {hasFeature("outreach") && <NotificationBell />}
+      {/* App-wide notifications (bell + toast) for every user: due follow-up calls
+          always; inbound replies only for tenants with the outreach feature. */}
+      <NotificationBell repliesEnabled={hasFeature("outreach")} />
     </div>
   );
 }
@@ -105,12 +105,15 @@ function JobDetailRoute() {
   const stateJob = location.state?.job;
   const [fetchedJob, setFetchedJob] = useState(null);
   const [loadState, setLoadState] = useState(stateJob ? "done" : "loading");
+  // Server message when the job can't be opened (a 403 names who it's assigned to).
+  const [loadError, setLoadError] = useState("");
 
   useEffect(() => {
     if (stateJob) return undefined;
     let cancelled = false;
     setLoadState("loading");
     setFetchedJob(null);
+    setLoadError("");
     (async () => {
       try {
         const res = await getJob(jobId);
@@ -118,8 +121,11 @@ function JobDetailRoute() {
           setFetchedJob(mapJobToDetail(mapApiJob(res)));
           setLoadState("done");
         }
-      } catch {
-        if (!cancelled) setLoadState("error"); // 404 or backend unreachable
+      } catch (err) {
+        if (cancelled) return;
+        // 403: assigned to someone else — show who; 404 / unreachable: generic.
+        setLoadError(err instanceof ApiError && err.status === 403 ? err.message : "");
+        setLoadState("error");
       }
     })();
     return () => { cancelled = true; };
@@ -134,7 +140,7 @@ function JobDetailRoute() {
       <div style={{ minHeight: "100vh", background: "#F8FAFC", padding: 40, color: "#64748B", fontFamily: 'ui-sans-serif,system-ui,"Segoe UI",Roboto,sans-serif' }}>
         {loadState === "loading" ? "Loading job…" : (
           <div>
-            <div style={{ marginBottom: 12 }}>This job isn’t in the current list.</div>
+            <div style={{ marginBottom: 12 }}>{loadError || "This job isn’t in the current list."}</div>
             <button
               onClick={() => navigate("/jobs")}
               style={{ background: "#fff", border: "1px solid #CBD5E1", color: "#2563EB", borderRadius: 8, padding: "8px 16px", fontSize: 14, cursor: "pointer" }}
@@ -166,11 +172,13 @@ function HistoryRoute() {
 function RunDetailRoute() {
   const { runId } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
   return (
     <RunDetailView
       runId={runId}
       onBack={() => navigate("/history")}
-      onView={(dv) => navigate(`/jobs/${encodeURIComponent(dv.job.id)}`, { state: { job: dv.job } })}
+      // `from` = this run's page, so the job detail's Back returns here, not /jobs.
+      onView={(dv) => navigate(`/jobs/${encodeURIComponent(dv.job.id)}`, { state: { job: dv.job, from: location.pathname + location.search } })}
     />
   );
 }

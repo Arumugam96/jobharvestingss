@@ -472,9 +472,9 @@ def sender_display_name(sender_email: str) -> str:
 # back to a first-name-only identity with the default role and no phone (resolve_identity),
 # so an unlisted sender still gets a valid signature, just without a bespoke full name.
 SENDER_IDENTITIES: dict[str, dict[str, str]] = {
-    "dharshana@sightspectrum.com": {
-        "first": "Dharshana",
-        "full": "Dharshana Gerald",
+    "vishnu@sightspectrum.com": {
+        "first": "Vishnu",
+        "full": "Vishnu Hassan",
         "title": "Business Development Executive",
         "phone": "", 
     },
@@ -493,7 +493,7 @@ SENDER_IDENTITIES: dict[str, dict[str, str]] = {
 # an unlisted address) to fall back to the per-send address instead (OUTREACH_AUTO_REPLY_TO
 # for auto-outreach, the logged-in user for the composer). Display only — the Reply-To
 # header still follows OUTREACH_AUTO_REPLY_TO / the composer's From field.
-ACTIVE_SENDER_EMAIL = "dharshana@sightspectrum.com"
+ACTIVE_SENDER_EMAIL = "vishnu@sightspectrum.com"
 
 
 def resolve_identity(sender_email: str) -> dict[str, str]:

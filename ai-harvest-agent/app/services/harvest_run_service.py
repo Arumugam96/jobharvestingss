@@ -533,10 +533,78 @@ class HarvestRunService:
         the same session/transaction), so the run's rows are never briefly empty
         for a concurrent reader. Used to reconcile provisional incremental rows
         with the final canonical list at end-of-run. Returns True once both steps
-        ran, so a db_write caller can tell success from a swallowed failure (None)."""
+        ran, so a db_write caller can tell success from a swallowed failure (None).
+
+        A job claimed ("Assign to me") while the run was still scraping keeps its
+        claim: the assignment columns are carried over to the reinserted row with
+        the same job_url, and per-job references (phone call logs) are relinked
+        from the old row id to the new one — all in this same transaction."""
+        old_rows = await self._snapshot_run_job_rows(run_pk)
         await self.delete_jobs_for_run(run_pk)
-        await self.bulk_insert_scraped_jobs(run_pk, jobs)
+        await self.bulk_insert_scraped_jobs(run_pk, jobs)  # flushes
+        if old_rows:
+            await self._carry_over_job_state(run_pk, old_rows)
         return True
+
+    async def _snapshot_run_job_rows(self, run_pk: str) -> dict[str, dict[str, Any]]:
+        """{normalized job_url: {"ids": [old row ids], "assignment": (email, name,
+        assigned_at, note) | None}} for a run's current rows. Scoped by run_id only,
+        exactly like delete_jobs_for_run. Blank job_urls can't be matched and are
+        skipped. For a duplicated job_url every old id is kept (all relink to the
+        one new row) and the first assigned row's claim wins."""
+        result = await self._db.execute(
+            select(
+                ScrapedJobORM.id, ScrapedJobORM.job_url, ScrapedJobORM.assigned_to_email,
+                ScrapedJobORM.assigned_to_name, ScrapedJobORM.assigned_at,
+                ScrapedJobORM.assignment_note,
+            )
+            .where(ScrapedJobORM.run_id == run_pk)
+            .order_by(ScrapedJobORM.assigned_at, ScrapedJobORM.id)
+        )
+        snapshot: dict[str, dict[str, Any]] = {}
+        for job_id, job_url, email, name, at, note in result.all():
+            key = normalize_job_url(job_url)
+            if not key:
+                continue
+            slot = snapshot.setdefault(key, {"ids": [], "assignment": None})
+            slot["ids"].append(job_id)
+            if email and slot["assignment"] is None:
+                slot["assignment"] = (email, name or "", at, note or "")
+        return snapshot
+
+    async def _carry_over_job_state(self, run_pk: str, old_rows: dict[str, dict[str, Any]]) -> None:
+        """Re-apply assignments to the reinserted rows and relink per-job
+        references old id → new id, matched on normalized job_url (when the new
+        set repeats a job_url, its first row gets the claim and the links)."""
+        result = await self._db.execute(
+            select(ScrapedJobORM.id, ScrapedJobORM.job_url)
+            .where(ScrapedJobORM.run_id == run_pk)
+            .order_by(ScrapedJobORM.id)
+        )
+        mapping: dict[str, str] = {}
+        seen: set[str] = set()
+        for new_id, job_url in result.all():
+            key = normalize_job_url(job_url)
+            if not key or key in seen or key not in old_rows:
+                continue
+            seen.add(key)
+            slot = old_rows[key]
+            mapping.update({old_id: new_id for old_id in slot["ids"] if old_id != new_id})
+            if slot["assignment"] is not None:
+                email, name, at, note = slot["assignment"]
+                await self._db.execute(
+                    update(ScrapedJobORM)
+                    .where(ScrapedJobORM.id == new_id)
+                    .values(
+                        assigned_to_email=email, assigned_to_name=name,
+                        assigned_at=at, assignment_note=note,
+                    )
+                )
+        if mapping:
+            # Imported lazily: keeps this module importable without a cycle.
+            from app.services.phone_verification_service import relink_job_ids
+
+            await relink_job_ids(self._db, mapping)
 
     async def update_scraped_job_fields(self, job_id: str, values: dict[str, Any]) -> bool:
         """Direct column update of one job row (tenant-scoped). Unlike

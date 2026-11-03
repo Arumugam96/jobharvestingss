@@ -30,6 +30,7 @@ import app.models.recruiter_finder  # noqa: F401 — registers recruiter_finder_
 import app.models.apollo_phone  # noqa: F401 — registers apollo_phone_requests / apollo_webhook_events on Base.metadata
 import app.models.outreach  # noqa: F401 — registers email_outreach on Base.metadata
 import app.models.outreach_reply  # noqa: F401 — registers outreach_replies on Base.metadata
+import app.models.phone_call_log  # noqa: F401 — registers phone_call_logs on Base.metadata
 import app.models.resdex  # noqa: F401 — registers resdex_searches / resdex_candidates / resdex_candidate_emails / resdex_daily_usage on Base.metadata
 import app.models.suppression  # noqa: F401 — registers email_suppressions on Base.metadata
 import app.models.tenant  # noqa: F401 — registers tenants on Base.metadata
@@ -46,6 +47,7 @@ from app.routes.dice_routes import router as dice_agent_router
 from app.routes.run_harvest_agent import router as run_harvest_agent_router
 from app.routes.frontend_routes import router as frontend_router
 from app.routes.job_assignment_routes import router as job_assignment_router
+from app.routes.phone_verification_routes import router as phone_verification_router
 from app.routes.prospect_routes import router as prospect_intelligence_router
 from app.routes.recruiter_routes import router as recruiter_discovery_router
 from app.routes.recruiter_finder_routes import router as recruiter_finder_router
@@ -406,6 +408,8 @@ _TENANT_CONTENT_TABLES = [
     "apollo_phone_requests",
     # Resdex candidate matching (resdex_daily_usage is a global counter — not listed).
     "resdex_searches", "resdex_candidates", "resdex_candidate_emails",
+    # Phone call verification log (Harvested Jobs "Verify mobile number").
+    "phone_call_logs",
 ]
 
 
@@ -749,6 +753,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_router)                   # POST /auth/request-otp, /auth/verify-otp, GET /auth/me
     app.include_router(frontend_router, dependencies=protected)               # GET /jobs, /lead-intelligence, /download/*, /health
     app.include_router(job_assignment_router, dependencies=protected)         # POST/DELETE /jobs/{id}/assign ("Assign to me")
+    app.include_router(phone_verification_router, dependencies=protected)     # /jobs/{id}/phone-verification, /phone-verifications/* (call log + follow-ups)
     app.include_router(run_harvest_agent_router, dependencies=protected)      # POST /run-harvest-agent, GET /harvest-status/{id}, /run-history
     app.include_router(linkedin_agent_router, dependencies=protected)         # POST /run-linkedin-agent  +  results endpoints
     app.include_router(linkedin_feed_router, dependencies=protected)          # POST /run-linkedin-feed-agent (Home Feed leads)

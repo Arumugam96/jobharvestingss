@@ -135,6 +135,64 @@ export function unassignJob(jobId) {
   return request(`/jobs/${encodeURIComponent(jobId)}/assign`, { method: "DELETE" });
 }
 
+// ── Phone call verification ────────────────────────────────────────────────────
+// A "call view" is { id, job_id, phone, phone_source, status: "answered"|"unanswered",
+// remarks, follow_up, follow_up_due_at, follow_up_done_at, called_by: {email, name},
+// called_at }. Calls are shared with the whole tenant team; a job locked to another
+// user returns 403 with an "assigned to …" detail.
+
+/** POST /jobs/{id}/phone-verification — record a call outcome for the job's number.
+ * Remarks are required when answered; an unanswered call with follow_up=true schedules
+ * a reminder for the caller. Returns the saved call view. */
+export function logPhoneCall(jobId, { phone, phone_source, contact_name, status, remarks, follow_up } = {}) {
+  return request(`/jobs/${encodeURIComponent(jobId)}/phone-verification`, {
+    method: "POST",
+    body: JSON.stringify({
+      phone,
+      phone_source: phone_source || "",
+      contact_name: contact_name || "",
+      status,
+      remarks: remarks || "",
+      follow_up: !!follow_up,
+    }),
+  });
+}
+
+/** DELETE /jobs/{id}/phone-verification?phone=… — "Clear status" for that number
+ * (soft-deletes its calls and closes any open follow-up). Returns { job_id, cleared }. */
+export function clearPhoneCall(jobId, phone) {
+  return request(`/jobs/${encodeURIComponent(jobId)}/phone-verification${qs({ phone })}`, { method: "DELETE" });
+}
+
+/** GET /phone-verifications/latest?job_ids=… — latest call per job for the visible rows.
+ * Returns { items: { job_id: callView } }; jobs locked to other users are omitted. */
+export function getPhoneVerifications(jobIds = []) {
+  const ids = (jobIds || []).filter(Boolean).join(",");
+  return request(`/phone-verifications/latest?job_ids=${encodeURIComponent(ids)}`);
+}
+
+/** GET /jobs/{id}/phone-verification/history — every call logged on the job, newest
+ * first. Returns { job_id, items: [callView] }. */
+export function getPhoneCallHistory(jobId) {
+  return request(`/jobs/${encodeURIComponent(jobId)}/phone-verification/history`);
+}
+
+/** GET /phone-verifications/follow-ups — the current user's due follow-up calls.
+ * Returns { due, items: [{...callView, type: "call_followup", contact_name, company, job_title}] }. */
+export function getCallFollowUps({ limit } = {}) {
+  return request(`/phone-verifications/follow-ups${qs({ limit })}`);
+}
+
+/** POST /phone-verifications/follow-ups/{id}/done — dismiss one follow-up reminder. Returns { id, done }. */
+export function markFollowUpDone(id) {
+  return request(`/phone-verifications/follow-ups/${encodeURIComponent(id)}/done`, { method: "POST" });
+}
+
+/** POST /phone-verifications/follow-ups/done-all — dismiss every due follow-up. Returns { updated }. */
+export function markAllFollowUpsDone() {
+  return request("/phone-verifications/follow-ups/done-all", { method: "POST" });
+}
+
 /** GET /harvest-config — current Rule Engine configuration. */
 export function getHarvestConfig() {
   return request("/harvest-config");

@@ -253,10 +253,13 @@ def _int_or_none(v: Any) -> int | None:
     return None
 
 
-def build_filters(req: dict, tier: int, active_within_months: int) -> dict[str, Any]:
+def build_filters(
+    req: dict, tier: int, active_within_months: int, active_in: str = "",
+) -> dict[str, Any]:
     """Resdex search filters derived from the same requirements:
     {"min_exp", "max_exp", "locations", "notice_period_max_days",
-    "active_within_months"} — None / empty values omitted. T3 widens experience by
+    "active_within_months", "active_in"} — None / empty values omitted. ``active_in``
+    is the label picked in the form's "Active in -" dropdown (RESDEX_ACTIVE_IN). T3 widens experience by
     ±2 years (floor 0) and drops the location filter. A remote-friendly role
     (``remote_ok``) gets no location filter at any tier."""
     req = req or {}
@@ -281,12 +284,14 @@ def build_filters(req: dict, tier: int, active_within_months: int) -> dict[str, 
         "active_within_months": (
             int(active_within_months) if active_within_months and active_within_months > 0 else None
         ),
+        "active_in": (active_in or "").strip() or None,
     }
     return {k: v for k, v in out.items() if v is not None}
 
 
 def build_tiers(
     req: dict, max_tiers: int, active_within_months: int, fixed_tier: int = 0,
+    active_in: str = "",
 ) -> list[ResdexTier]:
     """The relaxation ladder T1..T{min(3, max_tiers)}; a tier identical to the
     previous one (same query AND filters — e.g. a single mandatory skill and no
@@ -301,20 +306,22 @@ def build_tiers(
         if not query:
             return []
         return [ResdexTier(tier=fixed, query=query,
-                           filters=build_filters(req, fixed, active_within_months))]
+                           filters=build_filters(req, fixed, active_within_months, active_in))]
     tiers: list[ResdexTier] = []
     for t in range(1, min(MAX_TIERS, max(1, int(max_tiers or 1))) + 1):
         query = build_boolean_query(req, t)
         if not query:
             continue
-        filters = build_filters(req, t, active_within_months)
+        filters = build_filters(req, t, active_within_months, active_in)
         if tiers and tiers[-1].query == query and tiers[-1].filters == filters:
             continue
         tiers.append(ResdexTier(tier=t, query=query, filters=filters))
     return tiers
 
 
-def tier_previews(req: dict, active_within_months: int) -> list[dict[str, Any]]:
+def tier_previews(
+    req: dict, active_within_months: int, active_in: str = "",
+) -> list[dict[str, Any]]:
     """Every ladder tier's query + filters for ``req`` — [{"tier", "query",
     "filters"}], T1..T3, not de-duplicated and whatever RESDEX_SEARCH_TIER is, so
     the job detail page can offer the tiers that were not searched for manual use.
@@ -324,7 +331,8 @@ def tier_previews(req: dict, active_within_months: int) -> list[dict[str, Any]]:
         query = build_boolean_query(req or {}, t)
         if query:
             out.append({"tier": t, "query": query,
-                        "filters": build_filters(req or {}, t, active_within_months)})
+                        "filters": build_filters(req or {}, t, active_within_months,
+                                                 active_in)})
     return out
 
 

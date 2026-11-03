@@ -617,7 +617,9 @@ def _resdex_tier_views(s: Any) -> list[dict]:
     if not req:
         return []
     try:
-        tiers = tier_previews(req, int(get_settings().resdex_active_within_months or 0))
+        settings = get_settings()
+        tiers = tier_previews(req, int(settings.resdex_active_within_months or 0),
+                              str(settings.resdex_active_in or ""))
     except Exception as exc:  # a malformed stored requirement must not break the page
         logger.warning("resdex_tier_preview_failed", error=str(exc))
         return []

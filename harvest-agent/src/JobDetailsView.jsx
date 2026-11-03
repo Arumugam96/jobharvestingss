@@ -4,6 +4,7 @@ import EmailComposeModal from "./components/EmailComposeModal";
 import LinkedInMessageModal from "./components/LinkedInMessageModal";
 import { getOutreachStatus, getJobOutreachDetail, openLoginRequired, ApiError } from "./api";
 import LiveBrowserView from "./components/LiveBrowserView";
+import { useCurrentUserEmail, isAssignedToOther } from "./components/AssignJob";
 import { GLASS, GLASS_BTN, PAGE_BG, GLASS_FALLBACK } from "./theme";
 import { copyText } from "./lib/clipboard";
 import {
@@ -203,6 +204,8 @@ const lc = (s) => String(s || "").toLowerCase();
 // bookkeeping, not a filter).
 function filterRows(filters) {
   const f = { ...(filters || {}) };
+  // Searches stored before "active_in" was a filter key only carry it in "applied".
+  if (!f.active_in && f.applied?.active_in) f.active_in = f.applied.active_in;
   delete f.applied;
   const rows = [];
   const take = (...keys) => {
@@ -227,8 +230,12 @@ function filterRows(filters) {
   if (asList(pref).length) rows.push(["Preferred", asList(pref).join(", ")]);
   const notice = take("notice_period_max_days", "notice_max_days", "notice_period");
   if (notice !== undefined) rows.push(["Notice", typeof notice === "number" ? `≤ ${notice} days` : String(notice)]);
+  // The form's "Active in" dropdown (e.g. "15 days") is what Resdex searches with;
+  // active_within_months is only a looser post-filter, so it's shown when that's unset.
+  const activeIn = take("active_in");
   const active = take("active_within_months", "active_in_months", "active_months");
-  if (active !== undefined) rows.push(["Active within", typeof active === "number" ? `${active} months` : String(active)]);
+  if (activeIn !== undefined) rows.push(["Active in", String(activeIn)]);
+  else if (active !== undefined) rows.push(["Active within", typeof active === "number" ? `${active} months` : String(active)]);
   Object.entries(f).forEach(([k, v]) => {
     if (v === undefined || v === null || v === "" || (Array.isArray(v) && !v.length)) return;
     rows.push([k.replace(/_/g, " "), Array.isArray(v) ? v.join(", ") : typeof v === "object" ? JSON.stringify(v) : String(v)]);
@@ -662,6 +669,15 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
   // Non-blocking: the page renders without it; a failure shows one muted line.
   const [detail, setDetail] = useState(null);
   const [detailError, setDetailError] = useState(false);
+  // Self-assign lock: a job held by someone else is view-locked — the backend
+  // 403s its detail/outreach endpoints; mirror that here (defensive, for entries
+  // that arrive via navigation state) with a banner and inert outreach actions.
+  const myEmail = useCurrentUserEmail();
+  const assignedTo = job.assignedTo || job.assigned_to || null;
+  const [lockMsg, setLockMsg] = useState("");
+  const locked = !!lockMsg || isAssignedToOther(assignedTo, myEmail);
+  const lockText = lockMsg
+    || (assignedTo ? `Assigned to ${assignedTo.name || assignedTo.email} — only they can open or work on this job.` : "");
   // Naukri recruiter login from a 'login needed' Resdex state — same global
   // action as the app-wide banner (POST /login-required/open + Live Browser).
   const [liveLogin, setLiveLogin] = useState(null);   // title | null
@@ -682,8 +698,11 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
     // Refetched together with the sent-state map, so a send/log from the
     // composers (onSent / onLogged) also refreshes the Outreach email panel.
     getJobOutreachDetail(job.id)
-      .then((d) => { setDetail(d || null); setDetailError(false); })
-      .catch(() => setDetailError(true));
+      .then((d) => { setDetail(d || null); setDetailError(false); setLockMsg(""); })
+      .catch((err) => {
+        if (err instanceof ApiError && err.status === 403) setLockMsg(err.message);
+        else setDetailError(true);
+      });
     try {
       const map = await getOutreachStatus([job.id]);
       setOutreach((map && map[job.id]) || {});
@@ -747,6 +766,12 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
           </div>
         </div>
 
+        {locked && (
+          <div className="ha-lock-banner" role="status">
+            <Lock size={15} style={{ flex: "none" }} /> {lockText}
+          </div>
+        )}
+
         <header className="ha-hero">
           <div style={{ minWidth: 0 }}>
           <div className="ha-hero-meta">
@@ -777,7 +802,7 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
           {detail && !isDemand && (
             <OutreachEmailStrip
               emails={detail.emails}
-              onCompose={job.id && job.email ? () => setEmailModal({ job, followup: false }) : null}
+              onCompose={!locked && job.id && job.email ? () => setEmailModal({ job, followup: false }) : null}
             />
           )}
         </header>
@@ -827,7 +852,7 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
                 glyph={WhatsAppIcon}
                 variant="wa"
                 title="WhatsApp"
-                href={job.posterContact?.mobile ? `https://wa.me/${job.posterContact.mobile.replace(/\D/g, "")}` : null}
+                href={!locked && job.posterContact?.mobile ? `https://wa.me/${job.posterContact.mobile.replace(/\D/g, "")}` : null}
               />
               <ContactAction
                 glyph={Mail}
@@ -836,21 +861,23 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
                 sent={emailSent}
                 newTab={false}
                 onClick={
-                  job.id && emailSent
-                    ? () => setEmailModal({ job, followup: true, parentOutreachId: outreach.email.outreach_id })
-                    : job.id && job.email
-                      ? () => setEmailModal({ job, followup: false })
-                      : undefined
+                  locked
+                    ? undefined
+                    : job.id && emailSent
+                      ? () => setEmailModal({ job, followup: true, parentOutreachId: outreach.email.outreach_id })
+                      : job.id && job.email
+                        ? () => setEmailModal({ job, followup: false })
+                        : undefined
                 }
-                href={!job.id && job.email ? `mailto:${job.email}` : null}
+                href={!locked && !job.id && job.email ? `mailto:${job.email}` : null}
               />
               <ContactAction
                 glyph={LinkedInIcon}
                 variant="li"
                 title={liSent ? "LinkedIn message sent" : "LinkedIn"}
                 sent={liSent}
-                onClick={job.id && job.linkedin ? () => setLinkedinModalJob(job) : undefined}
-                href={!job.id && job.linkedin ? job.linkedin : null}
+                onClick={!locked && job.id && job.linkedin ? () => setLinkedinModalJob(job) : undefined}
+                href={!locked && !job.id && job.linkedin ? job.linkedin : null}
               />
             </div>
             )}
@@ -892,7 +919,7 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
                   glyph={WhatsAppIcon}
                   variant="wa"
                   title="WhatsApp"
-                  href={cc.phone ? `https://wa.me/${cc.phone.replace(/\D/g, "")}` : null}
+                  href={!locked && cc.phone ? `https://wa.me/${cc.phone.replace(/\D/g, "")}` : null}
                 />
                 <ContactAction
                   glyph={Mail}
@@ -901,13 +928,15 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
                   sent={emailSent}
                   newTab={false}
                   onClick={
-                    job.id && emailSent
-                      ? () => setEmailModal({ job: { ...job, email: cc.email }, followup: true, parentOutreachId: outreach.email.outreach_id })
-                      : job.id && cc.email
-                        ? () => setEmailModal({ job: { ...job, email: cc.email }, followup: false })
-                        : undefined
+                    locked
+                      ? undefined
+                      : job.id && emailSent
+                        ? () => setEmailModal({ job: { ...job, email: cc.email }, followup: true, parentOutreachId: outreach.email.outreach_id })
+                        : job.id && cc.email
+                          ? () => setEmailModal({ job: { ...job, email: cc.email }, followup: false })
+                          : undefined
                   }
-                  href={!job.id && cc.email ? `mailto:${cc.email}` : null}
+                  href={!locked && !job.id && cc.email ? `mailto:${cc.email}` : null}
                 />
               </div>
             </div>
@@ -1047,6 +1076,8 @@ const styles = `
   .ha-container { max-width: 1280px; margin: 0 auto; padding: 22px 32px 48px; }
 
   .ha-topbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; }
+  .ha-lock-banner { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; padding: 10px 14px;
+    border-radius: 10px; background: #FFFBEB; border: 1px solid #FCD34D; color: #92400E; font-size: 13px; font-weight: 600; }
   .ha-back { display: inline-flex; align-items: center; gap: 7px; cursor: pointer;
     ${GLASS_BTN} color: #334155;
     font-size: 13px; font-weight: 600; padding: 8px 14px; border-radius: 8px; }
