@@ -126,8 +126,8 @@ def compute_harvest_insights(jobs: list[ScrapedJobORM]) -> dict[str, Any]:
     raw row count and ``cross_source_duplicates`` the postings seen on 2+ sources.
     ``apollo_enriched`` counts postings whose contact came from an Apollo-sourced
     recruiter — NOT credits spent (see apollo_budget.credits_between)."""
-    total_rows = len(jobs)
-    jobs, cross_source_duplicates = distinct_postings(jobs)
+    # total_rows = len(jobs)
+    # jobs, cross_source_duplicates = distinct_postings(jobs)
     total = len(jobs)
     linkedin = naukri = dice = 0
     with_email = with_phone = with_contact = with_linkedin = 0
@@ -182,8 +182,8 @@ def compute_harvest_insights(jobs: list[ScrapedJobORM]) -> dict[str, Any]:
 
     return {
         "total":               total,
-        "total_rows":          total_rows,
-        "cross_source_duplicates": cross_source_duplicates,
+        # "total_rows":          total_rows,
+        # "cross_source_duplicates": cross_source_duplicates,
         "linkedin":            linkedin,
         "non_linkedin":        naukri + dice,
         "naukri":              naukri,

@@ -31,7 +31,7 @@ from app.config import get_settings  # noqa: E402
 from app.core.dependencies import get_session_factory  # noqa: E402
 from app.models.harvest_config import NotificationConfig  # noqa: E402
 from app.models.harvest_run import HarvestRunORM, ScrapedJobORM  # noqa: E402
-from app.services import apollo_credit_usage  # noqa: E402
+from app.services import apollo_budget, apollo_credit_usage  # noqa: E402
 from app.services.config_service import ConfigService  # noqa: E402
 from app.services.email_service import EmailSender  # noqa: E402
 from app.services.harvest_notification_service import send_harvest_report  # noqa: E402
@@ -130,13 +130,19 @@ async def main():
             "phases": run.phase_timings or {},
         }
 
-    # ── Apollo's own credit counter (same as the real email path) ───────
-    # No run-start snapshot is kept here, so "this run" falls back to the last
-    # snapshot taken before run.started_at.
+    # ── Apollo figures (same as the real email path) ────────────────────
+    # Cycle remaining comes from Apollo's own counter; "credits this run" is the
+    # local ledger's enrichment spend within the run's own window (not up to now,
+    # so re-running the script later doesn't pick up newer spend).
     apollo_usage = await apollo_credit_usage.report_usage(None, run.started_at)
     print(f"  Apollo usage: {apollo_usage}")
-    if insights is not None and apollo_usage and apollo_usage.get("run") is not None:
-        insights["apollo_credits_run"] = apollo_usage["run"]
+    if insights is not None and run.started_at:
+        run_credits = await apollo_budget.credits_between(
+            run.started_at, run.completed_at, purpose="enrichment"
+        )
+        print(f"  Apollo enrichment credits this run: {run_credits}")
+        if run_credits is not None:
+            insights["apollo_credits_run"] = run_credits
 
     # ── Notification config: the live one, retargeted for the test ──────
     live = ConfigService().load().notifications
