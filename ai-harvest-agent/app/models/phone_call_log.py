@@ -43,8 +43,17 @@ class PhoneCallLogORM(Base):
 
     call_status: Mapped[str] = mapped_column(String(20), nullable=False)  # answered | unanswered
     remarks: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # Call outcome under the status (e.g. "connect_back", "switched_off" — see
+    # phone_verification_service.CALL_OUTCOMES); "" for calls logged before it existed.
+    call_outcome: Mapped[str] = mapped_column(String(40), nullable=False, default="")
+    # Outcome-specific fields as a JSON object string (next steps, reason, referred POC…).
+    outcome_details: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # Proof of the call as a JSON list string: [{name, size, type, src}] — src is a
+    # small image data: URL or "" (larger files keep only their name).
+    proof: Mapped[str] = mapped_column(Text, nullable=False, default="")
     follow_up: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    # Set only for unanswered + follow_up: created_at + PHONE_FOLLOWUP_DELAY_HOURS.
+    # The reminder time the caller picked (any status), or — for the older
+    # unanswered + follow_up flow — created_at + PHONE_FOLLOWUP_DELAY_HOURS.
     follow_up_due_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

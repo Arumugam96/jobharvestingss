@@ -111,7 +111,7 @@ def _ensure_scraped_jobs_columns(sync_conn) -> None:
         ("company_contact_phone",    "ALTER TABLE scraped_jobs ADD COLUMN company_contact_phone VARCHAR(50) NOT NULL DEFAULT ''"),
         ("company_contact_location", "ALTER TABLE scraped_jobs ADD COLUMN company_contact_location TEXT NOT NULL DEFAULT ''"),
         ("company_contact_source",   "ALTER TABLE scraped_jobs ADD COLUMN company_contact_source VARCHAR(30) NOT NULL DEFAULT ''"),
-        # Self-assignment lock ("Assign to me"). Mirrored in alembic 0028.
+        # Self-assignment lock ("Assign to me"). Mirrored in alembic 0029.
         ("assigned_to_email", "ALTER TABLE scraped_jobs ADD COLUMN assigned_to_email VARCHAR(255)"),
         ("assigned_to_name",  "ALTER TABLE scraped_jobs ADD COLUMN assigned_to_name VARCHAR(255) NOT NULL DEFAULT ''"),
         ("assigned_at",       f"ALTER TABLE scraped_jobs ADD COLUMN assigned_at {ts_type}"),
@@ -335,6 +335,26 @@ def _ensure_recruiter_finder_items_columns(sync_conn) -> None:
             logger.info("recruiter_finder_items_column_added", column=name)
 
 
+def _ensure_phone_call_logs_columns(sync_conn) -> None:
+    """One-time, idempotent ADD COLUMN backfill for the pre-existing phone_call_logs
+    table: the call outcome, its outcome-specific details and the proof of call
+    (the call-log popup). Mirrors alembic 0031 — create_all never alters an
+    existing table."""
+    inspector = sa_inspect(sync_conn)
+    if "phone_call_logs" not in inspector.get_table_names():
+        return  # brand-new DB — create_all already made this table with the columns
+    cols = {c["name"] for c in inspector.get_columns("phone_call_logs")}
+    pending = [
+        ("call_outcome", "ALTER TABLE phone_call_logs ADD COLUMN call_outcome VARCHAR(40) NOT NULL DEFAULT ''"),
+        ("outcome_details", "ALTER TABLE phone_call_logs ADD COLUMN outcome_details TEXT NOT NULL DEFAULT ''"),
+        ("proof", "ALTER TABLE phone_call_logs ADD COLUMN proof TEXT NOT NULL DEFAULT ''"),
+    ]
+    for name, ddl in pending:
+        if name not in cols:
+            sync_conn.execute(sa_text(ddl))
+            logger.info("phone_call_logs_column_added", column=name)
+
+
 def _ensure_resdex_searches_columns(sync_conn) -> None:
     """One-time, idempotent ADD COLUMN backfill for the pre-existing resdex_searches
     table: `contact_source` — the origin of the outreach contact that triggered the
@@ -550,6 +570,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # resdex_searches gained contact_source (origin of the contact that
         # triggered the search) — same idempotent ADD COLUMN treatment.
         await conn.run_sync(_ensure_resdex_searches_columns)
+        # phone_call_logs gained call_outcome + outcome_details + proof (the
+        # call-log popup) — same idempotent ADD COLUMN treatment.
+        await conn.run_sync(_ensure_phone_call_logs_columns)
         # Data backfill: re-parse country/state onto scraped_jobs rows harvested
         # before location parsing was wired (columns above exist but stayed empty).
         await conn.run_sync(_backfill_scraped_jobs_location)

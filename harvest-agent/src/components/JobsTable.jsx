@@ -3,9 +3,9 @@ import { useSearchParams } from "react-router-dom";
 import { Search, Mail, Lock } from "lucide-react";
 import EmailComposeModal from "./EmailComposeModal";
 import LinkedInMessageModal from "./LinkedInMessageModal";
-import PhoneVerifyModal, { PhoneVerifyStyles, PhoneVerifyButton, PhoneVerifyBadge } from "./PhoneVerify";
+import PhoneVerifyModal, { PhoneVerifyStyles, PhoneVerifyButton, PhoneVerifyBadge, callFromView } from "./PhoneVerify";
 import AssignJobModal, { AssignJobStyles, AssignCell, useCurrentUserEmail, isAssignedToOther } from "./AssignJob";
-import { getOutreachStatus, getPhoneVerifications, logPhoneCall, clearPhoneCall } from "../api";
+import { getOutreachStatus, getPhoneVerifications, logPhoneCall } from "../api";
 import { C } from "../theme";
 import {
   WhatsAppIcon, LinkedInIcon, SourceChip, SortHeader, PlainHeader,
@@ -51,18 +51,6 @@ export const PAGE_SIZE_OPTIONS = [
 const DEFAULT_DISPLAY_PAGE_SIZE = 100;
 
 const NO_OUTREACH_TITLE = "No outreach for Demand Search jobs";
-
-// Server call view (POST/GET phone-verification) → the shape PhoneVerifyBadge
-// and PhoneVerifyModal read.
-const phoneResultFromView = (v) => (v ? {
-  id: v.id,
-  status: v.status,
-  remarks: v.remarks || "",
-  followUp: !!v.follow_up,
-  phone: v.phone,
-  updatedAt: v.called_at,
-  calledBy: v.called_by || null,
-} : null);
 
 export default function JobsTable({
   jobs,
@@ -133,29 +121,12 @@ export default function JobsTable({
   // Latest phone-call verification per job id, from the server (shared with the
   // tenant team — see PhoneVerify.jsx). Fetched for the visible rows below.
   const [phoneVerify, setPhoneVerify] = useState({});
-  const [phoneModal, setPhoneModal] = useState(null); // { job, phone, phoneSource, pocName }
-  // Saves (or, with result=null, clears) the call for the modal's job + number.
-  // Rejects on failure so the modal can show the error and stay open.
-  const savePhoneResult = useCallback(async (modal, result) => {
-    const jobId = modal.job.id;
-    if (!result) {
-      await clearPhoneCall(jobId, modal.phone);
-      setPhoneVerify((prev) => {
-        const next = { ...prev };
-        delete next[jobId];
-        return next;
-      });
-      return;
-    }
-    const view = await logPhoneCall(jobId, {
-      phone: result.phone,
-      phone_source: modal.phoneSource,
-      contact_name: modal.pocName,
-      status: result.status,
-      remarks: result.remarks,
-      follow_up: result.followUp,
-    });
-    setPhoneVerify((prev) => ({ ...prev, [jobId]: phoneResultFromView(view) }));
+  const [phoneModal, setPhoneModal] = useState(null); // { job, phone, phoneSource, pocName, pocKind, email }
+  // Logs a call for the modal's job + number. Rejects on failure so the modal
+  // can show the error and stay open.
+  const savePhoneResult = useCallback(async (modal, call) => {
+    const view = await logPhoneCall(modal.job.id, { ...call, phone_source: modal.phoneSource, contact_name: modal.pocName });
+    setPhoneVerify((prev) => ({ ...prev, [modal.job.id]: callFromView(view) }));
   }, []);
   // "Assign to me": the logged-in user, the open modal, and assignments changed
   // in this session (overlaid on the server's row.assignedTo until the next fetch).
@@ -370,7 +341,7 @@ export default function JobsTable({
       setPhoneVerify((prev) => {
         const next = { ...prev };
         ids.forEach((id) => {
-          if (items[id]) next[id] = phoneResultFromView(items[id]); else delete next[id];
+          if (items[id]) next[id] = callFromView(items[id]); else delete next[id];
         });
         return next;
       });
@@ -478,11 +449,11 @@ export default function JobsTable({
                     {c.phone && !locked ? (
                       <div className="pvm-cell">
                         <PhoneVerifyButton verified={phoneVerify[j.id]?.phone === c.phone}
-                          onClick={() => setPhoneModal({ job: j, phone: c.phone, phoneSource: c.phoneParts[0]?.variant || "", pocName: c.pocName })} />
+                          onClick={() => setPhoneModal({ job: j, phone: c.phone, phoneSource: c.phoneParts[0]?.variant || "", pocName: c.pocName, pocKind: c.pocKind, email: c.email })} />
                         <div className="pvm-val"><DualContact parts={c.phoneParts} link="tel:" cls="ha-tel" /></div>
                         {/* A stored result only applies while the row still shows the same number. */}
                         <PhoneVerifyBadge result={phoneVerify[j.id]?.phone === c.phone ? phoneVerify[j.id] : null}
-                          onEdit={() => setPhoneModal({ job: j, phone: c.phone, phoneSource: c.phoneParts[0]?.variant || "", pocName: c.pocName })} />
+                          onEdit={() => setPhoneModal({ job: j, phone: c.phone, phoneSource: c.phoneParts[0]?.variant || "", pocName: c.pocName, pocKind: c.pocKind, email: c.email })} />
                       </div>
                     ) : (
                       <DualContact parts={c.phoneParts} link="tel:" cls="ha-tel" />
@@ -604,9 +575,12 @@ export default function JobsTable({
       {phoneModal && (
         <PhoneVerifyModal
           phone={phoneModal.phone}
+          jobId={phoneModal.job.id}
           pocName={phoneModal.pocName}
+          pocTitle={phoneModal.pocKind === "poster" ? phoneModal.job.posterTitle : ""}
+          email={phoneModal.email}
           company={phoneModal.job.company}
-          initial={phoneVerify[phoneModal.job.id]?.phone === phoneModal.phone ? phoneVerify[phoneModal.job.id] : null}
+          latest={phoneVerify[phoneModal.job.id]?.phone === phoneModal.phone ? phoneVerify[phoneModal.job.id] : null}
           onSave={(result) => savePhoneResult(phoneModal, result)}
           onClose={() => setPhoneModal(null)}
         />

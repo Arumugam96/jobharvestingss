@@ -136,15 +136,20 @@ export function unassignJob(jobId) {
 }
 
 // ── Phone call verification ────────────────────────────────────────────────────
-// A "call view" is { id, job_id, phone, phone_source, status: "answered"|"unanswered",
-// remarks, follow_up, follow_up_due_at, follow_up_done_at, called_by: {email, name},
-// called_at }. Calls are shared with the whole tenant team; a job locked to another
-// user returns 403 with an "assigned to …" detail.
+// A "call view" is { id, job_id, phone, phone_source, contact_name,
+// status: "answered"|"unanswered", outcome, details, proof: [{name, size, type, src}],
+// remarks, follow_up, follow_up_due_at (the reminder time), follow_up_done_at,
+// called_by: {email, name}, called_at } — plus `attempts` (calls on the job so far)
+// from POST and /latest. Calls are shared with the whole tenant team; a job locked
+// to another user returns 403 with an "assigned to …" detail.
 
-/** POST /jobs/{id}/phone-verification — record a call outcome for the job's number.
- * Remarks are required when answered; an unanswered call with follow_up=true schedules
- * a reminder for the caller. Returns the saved call view. */
-export function logPhoneCall(jobId, { phone, phone_source, contact_name, status, remarks, follow_up } = {}) {
+/** POST /jobs/{id}/phone-verification — log one call on the job's number: status,
+ * outcome, outcome details, proof of call, comments and an optional reminder time
+ * (reminder_at, ISO), which shows in the caller's notification bell once due.
+ * Returns the saved call view. */
+export function logPhoneCall(jobId, {
+  phone, phone_source, contact_name, status, outcome, details, proof, remarks, reminder_at, follow_up,
+} = {}) {
   return request(`/jobs/${encodeURIComponent(jobId)}/phone-verification`, {
     method: "POST",
     body: JSON.stringify({
@@ -152,7 +157,11 @@ export function logPhoneCall(jobId, { phone, phone_source, contact_name, status,
       phone_source: phone_source || "",
       contact_name: contact_name || "",
       status,
+      outcome: outcome || "",
+      details: details || {},
+      proof: proof || [],
       remarks: remarks || "",
+      reminder_at: reminder_at || null,
       follow_up: !!follow_up,
     }),
   });
@@ -165,7 +174,8 @@ export function clearPhoneCall(jobId, phone) {
 }
 
 /** GET /phone-verifications/latest?job_ids=… — latest call per job for the visible rows.
- * Returns { items: { job_id: callView } }; jobs locked to other users are omitted. */
+ * Returns { items: { job_id: callView } } (proof images omitted); jobs locked to other
+ * users are omitted. */
 export function getPhoneVerifications(jobIds = []) {
   const ids = (jobIds || []).filter(Boolean).join(",");
   return request(`/phone-verifications/latest?job_ids=${encodeURIComponent(ids)}`);

@@ -14,7 +14,7 @@ import { fmtRel, avatarColor, initials } from "./outreachUi";
  *   • GET /outreach/notifications — UNREAD replies + a total count (only when the
  *     tenant has the outreach feature: `repliesEnabled`);
  *   • GET /phone-verifications/follow-ups — the current user's follow-up calls that
- *     are due (an Unanswered call logged with Follow-up on, 24h later).
+ *     are due (a call logged with a reminder, once its time passes).
  * Both are merged into one list (newest first) and rendered as:
  *   • a floating bell with a badge (unread replies + due follow-ups); clicking opens
  *     a dropdown. A reply row deep-links to its thread (/mail/:outreach_id) and marks

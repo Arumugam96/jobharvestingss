@@ -3,7 +3,7 @@ Phone call verification routes ("Verify mobile number" on the Harvested Jobs tab
 
 Endpoints
 ─────────
-POST   /jobs/{id}/phone-verification          — log a call (answered needs remarks)
+POST   /jobs/{id}/phone-verification          — log a call (outcome, details, proof, reminder)
 DELETE /jobs/{id}/phone-verification?phone=   — "Clear status" for that number
 GET    /jobs/{id}/phone-verification/history  — every non-cleared call, newest first
 GET    /phone-verifications/latest?job_ids=   — newest call per visible job (badges)
@@ -16,6 +16,9 @@ when the job is assigned to someone else); /latest omits such jobs. Call views
 are documented on phone_verification_service.call_view.
 """
 from __future__ import annotations
+
+from datetime import datetime
+from typing import Any
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -42,6 +45,13 @@ _GUARDED_RESPONSES: dict = {
 }
 
 
+class ProofFile(BaseModel):
+    name: str = Field(default="", max_length=255)
+    size: str = Field(default="", max_length=20)
+    type: str = Field(default="", max_length=40, description="e.g. Call log screenshot")
+    src: str = Field(default="", description="Small image as a data: URL, or blank.")
+
+
 class LogCallRequest(BaseModel):
     phone: str = Field(..., min_length=1, max_length=pvs.PHONE_MAX_LEN,
                        description="Number as dialed.")
@@ -49,8 +59,16 @@ class LogCallRequest(BaseModel):
                               description="job | recruiter | contact | company")
     contact_name: str = Field(default="", max_length=pvs.CONTACT_NAME_MAX_LEN)
     status: str = Field(..., description="answered | unanswered")
-    remarks: str = Field(default="", description="Required when status is answered.")
-    follow_up: bool = Field(default=False, description="Remind me in 24h (unanswered calls only).")
+    outcome: str = Field(default="", max_length=40,
+                         description="Outcome under the status, e.g. connect_back, switched_off.")
+    details: dict[str, Any] = Field(default_factory=dict,
+                                    description="Outcome-specific fields (next steps, reason…).")
+    proof: list[ProofFile] = Field(default_factory=list, max_length=pvs.PROOF_MAX_FILES)
+    remarks: str = Field(default="", description="Required for an answered call without an outcome.")
+    reminder_at: datetime | None = Field(default=None,
+                                         description="Remind me at this time (any status).")
+    follow_up: bool = Field(default=False,
+                            description="Older clients: remind me in 24h (unanswered calls only).")
 
 
 async def _load_job_guarded(
@@ -84,10 +102,14 @@ async def log_phone_call(
         db, job, current_user,
         phone=body.phone, phone_source=body.phone_source, contact_name=body.contact_name,
         status=body.status, remarks=body.remarks, follow_up=body.follow_up,
+        outcome=body.outcome, details=body.details,
+        proof=[p.model_dump() for p in body.proof], reminder_at=body.reminder_at,
     )
     logger.info("phone_call_logged", job_id=job_id, user=current_user.email,
-                status=row.call_status, follow_up_due=bool(row.follow_up_due_at))
-    return pvs.call_view(row)
+                status=row.call_status, outcome=row.call_outcome,
+                follow_up_due=bool(row.follow_up_due_at))
+    counts = await pvs.count_calls(db, [job_id])
+    return {**pvs.call_view(row), "attempts": counts.get(job_id, 1)}
 
 
 @router.delete(

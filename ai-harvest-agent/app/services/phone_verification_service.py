@@ -1,13 +1,15 @@
 """Phone call verification ("Verify mobile number" on the Harvested Jobs table).
 
-A user dials a job's phone number and logs the result: Answered (remarks
-required) or Unanswered, optionally with Follow-up on. Every log is an
-append-only phone_call_logs row (app/models/phone_call_log.py):
+A user dials a job's phone number and logs the result: Answered or Unanswered,
+the call outcome under it (CALL_OUTCOMES), outcome-specific details, proof of
+the call and optionally a reminder time. Every log is an append-only
+phone_call_logs row (app/models/phone_call_log.py):
 
   * The newest non-cleared row per job is the badge the whole tenant team sees
     (latest_for_jobs), including who called.
-  * An Unanswered call with Follow-up on gets follow_up_due_at = now +
-    settings.phone_followup_delay_hours. Once that passes it shows in the
+  * A call with a reminder gets follow_up_due_at = the picked time (older
+    clients: Unanswered + Follow-up gets now + settings.phone_followup_delay_hours).
+    Once that passes it shows in the
     CALLER's notification bell (due_followups) — computed at poll time, so no
     scheduler job is involved. A newer call on the same job+phone, the caller
     dismissing it, or "Clear status" closes it (follow_up_done_at).
@@ -19,6 +21,7 @@ case-insensitive on email, like job_assignment_service.
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -35,6 +38,20 @@ from app.models.phone_call_log import PhoneCallLogORM
 from app.services.job_assignment_service import display_name_from_email
 
 CALL_STATUSES = ("answered", "unanswered")
+# Mirrors OUTCOMES in harvest-agent/src/components/PhoneVerify.jsx.
+CALL_OUTCOMES = {
+    "answered": frozenset({
+        "good_response", "connect_back", "share_details", "not_interested", "wrong_number",
+        "not_right_poc", "position_closed", "language_barrier", "do_not_call",
+    }),
+    "unanswered": frozenset({
+        "no_answer", "busy", "switched_off", "unreachable", "invalid_number",
+        "disconnected", "voicemail",
+    }),
+}
+DETAILS_MAX_LEN = 4000
+PROOF_MAX_FILES = 3
+PROOF_SRC_MAX_LEN = 450_000  # a ~300 KB image as a base64 data: URL
 REMARKS_MAX_LEN = 2000
 PHONE_MAX_LEN = 50
 PHONE_SOURCE_MAX_LEN = 20
@@ -61,8 +78,20 @@ def _same_user(email: str | None, user: AuthenticatedUser) -> bool:
     return bool(email) and email.lower() == (user.email or "").lower()
 
 
-def call_view(row: PhoneCallLogORM) -> dict[str, Any]:
-    """API view of one logged call."""
+def _loads(raw: str | None, default):
+    try:
+        value = json.loads(raw) if raw else default
+    except ValueError:
+        return default
+    return value if isinstance(value, type(default)) else default
+
+
+def call_view(row: PhoneCallLogORM, *, proof_src: bool = True) -> dict[str, Any]:
+    """API view of one logged call. proof_src=False drops the inline proof images
+    (the table's batch /latest only needs the count)."""
+    proof = _loads(row.proof, [])
+    if not proof_src:
+        proof = [{**p, "src": ""} for p in proof]
     return {
         "id": row.id,
         "job_id": row.job_id,
@@ -70,6 +99,9 @@ def call_view(row: PhoneCallLogORM) -> dict[str, Any]:
         "phone_source": row.phone_source or "",
         "contact_name": row.contact_name or "",
         "status": row.call_status,
+        "outcome": row.call_outcome or "",
+        "details": _loads(row.outcome_details, {}),
+        "proof": proof,
         "remarks": row.remarks or "",
         "follow_up": bool(row.follow_up),
         "follow_up_due_at": _iso(row.follow_up_due_at),
@@ -107,9 +139,14 @@ async def log_call(
     status: str,
     remarks: str = "",
     follow_up: bool = False,
+    outcome: str = "",
+    details: dict[str, Any] | None = None,
+    proof: list[dict[str, Any]] | None = None,
+    reminder_at: datetime | None = None,
 ) -> PhoneCallLogORM:
     """Record one call against `job`'s `phone`. Supersedes (closes) any open
-    follow-up on the same job+phone, then inserts the new row."""
+    follow-up on the same job+phone, then inserts the new row. `reminder_at`
+    schedules the follow-up at that time (any status)."""
     call_status = (status or "").strip().lower()
     if call_status not in CALL_STATUSES:
         raise HTTPException(
@@ -119,14 +156,36 @@ async def log_call(
     if not phone:
         raise HTTPException(status_code=422, detail="phone is required")
     remarks = (remarks or "").strip()[:REMARKS_MAX_LEN]
-    if call_status == "answered" and not remarks:
+    outcome = (outcome or "").strip().lower()
+    if outcome and outcome not in CALL_OUTCOMES[call_status]:
+        raise HTTPException(status_code=422, detail=f"Unknown outcome '{outcome}' for a {call_status} call")
+    # The outcome records what happened; without one (older clients) an answered
+    # call still needs remarks.
+    if call_status == "answered" and not outcome and not remarks:
         raise HTTPException(status_code=422, detail="Remarks are required for an answered call")
+    details_json = json.dumps(details or {}, ensure_ascii=False)
+    if len(details_json) > DETAILS_MAX_LEN:
+        raise HTTPException(status_code=422, detail="Outcome details are too long")
+    proof_items = []
+    for p in (proof or [])[:PROOF_MAX_FILES]:
+        src = str(p.get("src") or "")
+        if src and (not src.startswith("data:image/") or len(src) > PROOF_SRC_MAX_LEN):
+            src = ""  # keep the file's name, drop anything that isn't a small inline image
+        proof_items.append({
+            "name": str(p.get("name") or "")[:255],
+            "size": str(p.get("size") or "")[:20],
+            "type": str(p.get("type") or "")[:40],
+            "src": src,
+        })
 
     now = _now()
     await db.execute(_close_open_followups_stmt(job.id, phone, now))
 
     due = None
-    if call_status == "unanswered" and follow_up:
+    if reminder_at is not None:
+        due = _aware(reminder_at)
+        follow_up = True
+    elif call_status == "unanswered" and follow_up:
         due = now + timedelta(hours=get_settings().phone_followup_delay_hours)
 
     row = PhoneCallLogORM(
@@ -138,6 +197,9 @@ async def log_call(
         phone_source=(phone_source or "").strip()[:PHONE_SOURCE_MAX_LEN],
         contact_name=(contact_name or "").strip()[:CONTACT_NAME_MAX_LEN],
         call_status=call_status,
+        call_outcome=outcome,
+        outcome_details=details_json,
+        proof=json.dumps(proof_items, ensure_ascii=False) if proof_items else "",
         remarks=remarks,
         follow_up=bool(follow_up),
         follow_up_due_at=due,
@@ -191,7 +253,22 @@ async def latest_for_jobs(db: AsyncSession, job_ids: list[str]) -> dict[str, dic
     rows = (await db.execute(
         select(PhoneCallLogORM).where(PhoneCallLogORM.id.in_(newest.scalar_subquery()))
     )).scalars().all()
-    return {r.job_id: call_view(r) for r in rows}
+    counts = await count_calls(db, [r.job_id for r in rows])
+    return {r.job_id: {**call_view(r, proof_src=False), "attempts": counts.get(r.job_id, 1)} for r in rows}
+
+
+async def count_calls(db: AsyncSession, job_ids: list[str]) -> dict[str, int]:
+    """{job_id: number of non-cleared calls} — the "Attempt N" shown on the badge."""
+    ids = [j for j in dict.fromkeys(job_ids) if j]
+    if not ids:
+        return {}
+    stmt = apply_tenant(
+        select(PhoneCallLogORM.job_id, func.count(PhoneCallLogORM.id))
+        .where(PhoneCallLogORM.job_id.in_(ids), PhoneCallLogORM.cleared_at.is_(None))
+        .group_by(PhoneCallLogORM.job_id),
+        PhoneCallLogORM.tenant_id,
+    )
+    return {job_id: int(n) for job_id, n in (await db.execute(stmt)).all()}
 
 
 async def history(db: AsyncSession, job_id: str) -> list[dict[str, Any]]:
