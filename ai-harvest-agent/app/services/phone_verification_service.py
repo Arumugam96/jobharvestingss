@@ -15,6 +15,22 @@ phone_call_logs row (app/models/phone_call_log.py):
     dismissing it, or "Clear status" closes it (follow_up_done_at).
   * "Clear status" soft-deletes (cleared_at) the job+phone's rows.
 
+The server re-checks the popup's Save gate (_validate_outcome: the outcome's
+required fields, and proof of call where the outcome needs it) and keeps only the
+outcome's known detail fields (_clean_details). Some outcomes then act beyond the
+log, in the same transaction (_apply_outcome_effects):
+
+  * good_response   — the number is flagged warm (and its recruiter's crm_status).
+  * wrong_number / invalid_number — the number is flagged invalid; invalid_number
+    can also request re-enrichment (a flag only — no Apollo spend here).
+  * do_not_call     — the number is flagged DNC, the contact's email is added to
+    email_suppressions (every send path already checks it) and no reminder is kept.
+  * not_right_poc   — the referred person becomes a recruiters row.
+  * language_barrier + reassign — the caller's assignment on the job is released.
+
+Number-level state lives in phone_contact_flags (one row per tenant + digits), so
+it follows the number onto every job that shows it (flags_for_phones).
+
 job_id is a soft link to scraped_jobs.id; a run reconcile that rewrites a run's
 rows re-points it via relink_job_ids(). Matching on the caller is
 case-insensitive on email, like job_assignment_service.
@@ -22,6 +38,7 @@ case-insensitive on email, like job_assignment_service.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -35,6 +52,10 @@ from app.core.tenant_context import apply_tenant, get_current_tenant_id
 from app.models.auth import AuthenticatedUser
 from app.models.harvest_run import ScrapedJobORM
 from app.models.phone_call_log import PhoneCallLogORM
+from app.models.phone_contact_flag import PhoneContactFlagORM
+from app.models.recruiter import RecruiterORM
+from app.models.suppression import EmailSuppressionORM
+from app.services import recruiter_service, suppression_service
 from app.services.job_assignment_service import display_name_from_email
 
 CALL_STATUSES = ("answered", "unanswered")
@@ -56,6 +77,42 @@ REMARKS_MAX_LEN = 2000
 PHONE_MAX_LEN = 50
 PHONE_SOURCE_MAX_LEN = 20
 CONTACT_NAME_MAX_LEN = 255
+DETAIL_TEXT_MAX_LEN = 255
+DETAIL_LIST_MAX_ITEMS = 10
+FLAGS_MAX_PHONES = 200
+
+# Outcome-specific detail fields the popup sends (OutcomePanel in PhoneVerify.jsx),
+# by panel. Each value is "str", "list" (of str) or "bool"; anything else is dropped.
+_PANEL_FIELDS: dict[str, dict[str, str]] = {
+    "callback": {"window": "str"},
+    "next": {"nextSteps": "list", "requirement": "str"},
+    "email": {"sendTo": "str", "sendWhat": "list"},
+    "reason": {"reason": "str", "revisit": "str"},
+    "wrong": {"markInvalid": "bool", "correctNumber": "str"},
+    "redirect": {"referredName": "str", "referredPhone": "str", "referredTeam": "str"},
+    "lang": {"language": "str", "reassign": "bool"},
+    "dnc": {"dncConfirm": "bool"},
+    "retry": {"preset": "str"},
+    "invalid": {"markInvalid": "bool", "reenrich": "bool"},
+}
+# outcome → its panel (None: no outcome-specific fields).
+_OUTCOME_PANEL: dict[str, str | None] = {
+    "good_response": "next", "connect_back": "callback", "share_details": "email",
+    "not_interested": "reason", "wrong_number": "wrong", "not_right_poc": "redirect",
+    "position_closed": None, "language_barrier": "lang", "do_not_call": "dnc",
+    "no_answer": "retry", "busy": "retry", "switched_off": "retry", "unreachable": "retry",
+    "invalid_number": "invalid", "disconnected": "retry", "voicemail": "retry",
+}
+# Proof of call: always required for these; from the 2nd attempt on a job for the
+# unanswered retry outcomes (mirrors `proof` in PhoneVerify.jsx's OUTCOMES).
+PROOF_REQUIRED = frozenset({"wrong_number", "do_not_call", "invalid_number"})
+PROOF_FROM_SECOND = frozenset({
+    "no_answer", "busy", "switched_off", "unreachable", "disconnected", "voicemail",
+})
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+# Which job field holds the email of the person whose number the Mobile cell showed
+# (phone_source); "recruiter" resolves through recruiters.official_email_id.
+_SOURCE_EMAIL_FIELD = {"job": "email_id", "contact": "email_id", "company": "company_contact_email"}
 
 
 def _now() -> datetime:
@@ -84,6 +141,54 @@ def _loads(raw: str | None, default):
     except ValueError:
         return default
     return value if isinstance(value, type(default)) else default
+
+
+def normalize_phone(phone: str | None) -> str:
+    """The number's digits only — the phone_contact_flags key."""
+    return re.sub(r"\D", "", phone or "")[:50]
+
+
+def _clean_details(outcome: str, details: dict[str, Any] | None) -> dict[str, Any]:
+    """Keep only the detail fields the outcome's panel defines, coerced to their
+    type (text capped, lists of text, booleans). Unknown keys are dropped."""
+    fields = _PANEL_FIELDS.get(_OUTCOME_PANEL.get(outcome) or "", {})
+    details = details or {}
+    clean: dict[str, Any] = {}
+    for key, kind in fields.items():
+        if key not in details:
+            continue
+        value = details[key]
+        if kind == "bool":
+            clean[key] = bool(value)
+        elif kind == "list":
+            items = value if isinstance(value, list) else []
+            clean[key] = [str(v).strip()[:DETAIL_TEXT_MAX_LEN] for v in items
+                          if str(v).strip()][:DETAIL_LIST_MAX_ITEMS]
+        elif isinstance(value, (str, int, float)):
+            clean[key] = str(value).strip()[:DETAIL_TEXT_MAX_LEN]
+    return clean
+
+
+def _validate_outcome(outcome: str, details: dict[str, Any], proof_count: int,
+                      attempt_no: int) -> None:
+    """The popup's Save gate, enforced server-side (422 saying what is missing)."""
+    msg = ""
+    if outcome == "not_interested" and not details.get("reason"):
+        msg = "Select a reason"
+    elif outcome == "do_not_call" and not details.get("dncConfirm"):
+        msg = "Confirm the do-not-call request"
+    elif outcome == "good_response" and not details.get("nextSteps"):
+        msg = "Pick at least one next step"
+    elif outcome == "share_details" and not _EMAIL_RE.match(details.get("sendTo") or ""):
+        msg = "Add a valid email to send details to"
+    elif outcome == "not_right_poc" and not details.get("referredName"):
+        msg = "Add who you were referred to"
+    elif not proof_count and (
+        outcome in PROOF_REQUIRED or (outcome in PROOF_FROM_SECOND and attempt_no >= 2)
+    ):
+        msg = "Attach proof of the call to save"
+    if msg:
+        raise HTTPException(status_code=422, detail=msg)
 
 
 def call_view(row: PhoneCallLogORM, *, proof_src: bool = True) -> dict[str, Any]:
@@ -163,7 +268,9 @@ async def log_call(
     # call still needs remarks.
     if call_status == "answered" and not outcome and not remarks:
         raise HTTPException(status_code=422, detail="Remarks are required for an answered call")
-    details_json = json.dumps(details or {}, ensure_ascii=False)
+    # Calls without an outcome (older clients) keep their details as sent.
+    details = _clean_details(outcome, details) if outcome else dict(details or {})
+    details_json = json.dumps(details, ensure_ascii=False)
     if len(details_json) > DETAILS_MAX_LEN:
         raise HTTPException(status_code=422, detail="Outcome details are too long")
     proof_items = []
@@ -177,6 +284,11 @@ async def log_call(
             "type": str(p.get("type") or "")[:40],
             "src": src,
         })
+    if outcome:
+        attempt_no = (await count_calls(db, [job.id])).get(job.id, 0) + 1
+        _validate_outcome(outcome, details, sum(1 for p in proof_items if p["name"]), attempt_no)
+    if outcome == "do_not_call":
+        reminder_at, follow_up = None, False  # the contact is suppressed — nothing to schedule
 
     now = _now()
     await db.execute(_close_open_followups_stmt(job.id, phone, now))
@@ -209,9 +321,157 @@ async def log_call(
         updated_at=now,
     )
     db.add(row)
+    if outcome:
+        await db.flush()  # row.id, for the flag's last_call_id
+        await _apply_outcome_effects(db, job, user, row, details, now)
     await db.commit()
     await db.refresh(row)
     return row
+
+
+# ── Outcome side effects ───────────────────────────────────────────────────────
+
+async def _upsert_flag(
+    db: AsyncSession, row: PhoneCallLogORM, user: AuthenticatedUser, now: datetime,
+    *, stamps: tuple[str, ...] = (), correct_number: str = "",
+) -> PhoneContactFlagORM | None:
+    """Create or update the called number's flag row. Each stamp (invalid_at,
+    dnc_at…) is set once — the first call that established it keeps its time."""
+    key = normalize_phone(row.phone)
+    if not key:
+        return None
+    flag = (await db.execute(select(PhoneContactFlagORM).where(
+        PhoneContactFlagORM.tenant_id == row.tenant_id, PhoneContactFlagORM.phone_key == key,
+    ))).scalar_one_or_none()
+    if flag is None:
+        flag = PhoneContactFlagORM(tenant_id=row.tenant_id, phone_key=key, phone=row.phone,
+                                   correct_number="", created_at=now)
+        db.add(flag)
+    for stamp in stamps:
+        if getattr(flag, stamp) is None:
+            setattr(flag, stamp, now)
+    if correct_number:
+        flag.correct_number = correct_number[:50]
+    flag.last_outcome = row.call_outcome
+    flag.last_call_id = row.id
+    flag.updated_by_email = user.email or ""
+    flag.updated_at = now
+    return flag
+
+
+async def _job_recruiter(db: AsyncSession, job: ScrapedJobORM) -> RecruiterORM | None:
+    if not job.recruiter_id:
+        return None
+    return (await db.execute(
+        select(RecruiterORM).where(RecruiterORM.id == job.recruiter_id)
+    )).scalar_one_or_none()
+
+
+async def _contact_email_for(db: AsyncSession, job: ScrapedJobORM, phone_source: str) -> str:
+    """The email of the person whose number was dialed — the same contact variant
+    the Mobile cell took the number from."""
+    if phone_source == "recruiter":
+        recruiter = await _job_recruiter(db, job)
+        return ((recruiter.official_email_id if recruiter else "") or "").strip()
+    field = _SOURCE_EMAIL_FIELD.get(phone_source, "email_id")
+    return (getattr(job, field, "") or "").strip()
+
+
+async def _apply_outcome_effects(
+    db: AsyncSession, job: ScrapedJobORM, user: AuthenticatedUser,
+    row: PhoneCallLogORM, details: dict[str, Any], now: datetime,
+) -> None:
+    """What an outcome does beyond the log (see the module docstring). Runs inside
+    log_call's transaction — nothing here commits."""
+    outcome = row.call_outcome
+
+    if outcome == "good_response":
+        await _upsert_flag(db, row, user, now, stamps=("warm_at",))
+        if row.phone_source == "recruiter":
+            recruiter = await _job_recruiter(db, job)
+            if recruiter is not None:
+                recruiter.crm_status = "Warm"
+
+    elif outcome in ("wrong_number", "invalid_number"):
+        stamps: tuple[str, ...] = ("invalid_at",) if details.get("markInvalid", True) else ()
+        if outcome == "invalid_number" and details.get("reenrich"):
+            stamps += ("reenrich_requested_at",)
+        await _upsert_flag(db, row, user, now, stamps=stamps,
+                           correct_number=details.get("correctNumber", ""))
+
+    elif outcome == "do_not_call":
+        await _upsert_flag(db, row, user, now, stamps=("dnc_at",))
+        email = await _contact_email_for(db, job, row.phone_source)
+        if email and await suppression_service.suppress_bounced(
+            db, email=email, reason="do_not_call", source="phone_dnc",
+            recruiter_id=job.recruiter_id if row.phone_source == "recruiter" else None,
+            raw_payload={"call_id": row.id, "job_id": job.id, "phone": row.phone,
+                         "by": user.email or ""},
+            event_time=now,
+        ):
+            # suppress_bounced leaves the 'internal' server default; own the new row
+            # to the job's tenant so that tenant's suppression list shows it.
+            for obj in db.new:
+                if isinstance(obj, EmailSuppressionORM):
+                    obj.tenant_id = row.tenant_id
+
+    elif outcome == "not_right_poc":
+        recruiter = await recruiter_service.upsert_recruiter(
+            db, person_name=details.get("referredName", ""), company_name=job.company or "",
+            designation=details.get("referredTeam", ""), harvest_source="call_referral",
+            tenant_id=row.tenant_id,
+        )
+        if recruiter is not None:
+            referred_phone = details.get("referredPhone", "")
+            if referred_phone and not recruiter.contact_number:
+                # Given on the call — real, but neither scraped nor verified.
+                recruiter.contact_number = referred_phone[:50]
+                recruiter.phone_status = "REFERRED"
+            row.outcome_details = json.dumps(
+                {**details, "referredRecruiterId": recruiter.id}, ensure_ascii=False)
+
+    elif outcome == "language_barrier" and details.get("reassign"):
+        # Release the job so a teammate who speaks the language can pick it up. Only
+        # the caller's own lock (unassign_job's fields, without its separate commit).
+        if _same_user(job.assigned_to_email, user):
+            job.assigned_to_email = None
+            job.assigned_to_name = ""
+            job.assigned_at = None
+            job.assignment_note = ""
+
+
+def flag_view(flag: PhoneContactFlagORM | None) -> dict[str, Any]:
+    """API view of a number's flags (all off for a number without a row)."""
+    return {
+        "invalid": bool(flag and flag.invalid_at),
+        "dnc": bool(flag and flag.dnc_at),
+        "warm": bool(flag and flag.warm_at),
+        "reenrich_requested": bool(flag and flag.reenrich_requested_at),
+        "correct_number": (flag.correct_number if flag else "") or "",
+    }
+
+
+async def flags_for_phones(db: AsyncSession, phones: list[str]) -> dict[str, dict[str, Any]]:
+    """{phone as given: flag_view} for the numbers that carry a flag (tenant-scoped).
+    Numbers match on digits, so formatting differences don't matter."""
+    by_key: dict[str, list[str]] = {}
+    for p in list(dict.fromkeys(p for p in phones if p))[:FLAGS_MAX_PHONES]:
+        key = normalize_phone(p)
+        if key:
+            by_key.setdefault(key, []).append(p)
+    if not by_key:
+        return {}
+    rows = (await db.execute(apply_tenant(
+        select(PhoneContactFlagORM).where(PhoneContactFlagORM.phone_key.in_(list(by_key))),
+        PhoneContactFlagORM.tenant_id,
+    ))).scalars().all()
+    out: dict[str, dict[str, Any]] = {}
+    for flag in rows:
+        view = flag_view(flag)
+        if view["invalid"] or view["dnc"] or view["warm"] or view["reenrich_requested"]:
+            for p in by_key.get(flag.phone_key, []):
+                out[p] = view
+    return out
 
 
 async def clear_calls(db: AsyncSession, job_id: str, phone: str | None = None) -> int:

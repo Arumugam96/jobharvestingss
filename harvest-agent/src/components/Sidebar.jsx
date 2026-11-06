@@ -260,7 +260,7 @@ const styles = `
      item previews the same tab; the active one is additionally bold. Sign out
      keeps its red hover instead. */
   .ha-nav:hover:not(.ha-logout),.ha-nav-active,.ha-nav-active:hover{background:#F3F6FC;color:var(--navAcc);transform:none;}
-  .ha-nav:hover:not(.ha-logout),.ha-nav-active{margin-right:-10px;width:calc(100% + 10px);border-radius:12px 0 0 12px;}
+  .ha-nav:hover:not(.ha-logout),.ha-nav-active{margin-right:-10px;width:calc(100% + 10px);border-radius:20px 0 0 20px;}
   .ha-nav-active{font-weight:700;}
   .ha-nav:hover:not(.ha-logout)::before,.ha-nav-active::before,
   .ha-nav:hover:not(.ha-logout)::after,.ha-nav-active::after{content:"";position:absolute;right:0;width:14px;height:14px;pointer-events:none;}

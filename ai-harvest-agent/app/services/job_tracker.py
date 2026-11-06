@@ -33,8 +33,9 @@ class JobStatus:
     combined:     int = 0
     started_at:   str = ""
     completed_at: str = ""
-    excel_path:   str = ""
-    json_path:    str = ""
+    # we don't need these two path's
+    # excel_path:   str = ""
+    # json_path:    str = ""
     error:        str = ""
     token_usage:  dict = field(default_factory=dict)
     # Per-source live status ({source: {state, count, message, reason, error,

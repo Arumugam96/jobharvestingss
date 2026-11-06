@@ -11,24 +11,6 @@ per ENABLED source::
 
 state ∈ pending | running | done | failed | skipped. ``reason`` is a short,
 UI-friendly cause ("LLM unavailable"); ``error`` the full detail (provider message).
-
-Each entry also carries optional live-progress keys (see PROGRESS_KEYS: phase,
-reported_total, listed, skipped, target, cap, done, in_batch, batch_size,
-batches, page, total_pages, window_hours — all None until reported) fed by the
-agents' ``on_progress`` callback through ``progress()`` / ``set_listing()`` /
-``tick()``; ``add_jobs()`` (a flushed persist batch) resets ``in_batch`` and
-bumps ``batches``. A tick that only moves ``done`` / ``in_batch`` is throttled
-like a message; listing/phase changes are emitted immediately.
-
-The orchestrator routes every source's on_status / on_batch through per-source
-wrappers into the tracker; the tracker hands snapshots to an ``on_change``
-callback (the run route persists them to harvest_runs.source_status + the live
-*_count columns, and to JobTracker). Writes are throttled: a state or count change
-is emitted immediately, a message-only change at most once per ``min_interval_s``
-(a throttled message is sent by a single trailing flush once the interval passes,
-or rides along with an earlier forced emit). Call ``aclose()`` when collection
-ends — it cancels that trailing timer (no task leaks past the run's event loop)
-and flushes anything still unsent.
 """
 from __future__ import annotations
 

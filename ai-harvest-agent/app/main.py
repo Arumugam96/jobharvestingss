@@ -17,9 +17,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import inspect as sa_inspect, text as sa_text
 from app.config import get_settings
 from app.core.logging_config import configure_logging
-
-configure_logging(get_settings().log_level)
-
 from app.core.dependencies import get_current_user, get_engine
 from app.core.exceptions import HarvestException, harvest_exception_handler
 from app.core.middleware import LoggingMiddleware, RateLimitMiddleware
@@ -31,6 +28,7 @@ import app.models.apollo_phone  # noqa: F401 — registers apollo_phone_requests
 import app.models.outreach  # noqa: F401 — registers email_outreach on Base.metadata
 import app.models.outreach_reply  # noqa: F401 — registers outreach_replies on Base.metadata
 import app.models.phone_call_log  # noqa: F401 — registers phone_call_logs on Base.metadata
+import app.models.phone_contact_flag  # noqa: F401 — registers phone_contact_flags on Base.metadata
 import app.models.resdex  # noqa: F401 — registers resdex_searches / resdex_candidates / resdex_candidate_emails / resdex_daily_usage on Base.metadata
 import app.models.suppression  # noqa: F401 — registers email_suppressions on Base.metadata
 import app.models.tenant  # noqa: F401 — registers tenants on Base.metadata
@@ -50,8 +48,7 @@ from app.routes.job_assignment_routes import router as job_assignment_router
 from app.routes.phone_verification_routes import router as phone_verification_router
 from app.routes.prospect_routes import router as prospect_intelligence_router
 from app.routes.recruiter_routes import router as recruiter_discovery_router
-from app.routes.recruiter_finder_routes import router as recruiter_finder_router
-from app.routes.recruiter_finder_routes import webhook_router as recruiter_finder_webhook_router
+from app.routes.recruiter_finder_routes import router as recruiter_finder_router, webhook_router as recruiter_finder_webhook_router
 from app.routes.demand_routes import router as demand_router
 from app.routes.lead_intelligence_routes import router as lead_intelligence_router
 from app.routes.outreach_routes import router as outreach_router, webhook_router as outreach_webhook_router
@@ -59,9 +56,10 @@ from app.services.job_tracker import JobTracker
 from app.services.playwright_service import PlaywrightService
 from app.services.scheduler_service import SchedulerService
 
-logger   = structlog.get_logger(__name__)
 settings = get_settings()
+configure_logging(settings.log_level)
 
+logger   = structlog.get_logger(__name__)
 
 def _ensure_scraped_jobs_columns(sync_conn) -> None:
     """One-time, idempotent ADD COLUMN backfill for columns added to the
@@ -430,6 +428,8 @@ _TENANT_CONTENT_TABLES = [
     "resdex_searches", "resdex_candidates", "resdex_candidate_emails",
     # Phone call verification log (Harvested Jobs "Verify mobile number").
     "phone_call_logs",
+    # Phone-level flags set by logged calls (invalid / do-not-call / warm).
+    "phone_contact_flags",
 ]
 
 

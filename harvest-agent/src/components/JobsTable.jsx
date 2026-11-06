@@ -3,7 +3,9 @@ import { useSearchParams } from "react-router-dom";
 import { Search, Mail, Lock } from "lucide-react";
 import EmailComposeModal from "./EmailComposeModal";
 import LinkedInMessageModal from "./LinkedInMessageModal";
-import PhoneVerifyModal, { PhoneVerifyStyles, PhoneVerifyButton, PhoneVerifyBadge, callFromView } from "./PhoneVerify";
+import PhoneVerifyModal, {
+  PhoneVerifyStyles, PhoneVerifyButton, PhoneVerifyBadge, PhoneFlagTag, phoneBlocked, callFromView,
+} from "./PhoneVerify";
 import AssignJobModal, { AssignJobStyles, AssignCell, useCurrentUserEmail, isAssignedToOther } from "./AssignJob";
 import { getOutreachStatus, getPhoneVerifications, logPhoneCall } from "../api";
 import { C } from "../theme";
@@ -121,12 +123,19 @@ export default function JobsTable({
   // Latest phone-call verification per job id, from the server (shared with the
   // tenant team — see PhoneVerify.jsx). Fetched for the visible rows below.
   const [phoneVerify, setPhoneVerify] = useState({});
+  // Flags logged calls put on a number (invalid / do-not-call / warm), by number.
+  const [phoneFlags, setPhoneFlags] = useState({});
   const [phoneModal, setPhoneModal] = useState(null); // { job, phone, phoneSource, pocName, pocKind, email }
   // Logs a call for the modal's job + number. Rejects on failure so the modal
   // can show the error and stay open.
   const savePhoneResult = useCallback(async (modal, call) => {
     const view = await logPhoneCall(modal.job.id, { ...call, phone_source: modal.phoneSource, contact_name: modal.pocName });
     setPhoneVerify((prev) => ({ ...prev, [modal.job.id]: callFromView(view) }));
+    if (view?.flags) setPhoneFlags((prev) => ({ ...prev, [modal.phone]: view.flags }));
+    // Language barrier + "Reassign recruiter" released the caller's lock server-side.
+    if (call.outcome === "language_barrier" && call.details?.reassign) {
+      setAssignOverrides((prev) => ({ ...prev, [modal.job.id]: null }));
+    }
   }, []);
   // "Assign to me": the logged-in user, the open modal, and assignments changed
   // in this session (overlaid on the server's row.assignedTo until the next fetch).
@@ -317,6 +326,7 @@ export default function JobsTable({
   // Fetch outreach status for just the visible rows (keeps the query small vs.
   // the whole dataset). Merged into prior results so paged-away rows stay marked.
   const pageRowIdsKey = pageRows.map((j) => j.id).join(",");
+  const pagePhonesKey = [...new Set(pageRows.map((j) => jobContact(j).phone).filter(Boolean))].join(",");
   const refreshOutreachStatus = useCallback(async () => {
     const ids = pageRowIdsKey ? pageRowIdsKey.split(",") : [];
     if (!ids.length) return;
@@ -335,9 +345,16 @@ export default function JobsTable({
   const refreshPhoneVerifications = useCallback(async () => {
     const ids = pageRowIdsKey ? pageRowIdsKey.split(",") : [];
     if (!ids.length) return;
+    const phones = pagePhonesKey ? pagePhonesKey.split(",") : [];
     try {
-      const res = await getPhoneVerifications(ids);
+      const res = await getPhoneVerifications(ids, phones);
       const items = (res && res.items) || {};
+      const flags = (res && res.flags) || {};
+      setPhoneFlags((prev) => {
+        const next = { ...prev };
+        phones.forEach((p) => { if (flags[p]) next[p] = flags[p]; else delete next[p]; });
+        return next;
+      });
       setPhoneVerify((prev) => {
         const next = { ...prev };
         ids.forEach((id) => {
@@ -348,7 +365,7 @@ export default function JobsTable({
     } catch {
       // best-effort — rows fall back to the unverified state
     }
-  }, [pageRowIdsKey]);
+  }, [pageRowIdsKey, pagePhonesKey]);
   useEffect(() => { refreshPhoneVerifications(); }, [refreshPhoneVerifications]);
 
   // Columns: Job title, Company, Company size, POC, Email,
@@ -454,6 +471,7 @@ export default function JobsTable({
                         {/* A stored result only applies while the row still shows the same number. */}
                         <PhoneVerifyBadge result={phoneVerify[j.id]?.phone === c.phone ? phoneVerify[j.id] : null}
                           onEdit={() => setPhoneModal({ job: j, phone: c.phone, phoneSource: c.phoneParts[0]?.variant || "", pocName: c.pocName, pocKind: c.pocKind, email: c.email })} />
+                        <PhoneFlagTag flags={phoneFlags[c.phone]} />
                       </div>
                     ) : (
                       <DualContact parts={c.phoneParts} link="tel:" cls="ha-tel" />
@@ -482,9 +500,14 @@ export default function JobsTable({
                         {/* WhatsApp is a plain wa.me link to whatever number the
                             Mobile cell shows (incl. a Company-tagged one), matching
                             the run view's phone/WhatsApp count. */}
-                        <ContactActionBtn glyph={WhatsAppIcon} title="WhatsApp" available={!!c.phone}
-                          href={c.phone ? "https://wa.me/" + c.phone.replace(/[^0-9]/g, "") : null}
-                          onClick={() => showNoData(j.id, "WhatsApp")} />
+                        {phoneBlocked(phoneFlags[c.phone]) ? (
+                          <ContactActionBtn glyph={WhatsAppIcon} title="WhatsApp"
+                            disabledTitle={phoneFlags[c.phone].dnc ? "Do not contact — asked on a logged call" : "Number marked invalid on a logged call"} />
+                        ) : (
+                          <ContactActionBtn glyph={WhatsAppIcon} title="WhatsApp" available={!!c.phone}
+                            href={c.phone ? "https://wa.me/" + c.phone.replace(/[^0-9]/g, "") : null}
+                            onClick={() => showNoData(j.id, "WhatsApp")} />
+                        )}
                         {(() => {
                           const st = outreachStatus[j.id] || {};
                           const emailSent = !!st.email;

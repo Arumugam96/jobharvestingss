@@ -140,13 +140,16 @@ export function unassignJob(jobId) {
 // status: "answered"|"unanswered", outcome, details, proof: [{name, size, type, src}],
 // remarks, follow_up, follow_up_due_at (the reminder time), follow_up_done_at,
 // called_by: {email, name}, called_at } — plus `attempts` (calls on the job so far)
-// from POST and /latest. Calls are shared with the whole tenant team; a job locked
+// from POST and /latest. "Flags" are what calls established about a number itself:
+// { invalid, dnc, warm, reenrich_requested, correct_number }. Calls are shared with the whole tenant team; a job locked
 // to another user returns 403 with an "assigned to …" detail.
 
 /** POST /jobs/{id}/phone-verification — log one call on the job's number: status,
  * outcome, outcome details, proof of call, comments and an optional reminder time
  * (reminder_at, ISO), which shows in the caller's notification bell once due.
- * Returns the saved call view. */
+ * The server re-checks the outcome's required fields and proof (422 otherwise) and
+ * applies its side effects (number flags, do-not-call email suppression, referred
+ * POC, releasing the job). Returns the saved call view plus `flags` for the number. */
 export function logPhoneCall(jobId, {
   phone, phone_source, contact_name, status, outcome, details, proof, remarks, reminder_at, follow_up,
 } = {}) {
@@ -173,12 +176,14 @@ export function clearPhoneCall(jobId, phone) {
   return request(`/jobs/${encodeURIComponent(jobId)}/phone-verification${qs({ phone })}`, { method: "DELETE" });
 }
 
-/** GET /phone-verifications/latest?job_ids=… — latest call per job for the visible rows.
- * Returns { items: { job_id: callView } } (proof images omitted); jobs locked to other
- * users are omitted. */
-export function getPhoneVerifications(jobIds = []) {
+/** GET /phone-verifications/latest?job_ids=…&phones=… — latest call per job for the
+ * visible rows. Returns { items: { job_id: callView }, flags: { phone: flags } }
+ * (proof images omitted; flags only for numbers that carry one, covering the calls'
+ * numbers and `phones`); jobs locked to other users are omitted. */
+export function getPhoneVerifications(jobIds = [], phones = []) {
   const ids = (jobIds || []).filter(Boolean).join(",");
-  return request(`/phone-verifications/latest?job_ids=${encodeURIComponent(ids)}`);
+  const nums = (phones || []).filter(Boolean).join(",");
+  return request(`/phone-verifications/latest?job_ids=${encodeURIComponent(ids)}&phones=${encodeURIComponent(nums)}`);
 }
 
 /** GET /jobs/{id}/phone-verification/history — every call logged on the job, newest

@@ -62,6 +62,7 @@ async def engine():
     import app.models.outreach  # noqa: F401 — registers email_outreach on Base.metadata
     import app.models.resdex  # noqa: F401 — registers resdex_searches / resdex_candidates / resdex_daily_usage
     import app.models.phone_call_log  # noqa: F401 — registers phone_call_logs
+    import app.models.phone_contact_flag  # noqa: F401 — registers phone_contact_flags
 
     eng = create_async_engine(TEST_DB_URL, echo=False)
     async with eng.begin() as conn:

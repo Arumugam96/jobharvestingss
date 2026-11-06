@@ -32,10 +32,12 @@ class EmailSuppressionORM(Base):
     # failure — "hard_bounce" / "blocked" — added by suppression_service.suppress_bounced
     # so a dead address is never retried. (Soft bounces and spam are recorded on the
     # outreach row's event trail but do NOT suppress, per product decision.)
+    # "do_not_call" — the contact asked on a logged call not to be approached again
+    # (phone_verification_service, source "phone_dnc").
     reason: Mapped[str] = mapped_column(String(30), nullable=False, default="unsubscribe")
     # How it was captured: "self_link" (footer link) | "list_unsubscribe" (one-click)
     # | "mailjet_webhook" / "brevo_webhook" (provider unsub or hard-bounce/block event)
-    # | "manual".
+    # | "manual" | "phone_dnc" (do-not-call outcome on a logged call).
     source: Mapped[str] = mapped_column(String(30), nullable=False, default="")
     # The recruiter this email resolved to, when one was linked (mirror only).
     recruiter_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)

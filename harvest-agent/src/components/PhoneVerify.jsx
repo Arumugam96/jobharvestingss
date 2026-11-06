@@ -15,7 +15,9 @@ import { getPhoneCallHistory } from "../api";
  * shows the latest call; hovering it shows the outcome and comments.
  * Calls are saved server-side (POST /jobs/{id}/phone-verification) and shared
  * with the tenant team; the reminder lands in the caller's notification bell.
- * The table ignores a call if the row's number has since changed. Styling uses `pvm-`. */
+ * The table ignores a call if the row's number has since changed. Some outcomes
+ * flag the number itself (invalid / do-not-call / warm — returned as `flags` by the
+ * POST and /phone-verifications/latest); PhoneFlagTag shows them. Styling uses `pvm-`. */
 
 const MAX_FILES = 3;
 const MAX_INLINE_PROOF = 300 * 1024; // larger images keep only their name (server caps inline proof)
@@ -104,6 +106,9 @@ const styles = `
 .pvm-cell { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .pvm-cell > .pvm-val { min-width: 0; overflow: hidden; }
 .pvm-badge { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; border-radius: 999px; border: 1px solid; padding: 0; cursor: pointer; }
+.pvm-flag { flex: none; font-size: 9.5px; font-weight: 800; letter-spacing: .04em; padding: 1.5px 6px; border-radius: 999px; border: 1px solid; }
+.pvm-flag.bad { background: #FEF2F2; border-color: #FECACA; color: #DC2626; }
+.pvm-flag.good { background: #ECFDF5; border-color: #A7F3D0; color: #059669; }
 .pvm-pop { position: fixed; z-index: 1000; width: 280px; ${GLASS_MODAL} border-radius: 10px; padding: 12px 14px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #1E293B; white-space: normal; }
 .pvm-pop-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
 .pvm-pop-status { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 600; }
@@ -293,6 +298,20 @@ export function PhoneVerifyButton({ onClick, verified = false }) {
       <ShieldCheck size={14} />
     </button>
   );
+}
+
+// What logged calls established about the number itself (server `flags`):
+// do-not-call wins over invalid, which wins over warm.
+export const phoneBlocked = (flags) => !!(flags && (flags.dnc || flags.invalid));
+export function PhoneFlagTag({ flags }) {
+  if (!flags) return null;
+  if (flags.dnc) return <span className="pvm-flag bad" title="Asked not to be contacted again — suppressed for calls, email and WhatsApp">DNC</span>;
+  if (flags.invalid) {
+    const title = "Marked invalid on a logged call" + (flags.correct_number ? ` · correct number: ${flags.correct_number}` : "");
+    return <span className="pvm-flag bad" title={title}>Invalid</span>;
+  }
+  if (flags.warm) return <span className="pvm-flag good" title="Good response on a logged call">Warm</span>;
+  return null;
 }
 
 // Outcome icon next to the number for the latest attempt; hovering (or

@@ -7,13 +7,16 @@ POST   /jobs/{id}/phone-verification          — log a call (outcome, details, 
 DELETE /jobs/{id}/phone-verification?phone=   — "Clear status" for that number
 GET    /jobs/{id}/phone-verification/history  — every non-cleared call, newest first
 GET    /phone-verifications/latest?job_ids=   — newest call per visible job (badges)
+                                               + flags of those numbers
+GET    /phone-verifications/flags?phones=     — invalid / do-not-call / warm per number
 GET    /phone-verifications/follow-ups        — the caller's due follow-up reminders
 POST   /phone-verifications/follow-ups/{id}/done — dismiss one reminder
 POST   /phone-verifications/follow-ups/done-all  — dismiss all due reminders
 
 The per-job endpoints honour the self-assignment lock (ensure_job_access → 403
 when the job is assigned to someone else); /latest omits such jobs. Call views
-are documented on phone_verification_service.call_view.
+are documented on phone_verification_service.call_view, number flags on
+phone_verification_service.flag_view (keyed by the number as given).
 """
 from __future__ import annotations
 
@@ -71,6 +74,13 @@ class LogCallRequest(BaseModel):
                             description="Older clients: remind me in 24h (unanswered calls only).")
 
 
+def _split_phones(raw: str) -> list[str]:
+    if not isinstance(raw, str):  # a direct (non-HTTP) call gets the Query() default
+        return []
+    phones = [p.strip() for p in raw.split(",") if p.strip()]
+    return list(dict.fromkeys(phones))[:pvs.FLAGS_MAX_PHONES]
+
+
 async def _load_job_guarded(
     db: AsyncSession, job_id: str, user: AuthenticatedUser
 ) -> ScrapedJobORM:
@@ -89,7 +99,8 @@ async def _load_job_guarded(
     summary="Log a phone call on a job",
     responses={403: {"description": "Assigned to someone else"},
                404: {"description": "Job not found"},
-               422: {"description": "Invalid status / missing remarks"}},
+               422: {"description": "Invalid status / outcome, missing outcome "
+                                     "fields or proof of call"}},
 )
 async def log_phone_call(
     job_id: str,
@@ -109,7 +120,9 @@ async def log_phone_call(
                 status=row.call_status, outcome=row.call_outcome,
                 follow_up_due=bool(row.follow_up_due_at))
     counts = await pvs.count_calls(db, [job_id])
-    return {**pvs.call_view(row), "attempts": counts.get(job_id, 1)}
+    flags = await pvs.flags_for_phones(db, [row.phone])
+    return {**pvs.call_view(row), "attempts": counts.get(job_id, 1),
+            "flags": flags.get(row.phone, pvs.flag_view(None))}
 
 
 @router.delete(
@@ -148,13 +161,16 @@ async def phone_call_history(
 @router.get("/phone-verifications/latest", summary="Latest call per job (batch, for table badges)")
 async def latest_phone_verifications(
     job_ids: str = Query(default="", description="Comma-separated scraped job ids (max 200)."),
+    phones: str = Query(default="",
+                        description="Comma-separated numbers to return flags for too (max 200)."),
     current_user: AuthenticatedUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
 ) -> dict:
     ids = [j.strip() for j in job_ids.split(",") if j.strip()]
     ids = list(dict.fromkeys(ids))[:LATEST_MAX_IDS]
+    extra_phones = _split_phones(phones)
     if not ids:
-        return {"items": {}}
+        return {"items": {}, "flags": await pvs.flags_for_phones(db, extra_phones)}
 
     # Drop jobs locked to someone else (same rule as ensure_job_access).
     me = (current_user.email or "").lower()
@@ -165,7 +181,20 @@ async def latest_phone_verifications(
     ))).all()
     locked = {jid for jid, owner in locks if owner and owner.lower() != me}
     visible = [j for j in ids if j not in locked]
-    return {"items": await pvs.latest_for_jobs(db, visible)}
+    items = await pvs.latest_for_jobs(db, visible)
+    flags = await pvs.flags_for_phones(db, [v["phone"] for v in items.values()] + extra_phones)
+    return {"items": items, "flags": flags}
+
+
+@router.get("/phone-verifications/flags", summary="Call-learned flags per number")
+async def phone_flags(
+    phones: str = Query(default="", description="Comma-separated numbers (max 200)."),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """{phone: {invalid, dnc, warm, reenrich_requested, correct_number}} — only
+    numbers carrying a flag are listed."""
+    return {"flags": await pvs.flags_for_phones(db, _split_phones(phones))}
 
 
 @router.get("/phone-verifications/follow-ups", summary="My due follow-up call reminders")
