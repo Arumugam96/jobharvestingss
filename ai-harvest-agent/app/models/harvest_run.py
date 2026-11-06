@@ -86,6 +86,13 @@ class HarvestRunORM(Base):
     phase_timings: Mapped[dict | None] = mapped_column(
         JSON().with_variant(JSONB(), "postgresql"), nullable=True
     )
+    # Apollo's own credit reading at run completion (apollo_credit_usage.report_usage):
+    # {consumed, limit, left_over, today, run, cycle_start, cycle_end, taken_at}.
+    # Stored so the next run's report can show "previous run" / "yesterday" usage
+    # without re-querying Apollo for a past point in time.
+    apollo_usage: Mapped[dict | None] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

@@ -237,6 +237,7 @@ def _ensure_harvest_runs_columns(sync_conn) -> None:
     for col, col_type in (
         ("scrape_completed_at", ts_type),
         ("phase_timings",       json_type),
+        ("apollo_usage",        json_type),
     ):
         if col not in existing_cols:
             sync_conn.execute(sa_text(f"ALTER TABLE harvest_runs ADD COLUMN {col} {col_type}"))

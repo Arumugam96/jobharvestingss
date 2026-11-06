@@ -264,20 +264,18 @@ class Settings(BaseSettings):
     # every N searches in a batch take a longer 2-4 min break (0 = never).
     resdex_results_dwell_min_s: float = 25.0
     resdex_results_dwell_max_s: float = 35.0
-    resdex_break_every_searches: int = 20
+    resdex_break_every_searches: int = 50
     resdex_break_min_s: float = 120.0
     resdex_break_max_s: float = 240.0
     # A CAPTCHA / bot wall during a batch is held open in the Live Browser for a
     # human to solve, for at most this long; unsolved → the batch stops.
-    resdex_human_wait_s: int = 600
+    resdex_human_wait_s: int = 300
     # Global "login needed" requests (app/services/login_required.py): how long a
     # run that can pause (the Resdex step after an expired recruiter session)
     # waits for a person to log in via the Live Browser before carrying on
     # without that source. 0 = never wait.
     login_wait_s: int = 600
     resdex_llm_timeout_s: float = 45.0
-    # Provider for the Resdex LLM passes only ("" = inherit EXTRACTION_LLM_MODEL).
-    resdex_llm_model: str = ""
 
     @property
     def resdex_source_list(self) -> list[str]:

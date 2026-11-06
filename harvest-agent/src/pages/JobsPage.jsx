@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
-import { SlidersHorizontal, Download, RefreshCw, FileJson, FileSpreadsheet } from "lucide-react";
+import { Download, ChevronDown, Wrench } from "lucide-react";
 import { getJobs, getJobsFacets, ApiError, downloadJsonUrl, downloadExcelUrl } from "../api";
 import { C } from "../theme";
 import { Select, StatCard } from "../components/ui";
@@ -23,7 +23,7 @@ import { useTenant } from "../TenantContext";
 // apart from Harvested Jobs'.
 const DEMAND_SOURCE = "Demand";
 
-export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeChange, urlState = false, demand = false, demandTabs = null }) {
+export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeChange, urlState = false, demand = false, demandTabs = null, library = false }) {
   const { jobsViewRef: sharedViewRef } = useHarvestData();
   const demandViewRef = useRef(null);
   const jobsViewRef = demand ? demandViewRef : sharedViewRef;
@@ -46,6 +46,9 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
   const [pageError, setPageError] = useState("");
   const [facets, setFacets] = useState(cache?.facets || null);
   const [exporting, setExporting] = useState(false);
+  const [exportFormat, setExportFormat] = useState("csv");
+  const [formatOpen, setFormatOpen] = useState(false);
+  const formatRef = useRef(null);
   // Monotonic request counter — a response only lands if no newer request has
   // started since (fast typing / rapid filter clicks can overlap fetches).
   const seqRef = useRef(0);
@@ -123,11 +126,29 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
   // Date range is a server-side filter now (date_from/date_to) — JobsTable
   // folds these into every emitted params object.
   const serverExtraParams = useMemo(
-    () => ({ date_from: startDate, date_to: endDate, ...(demand ? { source: DEMAND_SOURCE } : {}) }),
-    [startDate, endDate, demand]
+    () => ({
+      date_from: startDate, date_to: endDate,
+      ...(demand ? { source: DEMAND_SOURCE } : {}),
+      ...(library ? { assigned_to_me: true } : {}),
+    }),
+    [startDate, endDate, demand, library]
   );
 
   const stats = facets?.stats || {};
+
+  // Close format dropdown on outside click.
+  useEffect(() => {
+    if (!formatOpen) return;
+    const close = (e) => { if (formatRef.current && !formatRef.current.contains(e.target)) setFormatOpen(false); };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [formatOpen]);
+
+  function doExport() {
+    if (exportFormat === "json") { window.location.href = downloadJsonUrl(); return; }
+    if (exportFormat === "excel") { window.location.href = downloadExcelUrl(); return; }
+    exportCsv();
+  }
 
   // Export the FULL filtered dataset, not just the loaded page: re-run the
   // current filter params without pagination through fetchAllJobs (which pulls
@@ -172,33 +193,64 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
     <main className="ha-main">
       <div className="ha-pagehead">
         <div className="ha-pagehead-titles">
-          <h1>{demand ? "Demand Jobs" : "Harvested Jobs"}</h1>
+          <h1>{library ? "My Workspace" : demand ? "Demand Jobs" : "Harvested Jobs"}</h1>
           <p className="ha-sub">
-            {pageLoading && !facets ? "Loading…" : demand
-              ? `${stats.total || 0} Demand Search job${(stats.total || 0) === 1 ? "" : "s"} from uploaded and manually added requirements`
-              : `${stats.total || 0} harvested posting${(stats.total || 0) === 1 ? "" : "s"} · ${stats.qualified || 0} qualified · ${stats.flagged || 0} flagged`}
+            {pageLoading && !facets ? "Loading…" : library
+              ? `${stats.total || 0} assigned job${(stats.total || 0) === 1 ? "" : "s"} awaiting outreach`
+              : demand
+                ? `${stats.total || 0} Demand Search job${(stats.total || 0) === 1 ? "" : "s"} from uploaded and manually added requirements`
+                : `${stats.total || 0} harvested posting${(stats.total || 0) === 1 ? "" : "s"} · ${stats.qualified || 0} qualified · ${stats.flagged || 0} flagged`}
           </p>
         </div>
         <div className="ha-pagehead-actions">
-          <button className="ha-btn ha-btn-secondary" onClick={refresh} disabled={pageLoading} title="Refresh">
-            <RefreshCw size={16} className={pageLoading ? "ha-spin" : ""} /> Refresh
-          </button>
-          {!demand && hasFeature("rules") && (
-            <button className="ha-btn ha-btn-secondary" onClick={() => onNavigate("rules")}><SlidersHorizontal size={16} /> Rule Engine</button>
+          {!library && (
+            <div ref={formatRef} style={{ position: "relative", display: "inline-flex", borderRadius: 8, overflow: "hidden", border: `1px solid ${C.primary}` }}>
+              <button
+                className="ha-btn ha-btn-primary"
+                style={{ border: "none", borderRadius: 0, borderRight: "1px solid rgba(255,255,255,.25)" }}
+                onClick={doExport}
+                disabled={exporting}
+              >
+                <Download size={16} /> {exporting ? "Exporting…" : "Export"}
+              </button>
+              <button
+                style={{
+                  display: "inline-flex", alignItems: "center", gap: 4,
+                  background: C.primary, color: "#fff", border: "none",
+                  padding: "7px 12px", fontSize: 13, fontWeight: 500,
+                  cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap",
+                }}
+                onClick={() => setFormatOpen((v) => !v)}
+                aria-expanded={formatOpen}
+              >
+                {exportFormat === "csv" ? "CSV" : exportFormat === "excel" ? "Excel" : "JSON"}
+                <ChevronDown size={14} style={{ transition: "transform .2s", transform: formatOpen ? "rotate(180deg)" : "none" }} />
+              </button>
+              {formatOpen && (
+                <div style={{
+                  position: "absolute", top: "100%", right: 0, marginTop: 4,
+                  minWidth: 140, background: "#fff", border: `1px solid ${C.border}`,
+                  borderRadius: 8, boxShadow: "0 8px 24px -6px rgba(15,23,42,.18)",
+                  zIndex: 10, overflow: "hidden",
+                }}>
+                  {["csv", "excel", "json"].map((fmt) => (
+                    <button
+                      key={fmt}
+                      onClick={() => { setExportFormat(fmt); setFormatOpen(false); }}
+                      style={{
+                        display: "flex", alignItems: "center", gap: 8, width: "100%",
+                        padding: "9px 14px", border: "none", background: exportFormat === fmt ? `color-mix(in srgb, ${C.primary} 8%, transparent)` : "transparent",
+                        color: C.text, fontSize: 13, fontWeight: 500, cursor: "pointer",
+                        fontFamily: "inherit", textAlign: "left",
+                      }}
+                    >
+                      {fmt === "csv" ? "CSV" : fmt === "excel" ? "Excel" : "JSON"}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
           )}
-          {!demand && (
-            <a className="ha-btn ha-btn-secondary" href={downloadJsonUrl()} title="GET /download/json — latest combined harvest JSON">
-              <FileJson size={16} /> JSON
-            </a>
-          )}
-          {!demand && (
-            <a className="ha-btn ha-btn-secondary" href={downloadExcelUrl()} title="GET /download/excel — latest combined harvest Excel">
-              <FileSpreadsheet size={16} /> Excel
-            </a>
-          )}
-          <button className="ha-btn ha-btn-primary" onClick={exportCsv} disabled={exporting}>
-            <Download size={16} /> {exporting ? "Exporting…" : "Export CSV"}
-          </button>
         </div>
       </div>
 
@@ -207,6 +259,11 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
         {pageError && <div className="ha-errbanner">{pageError}</div>}
 
         <div className="ha-daterow">
+          {!demand && !library && (
+            <button className="ha-btn ha-btn-secondary" style={{ height: 34, boxSizing: "border-box" }} onClick={() => onNavigate("library")}>
+              <Wrench size={16} /> My Workspace
+            </button>
+          )}
           <span style={{ fontSize: 13, fontWeight: 600, color: C.text }}>Posted between</span>
           <input type="date" className="ha-input" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
           <span style={{ color: C.textSoft }}>to</span>
@@ -237,9 +294,11 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
           pageSize={Number(pageSizeSel)}
           urlState={urlState}
           lockedSource={demand ? DEMAND_SOURCE : ""}
-          emptyMessage={demand
-            ? "No Demand jobs match your search. Upload or add requirements from New search."
-            : "No postings match your search. Run a harvest from the Rule Engine to collect jobs."}
+          emptyMessage={library
+            ? "Your workspace is empty. Self-assign jobs from the Harvested Jobs page to add them here."
+            : demand
+              ? "No Demand jobs match your search. Upload or add requirements from New search."
+              : "No postings match your search. Run a harvest from the Rule Engine to collect jobs."}
         />
 
         <div style={{ display: "flex", justifyContent: "space-between", padding: "0 4px", fontSize: 12, color: C.textSoft }}>

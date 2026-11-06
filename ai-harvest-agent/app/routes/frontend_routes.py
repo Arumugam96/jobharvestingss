@@ -315,6 +315,8 @@ async def list_jobs(
     run_id:        str = Query("",                        description="Filter to a single harvest run's jobs (display run id, e.g. 20260817_110703)"),
     date_from:     str = Query("",                        description="Filter jobs posted on or after this date (YYYY-MM-DD)"),
     date_to:       str = Query("",                        description="Filter jobs posted on or before this date (YYYY-MM-DD)"),
+    assigned_to_me: bool = Query(False,                   description="When true, return only jobs assigned to the authenticated user"),
+    current_user: AuthenticatedUser = Depends(get_current_user),
 ) -> dict:
     """
     Paginated job list — every run on record when read from the database,
@@ -386,6 +388,7 @@ async def list_jobs(
             run_id        = run_id        or None,
             date_from     = date_from     or None,
             date_to       = date_to       or None,
+            assigned_to_email = current_user.email if assigned_to_me else None,
             sort_by       = sort_by,
             sort_order    = sort_order,
             page          = page,
@@ -426,6 +429,7 @@ async def list_jobs(
             "run_id":        run_id        or None,
             "date_from":     date_from     or None,
             "date_to":       date_to       or None,
+            "assigned_to_me": assigned_to_me,
         },
         "sort": {"by": sort_by, "order": sort_order},
         "jobs": page_items,

@@ -843,6 +843,7 @@ class HarvestRunService:
         date_from:     str | None = None,
         date_to:       str | None = None,
         run_id:        str | None = None,
+        assigned_to_email: str | None = None,
         sort_by:       str = "posted_date",
         sort_order:    str = "desc",
         page:          int = 1,
@@ -862,6 +863,8 @@ class HarvestRunService:
         _format_posted(); not independently verified for Naukri/Dice)."""
         stmt = select(ScrapedJobORM)
         stmt = apply_tenant(stmt, ScrapedJobORM.tenant_id)  # scope to the caller's tenant
+        if assigned_to_email:
+            stmt = stmt.where(ScrapedJobORM.assigned_to_email == assigned_to_email)
         token_exprs = _contact_token_exprs()
         selected = [token_exprs[t] for t in (contact or []) if t in token_exprs]
         if keyword or selected:
@@ -1082,6 +1085,25 @@ class HarvestRunService:
         stmt = apply_tenant(stmt, HarvestRunORM.tenant_id)  # never merge another tenant's run
         result = await self._db.execute(stmt)
         return list(result.scalars())
+
+    async def get_previous_apollo_usage(self, current_run_pk: str | None = None) -> dict | None:
+        """Return the apollo_usage snapshot stored on the most recent completed
+        orchestrator run BEFORE the current one. Used by the harvest report to
+        show "previous run" / "yesterday" credit delta."""
+        stmt = (
+            select(HarvestRunORM.apollo_usage)
+            .where(
+                HarvestRunORM.source.is_(None),
+                HarvestRunORM.status.in_(("success", "no_results", "completed")),
+                HarvestRunORM.apollo_usage.isnot(None),
+            )
+            .order_by(HarvestRunORM.completed_at.desc())
+        )
+        if current_run_pk:
+            stmt = stmt.where(HarvestRunORM.id != current_run_pk)
+        stmt = stmt.limit(1)
+        row = (await self._db.execute(stmt)).scalar_one_or_none()
+        return row if isinstance(row, dict) else None
 
     async def clear_report_pending(self, run_pk: str) -> None:
         """Mark a stopped run's owed report as delivered."""

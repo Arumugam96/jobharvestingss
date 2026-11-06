@@ -19,6 +19,7 @@ Common abbreviations (IST, UTC, EST) are mapped automatically.
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from typing import Any, Callable, Coroutine
 
 import structlog
@@ -193,6 +194,29 @@ class SchedulerService:
             max_instances = 1,
         )
         logger.info("interval_job_registered", job_id=job_id, interval_seconds=seconds)
+
+    def schedule_one_shot(
+        self,
+        job_id: str,
+        job_fn: Callable[[], Coroutine[Any, Any, Any]],
+        run_at: datetime,
+        name: str,
+    ) -> None:
+        """Schedule a one-time job at a specific datetime using APScheduler DateTrigger."""
+        from apscheduler.triggers.date import DateTrigger
+
+        if self._scheduler.get_job(job_id):
+            self._scheduler.remove_job(job_id)
+
+        self._scheduler.add_job(
+            func=job_fn,
+            trigger=DateTrigger(run_date=run_at),
+            id=job_id,
+            name=name,
+            replace_existing=True,
+            misfire_grace_time=3600,
+        )
+        logger.info("one_shot_job_scheduled", job_id=job_id, run_at=str(run_at))
 
     def get_next_run(self) -> str | None:
         """Return ISO string of next scheduled run, or None."""

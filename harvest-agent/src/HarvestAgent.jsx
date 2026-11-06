@@ -36,6 +36,7 @@ function FeatureGate({ feature, children }) {
 // Map the current pathname to the Sidebar's active nav key.
 function activeKeyFromPath(pathname) {
   if (pathname.startsWith("/rules")) return "rules";
+  if (pathname.startsWith("/library")) return "library";
   if (pathname.startsWith("/history")) return "history";
   if (pathname.startsWith("/sources")) return "sources";
   if (pathname.startsWith("/leads")) return "leads";
@@ -157,6 +158,21 @@ function JobDetailRoute() {
   return <JobDetailsView job={job} onBack={() => navigate(location.state?.from || "/jobs")} />;
 }
 
+function MyWorkspaceRoute() {
+  const { pageSizeSel, setPageSizeSel } = useHarvestData();
+  const navigate = useNavigate();
+  const location = useLocation();
+  return (
+    <JobsPage
+      library
+      onNavigate={(key) => navigate(`/${key}`)}
+      onView={(dv) => navigate(`/jobs/${encodeURIComponent(dv.job.id)}`, { state: { job: dv.job, from: location.pathname + location.search } })}
+      pageSizeSel={pageSizeSel} onPageSizeChange={setPageSizeSel}
+      urlState
+    />
+  );
+}
+
 function HistoryRoute() {
   const { runs, runsLoading, runsError, fetchRuns } = useHarvestData();
   const navigate = useNavigate();
@@ -239,6 +255,7 @@ export default function HarvestAgent({ onLogout }) {
         <Route element={<AppLayout onLogout={onLogout} />}>
           <Route index element={<Navigate to="/jobs" replace />} />
           <Route path="/jobs" element={<JobsRoute />} />
+          <Route path="/library" element={<FeatureGate feature="jobs"><MyWorkspaceRoute /></FeatureGate>} />
           <Route path="/history" element={<FeatureGate feature="history"><HistoryRoute /></FeatureGate>} />
           <Route path="/sources" element={<FeatureGate feature="sources"><SourcesRoute /></FeatureGate>} />
           <Route path="/leads" element={<FeatureGate feature="leads"><LeadIntelligencePage /></FeatureGate>} />

@@ -150,7 +150,6 @@ def _render_body(
         # lines += f"\nContactable: {g('with_contact', 0)} of {total}\n"
         if g("apollo_credits_run") is not None:
             lines += f"\nApollo credits (this run): {g('apollo_credits_run')}\n"
-        # lines += f"Apollo-sourced contacts: {g('apollo_enriched', 0)}\n\n"
         lines += "\n"
     if attachment_names:
         lines += "The extracted jobs are attached to this email.\n\n"

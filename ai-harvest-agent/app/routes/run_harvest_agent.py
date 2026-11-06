@@ -828,6 +828,15 @@ async def _run_harvest_background_impl(
     insights = compute_harvest_insights(run_rows) if run_rows else None
     # Apollo's own credit figures (cycle / today / this run) — None if unreachable.
     apollo_usage = await apollo_credit_usage.report_usage(apollo_start, result.started_at)
+    # Persist the snapshot so the next run's report can show "previous run" usage.
+    if run_pk and apollo_usage:
+        serializable = {
+            k: (v.isoformat() if isinstance(v, datetime) else v)
+            for k, v in apollo_usage.items()
+        }
+        await db_write(lambda db: HarvestRunService(db).update_run(
+            run_pk, apollo_usage=serializable,
+        ))
     if insights is not None:
         if pending_dicts:
             insights["deferred_jobs"] = len(pending_dicts)
@@ -863,6 +872,42 @@ async def _run_harvest_background_impl(
         )
     if pending_runs:
         log.info("deferred_reports_merged", runs=len(pending_runs), jobs=len(pending_dicts))
+
+    # ── Schedule phone outreach insights email (24h after completion) ──────
+    try:
+        from app.services.phone_insights_service import send_phone_outreach_insights
+        from app.core.tenant_context import get_current_tenant_id
+        from app.main import app as _app
+        from datetime import timedelta as td
+
+        scheduler = getattr(_app.state, "scheduler", None)
+        if scheduler and run_pk:
+            insights_run_at = datetime.now(timezone.utc) + td(hours=24)
+            insights_job_id = f"phone_insights_{run_pk}"
+            sources_label = (
+                " + ".join(result.sources_executed)
+                if result.sources_executed
+                else "Harvest"
+            )
+            _tenant = get_current_tenant_id()
+            _run_pk = run_pk
+            _run_id = run_id
+            _src_label = sources_label
+
+            scheduler.schedule_one_shot(
+                job_id=insights_job_id,
+                job_fn=lambda: send_phone_outreach_insights(
+                    run_id=_run_pk,
+                    tenant_id=_tenant,
+                    run_display_id=_run_id,
+                    sources_label=_src_label,
+                ),
+                run_at=insights_run_at,
+                name=f"Phone insights for {run_id}",
+            )
+            log.info("phone_insights_scheduled", run_id=run_id, run_at=str(insights_run_at))
+    except Exception as exc:
+        log.warning("phone_insights_schedule_failed", run_id=run_id, error=str(exc))
 
 
 async def _apollo_credits_since(started_at: datetime, log: Any) -> int | None:
