@@ -827,7 +827,30 @@ async def _run_harvest_background_impl(
     # in the attachments, noted as "+N jobs from earlier stopped run(s)".
     insights = compute_harvest_insights(run_rows) if run_rows else None
     # Apollo's own credit figures (cycle / today / this run) — None if unreachable.
-    apollo_usage = await apollo_credit_usage.report_usage(apollo_start, result.started_at)
+    # A user-stopped run's report is merged into this one (pending_runs), so its
+    # Apollo spend belongs here too: measure "this run" credits from the earliest
+    # merged stopped run's start instead of this run's own start.
+    credits_from = result.started_at
+    for pend in pending_runs:
+        p_start = apollo_credit_usage._utc(pend.started_at)
+        if p_start and (credits_from is None or p_start < apollo_credit_usage._utc(credits_from)):
+            credits_from = p_start
+    if credits_from != result.started_at:
+        apollo_usage = await apollo_credit_usage.report_usage(None, credits_from)
+    else:
+        apollo_usage = await apollo_credit_usage.report_usage(apollo_start, result.started_at)
+    # "Today" = Apollo's consumed now minus the consumed stored on the previous
+    # completed run (no midnight window). No previous reading → left as computed.
+    if apollo_usage:
+        prev = await db_read(lambda db: HarvestRunService(db).get_previous_apollo_usage(run_pk))
+        if prev and prev.get("consumed") is not None:
+            now_cycle = apollo_usage.get("cycle_start")
+            now_cycle = now_cycle.isoformat() if isinstance(now_cycle, datetime) else now_cycle
+            prev_cycle = prev.get("cycle_start")
+            if prev_cycle and now_cycle and prev_cycle != now_cycle:
+                apollo_usage["today"] = int(apollo_usage["consumed"])  # billing cycle reset
+            else:
+                apollo_usage["today"] = max(0, int(apollo_usage["consumed"]) - int(prev["consumed"]))
     # Persist the snapshot so the next run's report can show "previous run" usage.
     if run_pk and apollo_usage:
         serializable = {
@@ -845,7 +868,7 @@ async def _run_harvest_background_impl(
         # counter, which also counts UI exports, Recruiter Finder lookups and charges
         # outside the app. Distinct from insights["apollo_enriched"], the number of
         # postings whose contact is Apollo-sourced.
-        run_credits = await _apollo_credits_since(result.started_at, log)
+        run_credits = await _apollo_credits_since(credits_from, log)
         if run_credits is not None:
             insights["apollo_credits_run"] = run_credits
 
