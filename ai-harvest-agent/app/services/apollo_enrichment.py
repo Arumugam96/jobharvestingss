@@ -6,8 +6,8 @@ Keeping the gate/cooldown decision here (rather than in each agent) means the
 credit-conservation rules live in exactly one spot:
 
   * no-op when Apollo isn't configured or there's no LinkedIn URL;
-  * only reveal a channel we don't already have (email always eligible; phone
-    only when settings.apollo_reveal_phone is on);
+  * email only — phones are never requested here (they're requested after a sent
+    outreach email: app/services/outreach_phone_service.py);
   * skip if this profile was tried within settings.apollo_recheck_days.
 
 The helper only *decides + calls* Apollo and returns what it found. Persistence
@@ -55,6 +55,9 @@ class ApolloFallbackResult:
     matched: bool = False
     attempted: bool = False          # True once an Apollo call was actually issued
     source: str = ""                 # "apollo" when Apollo supplied the email
+    # Apollo person id — stored on recruiters.apollo_person_id so a later phone request
+    # (outreach_phone_service) can match by id and a delivery can find the recruiter.
+    person_id: str = ""
 
     @property
     def enrichment_source(self) -> str:
@@ -82,15 +85,18 @@ async def apollo_contact_fallback(
     apollo_enriched_at: datetime | None = None,
     client: ApolloClient | None = None,
 ) -> ApolloFallbackResult:
-    """Try Apollo for a still-missing email (and optionally phone). Returns an
-    ApolloFallbackResult; callers merge .email/.phone into their own result and
-    pass .attempted / .enrichment_source through to save_enrichment(...)."""
+    """Try Apollo for a still-missing email. Returns an ApolloFallbackResult; callers
+    merge .email into their own result and pass .attempted / .enrichment_source /
+    .person_id through to save_enrichment(...).
+
+    EMAIL-ONLY: harvest enrichment never asks Apollo for a phone (8 credits each).
+    Phones are requested only after an initial outreach email was actually sent to an
+    eligible recruiter — app/services/outreach_phone_service.py (settings.apollo_reveal_phone
+    gates that step). ``already_phone`` is accepted for call compatibility only."""
     if not settings.apollo_api_key or not linkedin_url:
         return _SKIP
 
-    want_email = not already_email
-    want_phone = settings.apollo_reveal_phone and not already_phone
-    if not want_email and not want_phone:
+    if already_email:
         return _SKIP  # nothing left worth a credit
 
     # Recheck cooldown — don't re-bill/re-hit a profile tried recently.
@@ -108,16 +114,16 @@ async def apollo_contact_fallback(
         linkedin_url=linkedin_url,
         person=person_name,
         company=company_name,
-        want_email=want_email,
-        want_phone=want_phone,
+        want_email=True,
+        want_phone=False,
     )
 
     client = client or ApolloClient(settings)
     try:
         person = await client.enrich_person_by_linkedin(
             linkedin_url,
-            reveal_email=want_email,
-            reveal_phone=want_phone,
+            reveal_email=True,
+            reveal_phone=False,
             name=person_name,
             company=company_name,
             domain=company_domain,
@@ -129,21 +135,19 @@ async def apollo_contact_fallback(
         logger.warning("apollo_fallback_failed", linkedin_url=linkedin_url, error=str(exc))
         return ApolloFallbackResult(attempted=True)
 
-    email = person.email or "" if want_email else ""
-    phone = person.phone or "" if want_phone else ""
+    email = person.email or ""
     logger.info(
         "apollo_fallback_result",
         linkedin_url=linkedin_url,
         matched=person.matched,
         email_found=bool(email),
-        phone_found=bool(phone),
+        person_id=person.id or "",
     )
     org = person.organization
     return ApolloFallbackResult(
         email=email,
-        phone=phone,
         # These ride along with the match (no extra reveal/credit), so pass them
-        # through whenever Apollo matched — independent of email/phone reveal.
+        # through whenever Apollo matched — independent of the email reveal.
         secondary_email=person.secondary_email or "",
         company_linkedin_url=(org.linkedin_url if org else "") or "",
         address=person.address or "",
@@ -160,6 +164,7 @@ async def apollo_contact_fallback(
         matched=person.matched,
         attempted=True,
         source="apollo" if email else "",
+        person_id=str(person.id or "") if person.matched else "",
     )
 
 

@@ -47,6 +47,7 @@ from app.core.company_size import minimum_floor, size_meets_floor
 from app.models.harvest_run import ScrapedJobORM
 from app.services.active_clients import classify_client
 from app.services.email_service import AUTOMATION_CONTACT_BLOCK, EmailSender, render_outreach_email_html
+from app.services import outreach_phone_service
 from app.services.harvest_run_service import (
     contact_origin,
     db_read,
@@ -427,6 +428,9 @@ async def run_auto_outreach_after_harvest(
 
         email_sender = EmailSender(settings)
         outreach = OutreachService(LLMService(settings))
+        # Size pills for the post-send Apollo phone step (band membership; resolved
+        # once — None falls back to harvest_config like the manual send does).
+        phone_sizes = outreach_phone_service.resolve_filter_sizes(company_sizes)
         sem = asyncio.Semaphore(_CONCURRENCY)
 
         async def _process(target: dict) -> None:
@@ -555,6 +559,14 @@ async def run_auto_outreach_after_harvest(
                     counts["sent"] += 1
                 else:
                     counts["failed"] += 1
+
+                if send_status == "sent" and not is_company:
+                    # Apollo phone for a contact we actually emailed (eligibility rules +
+                    # skip reasons live in outreach_phone_service). Never raises.
+                    await outreach_phone_service.request_phone_after_outreach(
+                        recruiter_id=recruiter_id, job_id=job_id, to_email=email,
+                        company_sizes=phone_sizes,
+                    )
 
                 # Throttle before this slot picks up the next recruiter so a large harvest
                 # doesn't burst the relay. Awaited — a blocking sleep would freeze the loop.

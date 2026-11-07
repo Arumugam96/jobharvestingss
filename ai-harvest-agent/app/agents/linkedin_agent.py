@@ -1972,6 +1972,7 @@ class LinkedInAgent:
                         company_country      = apollo_result.company_country if apollo_result else "",
                         enrichment_source = "apollo" if (apollo_result and apollo_result.source) else "",
                         apollo_attempted  = bool(apollo_result and apollo_result.attempted),
+                        apollo_person_id  = apollo_result.person_id if apollo_result else "",
                     )
                     await link_recruiter_jobs_by_url(db, recruiter_id, norm_url)
                     await db.commit()

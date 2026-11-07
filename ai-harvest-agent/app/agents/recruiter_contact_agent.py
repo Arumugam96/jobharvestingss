@@ -133,6 +133,8 @@ class RecruiterRecord:
     apollo_city:                 str = ""
     apollo_state:                str = ""
     apollo_country:              str = ""
+    # Apollo person id from the match — stored on recruiters.apollo_person_id.
+    apollo_person_id:            str = ""
 
 
 # ── Run summary ────────────────────────────────────────────────────────────────
@@ -413,6 +415,7 @@ async def _persist_enrichment(rec: RecruiterRecord, result: ProspectResult) -> N
             country              = rec.apollo_country,
             enrichment_source   = "apollo" if rec.apollo_source else "",
             apollo_attempted    = rec.apollo_attempted,
+            apollo_person_id    = rec.apollo_person_id,
         )
 
     await db_write(_write)
@@ -806,6 +809,7 @@ class RecruiterContactAgent:
                     apollo_enriched_at=rec.apollo_enriched_at,
                 )
                 rec.apollo_attempted = apollo.attempted
+                rec.apollo_person_id = apollo.person_id
                 rec.apollo_source = apollo.source
                 rec.apollo_secondary_email      = apollo.secondary_email
                 rec.apollo_company_linkedin_url = apollo.company_linkedin_url

@@ -152,11 +152,18 @@ def _ensure_recruiter_columns(sync_conn) -> None:
         # Recruiter Contact Finder provenance (app/services/recruiter_finder_service.py).
         ("source_label",         "ALTER TABLE recruiters ADD COLUMN source_label VARCHAR(60) NOT NULL DEFAULT ''"),
         ("requested_by",         "ALTER TABLE recruiters ADD COLUMN requested_by VARCHAR(120)"),
+        # Apollo person id learned from a people/match — maps an async phone delivery
+        # (apollo_phone_service) back to the harvest recruiter. Mirrored in alembic 0033.
+        ("apollo_person_id",     "ALTER TABLE recruiters ADD COLUMN apollo_person_id VARCHAR(60)"),
     ]
     for name, ddl in pending:
         if name not in existing_cols:
             sync_conn.execute(sa_text(ddl))
             logger.info("recruiters_column_added", column=name)
+    # Postgres and SQLite (>=3.8) both support IF NOT EXISTS on CREATE INDEX.
+    sync_conn.execute(sa_text(
+        "CREATE INDEX IF NOT EXISTS ix_recruiters_apollo_person_id ON recruiters (apollo_person_id)"
+    ))
 
 
 def _ensure_llm_calls_columns(sync_conn) -> None:
@@ -238,10 +245,45 @@ def _ensure_harvest_runs_columns(sync_conn) -> None:
         ("scrape_completed_at", ts_type),
         ("phase_timings",       json_type),
         ("apollo_usage",        json_type),
+        # When the 24h phone-outreach insights email went out (the periodic sweep
+        # in app/services/phone_insights_service.py stamps it). Mirrored in 0033.
+        ("phone_insights_sent_at", ts_type),
     ):
         if col not in existing_cols:
             sync_conn.execute(sa_text(f"ALTER TABLE harvest_runs ADD COLUMN {col} {col_type}"))
             logger.info("harvest_runs_column_added", column=col)
+
+
+def _ensure_apollo_phone_columns(sync_conn) -> None:
+    """One-time, idempotent ADD COLUMN backfill for the pre-existing Apollo phone
+    tables: apollo_phone_requests gained purpose / source / linkedin_url
+    (harvest-enrichment phones), apollo_webhook_events
+    gained reprocessed_at / reprocess_note (the backfill). Mirrors alembic 0033 —
+    create_all never alters an existing table."""
+    inspector = sa_inspect(sync_conn)
+    tables = set(inspector.get_table_names())
+    ts_type = "TIMESTAMPTZ" if sync_conn.dialect.name == "postgresql" else "TIMESTAMP"
+    if "apollo_phone_requests" in tables:
+        cols = {c["name"] for c in inspector.get_columns("apollo_phone_requests")}
+        pending = [
+            ("purpose", "ALTER TABLE apollo_phone_requests ADD COLUMN purpose VARCHAR(20) NOT NULL DEFAULT 'finder'"),
+            ("source", "ALTER TABLE apollo_phone_requests ADD COLUMN source VARCHAR(40) NOT NULL DEFAULT 'contact_finder'"),
+            ("linkedin_url", "ALTER TABLE apollo_phone_requests ADD COLUMN linkedin_url TEXT"),
+        ]
+        for name, ddl in pending:
+            if name not in cols:
+                sync_conn.execute(sa_text(ddl))
+                logger.info("apollo_phone_requests_column_added", column=name)
+    if "apollo_webhook_events" in tables:
+        cols = {c["name"] for c in inspector.get_columns("apollo_webhook_events")}
+        pending = [
+            ("reprocessed_at", f"ALTER TABLE apollo_webhook_events ADD COLUMN reprocessed_at {ts_type}"),
+            ("reprocess_note", "ALTER TABLE apollo_webhook_events ADD COLUMN reprocess_note TEXT NOT NULL DEFAULT ''"),
+        ]
+        for name, ddl in pending:
+            if name not in cols:
+                sync_conn.execute(sa_text(ddl))
+                logger.info("apollo_webhook_events_column_added", column=name)
 
 
 def _ensure_email_outreach_columns(sync_conn) -> None:
@@ -574,6 +616,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # phone_call_logs gained call_outcome + outcome_details + proof (the
         # call-log popup) — same idempotent ADD COLUMN treatment.
         await conn.run_sync(_ensure_phone_call_logs_columns)
+        # apollo_phone_requests gained purpose/source/linkedin_url and
+        # apollo_webhook_events gained reprocessed_at/reprocess_note (harvest
+        # enrichment phones + backfill) — same idempotent ADD COLUMN treatment.
+        await conn.run_sync(_ensure_apollo_phone_columns)
         # Data backfill: re-parse country/state onto scraped_jobs rows harvested
         # before location parsing was wired (columns above exist but stayed empty).
         await conn.run_sync(_backfill_scraped_jobs_location)
@@ -695,6 +741,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         )
     except Exception as exc:
         logger.warning("apollo_phone_expiry_setup_failed", error=str(exc))
+
+    # Phone outreach insights email, 24h after a multi-source run completes. Restart-
+    # safe: state is harvest_runs.phone_insights_sent_at (the one-shot scheduled at run
+    # end lives in the in-memory job store and is lost on restart).
+    try:
+        from app.services.phone_insights_service import send_due_phone_insights
+        scheduler.schedule_interval_job(
+            job_id           = "phone_insights_sweep",
+            job_fn           = send_due_phone_insights,
+            interval_seconds = 1800,
+            name             = "Phone outreach insights (24h after run)",
+        )
+    except Exception as exc:
+        logger.warning("phone_insights_sweep_setup_failed", error=str(exc))
 
     # Apollo's own credit counter, read every 15 min (free call) so the harvest report
     # can show true "credits today" (diff vs. the last reading before IST midnight).

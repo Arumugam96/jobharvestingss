@@ -161,6 +161,7 @@ async def save_enrichment(
     verified: bool = False,
     enrichment_source: str = "",
     apollo_attempted: bool = False,
+    apollo_person_id: str = "",
 ) -> None:
     """Cache one recruiter's scraped contact-discovery result on their
     RecruiterORM row, so RecruiterContactAgent and ProspectIntelligenceAgent
@@ -219,6 +220,9 @@ async def save_enrichment(
         # Stamp every Apollo attempt (hit or miss) so the recheck cooldown can
         # skip this profile on subsequent runs.
         recruiter.apollo_enriched_at = now
+    if apollo_person_id and not recruiter.apollo_person_id:
+        # Lets an async Apollo phone delivery (apollo_phone_service) find this row.
+        recruiter.apollo_person_id = str(apollo_person_id)[:60]
     await db.flush()
 
 

@@ -1458,6 +1458,7 @@ class ProspectIntelligenceAgent:
                                 enrichment_source    = "apollo" if apollo.source else "",
                                 apollo_attempted     = True,
                                 verified             = bool(apollo.email or apollo.phone),
+                                apollo_person_id     = apollo.person_id,
                             )
                             await db.commit()
                     except Exception as exc:

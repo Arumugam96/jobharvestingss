@@ -16,6 +16,31 @@ import {
 import { mapJobToDetail, jobContact, sortSources, SOURCE_ORDER } from "../lib/jobsData";
 import { CONTACT_FILTER_OPTIONS, CLIENT_CONTACT_FILTER_OPTIONS, jobMatchesContact } from "../lib/contactFilter";
 
+// Apollo phone status of the job's recruiter: "Verified" when Apollo marked the
+// recruiter's (shown) number valid, "Phone pending" while an async Apollo phone is
+// on its way and the row has no number yet. Renders nothing otherwise.
+function ApolloPhoneChip({ job, contact }) {
+  const status = (job.mobileRecruiterStatus || "").toUpperCase();
+  const recruiterShown = contact.phoneParts.some((p) => p.variant === "recruiter" || p.val === job.mobileRecruiter);
+  if (status === "VERIFIED" && job.mobileRecruiter && recruiterShown) {
+    return (
+      <span title="Apollo verified this recruiter number" style={{
+        display: "inline-block", marginTop: 3, padding: "1px 7px", borderRadius: 999, fontSize: 10.5,
+        fontWeight: 700, color: "#15803D", background: "#F0FDF4", border: "1px solid #BBF7D0",
+      }}>Verified</span>
+    );
+  }
+  if (status === "PENDING" && !contact.phone) {
+    return (
+      <span title="Phone requested from Apollo — it is delivered asynchronously" style={{
+        display: "inline-block", padding: "1px 7px", borderRadius: 999, fontSize: 10.5,
+        fontWeight: 700, color: "#B45309", background: "#FFF7ED", border: "1px solid #FED7AA",
+      }}>Phone pending</span>
+    );
+  }
+  return null;
+}
+
 // Company-size filter options. Named tiers map to the LinkedIn employee bands
 // captured per job (backend app/core/company_size.py); "unknown" catches jobs
 // with no detected band (and non-LinkedIn sources). Display-only — filters which
@@ -472,9 +497,13 @@ export default function JobsTable({
                         <PhoneVerifyBadge result={phoneVerify[j.id]?.phone === c.phone ? phoneVerify[j.id] : null}
                           onEdit={() => setPhoneModal({ job: j, phone: c.phone, phoneSource: c.phoneParts[0]?.variant || "", pocName: c.pocName, pocKind: c.pocKind, email: c.email })} />
                         <PhoneFlagTag flags={phoneFlags[c.phone]} />
+                        <ApolloPhoneChip job={j} contact={c} />
                       </div>
                     ) : (
-                      <DualContact parts={c.phoneParts} link="tel:" cls="ha-tel" />
+                      <>
+                        <DualContact parts={c.phoneParts} link="tel:" cls="ha-tel" />
+                        <ApolloPhoneChip job={j} contact={c} />
+                      </>
                     )}
                   </td>
                   <td className="ha-td ha-td-pin">

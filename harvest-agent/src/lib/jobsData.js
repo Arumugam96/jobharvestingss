@@ -136,6 +136,9 @@ function mapApiJobFields(j) {
     outreachToSource: j.outreach_to_source || null,
     mobileScraped: j.phone_scraped || null,
     mobileRecruiter: j.phone_recruiter || null,
+    // Recruiter row's phone_status: VERIFIED | PUBLIC | PENDING (Apollo phone on its
+    // way via the async webhook) | NOT_FOUND — drives the phone-cell badges.
+    mobileRecruiterStatus: j.phone_recruiter_status || null,
     // Inferred HR contact found by (company + job location) via Apollo, attached
     // only to jobs with no scraped-poster and no enriched-recruiter email. Shown
     // inline with an "Apollo Resolved" tag in the table; its own section in the detail view.

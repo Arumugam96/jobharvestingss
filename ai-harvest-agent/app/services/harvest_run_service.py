@@ -1471,6 +1471,10 @@ def scraped_job_view(job: ScrapedJobORM) -> dict[str, Any]:
         "email_recruiter":        email_recruiter,
         "phone_scraped":          phone_scraped,
         "phone_recruiter":        phone_recruiter,
+        # The recruiter row's phone_status (VERIFIED / PUBLIC / PENDING while an Apollo
+        # phone is on its way / NOT_FOUND) — drives the jobs table's phone badges.
+        "phone_recruiter_status": ((getattr(recruiter, "phone_status", "") or "") or None)
+                                  if recruiter else None,
         # Company+location Apollo HR contact (separate from the poster above) and the
         # resolved outreach recipient. email_id above stays scraped-or-recruiter only
         # (UI/reports unchanged); auto-outreach uses outreach_to_email/outreach_to_name,

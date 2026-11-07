@@ -90,6 +90,9 @@ class Settings(BaseSettings):
     apollo_api_key: str = ""
     apollo_base_url: str = "https://api.apollo.io/api/v1"
     apollo_timeout_s: float = 20.0
+    # Gates the post-outreach Apollo phone request (app/services/outreach_phone_service.py):
+    # after an initial outreach email is SENT to an eligible recruiter. Harvest
+    # enrichment itself never requests phones.
     apollo_reveal_phone: bool = False
     # Full public URL of POST /recruiter-finder/apollo-phone-webhook (Apollo delivers
     # revealed phones there asynchronously). Empty disables phone reveal everywhere.

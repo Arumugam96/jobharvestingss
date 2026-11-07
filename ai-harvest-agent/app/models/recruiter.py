@@ -98,6 +98,9 @@ class RecruiterORM(Base):
     # whatever downstream CRM sync exists; this table doesn't manage its
     # lifecycle, just carries it alongside the recruiter's identity.
     crm_status: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # Apollo person id learned from a people/match — maps an async Apollo phone
+    # delivery (app/services/apollo_phone_service.py) back to this recruiter.
+    apollo_person_id: Mapped[str | None] = mapped_column(String(60), nullable=True, index=True)
     # Global outreach opt-out — mirrored from the email_suppressions list (the
     # email-keyed source of truth) when this recruiter's address is suppressed, so
     # the CRM/UI can see it on the person. See app/services/suppression_service.py.

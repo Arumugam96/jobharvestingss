@@ -1,22 +1,44 @@
 """
 Phone outreach insights email — sent 24 hours after a harvest run completes.
 Derives call activity from the phone_call_logs table for jobs in the run.
+
+Delivery: ``send_due_phone_insights`` (APScheduler interval job registered in
+app/main.py, every 30 min) sends it for every multi-source run that completed 24–72h
+ago and has no ``harvest_runs.phone_insights_sent_at`` yet — so it survives a restart
+(APScheduler's in-memory job store does not). The one-shot scheduled at run end is
+kept as a fast path; both go through the same atomic claim on
+``phone_insights_sent_at``, so a run's email is sent exactly once.
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import structlog
-from sqlalchemy import select, func
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.harvest_run import ScrapedJobORM
-from app.models.phone_call_log import PhoneCallLogORM
-from app.services.email_service import EmailSender, report_identity_from
-from app.services.harvest_run_service import db_read
 from app.config import get_settings
+from app.models.harvest_run import HarvestRunORM, ScrapedJobORM
+from app.models.phone_call_log import PhoneCallLogORM
+from app.models.recruiter import RecruiterORM
+from app.services.email_service import EmailSender, report_identity_from
+from app.services.harvest_run_service import _contact_presence_exprs, _txt_expr, db_read, db_write
 
 logger = structlog.get_logger(__name__)
+
+# Call-log phone_source → report row. "contact" is the UI's merged poster value
+# (older rows with no job/recruiter split) — it is the job poster's number.
+_SOURCE_ROWS = (
+    ("job", "Job Posting", ("job", "contact")),
+    ("recruiter", "Recruiter (Apollo)", ("recruiter",)),
+)
+_DONE_STATUSES = ("success", "completed", "no_results")
+
+
+def _empty(run_id: str) -> dict[str, Any]:
+    return {"total_phones": 0, "called": 0, "not_called": 0, "answered": 0, "unanswered": 0,
+            "called_pct": 0, "not_called_pct": 0, "sources": [], "run_id": run_id}
 
 
 async def compute_phone_outreach_insights(
@@ -26,72 +48,57 @@ async def compute_phone_outreach_insights(
 
     ``run_id`` is the harvest_runs surrogate PK (UUID), which is what
     ScrapedJobORM.run_id references as an FK.
+
+    A job "has a phone" exactly as the jobs table shows it — its scraped number, its
+    recruiter's (incl. Apollo-delivered) number, or its company HR contact's
+    (``_contact_presence_exprs()["mobile"]``). Call activity uses the LATEST
+    non-cleared call per job (same rule as the Phone Tracker badge), counted only for
+    jobs that have a phone — so called + not_called == total_phones.
     """
-    # 1. Get all job IDs from this run
-    job_ids_q = select(ScrapedJobORM.id).where(
-        ScrapedJobORM.run_id == run_id,
-        ScrapedJobORM.tenant_id == tenant_id,
+    J, R = ScrapedJobORM, RecruiterORM
+    mobile = _contact_presence_exprs()["mobile"]
+    base = (
+        select(J.id, _txt_expr(J.contact_number).label("job_phone"),
+               _txt_expr(R.contact_number).label("rec_phone"),
+               _txt_expr(J.company_contact_phone).label("co_phone"))
+        .select_from(J).outerjoin(R, J.recruiter_id == R.id)
+        .where(J.run_id == run_id, J.tenant_id == tenant_id, mobile)
     )
-    job_ids_result = await db.execute(job_ids_q)
-    job_ids = [r[0] for r in job_ids_result.all()]
+    rows = (await db.execute(base)).all()
+    if not rows:
+        return _empty(run_id)
+    phone_jobs = {r.id for r in rows}
+    total_phones = len(phone_jobs)
+    per_source = {
+        "job": sum(1 for r in rows if r.job_phone),
+        "recruiter": sum(1 for r in rows if r.rec_phone),
+        "company": sum(1 for r in rows if r.co_phone),
+    }
 
-    if not job_ids:
-        return {"total_phones": 0, "called": 0, "not_called": 0, "answered": 0,
-                "unanswered": 0, "sources": [], "run_id": run_id}
-
-    # 2. Count jobs that have at least one phone number (contact_number).
-    phones_q = select(func.count()).select_from(ScrapedJobORM).where(
-        ScrapedJobORM.run_id == run_id,
-        ScrapedJobORM.tenant_id == tenant_id,
-        ScrapedJobORM.contact_number.isnot(None),
-        ScrapedJobORM.contact_number != "",
+    # Latest non-cleared call per job (ids are autoincrement → max(id) is newest).
+    C = PhoneCallLogORM
+    newest = (
+        select(func.max(C.id))
+        .where(C.job_id.in_(list(phone_jobs)), C.tenant_id == tenant_id, C.cleared_at.is_(None))
+        .group_by(C.job_id)
     )
-    phones_result = await db.execute(phones_q)
-    total_phones = phones_result.scalar() or 0
+    latest = (await db.execute(select(C).where(C.id.in_(newest.scalar_subquery())))).scalars().all()
+    latest = [c for c in latest if c.job_id in phone_jobs]
 
-    # 3. Get call logs for these jobs (non-cleared only)
-    calls_q = select(PhoneCallLogORM).where(
-        PhoneCallLogORM.job_id.in_(job_ids),
-        PhoneCallLogORM.tenant_id == tenant_id,
-        PhoneCallLogORM.cleared_at.is_(None),
-    )
-    calls_result = await db.execute(calls_q)
-    calls = calls_result.scalars().all()
-
-    # Distinct jobs that were called
-    called_job_ids = {c.job_id for c in calls}
-    called = len(called_job_ids)
+    called = len(latest)
     not_called = max(0, total_phones - called)
+    answered = sum(1 for c in latest if c.call_status == "answered")
+    unanswered = sum(1 for c in latest if c.call_status == "unanswered")
 
-    answered = sum(1 for c in calls if c.call_status == "answered")
-    unanswered = sum(1 for c in calls if c.call_status == "unanswered")
-
-    # 4. Phone source coverage — group call logs by phone_source
-    source_q = (
-        select(
-            PhoneCallLogORM.phone_source,
-            func.count(func.distinct(PhoneCallLogORM.phone)).label("count"),
-        )
-        .where(
-            PhoneCallLogORM.job_id.in_(job_ids),
-            PhoneCallLogORM.tenant_id == tenant_id,
-            PhoneCallLogORM.cleared_at.is_(None),
-        )
-        .group_by(PhoneCallLogORM.phone_source)
-    )
-    source_result = await db.execute(source_q)
-    source_data = {r.phone_source: r.count for r in source_result.all()}
-
-    # Build source coverage list (Job Posting and Recruiter only)
-    source_map = {"job": "Job Posting", "recruiter": "Recruiter (Apollo)"}
     sources = []
-    for key, label in source_map.items():
-        called_count = source_data.get(key, 0)
+    for key, label, call_sources in _SOURCE_ROWS:
+        count = per_source[key]
+        called_count = sum(1 for c in latest if (c.phone_source or "") in call_sources)
         sources.append({
             "label": label,
-            "count": total_phones,
+            "count": count,
             "called": called_count,
-            "coverage": round(called_count / total_phones * 100, 1) if total_phones > 0 else 0,
+            "coverage": round(called_count / count * 100, 1) if count > 0 else 0,
         })
 
     return {
@@ -224,23 +231,52 @@ def render_phone_insights_email_html(insights: dict[str, Any], run_label: str) -
 </html>"""
 
 
+async def _claim(run_id: str) -> bool:
+    """Atomically stamp phone_insights_sent_at (only if still NULL). True when this
+    caller won the claim — the one-shot and the sweep can never both send."""
+    async def _w(db: AsyncSession) -> bool:
+        H = HarvestRunORM
+        res = await db.execute(
+            update(H).where(H.id == run_id, H.phone_insights_sent_at.is_(None))
+            .values(phone_insights_sent_at=datetime.now(timezone.utc))
+        )
+        return (res.rowcount or 0) > 0
+    return bool(await db_write(_w))
+
+
+async def _release(run_id: str) -> None:
+    """Undo a claim after a failed send so the sweep retries it."""
+    async def _w(db: AsyncSession) -> None:
+        H = HarvestRunORM
+        await db.execute(update(H).where(H.id == run_id).values(phone_insights_sent_at=None))
+    await db_write(_w)
+
+
 async def send_phone_outreach_insights(
     run_id: str, tenant_id: str, run_display_id: str, sources_label: str,
-) -> None:
-    """Compute + send the phone outreach insights email for a completed harvest run.
+) -> bool:
+    """Compute + send the phone outreach insights email for a completed harvest run,
+    at most once per run (claims ``phone_insights_sent_at`` first). Returns True when
+    an email went out. Never raises.
 
     ``run_id`` is the harvest_runs surrogate PK (UUID).
     ``run_display_id`` is the human-readable timestamp id (e.g. 20261105_143000).
     """
+    if not await _claim(run_id):
+        logger.info("phone_insights_skip_already_sent", run_id=run_id)
+        return False
     try:
         settings = get_settings()
 
         result = await db_read(
             lambda db: compute_phone_outreach_insights(db, run_id, tenant_id)
         )
-        if result is None or result["total_phones"] == 0:
+        if result is None:
+            await _release(run_id)  # DB read failed — let the sweep retry
+            return False
+        if result["total_phones"] == 0:
             logger.info("phone_insights_skip_no_phones", run_id=run_id)
-            return
+            return False  # claim kept: nothing to report for this run, ever
 
         run_label = f"{sources_label} · {run_display_id}"
         html = render_phone_insights_email_html(result, run_label)
@@ -270,5 +306,42 @@ async def send_phone_outreach_insights(
             sender_identity=sender_identity,
         )
         logger.info("phone_insights_sent", run_id=run_id, recipients=len(recipients))
+        return True
     except Exception as exc:
         logger.warning("phone_insights_failed", run_id=run_id, error=str(exc))
+        await _release(run_id)
+        return False
+
+
+async def due_runs(db: AsyncSession, *, now: datetime | None = None) -> list[HarvestRunORM]:
+    """Multi-source runs that completed 24–72h ago and haven't had their insights sent."""
+    now = now or datetime.now(timezone.utc)
+    H = HarvestRunORM
+    return list((await db.execute(
+        select(H).where(
+            H.status.in_(_DONE_STATUSES), H.source.is_(None),
+            H.phone_insights_sent_at.is_(None),
+            H.completed_at <= now - timedelta(hours=24),
+            H.completed_at > now - timedelta(hours=72),
+        ).order_by(H.completed_at.asc())
+    )).scalars().all())
+
+
+async def send_due_phone_insights() -> int:
+    """APScheduler tick (every 30 min): send the 24h insights email for every due run.
+    Restart-safe (state lives on harvest_runs). Returns emails sent. Never raises."""
+    try:
+        runs = await db_read(lambda db: due_runs(db)) or []
+    except Exception as exc:  # db_read already swallows — belt and braces
+        logger.warning("phone_insights_sweep_failed", error=str(exc))
+        return 0
+    sent = 0
+    for run in runs:
+        label = " + ".join(run.sources or []) or "Harvest"
+        if await send_phone_outreach_insights(
+            run_id=run.id, tenant_id=run.tenant_id, run_display_id=run.run_id, sources_label=label,
+        ):
+            sent += 1
+    if runs:
+        logger.info("phone_insights_sweep_done", due=len(runs), sent=sent)
+    return sent

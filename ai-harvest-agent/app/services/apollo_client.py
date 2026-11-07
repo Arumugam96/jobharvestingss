@@ -34,9 +34,9 @@ not in the match response, and it *requires* a ``webhook_url`` param whenever
 email reveal down with it). So a phone is only requested when the caller asks for it
 (``reveal_phone=True``) AND ``settings.apollo_webhook_url`` is set; without a webhook
 it is silently downgraded to email-only so the email still resolves. (The Contact
-Finder decides per call; ``settings.apollo_reveal_phone`` only gates the harvest-time
-fallback in apollo_enrichment.) The URL sent carries ``token=<apollo_webhook_token>``
-and, when the caller passes ``webhook_ref``, ``ref=<ref>`` so the delivery can be
+Finder decides per call; ``settings.apollo_reveal_phone`` only gates the post-outreach
+phone step in outreach_phone_service.) The URL sent carries ``token=<apollo_webhook_token>``
+and, when the caller passes ``webhook_ref``, a trailing ``/<ref>`` path segment so the delivery can be
 authenticated and correlated (app/services/apollo_phone_service.py). If Apollo rejects
 the webhook_url itself (e.g. a plain-http URL), the call is retried ONCE email-only
 and the result's ``phone_requested`` is False — no webhook will follow.
@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import math
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 
 import httpx
 import structlog
@@ -592,17 +592,22 @@ class ApolloClient:
 
     def _webhook_url_for(self, ref: str = "") -> str:
         """The configured webhook URL plus our ``token`` (authenticates the unsigned
-        delivery) and ``ref`` (correlates it to the request rows), respecting any
-        query string the configured URL already has."""
-        extra: dict[str, str] = {}
-        if self._webhook_token:
-            extra["token"] = self._webhook_token
+        delivery) in the query string, and ``ref`` (correlates it to the request rows)
+        as a trailing PATH segment — Apollo was observed to keep only the first query
+        param, so a query-string ref arrived empty. Respects any query string the
+        configured URL already has. No ref → the base path unchanged."""
+        base = self._webhook_url
+        if not base:
+            return base
+        parts = urlsplit(base)
+        path = parts.path
         if ref:
-            extra["ref"] = ref
-        if not extra:
-            return self._webhook_url
-        sep = "&" if "?" in self._webhook_url else "?"
-        return f"{self._webhook_url}{sep}{urlencode(extra)}"
+            path = path.rstrip("/") + "/" + quote(ref, safe="")
+        query = parts.query
+        if self._webhook_token:
+            tok = urlencode({"token": self._webhook_token})
+            query = f"{query}&{tok}" if query else tok
+        return urlunsplit((parts.scheme, parts.netloc, path, query, parts.fragment))
 
     async def _reveal_request(
         self,
@@ -712,18 +717,21 @@ class ApolloClient:
 
     def _log_result(self, endpoint: str, linkedin_url: str, result: ApolloPersonResult) -> None:
         if not result.matched:
-            logger.info("apollo_no_match", endpoint=endpoint, linkedin_url=linkedin_url)
+            logger.info("apollo_no_match", endpoint=endpoint, linkedin_url=linkedin_url,
+                        person_id=result.id)
             return
         if result.has_email or result.has_phone:
             logger.info(
                 "apollo_credits_used",
                 endpoint=endpoint,
                 linkedin_url=linkedin_url,
+                person_id=result.id,
                 email_revealed=result.has_email,
                 phone_revealed=result.has_phone,
             )
         else:
-            logger.info("apollo_matched_no_contact", endpoint=endpoint, linkedin_url=linkedin_url)
+            logger.info("apollo_matched_no_contact", endpoint=endpoint, linkedin_url=linkedin_url,
+                        person_id=result.id)
 
 
 # Apollo bills 1 credit for a revealed email / demographic record and 8 more for a

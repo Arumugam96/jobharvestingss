@@ -110,6 +110,7 @@ async def run_apollo_recruiter_sweep(limit: int | None = None) -> dict[str, int]
             verified=fe or fp,
             enrichment_source=res.enrichment_source,
             apollo_attempted=res.attempted,
+            apollo_person_id=res.person_id,
         ))
 
     logger.info("apollo_recruiter_sweep_done", **summary)

@@ -339,6 +339,14 @@ async def send_email(
     db.add(row)
     await db.flush()
 
+    if send_status == "sent" and outreach_kind == "initial" and recruiter_id:
+        # Apollo phone for the recruiter we just emailed — fire-and-forget so it never
+        # delays or fails this response; eligibility (LinkedIn URL, known size in the
+        # Rule Engine size pills, no phone yet, budget) is checked there.
+        from app.services.outreach_phone_service import schedule_phone_after_outreach
+
+        schedule_phone_after_outreach(recruiter_id=recruiter_id, job_id=body.job_id, to_email=to_email)
+
     return {"status": send_status, "error": error_message, "outreach_id": row.id}
 
 

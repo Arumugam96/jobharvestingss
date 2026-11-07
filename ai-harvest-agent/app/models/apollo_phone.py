@@ -56,6 +56,18 @@ class ApolloPhoneRequestORM(Base):
     finder_job_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     reveal_log_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     requested_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    # Whose credits: "finder" (Contact Finder — per-tenant Finder budget + global) or
+    # "enrichment" (harvest / maintenance contact enrichment — global + enrichment
+    # sub-cap only, never the Finder budget).
+    purpose: Mapped[str] = mapped_column(String(20), nullable=False, default="finder", server_default="finder")
+    # Which flow asked: contact_finder | linkedin_harvest | prospect_intel |
+    # recruiter_contact | apollo_sweep | csv_script | harvest | backfill | unsolicited.
+    source: Mapped[str] = mapped_column(
+        String(40), nullable=False, default="contact_finder", server_default="contact_finder"
+    )
+    # The LinkedIn URL asked about — lets a delivery find its recruiter when the row
+    # was created before the recruiter existed (prospect intel / CSV scripts).
+    linkedin_url: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending", index=True)
     phone: Mapped[str] = mapped_column(String(50), nullable=False, default="")
@@ -87,5 +99,9 @@ class ApolloWebhookEventORM(Base):
     people_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     matched_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     found_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    # Raw JSON body, truncated (~64 KB) — never parsed back, diagnostics only.
+    # Raw JSON body, truncated (~64 KB) — diagnostics, and re-parsed by the backfill
+    # (apollo_phone_service.reprocess_events) for deliveries that matched no row.
     body: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # Set by the backfill once this event was reprocessed (+ a JSON summary).
+    reprocessed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reprocess_note: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")

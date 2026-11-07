@@ -11,20 +11,24 @@ Endpoints (all under the shared auth guard; added to harvest-agent/nginx.conf):
   GET  /recruiter-finder/history               recent jobs
   GET  /recruiter-finder/phone-status          poll async Apollo phone deliveries
   GET  /recruiter-finder/apollo-webhook-events recent raw webhook deliveries (diagnostics)
+  POST /recruiter-finder/apollo-webhook-events/reprocess  backfill unmatched deliveries (internal)
 
 Unauthenticated (``webhook_router`` — Apollo carries no login cookie; guarded by a
 shared token in the URL query, like the outreach webhooks):
-  POST /recruiter-finder/apollo-phone-webhook  Apollo's async phone delivery
+  POST /recruiter-finder/apollo-phone-webhook/{ref}  Apollo's async phone delivery
+  POST /recruiter-finder/apollo-phone-webhook        legacy form (?ref=… in the query)
 
 Thin trigger layer — all Apollo/budget/persistence logic lives in
 app/services/recruiter_finder_service.py (+ _import / _budget).
 """
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 import hmac
 import json
+import re
 
 import structlog
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
@@ -404,22 +408,53 @@ async def apollo_webhook_events(
     return {"events": await apollo_phone_service.recent_webhook_events(db, limit=limit)}
 
 
+class ReprocessBody(BaseModel):
+    """POST /recruiter-finder/apollo-webhook-events/reprocess — see
+    apollo_phone_service.reprocess_events. dry_run defaults ON."""
+    dry_run: bool = True
+    since: datetime | None = None
+    event_ids: list[str] | None = None
+    record_charges: bool = True
+    resolve_via_apollo: bool = False
+    max_resolve: int = Field(default=25, ge=0, le=500)
+    include_reprocessed: bool = False
+
+
+@router.post("/recruiter-finder/apollo-webhook-events/reprocess")
+async def reprocess_apollo_webhook_events(
+    body: ReprocessBody,
+    current_user=Depends(get_current_user),
+) -> Any:
+    """Backfill logged Apollo phone deliveries that matched no request row (internal-
+    only — events span workspaces). Dry run by default; the report masks numbers."""
+    if not is_all_access(getattr(current_user, "tenant_id", None)):
+        raise HTTPException(status_code=403, detail="Webhook reprocessing is internal-only.")
+    return await apollo_phone_service.reprocess_events(
+        dry_run=body.dry_run, since=body.since, event_ids=body.event_ids,
+        record_charges=body.record_charges, resolve_via_apollo=body.resolve_via_apollo,
+        max_resolve=body.max_resolve, include_reprocessed=body.include_reprocessed,
+    )
+
+
 def _remote_addr(request: Request) -> str:
     fwd = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
     return fwd or request.headers.get("x-real-ip") or (request.client.host if request.client else "")
 
 
-@webhook_router.post("/recruiter-finder/apollo-phone-webhook", status_code=status.HTTP_200_OK)
-async def apollo_phone_webhook(
-    request: Request,
-    token: str | None = Query(default=None, description="Shared webhook secret (APOLLO_WEBHOOK_TOKEN)."),
-    ref: str = Query(default="", description="Correlation ref we embedded in the webhook URL."),
-) -> dict:
-    """Receive Apollo's asynchronous phone delivery (``{people: [{id, phone_numbers: […]}]}``)
-    for a Contact Finder reveal. Apollo doesn't sign the webhook, so the request is
-    authenticated by our own ``token`` in the URL; a bad token is logged as a raw event
-    (diagnostics) and rejected 401. Every other delivery returns 200 — even a benign
-    no-match — so Apollo doesn't retry it."""
+_REF_RE = re.compile(r"^[A-Za-z0-9-]{1,64}$")
+
+
+def _clean_ref(*candidates: str | None) -> str:
+    """The first syntactically valid correlation ref (uuid-ish), else ''. A garbage
+    ref is treated as no ref — the delivery then falls back to person-id matching."""
+    for c in candidates:
+        c = (c or "").strip()
+        if c and _REF_RE.match(c):
+            return c
+    return ""
+
+
+async def _handle_apollo_phone_webhook(request: Request, token: str | None, ref: str) -> dict:
     settings = get_settings()
     raw = (await request.body()).decode("utf-8", errors="replace")
     try:
@@ -429,8 +464,34 @@ async def apollo_phone_webhook(
     expected = (settings.apollo_webhook_token or "").strip()
     token_ok = not expected or hmac.compare_digest((token or "").encode(), expected.encode())
     result = await apollo_phone_service.process_webhook(
-        payload, ref=ref or "", token_ok=token_ok, remote_addr=_remote_addr(request), raw_body=raw,
+        payload, ref=ref, token_ok=token_ok, remote_addr=_remote_addr(request), raw_body=raw,
     )
     if not token_ok:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid webhook token")
     return result
+
+
+@webhook_router.post("/recruiter-finder/apollo-phone-webhook", status_code=status.HTTP_200_OK)
+async def apollo_phone_webhook(
+    request: Request,
+    token: str | None = Query(default=None, description="Shared webhook secret (APOLLO_WEBHOOK_TOKEN)."),
+    ref: str = Query(default="", description="Legacy: correlation ref as a query param."),
+) -> dict:
+    """Receive Apollo's asynchronous phone delivery (``{people: [{id, phone_numbers: […]}]}``).
+    Legacy form (ref in the query string) — kept for requests already in flight. Apollo
+    doesn't sign the webhook, so the request is authenticated by our own ``token`` in
+    the URL; a bad token is logged as a raw event (diagnostics) and rejected 401. Every
+    other delivery returns 200 — even a benign no-match — so Apollo doesn't retry it."""
+    return await _handle_apollo_phone_webhook(request, token, _clean_ref(ref))
+
+
+@webhook_router.post("/recruiter-finder/apollo-phone-webhook/{path_ref}", status_code=status.HTTP_200_OK)
+async def apollo_phone_webhook_with_ref(
+    path_ref: str,
+    request: Request,
+    token: str | None = Query(default=None, description="Shared webhook secret (APOLLO_WEBHOOK_TOKEN)."),
+    ref: str = Query(default="", description="Ignored when the path carries a ref."),
+) -> dict:
+    """Same delivery, with the correlation ref as a PATH segment (what ApolloClient now
+    sends — Apollo was observed to drop all but the first query param)."""
+    return await _handle_apollo_phone_webhook(request, token, _clean_ref(path_ref, ref))

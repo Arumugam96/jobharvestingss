@@ -875,6 +875,8 @@ async def _run_harvest_background_impl(
 
     # ── Schedule phone outreach insights email (24h after completion) ──────
     try:
+        import functools
+
         from app.services.phone_insights_service import send_phone_outreach_insights
         from app.core.tenant_context import get_current_tenant_id
         from app.main import app as _app
@@ -894,9 +896,15 @@ async def _run_harvest_background_impl(
             _run_id = run_id
             _src_label = sources_label
 
+            # functools.partial, NOT a lambda: APScheduler's asyncio executor awaits
+            # the job only when the callable itself is a coroutine function — a
+            # lambda returning a coroutine was never awaited (the email never went).
+            # Fast path only: the restart-safe interval sweep in app/main.py also
+            # sends it, and phone_insights_sent_at makes the two send exactly once.
             scheduler.schedule_one_shot(
                 job_id=insights_job_id,
-                job_fn=lambda: send_phone_outreach_insights(
+                job_fn=functools.partial(
+                    send_phone_outreach_insights,
                     run_id=_run_pk,
                     tenant_id=_tenant,
                     run_display_id=_run_id,

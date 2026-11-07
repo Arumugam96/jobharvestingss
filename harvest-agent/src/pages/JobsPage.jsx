@@ -204,10 +204,10 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
         </div>
         <div className="ha-pagehead-actions">
           {!library && (
-            <div ref={formatRef} style={{ position: "relative", display: "inline-flex", borderRadius: 8, overflow: "hidden", border: `1px solid ${C.primary}` }}>
+            <div ref={formatRef} style={{ position: "relative", display: "inline-flex", borderRadius: 8, border: `1px solid ${C.primary}` }}>
               <button
                 className="ha-btn ha-btn-primary"
-                style={{ border: "none", borderRadius: 0, borderRight: "1px solid rgba(255,255,255,.25)" }}
+                style={{ border: "none", borderRadius: "7px 0 0 7px", borderRight: "1px solid rgba(255,255,255,.25)" }}
                 onClick={doExport}
                 disabled={exporting}
               >
@@ -217,6 +217,7 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
                 style={{
                   display: "inline-flex", alignItems: "center", gap: 4,
                   background: C.primary, color: "#fff", border: "none",
+                  borderRadius: "0 7px 7px 0",
                   padding: "7px 12px", fontSize: 13, fontWeight: 500,
                   cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap",
                 }}

@@ -93,6 +93,11 @@ class HarvestRunORM(Base):
     apollo_usage: Mapped[dict | None] = mapped_column(
         JSON().with_variant(JSONB(), "postgresql"), nullable=True
     )
+    # When the 24h phone-outreach insights email went out — stamped by the periodic
+    # sweep (app/services/phone_insights_service.py) so it's sent exactly once.
+    phone_insights_sent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
