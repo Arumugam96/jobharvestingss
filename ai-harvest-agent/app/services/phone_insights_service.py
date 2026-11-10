@@ -114,7 +114,15 @@ async def compute_phone_outreach_insights(
     }
 
 
-def render_phone_insights_email_html(insights: dict[str, Any], run_label: str) -> str:
+def _src_badge(name: str) -> str:
+    """Reuse the shared source icon badge from harvest_notification_service."""
+    from app.services.harvest_notification_service import _src_badge as _shared_badge
+    return _shared_badge(name)
+
+
+def render_phone_insights_email_html(
+    insights: dict[str, Any], run_label: str, sources: list[str] | None = None,
+) -> str:
     """Render the phone outreach insights as an HTML email with inline CSS."""
     total = insights["total_phones"]
     called = insights["called"]
@@ -148,7 +156,7 @@ def render_phone_insights_email_html(insights: dict[str, Any], run_label: str) -
   <tr>
     <td style="background:linear-gradient(135deg,#1E40AF,#2563EB);padding:28px 32px 24px;text-align:center">
       <h1 style="margin:0;font-size:20px;font-weight:700;color:#ffffff;letter-spacing:-.01em">Phone Outreach Insights</h1>
-      <div style="display:inline-block;margin-top:10px;background:rgba(255,255,255,.15);color:#fff;font-size:11px;font-weight:600;padding:3px 12px;border-radius:12px;letter-spacing:.02em">{run_label}</div>
+      <div style="display:inline-block;margin-top:10px;background:rgba(255,255,255,.15);color:#fff;font-size:11px;font-weight:600;padding:3px 12px;border-radius:12px;letter-spacing:.02em;line-height:28px">{"".join(_src_badge(s) for s in (sources or [])) + " " if sources else ""}<span style="vertical-align:middle">{run_label}</span></div>
     </td>
   </tr>
   <!-- Overview -->
@@ -254,6 +262,7 @@ async def _release(run_id: str) -> None:
 
 async def send_phone_outreach_insights(
     run_id: str, tenant_id: str, run_display_id: str, sources_label: str,
+    sources: list[str] | None = None,
 ) -> bool:
     """Compute + send the phone outreach insights email for a completed harvest run,
     at most once per run (claims ``phone_insights_sent_at`` first). Returns True when
@@ -275,11 +284,14 @@ async def send_phone_outreach_insights(
             await _release(run_id)  # DB read failed — let the sweep retry
             return False
         if result["total_phones"] == 0:
-            logger.info("phone_insights_skip_no_phones", run_id=run_id)
+            logger.warning(
+                "phone_insights_skip_no_phones", run_id=run_id, tenant_id=tenant_id,
+                hint="Run has zero phone contacts — email permanently skipped",
+            )
             return False  # claim kept: nothing to report for this run, ever
 
-        run_label = f"{sources_label} · {run_display_id}"
-        html = render_phone_insights_email_html(result, run_label)
+        run_label = run_display_id
+        html = render_phone_insights_email_html(result, run_label, sources=sources)
 
         sender = EmailSender(settings)
         subject = (
@@ -291,19 +303,22 @@ async def send_phone_outreach_insights(
         from app.services.config_service import ConfigService
         config = ConfigService().load()
         recipients = (
-            config.notifications.email_recipients if config.notifications else []
+            config.notifications.recipients if config.notifications else []
         )
         if not recipients:
             recipients = [settings.outreach_auto_reply_to or settings.smtp_sender_mail]
 
         sender_identity = report_identity_from(settings, "JobHarvest Phone Insights")
 
+        from app.services.harvest_notification_service import collect_source_icon_attachments
+        icon_atts = collect_source_icon_attachments(html)
         await sender.send_email_with_attachments(
             recipients,
             subject,
             "Phone outreach insights are available — view the HTML version of this email.",
             html_body=html,
             sender_identity=sender_identity,
+            inline_attachments=icon_atts,
         )
         logger.info("phone_insights_sent", run_id=run_id, recipients=len(recipients))
         return True
@@ -339,7 +354,8 @@ async def send_due_phone_insights() -> int:
     for run in runs:
         label = " + ".join(run.sources or []) or "Harvest"
         if await send_phone_outreach_insights(
-            run_id=run.id, tenant_id=run.tenant_id, run_display_id=run.run_id, sources_label=label,
+            run_id=run.id, tenant_id=run.tenant_id, run_display_id=run.run_id,
+            sources_label=label, sources=run.sources,
         ):
             sent += 1
     if runs:

@@ -192,7 +192,7 @@ export default function NotificationBell({ repliesEnabled = true }) {
           const fu = t.type === "call_followup";
           const preview = fu ? t.remarks : t.preview;
           return (
-            <div key={t.key} className={"rb-toast" + (fu ? " fu" : "")} role="status">
+            <div key={t.key} className={"rb-toast" + (fu ? " fu" : "") + (!fu && t.is_auto_reply ? " auto" : "")} role="status">
               <span className="rb-toast-accent" />
               <button className="rb-toast-x" onClick={() => dismissToast(t.key)} aria-label="Dismiss"><X size={14} /></button>
               <div className="rb-toast-row">
@@ -200,7 +200,7 @@ export default function NotificationBell({ repliesEnabled = true }) {
                   {fu ? <PhoneCall size={16} strokeWidth={2.3} /> : <Reply size={17} strokeWidth={2.3} />}
                 </span>
                 <div style={{ minWidth: 0 }}>
-                  <div className="rb-toast-lab">{fu ? "Follow-up call due" : "New reply"}</div>
+                  <div className="rb-toast-lab">{fu ? "Follow-up call due" : (t.is_auto_reply ? "Auto-reply" : "New reply")}</div>
                   <div className="rb-toast-name">
                     {fu
                       ? `${t.contact_name || t.phone || "Contact"}${t.company ? ` · ${t.company}` : ""}`
@@ -251,14 +251,15 @@ export default function NotificationBell({ repliesEnabled = true }) {
                   );
                 }
                 const name = n.from_name || n.from_email || "Reply";
+                const isAuto = n.is_auto_reply;
                 return (
-                  <button key={n.key} className="rb-item" onClick={() => openItem(n)}>
-                    <span className="rb-av" style={{ background: avatarColor(name) }}>
+                  <button key={n.key} className={"rb-item" + (isAuto ? " rb-item-auto" : "")} onClick={() => openItem(n)}>
+                    <span className="rb-av" style={{ background: isAuto ? "#F3E8FF" : avatarColor(name), color: isAuto ? "#9333EA" : undefined }}>
                       {initials(n.from_name, n.from_email)}
-                      <span className="rb-dot" />
+                      <span className="rb-dot" style={isAuto ? { background: "#9333EA" } : undefined} />
                     </span>
                     <span className="rb-item-txt">
-                      <span className="rb-item-top"><b>{name}</b> replied</span>
+                      <span className="rb-item-top"><b>{name}</b> {isAuto ? "auto-replied" : "replied"}</span>
                       {n.preview && <span className="rb-item-prev">{n.preview}</span>}
                       <span className="rb-item-meta">{n.company ? `${n.company} · ` : ""}{fmtRel(n.received_at)}</span>
                     </span>
@@ -349,6 +350,13 @@ const CSS = `
 .rb-toast.fu .rb-toast-lab{ color:${FU}; }
 .rb-toast.fu .rb-btn-primary{ background:${FU}; }
 .rb-toast.fu .rb-btn-primary:hover{ background:#92400E; }
+
+.rb-toast.auto{ border-color:rgba(147,51,234,.28); box-shadow:0 22px 50px -16px rgba(15,23,42,.5), 0 0 0 4px rgba(147,51,234,.08); }
+.rb-toast.auto .rb-toast-accent{ background:#9333EA; }
+.rb-toast.auto .rb-toast-icon{ background:#F3E8FF; color:#9333EA; }
+.rb-toast.auto .rb-toast-lab{ color:#9333EA; }
+.rb-item-auto{ background:linear-gradient(90deg, rgba(147,51,234,.05), transparent 55%); }
+.rb-item-auto:hover{ background:#FAF5FF; }
 
 @media (prefers-reduced-motion: reduce){ .rb-bell{ transition:none; } .rb-toast{ animation:none; } }
 `;

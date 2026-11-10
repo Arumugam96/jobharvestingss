@@ -251,10 +251,10 @@ function UploadCard({ onFile, mode, setMode, manual, starting = false }) {
           onDrop={(e) => { e.preventDefault(); setDragging(false); const f = e.dataTransfer?.files?.[0]; if (f && !starting) onFile(f); }}
         >
           <span className="dm-drop-ic">{starting ? <Loader2 size={24} className="ha-spin" /> : <Upload size={24} />}</span>
-          <h4>{starting ? "Starting the search…" : "Drop an Excel or CSV file here"}</h4>
+          <h4>{starting ? "Starting the search…" : "Drop an Excel, CSV or Word file here"}</h4>
           <p>or <span className="u">browse your computer</span>. The file needs a <b>Job Title</b> and a <b>Job Description</b> column.</p>
         </button>
-        <input id={inputId} type="file" accept=".xlsx,.xls,.csv" style={{ display: "none" }}
+        <input id={inputId} type="file" accept=".xlsx,.xls,.csv,.docx" style={{ display: "none" }}
           onChange={(e) => { onFile(e.target.files?.[0]); e.target.value = ""; }} />
         <div className="dm-req">
           <div className="dm-req-row">
@@ -275,7 +275,7 @@ function UploadCard({ onFile, mode, setMode, manual, starting = false }) {
           <div className="dm-req-row">
             <span>Limits</span>
             <div className="dm-limits">
-              <span><b>.xlsx .xls .csv</b></span><span>up to <b>10 MB</b></span><span>up to <b>50 rows</b> per batch</span><span>JD of <b>50+ characters</b></span>
+              <span><b>.xlsx .xls .csv .docx</b></span><span>up to <b>10 MB</b></span><span>up to <b>50 rows</b> per batch</span><span>JD of <b>50+ characters</b></span>
             </div>
           </div>
           <Note icon={Info}>

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
-import { Download, ChevronDown, Wrench } from "lucide-react";
+import { Download, ChevronDown, Wrench, ArrowLeft } from "lucide-react";
 import { getJobs, getJobsFacets, ApiError, downloadJsonUrl, downloadExcelUrl } from "../api";
 import { C } from "../theme";
 import { Select, StatCard } from "../components/ui";
@@ -193,7 +193,33 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
     <main className="ha-main">
       <div className="ha-pagehead">
         <div className="ha-pagehead-titles">
-          <h1>{library ? "My Workspace" : demand ? "Demand Jobs" : "Harvested Jobs"}</h1>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            {!library && !demand && (
+              <button
+                className="ha-btn ha-btn-secondary"
+                style={{
+                  display: "inline-flex", alignItems: "center", gap: 6,
+                  height: 34, padding: "0 14px", borderRadius: 999,
+                  fontSize: 13, fontWeight: 600, color: C.primary,
+                  border: `1px solid ${C.primary}33`, background: `${C.primary}0A`,
+                  cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap",
+                }}
+                onClick={() => onNavigate("library")}
+              >
+                <Wrench size={14} /> My Workspace
+              </button>
+            )}
+            {library && (
+              <button
+                className="ha-btn ha-btn-secondary"
+                style={{ display: "inline-flex", alignItems: "center", gap: 6, height: 34, padding: "0 14px" }}
+                onClick={() => onNavigate("jobs")}
+              >
+                <ArrowLeft size={15} /> Back
+              </button>
+            )}
+            <h1>{library ? "My Workspace" : demand ? "Demand Jobs" : "Harvested Jobs"}</h1>
+          </div>
           <p className="ha-sub">
             {pageLoading && !facets ? "Loading…" : library
               ? `${stats.total || 0} assigned job${(stats.total || 0) === 1 ? "" : "s"} awaiting outreach`
@@ -260,11 +286,6 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
         {pageError && <div className="ha-errbanner">{pageError}</div>}
 
         <div className="ha-daterow">
-          {!demand && !library && (
-            <button className="ha-btn ha-btn-secondary" style={{ height: 34, boxSizing: "border-box" }} onClick={() => onNavigate("library")}>
-              <Wrench size={16} /> My Workspace
-            </button>
-          )}
           <span style={{ fontSize: 13, fontWeight: 600, color: C.text }}>Posted between</span>
           <input type="date" className="ha-input" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
           <span style={{ color: C.textSoft }}>to</span>

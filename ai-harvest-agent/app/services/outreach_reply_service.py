@@ -30,6 +30,19 @@ logger = structlog.get_logger(__name__)
 # All <angle-bracket> message-ids in a header value (In-Reply-To / References).
 _MSGID_RE = re.compile(r"<[^>]+>")
 _PREVIEW_LEN = 160
+_AUTO_REPLY_SUBJECT_PREFIXES = (
+    "automatic reply:",
+    "out of office:",
+    "out of office",
+    "auto:",
+    "autoreply:",
+    "auto-reply:",
+    "automatische antwort:",
+    "réponse automatique:",
+    "risposta automatica:",
+    "respuesta automática:",
+    "abwesenheitsnotiz:",
+)
 
 
 # ── Inbound payload parsing ──────────────────────────────────────────────────
@@ -137,6 +150,39 @@ def _body_text(item: dict) -> str:
     return ""
 
 
+def _detect_auto_reply(item: dict) -> bool:
+    """Detect if the inbound message is an auto-reply (Out-of-Office, delivery
+    notification, auto-responder, etc.) based on RFC 3834 headers, Microsoft-specific
+    headers, Precedence, and well-known subject prefixes."""
+    # RFC 3834 — the definitive signal: "auto-replied", "auto-generated", etc.
+    auto_sub = _header_value(item, "Auto-Submitted", "auto-submitted").lower()
+    if auto_sub and auto_sub != "no":
+        return True
+
+    # Microsoft Exchange / Outlook auto-response suppression header.
+    if _header_value(item, "X-Auto-Response-Suppress", "x-auto-response-suppress"):
+        return True
+
+    # Microsoft-specific OOF header.
+    if _header_value(
+        item, "X-MS-Exchange-Organization-AutoReply", "x-ms-exchange-organization-autoreply"
+    ):
+        return True
+
+    # Precedence: auto_reply / bulk / junk (common auto-responder convention).
+    prec = _header_value(item, "Precedence", "precedence").lower()
+    if prec in ("auto_reply", "bulk", "junk"):
+        return True
+
+    # Subject-line patterns used by major mail systems.
+    subject = str(item.get("Subject") or item.get("subject") or "").strip().lower()
+    for prefix in _AUTO_REPLY_SUBJECT_PREFIXES:
+        if subject.startswith(prefix):
+            return True
+
+    return False
+
+
 def reply_preview(body: str, limit: int = _PREVIEW_LEN) -> str:
     """One-line preview of a reply body for the notification/toast (collapsed
     whitespace, truncated with an ellipsis)."""
@@ -211,6 +257,8 @@ async def record_inbound_replies(
                 item.get("SentAtDate") or item.get("Date") or _header_value(item, "Date")
             )
 
+            is_auto = _detect_auto_reply(item)
+
             send = await _match_outreach(
                 db, in_reply_to=in_reply_to, references=references, from_email=from_email
             )
@@ -231,13 +279,15 @@ async def record_inbound_replies(
                 message_id=message_id,
                 in_reply_to=in_reply_to or references or None,
                 received_at=received_at,
+                is_auto_reply=is_auto,
                 raw=item,
             )
 
             if send is not None:
                 matched += 1
-                # Denormalized "has reply" flag the Mail-logs stat/badge reads without a join.
-                if send.replied_at is None or received_at > send.replied_at:
+                # Denormalized "has reply" flag — auto-replies (OOO etc.) don't
+                # count as a real prospect reply, so skip the stamp.
+                if not is_auto and (send.replied_at is None or received_at > send.replied_at):
                     send.replied_at = received_at
 
             db.add(reply)
@@ -327,6 +377,7 @@ def reply_to_dict(row: OutreachReplyORM) -> dict[str, Any]:
         "body_html": row.body_html,
         "status": "received",
         "is_read": row.is_read,
+        "is_auto_reply": row.is_auto_reply,
         "created_at": received.isoformat() if received else None,
         "received_at": row.received_at.isoformat() if row.received_at else None,
     }
@@ -385,6 +436,7 @@ def notification_dict(row: OutreachReplyORM) -> dict[str, Any]:
         "subject": row.subject,
         "preview": reply_preview(row.body),
         "is_read": row.is_read,
+        "is_auto_reply": row.is_auto_reply,
         "received_at": received.isoformat() if received else None,
     }
 

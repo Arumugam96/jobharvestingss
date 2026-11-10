@@ -1199,11 +1199,25 @@ async def get_run_history() -> Any:
     if source == "database":
         entries = [_run_to_history_entry(r) for r in runs] if runs else []
         # `runs` is capped at 50 by list_run_history; report the real count
-        # separately so the sidebar badge isn't stuck at the list's cap.
+        # and aggregate stats separately so the stat cards aren't stuck at
+        # the list's cap.
         total = await db_read(lambda db: HarvestRunService(db).count_run_history())
-        return {"total_runs": total if total is not None else len(entries), "runs": entries}
+        agg = await db_read(lambda db: HarvestRunService(db).aggregate_run_history_stats())
+        agg = agg or {}
+        return {
+            "total_runs": total if total is not None else len(entries),
+            "total_jobs": agg.get("total_jobs", 0),
+            "total_direct_clients": agg.get("total_direct_clients", 0),
+            "runs": entries,
+        }
 
-    return {"total_runs": len(runs), "runs": runs}
+    runs_list = runs or []
+    return {
+        "total_runs": len(runs_list),
+        "total_jobs": sum(r.get("jobs_found", 0) or 0 for r in runs_list),
+        "total_direct_clients": sum(r.get("direct_clients", 0) or 0 for r in runs_list),
+        "runs": runs_list,
+    }
 
 
 # Declared BEFORE /run-history/{run_id} so "contact-match" isn't captured as a run_id.

@@ -61,7 +61,7 @@ export function ValidationStep({ file, initial, onReplace, onCancel, onContinue 
   }, [file, initial]);
 
   const replaceInput = (
-    <input ref={replaceRef} type="file" accept=".xlsx,.xls,.csv" style={{ display: "none" }}
+    <input ref={replaceRef} type="file" accept=".xlsx,.xls,.csv,.docx" style={{ display: "none" }}
       onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) onReplace(f); }} />
   );
   const pickAnother = () => replaceRef.current?.click();
@@ -188,7 +188,7 @@ function FileErrorState({ file, err, onChoose }) {
         )}
         <div className="dm-state-acts">
           <button type="button" className="ha-btn ha-btn-primary ha-btn-sm" onClick={onChoose}><Upload size={13} /> Choose another file</button>
-          <span>Nothing was saved. Accepted: .xlsx, .xls, .csv · up to 10 MB · up to 50 rows</span>
+          <span>Nothing was saved. Accepted: .xlsx, .xls, .csv, .docx · up to 10 MB · up to 50 rows</span>
         </div>
       </div>
     </div>

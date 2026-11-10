@@ -36,7 +36,7 @@ MAX_FILE_BYTES = 10 * 1024 * 1024
 MAX_ROWS = 50
 MIN_JD_CHARS = 50
 PREVIEW_ROWS = 7
-ALLOWED_EXTENSIONS = (".xlsx", ".xls", ".csv")
+ALLOWED_EXTENSIONS = (".xlsx", ".xls", ".csv", ".docx")
 
 # Field → header synonyms in normalized form (lowercased, non-alphanumerics → one
 # space). Order is the matching priority.
@@ -146,6 +146,50 @@ def _fmt_size(n: int) -> str:
     return f"{max(1, round(n / 1024))} KB"
 
 
+def _read_docx_frame(content: bytes, filename: str):
+    """Extract the first table from a .docx Word document as a DataFrame.
+    The first row of the table is used as the header."""
+    import pandas as pd
+
+    try:
+        from docx import Document
+    except ImportError:
+        raise DemandFileError(
+            "unsupported_type", "Word documents are not supported on this server",
+            f"{filename} is a .docx file, but the python-docx library is not installed. "
+            "Save the document as .xlsx or .csv and upload it again.",
+        ) from None
+
+    try:
+        doc = Document(io.BytesIO(content))
+    except Exception as exc:
+        raise DemandFileError(
+            "unreadable", "The file could not be read",
+            f"{filename} could not be read as a Word document ({str(exc)[:200]}). "
+            "Save it again as .xlsx or .csv and upload it again.",
+        ) from exc
+
+    if not doc.tables:
+        raise DemandFileError(
+            "empty", "No table found in the document",
+            f"{filename} does not contain a table. The Word document needs a table with a "
+            "header row (Job Title, Job Description, …) and data rows. Alternatively, save "
+            "the data as .xlsx or .csv.",
+        )
+
+    table = doc.tables[0]
+    rows = [[cell.text.strip() for cell in row.cells] for row in table.rows]
+    if len(rows) < 2:
+        raise DemandFileError(
+            "empty", "No data rows in the table",
+            f"{filename} has a table but only a header row with no data. Add at least one "
+            "row with a Job Title and a Job Description.",
+        )
+    headers = rows[0]
+    data = rows[1:]
+    return pd.DataFrame(data, columns=headers, dtype=str), ""
+
+
 def _read_frame(content: bytes, filename: str):
     """(DataFrame, sheet name or "") — raises DemandFileError."""
     import pandas as pd  # lazy — heavy import
@@ -155,6 +199,8 @@ def _read_frame(content: bytes, filename: str):
     try:
         if name.endswith(".csv"):
             return pd.read_csv(buf, dtype=str, keep_default_na=False), ""
+        if name.endswith(".docx"):
+            return _read_docx_frame(content, filename)
         if name.endswith(".xls"):
             try:
                 import xlrd  # noqa: F401 — pandas' engine for legacy .xls
@@ -173,7 +219,7 @@ def _read_frame(content: bytes, filename: str):
         raise DemandFileError(
             "unreadable", "The file could not be read",
             f"{filename} could not be read ({str(exc)[:200]}). Save it again as .xlsx, "
-            ".xls or .csv and upload it again.",
+            ".xls, .csv or .docx and upload it again.",
         ) from exc
 
 
@@ -347,7 +393,7 @@ def parse_and_validate_rows(jobs: list[dict], source_label: str = MANUAL_SOURCE_
 
 
 def parse_and_validate(content: bytes, filename: str) -> dict:
-    """Parse an uploaded .xlsx/.xls/.csv of job requirements.
+    """Parse an uploaded .xlsx/.xls/.csv/.docx of job requirements.
 
     Returns {filename, size_bytes, size_label, sheet, total_rows, valid_rows,
     invalid: [{row, reason, fix}], mapping, headers_found, ignored_headers, rows
@@ -362,7 +408,7 @@ def parse_and_validate(content: bytes, filename: str) -> dict:
         ext = lower.rsplit(".", 1)[-1].upper() if "." in lower else "file without an extension"
         raise DemandFileError(
             "unsupported_type", "This file type is not supported",
-            f"{filename} is a {ext}. Save the sheet as .xlsx, .xls or .csv and upload it again.",
+            f"{filename} is a {ext}. Save the data as .xlsx, .xls, .csv or .docx and upload it again.",
             size_label=_fmt_size(size),
         )
     if size > MAX_FILE_BYTES:

@@ -59,6 +59,14 @@ function ReplyChip() {
   );
 }
 
+function AutoReplyChip() {
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, fontWeight: 700, color: "#9333EA", background: "#F3E8FF", borderRadius: 999, padding: "2px 9px 2px 7px" }}>
+      <Reply size={11} strokeWidth={2.6} /> Auto-reply
+    </span>
+  );
+}
+
 function FailedChip() {
   return (
     <span style={{ fontSize: 11, fontWeight: 700, color: "#B91C1C", background: "#FEF2F2", borderRadius: 999, padding: "2px 8px" }}>Failed</span>
@@ -147,7 +155,7 @@ export default function OutreachThread({
               marginLeft: inbound ? 22 : 0,
             }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
-                {inbound ? <ReplyChip /> : <KindChip kind={m.outreach_kind} />}
+                {inbound ? (m.is_auto_reply ? <AutoReplyChip /> : <ReplyChip />) : <KindChip kind={m.outreach_kind} />}
                 <ChannelChip channel={m.channel} />
                 {failed && <FailedChip />}
                 <span style={{ marginLeft: "auto", fontSize: 12, color: "#64748B" }}>{fmtDate(m.created_at)}</span>
@@ -192,7 +200,7 @@ export default function OutreachThread({
                 fontFamily: "inherit", cursor: forceCollapsed ? "default" : "pointer",
               }}
             >
-              {inbound ? <ReplyChip /> : <KindChip kind={m.outreach_kind} />}
+              {inbound ? (m.is_auto_reply ? <AutoReplyChip /> : <ReplyChip />) : <KindChip kind={m.outreach_kind} />}
               <ChannelChip channel={m.channel} />
               {failed && <FailedChip />}
               <span style={{ flex: 1, minWidth: 120, fontSize: 13, fontWeight: 600, color: "#1E293B", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>

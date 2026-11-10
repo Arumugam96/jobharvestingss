@@ -751,14 +751,28 @@ class _PagePool:
         self._sem     = asyncio.Semaphore(size)
         self._pages:  list[Page] = []
         self._lock    = asyncio.Lock()
+        self._crashed: set[Page] = set()
 
     async def _get_page(self) -> Page:
         async with self._lock:
-            if self._pages:
-                return self._pages.pop()
-            return await self._context.new_page()
+            while self._pages:
+                page = self._pages.pop()
+                if page in self._crashed or page.is_closed():
+                    self._crashed.discard(page)
+                    try:
+                        await page.close()
+                    except Exception:
+                        pass
+                    continue
+                return page
+            page = await self._context.new_page()
+            page.on("crash", lambda p=page: self._crashed.add(p))
+            return page
 
     def _return_page(self, page: Page) -> None:
+        if page in self._crashed or page.is_closed():
+            self._crashed.discard(page)
+            return
         self._pages.append(page)
 
     @asynccontextmanager
@@ -778,6 +792,7 @@ class _PagePool:
             except Exception:
                 pass
         self._pages.clear()
+        self._crashed.clear()
 
 
 # ══════════════════════════════════════════════════════════════════════════════

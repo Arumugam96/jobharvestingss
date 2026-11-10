@@ -174,11 +174,12 @@ function MyWorkspaceRoute() {
 }
 
 function HistoryRoute() {
-  const { runs, runsLoading, runsError, fetchRuns } = useHarvestData();
+  const { runs, runsTotal, runsAggStats, runsLoading, runsError, fetchRuns } = useHarvestData();
   const navigate = useNavigate();
   return (
     <RunHistoryPage
-      runs={runs} loading={runsLoading} error={runsError} onRefresh={fetchRuns}
+      runs={runs} runsTotal={runsTotal} runsAggStats={runsAggStats}
+      loading={runsLoading} error={runsError} onRefresh={fetchRuns}
       onNavigate={(key) => navigate(`/${key}`)}
       onView={(runId) => navigate(`/history/${encodeURIComponent(runId)}`)}
     />

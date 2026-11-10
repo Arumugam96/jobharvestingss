@@ -50,6 +50,9 @@ class OutreachReplyORM(Base):
     # Notification state (bell + toast) and whether the per-tenant email alarm fired.
     is_read: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false", index=True)
     forwarded: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    # True when the message is an auto-reply (Out-of-Office, delivery notification,
+    # etc.) — detected by RFC 3834 / Microsoft headers and subject patterns.
+    is_auto_reply: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     # When the prospect sent the reply (from the inbound payload), distinct from
     # created_at (our row-insert time).
     received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

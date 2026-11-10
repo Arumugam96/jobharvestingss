@@ -338,6 +338,23 @@ def _ensure_email_outreach_columns(sync_conn) -> None:
     ))
 
 
+def _ensure_outreach_replies_columns(sync_conn) -> None:
+    """One-time, idempotent ADD COLUMN backfill for the pre-existing outreach_replies
+    table. is_auto_reply tags auto-generated replies (OOO, delivery notifications)
+    so they don't count as real prospect replies."""
+    inspector = sa_inspect(sync_conn)
+    if "outreach_replies" not in inspector.get_table_names():
+        return
+    existing_cols = {c["name"] for c in inspector.get_columns("outreach_replies")}
+    pending = [
+        ("is_auto_reply", "ALTER TABLE outreach_replies ADD COLUMN is_auto_reply BOOLEAN NOT NULL DEFAULT FALSE"),
+    ]
+    for name, ddl in pending:
+        if name not in existing_cols:
+            sync_conn.execute(sa_text(ddl))
+            logger.info("outreach_replies_column_added", column=name)
+
+
 def _ensure_recruiter_finder_jobs_columns(sync_conn) -> None:
     """One-time, idempotent ADD COLUMN backfill for the pre-existing
     recruiter_finder_jobs table. `personas` stores the ordered, newline-joined
@@ -604,6 +621,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # email_outreach gained channel + follow-up threading (outreach_kind,
         # parent_outreach_id) + provider_message_id — same idempotent treatment.
         await conn.run_sync(_ensure_email_outreach_columns)
+        # outreach_replies gained is_auto_reply (OOO / auto-responder tagging).
+        await conn.run_sync(_ensure_outreach_replies_columns)
         # recruiter_finder_jobs gained personas (the ordered multi-select "Who to
         # look up" for a bulk upload) — same idempotent ADD COLUMN treatment.
         await conn.run_sync(_ensure_recruiter_finder_jobs_columns)
@@ -755,6 +774,21 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         )
     except Exception as exc:
         logger.warning("phone_insights_sweep_setup_failed", error=str(exc))
+
+    # Weekly harvest report — Fridays at 18:00 IST.
+    try:
+        from app.services.weekly_report_service import send_weekly_report
+        scheduler.schedule_cron_job(
+            job_id      = "weekly_harvest_report",
+            job_fn      = send_weekly_report,
+            day_of_week = "fri",
+            hour        = 18,
+            minute      = 0,
+            timezone    = "Asia/Kolkata",
+            name        = "Weekly harvest report (Fridays 18:00 IST)",
+        )
+    except Exception as exc:
+        logger.warning("weekly_report_setup_failed", error=str(exc))
 
     # Apollo's own credit counter, read every 15 min (free call) so the harvest report
     # can show true "credits today" (diff vs. the last reading before IST midnight).

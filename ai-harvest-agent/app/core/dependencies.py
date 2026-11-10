@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import AsyncGenerator
-
 import structlog
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -18,6 +17,7 @@ from app.models.tenant import INTERNAL_TENANT_ID, SEED_TENANTS
 from app.services.email_service import EmailSender
 from app.services.llm_service import LLMService
 from app.services.playwright_service import PlaywrightService
+from app.services.apollo_client import ApolloClient
 
 logger = structlog.get_logger(__name__)
 
@@ -25,35 +25,6 @@ logger = structlog.get_logger(__name__)
 # (internal, client_us, client_in). Static set — no per-request DB hit; anything
 # else falls back to internal.
 _DEV_TENANT_IDS = {t["id"] for t in SEED_TENANTS}
-
-# ── Database ────────────────────────────────────────────────────────────────────
-_PROJECT_ROOT = Path(__file__).resolve().parents[2]
-_SQLITE_PREFIX = "sqlite+aiosqlite:///"
-
-
-def _resolve_sqlite_url(url: str) -> str:
-    if not url.startswith(_SQLITE_PREFIX):
-        return url
-    raw_path = url[len(_SQLITE_PREFIX):]
-    path = Path(raw_path)
-    if path.is_absolute():
-        return url
-    return _SQLITE_PREFIX + (_PROJECT_ROOT / path).resolve().as_posix()
-
-
-def _build_engine(settings: Settings):
-    # SQLite's async dialect (aiosqlite) uses NullPool and rejects pool_size /
-    # max_overflow entirely — those only apply to pooled dialects (Postgres, MySQL).
-    if settings.database_url.startswith("sqlite"):
-        return create_async_engine(_resolve_sqlite_url(settings.database_url), echo=settings.db_echo)
-    return create_async_engine(
-        settings.database_url,
-        pool_size=settings.db_pool_size,
-        max_overflow=settings.db_max_overflow,
-        echo=settings.db_echo,
-    )
-
-
 _engine = None
 _session_factory = None
 
@@ -61,14 +32,22 @@ _session_factory = None
 def get_engine(settings: Settings = Depends(get_settings)):
     global _engine
     if _engine is None:
-        _engine = _build_engine(settings)
+        _engine = create_async_engine(
+            settings.database_url,
+            pool_size=settings.db_pool_size,
+            max_overflow=settings.db_max_overflow,
+            pool_timeout=settings.db_pool_timeout,
+            pool_recycle=settings.db_pool_recycle,
+            pool_pre_ping=True,
+            echo=settings.db_echo,
+        )
     return _engine
 
 
 def get_session_factory(settings: Settings = Depends(get_settings)):
     global _session_factory
     if _session_factory is None:
-        engine = _build_engine(settings)
+        engine = get_engine(settings)
         _session_factory = async_sessionmaker(engine, expire_on_commit=False)
     return _session_factory
 
@@ -112,10 +91,9 @@ def get_email_sender(settings: Settings = Depends(get_settings)) -> EmailSender:
 # ── Apollo.io contact-enrichment client ──────────────────────────────────────────
 
 
-def get_apollo_client(settings: Settings = Depends(get_settings)) -> "ApolloClient":
+def get_apollo_client(settings: Settings = Depends(get_settings)) -> ApolloClient:
     """FastAPI factory for the Apollo client (agents instantiate it directly;
     this exists for any future route that needs Apollo)."""
-    from app.services.apollo_client import ApolloClient
     return ApolloClient(settings)
 
 

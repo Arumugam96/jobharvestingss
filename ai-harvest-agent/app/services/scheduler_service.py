@@ -195,6 +195,40 @@ class SchedulerService:
         )
         logger.info("interval_job_registered", job_id=job_id, interval_seconds=seconds)
 
+    def schedule_cron_job(
+        self,
+        job_id: str,
+        job_fn: Callable[[], Coroutine[Any, Any, Any]],
+        *,
+        day_of_week: str = "fri",
+        hour: int = 18,
+        minute: int = 0,
+        timezone: str = "Asia/Kolkata",
+        name: str = "",
+    ) -> None:
+        """Register (or replace) a cron-triggered job (e.g. weekly Friday report)."""
+        tz = _TZ_MAP.get(timezone.upper(), timezone)
+        trigger = CronTrigger(
+            day_of_week=day_of_week, hour=hour, minute=minute, timezone=tz,
+        )
+        self._scheduler.add_job(
+            func=job_fn,
+            trigger=trigger,
+            id=job_id,
+            name=name or job_id,
+            replace_existing=True,
+            misfire_grace_time=3600,
+            coalesce=True,
+            max_instances=1,
+        )
+        next_job = self._scheduler.get_job(job_id)
+        next_str = str(next_job.next_run_time) if next_job else "unknown"
+        logger.info(
+            "cron_job_registered", job_id=job_id,
+            day_of_week=day_of_week, hour=hour, minute=minute,
+            timezone=tz, next_run=next_str,
+        )
+
     def schedule_one_shot(
         self,
         job_id: str,

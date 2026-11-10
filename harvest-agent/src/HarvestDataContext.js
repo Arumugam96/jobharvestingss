@@ -40,6 +40,8 @@ export function HarvestDataProvider({ children }) {
   // Real run count for the Sidebar badge — `runs` is capped at 50 by the
   // backend, so its length can't back the badge (it would stick at 50).
   const [runsTotal, setRunsTotal] = useState(0);
+  // Aggregate stats across ALL runs (uncapped) for the Run History stat cards.
+  const [runsAggStats, setRunsAggStats] = useState({ totalJobs: 0, totalDirectClients: 0 });
   const [runsLoading, setRunsLoading] = useState(true);
   const [runsError, setRunsError] = useState("");
 
@@ -64,6 +66,10 @@ export function HarvestDataProvider({ children }) {
       // total_runs is the uncapped count; fall back to the (capped) list length
       // if an older backend didn't send it.
       setRunsTotal(res.total_runs ?? (res.runs || []).length);
+      setRunsAggStats({
+        totalJobs: res.total_jobs ?? 0,
+        totalDirectClients: res.total_direct_clients ?? 0,
+      });
     } catch (err) {
       setRunsError(
         err instanceof ApiError
@@ -112,13 +118,13 @@ export function HarvestDataProvider({ children }) {
 
   const ctx = useMemo(() => ({
     jobsTotal, fetchJobs,
-    runs, runsTotal, runsLoading, runsError, fetchRuns,
+    runs, runsTotal, runsAggStats, runsLoading, runsError, fetchRuns,
     refreshAll, harvestRunning, setHarvestRunning,
     pageSizeSel, setPageSizeSel,
     jobsViewRef, runHistoryViewRef,   // stable refs — a persistent view cache
   }), [
     jobsTotal, fetchJobs,
-    runs, runsTotal, runsLoading, runsError, fetchRuns,
+    runs, runsTotal, runsAggStats, runsLoading, runsError, fetchRuns,
     refreshAll, harvestRunning, pageSizeSel,
   ]);
 

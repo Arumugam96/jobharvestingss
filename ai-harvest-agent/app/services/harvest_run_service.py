@@ -9,6 +9,7 @@ what the frontend-facing GET endpoints read from.
 """
 from __future__ import annotations
 
+import asyncio
 import math
 import re
 import uuid
@@ -269,6 +270,10 @@ async def resolve_read(
     return json_fn(), "json"
 
 
+_DB_WRITE_TIMEOUT = 30.0
+_DB_READ_TIMEOUT = 15.0
+
+
 async def db_write(coro_fn: Callable[[AsyncSession], Awaitable[_T]]) -> _T | None:
     """Best-effort DB mirror for the harvest workflow.
 
@@ -281,11 +286,15 @@ async def db_write(coro_fn: Callable[[AsyncSession], Awaitable[_T]]) -> _T | Non
     try:
         session_factory = get_session_factory(get_settings())
         async with session_factory() as db:
-            await bind_session_tenant(db)  # RLS scope for this write session (Postgres)
+            await bind_session_tenant(db)
             try:
-                result = await coro_fn(db)
+                result = await asyncio.wait_for(coro_fn(db), timeout=_DB_WRITE_TIMEOUT)
                 await db.commit()
                 return result
+            except asyncio.TimeoutError:
+                await db.rollback()
+                logger.warning("harvest_db_write_timeout", timeout=_DB_WRITE_TIMEOUT)
+                return None
             except Exception:
                 await db.rollback()
                 raise
@@ -301,8 +310,11 @@ async def db_read(coro_fn: Callable[[AsyncSession], Awaitable[_T]]) -> _T | None
     try:
         session_factory = get_session_factory(get_settings())
         async with session_factory() as db:
-            await bind_session_tenant(db)  # RLS scope for this read session (Postgres)
-            return await coro_fn(db)
+            await bind_session_tenant(db)
+            return await asyncio.wait_for(coro_fn(db), timeout=_DB_READ_TIMEOUT)
+    except asyncio.TimeoutError:
+        logger.warning("harvest_db_read_timeout", timeout=_DB_READ_TIMEOUT)
+        return None
     except Exception as exc:
         logger.warning("harvest_db_read_failed", error=str(exc))
         return None
@@ -720,6 +732,25 @@ class HarvestRunService:
         )
         stmt = apply_tenant(stmt, HarvestRunORM.tenant_id)
         return (await self._db.execute(stmt)).scalar_one()
+
+    async def aggregate_run_history_stats(self) -> dict[str, int]:
+        """Aggregate stats across ALL run-history entries (same scope as
+        list_run_history / count_run_history) — uncapped sums for the stat
+        cards so they reflect the whole dataset, not just the 50-row page."""
+        scope = or_(
+            HarvestRunORM.source.is_(None),
+            HarvestRunORM.source == "LinkedIn Feed",
+        )
+        stmt = select(
+            func.coalesce(func.sum(HarvestRunORM.combined_count), 0).label("total_jobs"),
+            func.coalesce(func.sum(HarvestRunORM.direct_clients), 0).label("total_direct_clients"),
+        ).where(scope)
+        stmt = apply_tenant(stmt, HarvestRunORM.tenant_id)
+        row = (await self._db.execute(stmt)).one()
+        return {
+            "total_jobs": int(row.total_jobs or 0),
+            "total_direct_clients": int(row.total_direct_clients or 0),
+        }
 
     async def list_run_ids_matching_contact(self, contact: list[str]) -> list[str]:
         """Display run_ids (HarvestRunORM.run_id) of runs holding ≥1 scraped job

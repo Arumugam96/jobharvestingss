@@ -150,6 +150,11 @@ def _to_item(raw_bytes: bytes) -> dict[str, Any]:
         "Date": (msg.get("Date") or "").strip(),
         "RawTextBody": text,
         "RawHtmlBody": html,
+        # Auto-reply detection headers (RFC 3834 + Microsoft).
+        "Auto-Submitted": (msg.get("Auto-Submitted") or "").strip(),
+        "X-Auto-Response-Suppress": (msg.get("X-Auto-Response-Suppress") or "").strip(),
+        "X-MS-Exchange-Organization-AutoReply": (msg.get("X-MS-Exchange-Organization-AutoReply") or "").strip(),
+        "Precedence": (msg.get("Precedence") or "").strip(),
     }
 
 

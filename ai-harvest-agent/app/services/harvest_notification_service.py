@@ -250,6 +250,83 @@ def _kv_row(label: str, value: str, label_width: int = 170) -> str:
     )
 
 
+_SRC_SLUGS = {
+    "LinkedIn": "linkedin", "Naukri": "naukri", "Dice": "dice",
+    "LinkedIn Feed": "linkedin-feed",
+}
+_SRC_COLORS = {
+    "LinkedIn": "#0a66c2", "Naukri": "#6366f1", "Dice": "#ef4444",
+    "LinkedIn Feed": "#6D28D9",
+}
+_SRC_ALT = {"LinkedIn": "in", "Naukri": "N", "Dice": "D", "LinkedIn Feed": "LF"}
+
+
+def _src_badge(name: str) -> str:
+    """Source icon badge for email — renders a CID-embedded <img> logo with a
+    coloured-cell fallback (alt text + bgcolor shown when images are blocked).
+    The actual icon bytes are attached by ``collect_source_icon_attachments``."""
+    color = _SRC_COLORS.get(name, _MUTED)
+    alt = _SRC_ALT.get(name, name[:1])
+    slug = _SRC_SLUGS.get(name)
+    img = (
+        f'<img src="cid:src-{slug}" alt="{_esc(alt)}" width="28" height="28"'
+        f' style="display:block;border:0;border-radius:5px;" />'
+    ) if slug else _esc(alt)
+    return (
+        f'<table {_TABLE} style="border-collapse:collapse;display:inline-table;">'
+        f'<tr>'
+        f'<td bgcolor="{color}" style="background-color:{color};width:28px;height:28px;'
+        f'font-size:12px;font-weight:800;color:#ffffff;text-align:center;line-height:28px;'
+        f'border-radius:5px;" width="28" height="28" align="center" valign="middle">'
+        f'{img}</td>'
+        f'<td style="padding:0 0 0 6px;font-size:12px;font-weight:700;color:#1a1d26;'
+        f'white-space:nowrap;" valign="middle">{_esc(name)}</td>'
+        f'</tr></table>'
+    )
+
+
+def collect_source_icon_attachments(html: str) -> list[dict]:
+    """Scan rendered HTML for ``cid:src-*`` references and return an
+    ``InlinedAttachments``-shaped list (Mailjet dict format) with the icon bytes
+    base64-encoded. Supports PNG, SVG, and JPEG icon files. The actual content
+    type is detected from the file's magic bytes — not the extension — so a PNG
+    renamed to .svg still works correctly."""
+    import base64 as b64
+    import re
+    from pathlib import Path
+
+    icons_dir = Path(__file__).resolve().parent.parent.parent / "data" / "static" / "email-icons"
+    cids = set(re.findall(r'cid:src-([\w-]+)', html))
+    attachments: list[dict] = []
+    for slug in sorted(cids):
+        # Try common extensions
+        path = None
+        for ext in ("png", "svg", "jpg", "jpeg"):
+            candidate = icons_dir / f"{slug}.{ext}"
+            if candidate.is_file():
+                path = candidate
+                break
+        if path is None:
+            continue
+        data = path.read_bytes()
+        # Detect actual content type from magic bytes, not extension
+        if data[:8].startswith(b'\x89PNG\r\n\x1a\n'):
+            ctype, fname = "image/png", f"{slug}.png"
+        elif data[:2] in (b'\xff\xd8',):
+            ctype, fname = "image/jpeg", f"{slug}.jpg"
+        elif b'<svg' in data[:512]:
+            ctype, fname = "image/svg+xml", f"{slug}.svg"
+        else:
+            ctype, fname = "image/png", path.name
+        attachments.append({
+            "ContentType": ctype,
+            "Filename": fname,
+            "ContentID": f"src-{slug}",
+            "Base64Content": b64.b64encode(data).decode("ascii"),
+        })
+    return attachments
+
+
 def _split_pair(label: str, value: str, label_style: str, value_style: str) -> str:
     """Label left / value right, as a 2-cell table (replaces flex space-between)."""
     return _table(
@@ -360,7 +437,7 @@ def _render_body_html(
         f'<div style="font-size:24px;font-weight:800;margin:0;">Harvest Run Report</div>'
         + _table(
             "<tr>"
-            + _cell(f"{_esc(run_date)} &middot; {src_str}",
+            + _cell(f"{_esc(run_date)} &middot; {''.join(_src_badge(s) for s in sources)} ",
                     f"padding:4px 0 0;font-size:13px;color:{_MUTED};", 'valign="middle"')
             + _cell(badge, "padding:4px 0 0;", 'width="110" align="right" valign="middle"')
             + "</tr>"
@@ -664,9 +741,10 @@ async def send_harvest_report(
         log.info(
             "harvest_report_email_sending", recipients=recipients, attachments=len(attachments),
         )
+        icon_atts = collect_source_icon_attachments(html_body) if html_body else []
         await email_sender.send_email_with_attachments(
             recipients, subject, body, attachment_blobs=attachments, html_body=html_body,
-            sender_identity=sender_identity,
+            sender_identity=sender_identity, inline_attachments=icon_atts,
         )
         log.info(
             "harvest_report_email_sent",

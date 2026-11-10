@@ -144,6 +144,11 @@ def _to_item(msg: dict[str, Any]) -> dict[str, Any]:
         "Date": (msg.get("receivedDateTime") or "").strip(),
         "RawTextBody": "" if is_html else content,
         "RawHtmlBody": content if is_html else "",
+        # Auto-reply detection headers (RFC 3834 + Microsoft).
+        "Auto-Submitted": _header(headers, "Auto-Submitted"),
+        "X-Auto-Response-Suppress": _header(headers, "X-Auto-Response-Suppress"),
+        "X-MS-Exchange-Organization-AutoReply": _header(headers, "X-MS-Exchange-Organization-AutoReply"),
+        "Precedence": _header(headers, "Precedence"),
     }
 
 

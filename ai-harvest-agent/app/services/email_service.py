@@ -754,6 +754,7 @@ class EmailSender:
         candidate_block: str = "",
         candidate_html: str = "",
         sender_identity: dict | None = None,
+        inline_attachments: list[dict] | None = None,
     ) -> str | None:
         """Generic Mailjet send with attachments — same transport/credentials as
         send_otp. Attachments come as file paths and/or as in-memory
@@ -895,6 +896,10 @@ class EmailSender:
                     "ContentID": LOGO_CID,
                     "Base64Content": base64.b64encode(logo_bytes).decode("ascii"),
                 })
+
+        # Caller-supplied inline (CID) images — source icons in report emails.
+        if inline_attachments:
+            message.setdefault("InlinedAttachments", []).extend(inline_attachments)
 
         attachments = _build_attachments(paths, blobs, log)
         if attachments:

@@ -11,7 +11,7 @@ import { useHarvestData } from "../HarvestDataContext";
 import { useTenant } from "../TenantContext";
 
 /* ── Run History page ────────────────────────────────────────────────── */
-export default function RunHistoryPage({ runs, loading, error, onRefresh, onNavigate, onView }) {
+export default function RunHistoryPage({ runs, runsTotal, runsAggStats, loading, error, onRefresh, onNavigate, onView }) {
   // Tenants without the rules feature (e.g. the India client) shouldn't see the
   // Rule Engine shortcut — FeatureGate would bounce the navigation anyway.
   const { hasFeature } = useTenant();
@@ -56,10 +56,10 @@ export default function RunHistoryPage({ runs, loading, error, onRefresh, onNavi
   }, [contactKey, runs.length]);
 
   const counts = useMemo(() => ({
-    totalRuns: runs.length,
-    totalJobs: runs.reduce((sum, r) => sum + r.jobsFound, 0),
-    directClients: runs.reduce((sum, r) => sum + r.directClients, 0),
-  }), [runs]);
+    totalRuns: runsTotal ?? runs.length,
+    totalJobs: runsAggStats?.totalJobs ?? runs.reduce((sum, r) => sum + r.jobsFound, 0),
+    directClients: runsAggStats?.totalDirectClients ?? runs.reduce((sum, r) => sum + r.directClients, 0),
+  }), [runs, runsTotal, runsAggStats]);
 
   const filtered = useMemo(() => {
     let rows = runs.filter((r) => {

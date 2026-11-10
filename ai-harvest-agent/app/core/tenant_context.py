@@ -49,18 +49,11 @@ def apply_tenant(stmt, tenant_column):
     return stmt.where(tenant_column == tid)
 
 
-def _is_postgres() -> bool:
-    from app.config import get_settings
-
-    return "postgresql" in (get_settings().database_url or "")
-
 
 async def bind_session_tenant(db) -> None:
     """Best-effort: bind Postgres `app.tenant_id` on this session's transaction so
     RLS scopes every subsequent query. `set_config(..., is_local => true)` is the
     parameterised form (SET LOCAL takes no bind params). No-op on non-Postgres."""
-    if not _is_postgres():
-        return
     from sqlalchemy import text as _text
 
     try:

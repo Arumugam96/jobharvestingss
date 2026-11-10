@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import HTTPException, status
-from sqlalchemy import func, or_, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.tenant_context import apply_tenant
@@ -26,7 +26,7 @@ NOTE_MAX_LEN = 1000
 
 
 def display_name_from_email(email: str) -> str:
-    """"josphine.swetha@sightspectrum.com" -> "Josphine Swetha"."""
+    """"Get's the name of the user using their email"."""
     local = (email or "").split("@", 1)[0]
     words = [w for w in local.replace("_", ".").replace("-", ".").split(".") if w]
     return " ".join(w.capitalize() for w in words) or email
@@ -71,8 +71,6 @@ async def assign_job(db: AsyncSession, job_id: str, user: AuthenticatedUser, not
 
     A single conditional UPDATE, so two users clicking at once can't both win:
     it only matches while the job is unassigned or already the caller's."""
-    from app.services.harvest_run_service import HarvestRunService  # avoid import cycle
-
     note = (note or "").strip()[:NOTE_MAX_LEN]
     stmt = apply_tenant(
         update(ScrapedJobORM)
@@ -93,7 +91,8 @@ async def assign_job(db: AsyncSession, job_id: str, user: AuthenticatedUser, not
     )
     result = await db.execute(stmt)
 
-    job = await HarvestRunService(db).get_scraped_job_by_id(job_id)
+    row = await db.execute(select(ScrapedJobORM).where(ScrapedJobORM.id == job_id))
+    job = row.scalar_one_or_none()
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Job {job_id} not found")
     if result.rowcount == 0:
@@ -109,9 +108,8 @@ async def assign_job(db: AsyncSession, job_id: str, user: AuthenticatedUser, not
 
 async def unassign_job(db: AsyncSession, job_id: str, user: AuthenticatedUser) -> ScrapedJobORM:
     """Release `job_id`. Only the current assignee may do this."""
-    from app.services.harvest_run_service import HarvestRunService  # avoid import cycle
-
-    job = await HarvestRunService(db).get_scraped_job_by_id(job_id)
+    row = await db.execute(select(ScrapedJobORM).where(ScrapedJobORM.id == job_id))
+    job = row.scalar_one_or_none()
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Job {job_id} not found")
     if not job.assigned_to_email:
