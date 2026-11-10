@@ -166,6 +166,14 @@ export default function RunDetailView({ runId, onBack, onView }) {
                           </div>
                         )}
                       </div>
+                      {entry.runType !== "feed" && (
+                        <div>
+                          <div style={{ fontSize: 11, color: C.textSoft, fontWeight: 600, letterSpacing: ".05em", textTransform: "uppercase" }}>Phone Insights</div>
+                          <div style={{ fontSize: 14, fontWeight: 600, marginTop: 3, color: entry.phoneInsightsSentAt ? "#059669" : C.textSoft }}>
+                            {entry.phoneInsightsSentAt ? `Sent ${fmtDate(entry.phoneInsightsSentAt)}` : entry.completedAt ? "Pending (24h after run)" : "—"}
+                          </div>
+                        </div>
+                      )}
                     </div>
                   </div>
                   <div className="ha-runhead-right">

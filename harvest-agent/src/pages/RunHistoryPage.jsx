@@ -209,6 +209,9 @@ export default function RunHistoryPage({ runs, runsTotal, runsAggStats, loading,
                           <span><b>{r.gcc}</b> GCC</span>
                           <span><b>{r.staffingFirms}</b> SF</span>
                           <span><b>{r.ambiguous}</b> Amb</span>
+                          {r.phoneInsightsSentAt && (
+                            <span title={`Phone insights sent ${fmtDate(r.phoneInsightsSentAt)}`} style={{ color: "#059669", fontSize: 13 }}>&#x260E;</span>
+                          )}
                         </div>
                       )}
                     </td>

@@ -294,6 +294,7 @@ export function mapRun(entry) {
     gcc: entry.gcc ?? 0,
     staffingFirms: entry.staffing_firms ?? 0,
     ambiguous: entry.ambiguous ?? 0,
+    phoneInsightsSentAt: entry.phone_insights_sent_at || null,
   };
 }
 

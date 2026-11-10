@@ -204,6 +204,10 @@ def _run_to_history_entry(run: HarvestRunORM) -> dict[str, Any]:
             if getattr(run, "scrape_completed_at", None) else ""
         ),
         "phase_timings":  getattr(run, "phase_timings", None) or {},
+        "phone_insights_sent_at": (
+            run.phone_insights_sent_at.isoformat()
+            if getattr(run, "phone_insights_sent_at", None) else None
+        ),
     }
 
 

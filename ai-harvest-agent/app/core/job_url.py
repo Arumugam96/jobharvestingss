@@ -28,7 +28,13 @@ _LEGAL_SUFFIXES = re.compile(
 _PUNCT = re.compile(r"[^\w\s]")
 _NON_WORD = re.compile(r"[\W_]+")
 _WS = re.compile(r"\s+")
-
+# Old/alternate city spellings seen across LinkedIn and Naukri → one canonical name.
+_CITY_ALIASES = {
+    "bangalore": "bengaluru", "gurgaon": "gurugram", "bombay": "mumbai",
+    "madras": "chennai", "calcutta": "kolkata", "new delhi": "delhi",
+    "trivandrum": "thiruvananthapuram", "cochin": "kochi", "mysore": "mysuru",
+}
+_PARENS = re.compile(r"\([^)]*\)")
 
 def normalize_job_url(url: str | None) -> str:
     """Canonical dedup key for a job posting URL, or "" for a blank/missing url.
@@ -53,15 +59,6 @@ def normalize_company_key(company_name: str) -> str:
 def normalize_title_key(title: str | None) -> str:
     """Lower-cased job title with every non-word run collapsed to one space."""
     return _NON_WORD.sub(" ", (title or "").lower()).strip()
-
-
-# Old/alternate city spellings seen across LinkedIn and Naukri → one canonical name.
-_CITY_ALIASES = {
-    "bangalore": "bengaluru", "gurgaon": "gurugram", "bombay": "mumbai",
-    "madras": "chennai", "calcutta": "kolkata", "new delhi": "delhi",
-    "trivandrum": "thiruvananthapuram", "cochin": "kochi", "mysore": "mysuru",
-}
-_PARENS = re.compile(r"\([^)]*\)")
 
 
 def normalize_city_key(location: str | None) -> str:
