@@ -269,7 +269,7 @@ def _src_badge(name: str) -> str:
     alt = _SRC_ALT.get(name, name[:1])
     slug = _SRC_SLUGS.get(name)
     img = (
-        f'<img src="cid:src-{slug}" alt="{_esc(alt)}" width="28" height="28"'
+        f'<img src="cid:src-{slug}" alt="{_esc(alt)}" width="18" height="18"'
         f' style="display:block;border:0;border-radius:5px;" />'
     ) if slug else _esc(alt)
     return (

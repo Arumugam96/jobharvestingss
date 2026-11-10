@@ -93,11 +93,16 @@ async def compute_phone_outreach_insights(
     sources = []
     for key, label, call_sources in _SOURCE_ROWS:
         count = per_source[key]
-        called_count = sum(1 for c in latest if (c.phone_source or "") in call_sources)
+        src_calls = [c for c in latest if (c.phone_source or "") in call_sources]
+        called_count = len(src_calls)
+        ans = sum(1 for c in src_calls if c.call_status == "answered")
+        unans = sum(1 for c in src_calls if c.call_status == "unanswered")
         sources.append({
             "label": label,
             "count": count,
             "called": called_count,
+            "answered": ans,
+            "unanswered": unans,
             "coverage": round(called_count / count * 100, 1) if count > 0 else 0,
         })
 
@@ -120,10 +125,43 @@ def _src_badge(name: str) -> str:
     return _shared_badge(name)
 
 
+def _funnel_seg(color: str, count: int, total: int, label: str) -> str:
+    """One segment of the outreach funnel bar (email-safe table cell)."""
+    if total == 0 or count == 0:
+        return ""
+    pct = round(count * 100 / total, 1)
+    width_pct = max(pct, 8)  # min 8% so label is readable
+    return (
+        f'<td bgcolor="{color}" width="{width_pct}%" '
+        f'style="background-color:{color};height:32px;color:#ffffff;'
+        f'font-size:12px;font-weight:700;text-align:center;line-height:32px;'
+        f'white-space:nowrap;" align="center" valign="middle">'
+        f'{count}</td>'
+    )
+
+
+def _legend_dot(color: str, label: str) -> str:
+    """Funnel legend item — coloured square + text, email-safe inline-table."""
+    return (
+        f'<table cellpadding="0" cellspacing="0" border="0" '
+        f'style="display:inline-table;border-collapse:collapse;"><tr>'
+        f'<td style="width:10px;height:10px;background-color:{color};'
+        f'border-radius:2px;" width="10" height="10">&nbsp;</td>'
+        f'<td style="padding:0 0 0 5px;font-size:12px;color:#64748B;'
+        f'white-space:nowrap;">{label}</td>'
+        f'</tr></table>'
+    )
+
+
 def render_phone_insights_email_html(
     insights: dict[str, Any], run_label: str, sources: list[str] | None = None,
 ) -> str:
-    """Render the phone outreach insights as an HTML email with inline CSS."""
+    """Render the phone outreach insights as an HTML email with inline CSS.
+
+    Design: 5 KPI cards, outreach funnel bar, expanded source coverage table
+    with Answered / Not Answered columns. All table-based + inline CSS for
+    Outlook / Gmail compatibility.
+    """
     total = insights["total_phones"]
     called = insights["called"]
     not_called = insights["not_called"]
@@ -131,93 +169,141 @@ def render_phone_insights_email_html(
     unanswered = insights["unanswered"]
     called_pct = insights["called_pct"]
     not_called_pct = insights["not_called_pct"]
-    sources = insights["sources"]
+    source_rows_data = insights["sources"]
 
-    # Build source rows HTML
+    ans_of_out = round(answered * 100 / called, 1) if called else 0
+    unans_of_out = round(unanswered * 100 / called, 1) if called else 0
+
+    # ── KPI card helper ─────────────────────────────────────────────────
+    def _kpi(value, label: str, color: str, sub: str = "") -> str:
+        sub_html = (
+            f'<div style="font-size:12px;font-weight:600;color:{color};'
+            f'margin-top:3px">{sub}</div>' if sub else ""
+        )
+        return (
+            f'<div style="background:#F8FAFC;border:1px solid #E2E8F0;'
+            f'border-radius:10px;padding:14px 10px;text-align:center">'
+            f'<div style="font-size:30px;font-weight:700;color:{color};'
+            f'line-height:1.1">{value}</div>'
+            f'<div style="font-size:11px;color:#64748B;margin-top:5px;'
+            f'line-height:1.3">{label}</div>{sub_html}</div>'
+        )
+
+    # ── Source rows ─────────────────────────────────────────────────────
+    _TH = (
+        'style="text-align:{align};font-size:11px;font-weight:600;'
+        'letter-spacing:.05em;text-transform:uppercase;color:#64748B;'
+        'padding:10px 10px;border-bottom:1px solid #E2E8F0"'
+    )
+    _TD = (
+        'style="padding:10px 10px;border-bottom:1px solid #E2E8F0;'
+        'text-align:{align};font-size:13px;{extra}"'
+    )
+
     source_rows = ""
-    for s in sources:
+    total_count = total_called = total_ans = total_unans = 0
+    for s in source_rows_data:
         cov_color = "#16A34A" if s["coverage"] >= 30 else "#D97706"
-        source_rows += f"""
-        <tr>
-          <td style="padding:10px 12px;border-bottom:1px solid #E2E8F0;text-align:left;font-weight:500">{s["label"]}</td>
-          <td style="padding:10px 12px;border-bottom:1px solid #E2E8F0;text-align:center">{s["count"]}</td>
-          <td style="padding:10px 12px;border-bottom:1px solid #E2E8F0;text-align:center">{s["called"]}</td>
-          <td style="padding:10px 12px;border-bottom:1px solid #E2E8F0;text-align:center">
-            <span style="font-weight:600;color:{cov_color}">{s["coverage"]}%</span>
-          </td>
-        </tr>"""
+        s_ans = s.get("answered", 0)
+        s_unans = s.get("unanswered", 0)
+        total_count += s["count"]
+        total_called += s["called"]
+        total_ans += s_ans
+        total_unans += s_unans
+        source_rows += (
+            f'<tr>'
+            f'<td {_TD.format(align="left", extra="font-weight:600")}>{s["label"]}</td>'
+            f'<td {_TD.format(align="center", extra="")}>{s["count"]}</td>'
+            f'<td {_TD.format(align="center", extra="")}>{s["called"]}</td>'
+            f'<td {_TD.format(align="center", extra="color:#16A34A;font-weight:600")}>{s_ans}</td>'
+            f'<td {_TD.format(align="center", extra="color:#DC2626;font-weight:600")}>{s_unans}</td>'
+            f'<td {_TD.format(align="center", extra="")}>'
+            f'<span style="font-weight:700;color:{cov_color}">{s["coverage"]}%</span></td>'
+            f'</tr>'
+        )
+    # Total row
+    total_cov = round(total_called * 100 / total_count, 1) if total_count else 0
+    total_cov_color = "#16A34A" if total_cov >= 30 else "#D97706"
+    source_rows += (
+        f'<tr>'
+        f'<td {_TD.format(align="left", extra="font-weight:800;border-top:2px solid #CBD5E1")}>Total</td>'
+        f'<td {_TD.format(align="center", extra="font-weight:800;border-top:2px solid #CBD5E1")}>{total_count}</td>'
+        f'<td {_TD.format(align="center", extra="font-weight:800;border-top:2px solid #CBD5E1")}>{total_called}</td>'
+        f'<td {_TD.format(align="center", extra="font-weight:800;color:#16A34A;border-top:2px solid #CBD5E1")}>{total_ans}</td>'
+        f'<td {_TD.format(align="center", extra="font-weight:800;color:#DC2626;border-top:2px solid #CBD5E1")}>{total_unans}</td>'
+        f'<td {_TD.format(align="center", extra="font-weight:800;border-top:2px solid #CBD5E1")}>'
+        f'<span style="color:{total_cov_color}">{total_cov}%</span></td>'
+        f'</tr>'
+    )
+
+    # ── Funnel bar segments ─────────────────────────────────────────────
+    funnel = (
+        _funnel_seg("#16A34A", answered, total, "Answered")
+        + _funnel_seg("#DC2626", unanswered, total, "Not Answered")
+        + _funnel_seg("#F59E0B", not_called, total, "Not Outreached")
+    )
+
+    # ── Source badges in header ─────────────────────────────────────────
+    src_badges = ""
+    if sources:
+        src_badges = "".join(_src_badge(s) for s in sources) + " "
 
     return f"""<!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
 <body style="margin:0;padding:0;background:#F1F5F9;font-family:Arial,Helvetica,sans-serif;color:#1E293B">
-<table width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;margin:0 auto">
+<table width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:620px;margin:0 auto;background:#ffffff">
   <!-- Header -->
   <tr>
     <td style="background:linear-gradient(135deg,#1E40AF,#2563EB);padding:28px 32px 24px;text-align:center">
-      <h1 style="margin:0;font-size:20px;font-weight:700;color:#ffffff;letter-spacing:-.01em">Phone Outreach Insights</h1>
-      <div style="display:inline-block;margin-top:10px;background:rgba(255,255,255,.15);color:#fff;font-size:11px;font-weight:600;padding:3px 12px;border-radius:12px;letter-spacing:.02em;line-height:28px">{"".join(_src_badge(s) for s in (sources or [])) + " " if sources else ""}<span style="vertical-align:middle">{run_label}</span></div>
+      <h1 style="margin:0;font-size:22px;font-weight:700;color:#ffffff;letter-spacing:-.02em">Phone Outreach Insights</h1>
+      <div style="display:inline-block;margin-top:10px;background:rgba(255,255,255,.15);color:#fff;font-size:11px;font-weight:600;padding:3px 14px;border-radius:12px;letter-spacing:.02em;line-height:28px">{src_badges}<span style="vertical-align:middle;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;letter-spacing:.05em;opacity:.85">{run_label}</span></div>
     </td>
   </tr>
-  <!-- Overview -->
+  <!-- Overview KPIs -->
   <tr>
-    <td style="padding:24px 32px">
+    <td style="padding:24px 24px 0">
       <div style="font-size:14px;font-weight:700;color:#1E293B;margin:0 0 14px;padding-bottom:8px;border-bottom:2px solid #2563EB;display:inline-block">Overview</div>
-      <table width="100%" cellpadding="0" cellspacing="0">
+      <table width="100%" cellpadding="0" cellspacing="0" border="0">
         <tr>
-          <td width="33%" style="padding:0 5px 10px 0">
-            <div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:10px;padding:14px 16px;text-align:center">
-              <div style="font-size:28px;font-weight:700;color:#2563EB;line-height:1.1">{total}</div>
-              <div style="font-size:11px;color:#64748B;margin-top:4px;line-height:1.3">Total phone contacts<br>from harvest</div>
-            </div>
-          </td>
-          <td width="33%" style="padding:0 5px 10px">
-            <div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:10px;padding:14px 16px;text-align:center">
-              <div style="font-size:28px;font-weight:700;color:#16A34A;line-height:1.1">{called}</div>
-              <div style="font-size:11px;color:#64748B;margin-top:4px;line-height:1.3">Phone Outreach<br><span style="font-weight:600;color:#16A34A">{called_pct}%</span></div>
-            </div>
-          </td>
-          <td width="33%" style="padding:0 0 10px 5px">
-            <div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:10px;padding:14px 16px;text-align:center">
-              <div style="font-size:28px;font-weight:700;color:#D97706;line-height:1.1">{not_called}</div>
-              <div style="font-size:11px;color:#64748B;margin-top:4px;line-height:1.3">Not yet Outreached<br><span style="font-weight:600;color:#D97706">{not_called_pct}%</span></div>
-            </div>
-          </td>
-        </tr>
-        <tr>
-          <td colspan="3" style="padding:0 0 0">
-            <table cellpadding="0" cellspacing="0" style="margin:0 auto">
-              <tr>
-                <td style="padding:0 5px">
-                  <div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:10px;padding:14px 24px;text-align:center;min-width:140px">
-                    <div style="font-size:28px;font-weight:700;color:#16A34A;line-height:1.1">{answered}</div>
-                    <div style="font-size:11px;color:#64748B;margin-top:4px;line-height:1.3">Contacted</div>
-                  </div>
-                </td>
-                <td style="padding:0 5px">
-                  <div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:10px;padding:14px 24px;text-align:center;min-width:140px">
-                    <div style="font-size:28px;font-weight:700;color:#DC2626;line-height:1.1">{unanswered}</div>
-                    <div style="font-size:11px;color:#64748B;margin-top:4px;line-height:1.3">Outreached but Unanswered</div>
-                  </div>
-                </td>
-              </tr>
-            </table>
-          </td>
+          <td width="20%" style="padding:0 4px 10px 0">{_kpi(total, "Total Phones", "#2563EB")}</td>
+          <td width="20%" style="padding:0 4px 10px">{_kpi(called, "Outreached", "#16A34A", f"{called_pct}%")}</td>
+          <td width="20%" style="padding:0 4px 10px">{_kpi(not_called, "Not Outreached", "#D97706", f"{not_called_pct}%")}</td>
+          <td width="20%" style="padding:0 4px 10px">{_kpi(answered, "Answered", "#16A34A", f"{ans_of_out}% of outreached")}</td>
+          <td width="20%" style="padding:0 0 10px 4px">{_kpi(unanswered, "Not Answered", "#DC2626", f"{unans_of_out}% of outreached")}</td>
         </tr>
       </table>
     </td>
   </tr>
+  <!-- Outreach Funnel -->
+  <tr>
+    <td style="padding:14px 24px 0">
+      <div style="font-size:14px;font-weight:700;color:#1E293B;margin:0 0 14px;padding-bottom:8px;border-bottom:2px solid #2563EB;display:inline-block">Outreach Funnel</div>
+      <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;border-radius:8px;overflow:hidden">
+        <tr>{funnel}</tr>
+      </table>
+      <div style="padding:10px 0 0;text-align:center">
+        {_legend_dot("#16A34A", f"Answered {answered}")}
+        &nbsp;&nbsp;
+        {_legend_dot("#DC2626", f"Not Answered {unanswered}")}
+        &nbsp;&nbsp;
+        {_legend_dot("#F59E0B", f"Not Outreached {not_called}")}
+      </div>
+    </td>
+  </tr>
   <!-- Phone Source Coverage -->
   <tr>
-    <td style="padding:0 32px 24px">
+    <td style="padding:20px 24px 24px">
       <div style="font-size:14px;font-weight:700;color:#1E293B;margin:0 0 14px;padding-bottom:8px;border-bottom:2px solid #2563EB;display:inline-block">Phone Source Coverage</div>
-      <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;font-size:13px">
+      <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;font-size:13px">
         <thead>
           <tr>
-            <th style="text-align:left;font-size:11px;font-weight:600;letter-spacing:.03em;text-transform:uppercase;color:#64748B;padding:8px 12px;border-bottom:1px solid #E2E8F0">Phone Source</th>
-            <th style="text-align:center;font-size:11px;font-weight:600;letter-spacing:.03em;text-transform:uppercase;color:#64748B;padding:8px 12px;border-bottom:1px solid #E2E8F0">Count</th>
-            <th style="text-align:center;font-size:11px;font-weight:600;letter-spacing:.03em;text-transform:uppercase;color:#64748B;padding:8px 12px;border-bottom:1px solid #E2E8F0">Called</th>
-            <th style="text-align:center;font-size:11px;font-weight:600;letter-spacing:.03em;text-transform:uppercase;color:#64748B;padding:8px 12px;border-bottom:1px solid #E2E8F0">Coverage</th>
+            <th {_TH.format(align="left")}>Source</th>
+            <th {_TH.format(align="center")}>Count</th>
+            <th {_TH.format(align="center")}>Called</th>
+            <th {_TH.format(align="center")}>Answered</th>
+            <th {_TH.format(align="center")}>Not Ans.</th>
+            <th {_TH.format(align="center")}>Coverage</th>
           </tr>
         </thead>
         <tbody>

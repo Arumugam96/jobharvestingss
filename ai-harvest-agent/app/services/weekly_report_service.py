@@ -86,7 +86,6 @@ async def compute_weekly_stats(
     source_stats = await _week_source_stats(db, run_ids)
 
     total_jobs = sum(r.combined_count or 0 for r in runs)
-    total_dc = sum(r.direct_clients or 0 for r in runs)
     total_duration = sum(
         ((r.completed_at - r.started_at).total_seconds() if r.completed_at and r.started_at else 0)
         for r in runs
@@ -103,7 +102,6 @@ async def compute_weekly_stats(
             "sources": r.sources or [],
             "status": r.status,
             "jobs": r.combined_count or 0,
-            "direct_clients": r.direct_clients or 0,
             "duration_s": dur,
             "is_feed": r.run_type == "feed",
         })
@@ -111,7 +109,6 @@ async def compute_weekly_stats(
     return {
         "total_runs": len(runs),
         "total_jobs": total_jobs,
-        "total_direct_clients": total_dc,
         "total_duration_s": total_duration,
         "per_run": per_run,
         "source_stats": source_stats,
@@ -128,9 +125,28 @@ def _status_color(status: str) -> str:
 
 
 def _source_icon(name: str) -> str:
-    """Reuse the shared source icon badge from harvest_notification_service."""
-    from app.services.harvest_notification_service import _src_badge
-    return _src_badge(name)
+    """Compact CID icon badge (20×20 cell, 14×14 img) + name, fits on one line."""
+    from app.services.harvest_notification_service import (
+        _esc, _SRC_COLORS, _SRC_SLUGS, _SRC_ALT, _MUTED, _TABLE,
+    )
+    color = _SRC_COLORS.get(name, _MUTED)
+    alt = _SRC_ALT.get(name, name[:1])
+    slug = _SRC_SLUGS.get(name)
+    img = (
+        f'<img src="cid:src-{slug}" alt="{_esc(alt)}" width="14" height="14"'
+        f' style="display:block;border:0;border-radius:3px;" />'
+    ) if slug else _esc(alt)
+    return (
+        f'<table {_TABLE} style="border-collapse:collapse;display:inline-table;">'
+        f'<tr>'
+        f'<td bgcolor="{color}" style="background-color:{color};width:20px;height:20px;'
+        f'font-size:10px;font-weight:800;color:#fff;text-align:center;line-height:20px;'
+        f'border-radius:3px;" width="20" height="20" align="center" valign="middle">'
+        f'{img}</td>'
+        f'<td style="padding:0 0 0 4px;font-size:11px;font-weight:600;color:#1a1d26;'
+        f'white-space:nowrap;" valign="middle">{_esc(name)}</td>'
+        f'</tr></table>'
+    )
 
 
 def render_weekly_report_html(stats: dict[str, Any]) -> str:
@@ -161,7 +177,6 @@ def render_weekly_report_html(stats: dict[str, Any]) -> str:
     # ── Stat pills ──────────────────────────────────────────────────────
     pills = [
         (stats["total_runs"], "Runs"),
-        (stats["total_direct_clients"], "Direct Clients"),
         (_fmt_duration(stats["total_duration_s"]), "Total Duration"),
     ]
     pill_cells = []
@@ -183,7 +198,6 @@ def render_weekly_report_html(stats: dict[str, Any]) -> str:
     summary_rows = (
         _kv_row("Total Jobs", str(stats["total_jobs"]))
         + _kv_row("Total Runs", str(stats["total_runs"]))
-        + _kv_row("Direct Clients", str(stats["total_direct_clients"]))
         + _kv_row("Total Duration", _fmt_duration(stats["total_duration_s"]))
     )
     summary = _section_title("Week Summary") + _table(summary_rows)
@@ -193,7 +207,7 @@ def render_weekly_report_html(stats: dict[str, Any]) -> str:
         w = f' width="{width}"' if width else ""
         return _cell(
             text,
-            f"padding:0 0 10px;font-size:10px;font-weight:700;letter-spacing:0.08em;"
+            f"padding:0 0 6px;font-size:10px;font-weight:700;letter-spacing:0.08em;"
             f"text-transform:uppercase;color:{_MUTED};text-align:{align};",
             f'align="{align}"{w}',
         )
@@ -202,7 +216,7 @@ def render_weekly_report_html(stats: dict[str, Any]) -> str:
         top = f"border-top:2px solid {_LINE};" if last else f"border-top:1px solid {_LINE};"
         weight = "800" if last else "600"
         return _cell(
-            content, f"padding:10px 0;{top}font-size:13px;font-weight:{weight};"
+            content, f"padding:6px 0;{top}font-size:13px;font-weight:{weight};"
             f"text-align:{align};", f'align="{align}" valign="middle"',
         )
 
@@ -212,7 +226,6 @@ def render_weekly_report_html(stats: dict[str, Any]) -> str:
         + _th("Sources", "left", "110")
         + _th("Status", "center", "80")
         + _th("Jobs", "center", "60")
-        + _th("DC", "center", "50")
         + _th("Duration", "center", "80")
         + "</tr>"
     )
@@ -232,7 +245,6 @@ def render_weekly_report_html(stats: dict[str, Any]) -> str:
             + _td(sources_html, "left")
             + _td(status_html, "center")
             + _td(str(pr["jobs"]), "center")
-            + _td(str(pr["direct_clients"]), "center")
             + _td(_fmt_duration(pr["duration_s"]), "center")
             + "</tr>"
         )
@@ -243,7 +255,6 @@ def render_weekly_report_html(stats: dict[str, Any]) -> str:
         + _td("", "left", last=True)
         + _td("", "center", last=True)
         + _td(f'<b>{stats["total_jobs"]}</b>', "center", last=True)
-        + _td(f'<b>{stats["total_direct_clients"]}</b>', "center", last=True)
         + _td(f'<b>{_fmt_duration(stats["total_duration_s"])}</b>', "center", last=True)
         + "</tr>"
     )
@@ -284,19 +295,19 @@ def render_weekly_report_html(stats: dict[str, Any]) -> str:
     )
 
     rows = (
-        _row(header, "28px 32px 0")
-        + _row(hero, "32px 32px 24px", "text-align:center;")
-        + _row(pills_html, "0 32px 24px", "text-align:center;")
+        _row(header, "5px 20px 0")
+        + _row(hero, "10px 10px 0px", "text-align:center;")
+        + _row(pills_html, "0 20px 16px", "text-align:center;")
         + _divider()
-        + _row(summary)
+        + _row(summary, "8px 20px 8px")
         + _divider()
-        + _row(breakdown)
+        + _row(breakdown, "8px 20px 8px")
     )
     if source_section:
-        rows += _divider() + _row(source_section)
+        rows += _divider() + _row(source_section, "8px 20px 8px")
     rows += (
         _divider(0)
-        + _row(footer, "20px 32px", f"text-align:center;font-size:12px;color:{_MUTED};")
+        + _row(footer, "12px 20px", f"text-align:center;font-size:12px;color:{_MUTED};")
     )
 
     return _doc(f"Weekly Harvest Report — {date_range}", rows, "#0ea5e9",
