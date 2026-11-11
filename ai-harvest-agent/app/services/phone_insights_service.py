@@ -194,26 +194,27 @@ def _funnel_seg(color: str, count: int, total: int, label: str) -> str:
     if total == 0 or count == 0:
         return ""
     pct = round(count * 100 / total, 1)
-    width_pct = max(pct, 8)  # min 8% so label is readable
+    width_pct = max(pct, 8)
     return (
         f'<td bgcolor="{color}" width="{width_pct}%" '
-        f'style="background-color:{color};height:32px;color:#ffffff;'
-        f'font-size:12px;font-weight:700;text-align:center;line-height:32px;'
+        f'style="background-color:{color};height:28px;color:#ffffff;'
+        f'font-size:11px;font-weight:700;text-align:center;line-height:28px;'
         f'white-space:nowrap;" align="center" valign="middle">'
         f'{count}</td>'
     )
 
 
 def _legend_dot(color: str, label: str) -> str:
-    """Funnel legend item — coloured square + text, email-safe inline-table."""
+    """Funnel legend item — coloured square + text, wrapped in a <td> for table row."""
     return (
+        f'<td valign="middle" style="padding:0 10px 0 0">'
         f'<table cellpadding="0" cellspacing="0" border="0" '
-        f'style="display:inline-table;border-collapse:collapse;"><tr>'
-        f'<td style="width:10px;height:10px;background-color:{color};'
-        f'border-radius:2px;" width="10" height="10">&nbsp;</td>'
-        f'<td style="padding:0 0 0 5px;font-size:12px;color:#64748B;'
-        f'white-space:nowrap;">{label}</td>'
-        f'</tr></table>'
+        f'style="border-collapse:collapse;"><tr>'
+        f'<td style="width:8px;height:8px;background-color:{color};'
+        f'border-radius:2px;" width="8" height="8">&nbsp;</td>'
+        f'<td style="padding:0 0 0 4px;font-size:11px;color:#64748B;'
+        f'white-space:nowrap;" valign="middle">{label}</td>'
+        f'</tr></table></td>'
     )
 
 
@@ -238,31 +239,31 @@ def render_phone_insights_email_html(
     ans_of_out = round(answered * 100 / called, 1) if called else 0
     unans_of_out = round(unanswered * 100 / called, 1) if called else 0
 
-    # ── KPI card helper (Outlook-safe: table cell with bgcolor) ─────────
+    # ── KPI card helper (compact, Outlook-safe) ──────────────────────────
     def _kpi(value, label: str, color: str, sub: str = "") -> str:
         sub_html = (
-            f'<div style="font-size:12px;font-weight:600;color:{color};'
-            f'margin-top:3px">{sub}</div>' if sub else ""
+            f'<div style="font-size:10px;font-weight:600;color:{color};'
+            f'margin-top:2px">{sub}</div>' if sub else ""
         )
         return (
             f'<td bgcolor="#F8FAFC" style="background-color:#F8FAFC;'
-            f'border:1px solid #E2E8F0;padding:14px 10px;text-align:center" '
+            f'border:1px solid #E2E8F0;padding:10px 8px;text-align:center" '
             f'align="center" valign="top">'
-            f'<div style="font-size:30px;font-weight:700;color:{color};'
+            f'<div style="font-size:22px;font-weight:700;color:{color};'
             f'line-height:1.1">{value}</div>'
-            f'<div style="font-size:11px;color:#64748B;margin-top:5px;'
-            f'line-height:1.3">{label}</div>{sub_html}</td>'
+            f'<div style="font-size:10px;color:#64748B;margin-top:3px">'
+            f'{label}</div>{sub_html}</td>'
         )
 
     # ── Source rows ─────────────────────────────────────────────────────
     _TH = (
-        'style="text-align:{align};font-size:11px;font-weight:600;'
+        'style="text-align:{align};font-size:10px;font-weight:600;'
         'letter-spacing:.05em;text-transform:uppercase;color:#64748B;'
-        'padding:10px 10px;border-bottom:1px solid #E2E8F0"'
+        'padding:8px;border-bottom:1px solid #E2E8F0"'
     )
     _TD = (
-        'style="padding:10px 10px;border-bottom:1px solid #E2E8F0;'
-        'text-align:{align};font-size:13px;{extra}"'
+        'style="padding:8px;border-bottom:1px solid #E2E8F0;'
+        'text-align:{align};font-size:12px;{extra}"'
     )
 
     source_rows = ""
@@ -308,10 +309,19 @@ def render_phone_insights_email_html(
         + _funnel_seg("#F59E0B", not_called, total, "Not Outreached")
     )
 
-    # ── Source badges in header ─────────────────────────────────────────
-    src_badges = ""
+    # ── Source badges in header (centered single-row table) ──────────────
+    src_badge_cells = ""
     if sources:
-        src_badges = "".join(_src_badge(s) for s in sources) + " "
+        src_badge_cells = "".join(
+            f'<td valign="middle" style="padding:0 5px">{_src_badge(s)}</td>'
+            for s in sources
+        )
+
+    _SECTION = (
+        '<table cellpadding="0" cellspacing="0" border="0" style="margin:0 0 10px">'
+        '<tr><td style="font-size:13px;font-weight:700;color:#1E293B;'
+        'padding-bottom:6px;border-bottom:2px solid #3B82F6">{title}</td></tr></table>'
+    )
 
     return f"""<!DOCTYPE html>
 <html>
@@ -320,25 +330,32 @@ def render_phone_insights_email_html(
 <table width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:620px;margin:0 auto;background:#ffffff">
   <!-- Header -->
   <tr>
-    <td bgcolor="#2563EB" style="background-color:#2563EB;padding:28px 32px 24px;text-align:center">
-      <h1 style="margin:0;font-size:22px;font-weight:700;color:#ffffff;letter-spacing:-.02em">Phone Outreach Insights</h1>
-      <div style="display:inline-block;margin-top:10px;background:rgba(255,255,255,.15);color:#fff;font-size:11px;font-weight:600;padding:3px 14px;border-radius:12px;letter-spacing:.02em;line-height:28px">{src_badges}<span style="vertical-align:middle;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;letter-spacing:.05em;opacity:.85">{run_label}</span></div>
+    <td bgcolor="#EFF6FF" style="background-color:#EFF6FF;padding:24px 32px 20px;text-align:center;border-bottom:2px solid #BFDBFE">
+      <div style="font-size:20px;font-weight:700;color:#1E40AF;letter-spacing:-.02em">Phone Outreach Insights</div>
+      <table cellpadding="0" cellspacing="0" border="0" align="center" style="margin:10px auto 0">
+        <tr>{src_badge_cells}</tr>
+      </table>
+      <table cellpadding="0" cellspacing="0" border="0" align="center" style="margin:8px auto 0"><tr>
+        <td style="background-color:rgba(30,64,175,.08);padding:3px 14px;border-radius:12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;font-weight:600;color:#1E40AF;letter-spacing:.05em">{run_label}</td>
+      </tr></table>
     </td>
   </tr>
-  <!-- Overview KPIs — 3 + 2 rows for Outlook compatibility -->
+  <!-- Overview KPIs — row 1 (3 cards) -->
   <tr>
-    <td style="padding:24px 24px 0">
-      <div style="font-size:14px;font-weight:700;color:#1E293B;margin:0 0 14px;padding-bottom:8px;border-bottom:2px solid #2563EB;display:inline-block">Overview</div>
-      <table width="100%" cellpadding="0" cellspacing="6" border="0">
+    <td style="padding:20px 24px 0">
+      {_SECTION.format(title="Overview")}
+      <table width="100%" cellpadding="0" cellspacing="5" border="0">
         <tr>
           {_kpi(total, "Total Phones", "#2563EB")}
           {_kpi(called, "Outreached", "#16A34A", f"{called_pct}%")}
           {_kpi(not_called, "Not Outreached", "#D97706", f"{not_called_pct}%")}
         </tr>
+      </table>
+      <!-- Row 2 (2 cards, centered) -->
+      <table width="68%" cellpadding="0" cellspacing="5" border="0" align="center" style="margin:0 auto">
         <tr>
           {_kpi(answered, "Answered", "#16A34A", f"{ans_of_out}% of outreached")}
           {_kpi(unanswered, "Not Answered", "#DC2626", f"{unans_of_out}% of outreached")}
-          <td></td>
         </tr>
       </table>
     </td>
@@ -346,24 +363,24 @@ def render_phone_insights_email_html(
   <!-- Outreach Funnel -->
   <tr>
     <td style="padding:14px 24px 0">
-      <div style="font-size:14px;font-weight:700;color:#1E293B;margin:0 0 14px;padding-bottom:8px;border-bottom:2px solid #2563EB;display:inline-block">Outreach Funnel</div>
-      <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;border-radius:8px;overflow:hidden">
+      {_SECTION.format(title="Outreach Funnel")}
+      <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;table-layout:fixed">
         <tr>{funnel}</tr>
       </table>
-      <div style="padding:10px 0 0;text-align:center">
-        {_legend_dot("#16A34A", f"Answered {answered}")}
-        &nbsp;&nbsp;
-        {_legend_dot("#DC2626", f"Not Answered {unanswered}")}
-        &nbsp;&nbsp;
-        {_legend_dot("#F59E0B", f"Not Outreached {not_called}")}
-      </div>
+      <table cellpadding="0" cellspacing="0" border="0" align="center" style="margin:8px auto 0">
+        <tr>
+          {_legend_dot("#16A34A", f"Answered {answered}")}
+          {_legend_dot("#DC2626", f"Not Answered {unanswered}")}
+          {_legend_dot("#F59E0B", f"Not Outreached {not_called}")}
+        </tr>
+      </table>
     </td>
   </tr>
   <!-- Phone Source Coverage -->
   <tr>
-    <td style="padding:20px 24px 24px">
-      <div style="font-size:14px;font-weight:700;color:#1E293B;margin:0 0 14px;padding-bottom:8px;border-bottom:2px solid #2563EB;display:inline-block">Phone Source Coverage</div>
-      <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;font-size:13px">
+    <td style="padding:18px 24px 20px">
+      {_SECTION.format(title="Phone Source Coverage")}
+      <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;font-size:12px">
         <thead>
           <tr>
             <th {_TH.format(align="left")}>Source</th>
@@ -382,10 +399,10 @@ def render_phone_insights_email_html(
   </tr>
   <!-- Footer -->
   <tr>
-    <td style="padding:20px 32px;text-align:center;font-size:11px;color:#64748B;border-top:1px solid #E2E8F0;line-height:1.5">
+    <td style="padding:16px 32px;text-align:center;font-size:10px;color:#64748B;border-top:1px solid #E2E8F0;line-height:1.5">
       This report was auto-generated 24 hours after Harvest Run completed.<br>
       Insights are based on phone call logs recorded in Phone Tracker.<br>
-      <span style="color:#2563EB">Sight Spectrum &middot; JobHarvest Platform</span>
+      <span style="color:#3B82F6">Sight Spectrum &middot; JobHarvest Platform</span>
     </td>
   </tr>
 </table>

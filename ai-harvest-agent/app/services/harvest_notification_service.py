@@ -269,15 +269,15 @@ def _src_badge(name: str) -> str:
     alt = _SRC_ALT.get(name, name[:1])
     slug = _SRC_SLUGS.get(name)
     img = (
-        f'<img src="cid:src-{slug}" alt="{_esc(alt)}" width="18" height="18"'
+        f'<img src="cid:src-{slug}" alt="{_esc(alt)}" width="24" height="24"'
         f' style="display:block;border:0;border-radius:5px;" />'
     ) if slug else _esc(alt)
     return (
         f'<table {_TABLE} style="border-collapse:collapse;display:inline-table;">'
         f'<tr>'
-        f'<td bgcolor="{color}" style="background-color:{color};width:28px;height:28px;'
-        f'font-size:12px;font-weight:800;color:#ffffff;text-align:center;line-height:28px;'
-        f'border-radius:5px;" width="28" height="28" align="center" valign="middle">'
+        f'<td bgcolor="{color}" style="background-color:{color};width:24px;height:24px;'
+        f'font-size:12px;font-weight:800;color:#ffffff;text-align:center;line-height:24px;'
+        f'border-radius:5px;" width="24" height="24" align="center" valign="middle">'
         f'{img}</td>'
         f'<td style="padding:0 0 0 6px;font-size:12px;font-weight:700;color:#1a1d26;'
         f'white-space:nowrap;" valign="middle">{_esc(name)}</td>'
