@@ -231,12 +231,16 @@ async def _db_main(args):
     sender_identity = report_identity_from(settings, "JobHarvest Weekly Report")
     sender = EmailSender(settings)
 
+    from app.services.harvest_notification_service import collect_source_icon_attachments
+    icon_atts = collect_source_icon_attachments(html)
+
     print(f"\nSending to: {recipients}")
     await sender.send_email_with_attachments(
         recipients, subject,
         "Your weekly harvest report is available — view the HTML version of this email.",
         html_body=html,
         sender_identity=sender_identity,
+        inline_attachments=icon_atts,
     )
     print("Done — check your inbox.")
 

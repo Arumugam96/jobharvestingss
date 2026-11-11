@@ -29,6 +29,8 @@ from app.services.harvest_notification_service import (
     _kv_row,
     _row,
     _section_title,
+    _src_badge,
+    _src_badges,
     _table,
     _TABLE,
     _to_ist,
@@ -40,6 +42,7 @@ from app.services.harvest_run_service import db_read
 logger = structlog.get_logger(__name__)
 
 _DONE_STATUSES = ("success", "completed", "no_results")
+_SOURCE_ORDER = ("LinkedIn", "Naukri", "Dice")
 
 
 async def _week_runs(
@@ -124,31 +127,6 @@ def _status_color(status: str) -> str:
     }.get(status, _MUTED)
 
 
-def _source_icon(name: str) -> str:
-    """Compact CID icon badge (20×20 cell, 14×14 img) + name, fits on one line."""
-    from app.services.harvest_notification_service import (
-        _esc, _SRC_COLORS, _SRC_SLUGS, _SRC_ALT, _MUTED, _TABLE,
-    )
-    color = _SRC_COLORS.get(name, _MUTED)
-    alt = _SRC_ALT.get(name, name[:1])
-    slug = _SRC_SLUGS.get(name)
-    img = (
-        f'<img src="cid:src-{slug}" alt="{_esc(alt)}" width="14" height="14"'
-        f' style="display:block;border:0;border-radius:3px;" />'
-    ) if slug else _esc(alt)
-    return (
-        f'<table {_TABLE} style="border-collapse:collapse;display:inline-table;">'
-        f'<tr>'
-        f'<td bgcolor="{color}" style="background-color:{color};width:20px;height:20px;'
-        f'font-size:10px;font-weight:800;color:#fff;text-align:center;line-height:20px;'
-        f'border-radius:3px;" width="20" height="20" align="center" valign="middle">'
-        f'{img}</td>'
-        f'<td style="padding:0 0 0 4px;font-size:11px;font-weight:600;color:#1a1d26;'
-        f'white-space:nowrap;" valign="middle">{_esc(name)}</td>'
-        f'</tr></table>'
-    )
-
-
 def render_weekly_report_html(stats: dict[str, Any]) -> str:
     """Render the weekly harvest report as Outlook-safe HTML."""
     ws = _to_ist(stats["week_start"])
@@ -159,11 +137,20 @@ def render_weekly_report_html(stats: dict[str, Any]) -> str:
     )
 
     # ── Header ──────────────────────────────────────────────────────────
+    week_sources = [
+        n for n in _SOURCE_ORDER
+        if any(n in pr["sources"] for pr in stats["per_run"] if not pr["is_feed"])
+    ]
     header = (
         f'<div style="font-size:11px;font-weight:700;letter-spacing:0.1em;'
         f'text-transform:uppercase;color:{_MUTED};margin-bottom:8px;">Sightspectrum</div>'
         f'<div style="font-size:24px;font-weight:800;margin:0;">Weekly Harvest Report</div>'
-        f'<div style="font-size:13px;color:{_MUTED};margin-top:4px;">{_esc(date_range)}</div>'
+        f'<table {_TABLE} style="border-collapse:collapse;"><tr>'
+        + _cell(_esc(date_range) + (" &middot;" if week_sources else ""),
+                f"padding:4px 10px 0 0;font-size:13px;color:{_MUTED};white-space:nowrap;",
+                'valign="middle"')
+        + _cell(_src_badges(week_sources), "padding:4px 0 0;", 'valign="middle"')
+        + "</tr></table>"
     )
 
     # ── Hero metric ─────────────────────────────────────────────────────
@@ -236,8 +223,9 @@ def render_weekly_report_html(stats: dict[str, Any]) -> str:
             f'font-size:11px;font-weight:700;color:#fff;'
             f'background:{_status_color(pr["status"])};">{_esc(pr["status"])}</span>'
         )
-        sources_html = " ".join(
-            _source_icon(s) for s in (["LinkedIn Feed"] if pr["is_feed"] else pr["sources"])
+        sources_html = (
+            _src_badge("LinkedIn Feed", 18, 12, label="Feed") if pr["is_feed"]
+            else _src_badges(pr["sources"], 18, gap=6, show_names=False)
         )
         run_rows += (
             "<tr>"
@@ -269,13 +257,15 @@ def render_weekly_report_html(stats: dict[str, Any]) -> str:
     )
     src_rows = ""
     total_src_jobs = 0
-    for name in ["LinkedIn", "Naukri", "Dice"]:
+    for name in _SOURCE_ORDER:
         s = stats["source_stats"].get(name, {})
         jobs = s.get("jobs", 0)
         total_src_jobs += jobs
         if not jobs:
             continue
-        src_rows += "<tr>" + _td(_source_icon(name), "left") + _td(str(jobs), "center") + "</tr>"
+        src_rows += (
+            "<tr>" + _td(_src_badge(name, 20, 13), "left") + _td(str(jobs), "center") + "</tr>"
+        )
 
     if src_rows:
         src_rows += (

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import html as html_lib
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import structlog
 
@@ -250,39 +251,83 @@ def _kv_row(label: str, value: str, label_width: int = 170) -> str:
     )
 
 
+_ICONS_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "static" / "email-icons"
 _SRC_SLUGS = {
     "LinkedIn": "linkedin", "Naukri": "naukri", "Dice": "dice",
-    "LinkedIn Feed": "linkedin-feed",
+    "LinkedIn Feed": "linkedin",
 }
 _SRC_COLORS = {
-    "LinkedIn": "#0a66c2", "Naukri": "#6366f1", "Dice": "#ef4444",
-    "LinkedIn Feed": "#6D28D9",
+    "LinkedIn": "#0a66c2", "Naukri": "#2563eb", "Dice": "#ef4444",
+    "LinkedIn Feed": "#0a66c2",
 }
-_SRC_ALT = {"LinkedIn": "in", "Naukri": "N", "Dice": "D", "LinkedIn Feed": "LF"}
+_SRC_ALT = {"LinkedIn": "in", "Naukri": "N", "Dice": "D", "LinkedIn Feed": "in"}
+# Logos whose artwork is a circle — clipped round so no square corners show.
+_SRC_ROUND = {"naukri"}
 
 
-def _src_badge(name: str) -> str:
-    """Source icon badge for email — renders a CID-embedded <img> logo with a
-    coloured-cell fallback (alt text + bgcolor shown when images are blocked).
-    The actual icon bytes are attached by ``collect_source_icon_attachments``."""
-    color = _SRC_COLORS.get(name, _MUTED)
-    alt = _SRC_ALT.get(name, name[:1])
+def _icon_file(slug: str) -> Path | None:
+    # PNG first: Gmail and Outlook don't render SVG images.
+    for ext in ("png", "jpg", "jpeg", "svg"):
+        candidate = _ICONS_DIR / f"{slug}.{ext}"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _src_logo(name: str, size: int = 20) -> str:
+    """The bare source logo (CID inline image, attached by
+    ``collect_source_icon_attachments``). Falls back to a coloured letter tile
+    only when the icon file is missing."""
     slug = _SRC_SLUGS.get(name)
-    img = (
-        f'<img src="cid:src-{slug}" alt="{_esc(alt)}" width="24" height="24"'
-        f' style="display:block;border:0;border-radius:5px;" />'
-    ) if slug else _esc(alt)
+    radius = "50%" if slug in _SRC_ROUND else f"{max(3, size // 5)}px"
+    if slug and _icon_file(slug):
+        return (
+            f'<img src="cid:src-{slug}" alt="{_esc(name)}" title="{_esc(name)}" '
+            f'width="{size}" height="{size}" style="display:block;width:{size}px;'
+            f'height:{size}px;border:0;outline:none;text-decoration:none;'
+            f'border-radius:{radius};" />'
+        )
+    color = _SRC_COLORS.get(name, _MUTED)
     return (
-        f'<table {_TABLE} style="border-collapse:collapse;display:inline-table;">'
-        f'<tr>'
-        f'<td bgcolor="{color}" style="background-color:{color};width:24px;height:24px;'
-        f'font-size:12px;font-weight:800;color:#ffffff;text-align:center;line-height:24px;'
-        f'border-radius:5px;" width="24" height="24" align="center" valign="middle">'
-        f'{img}</td>'
-        f'<td style="padding:0 0 0 6px;font-size:12px;font-weight:700;color:#1a1d26;'
-        f'white-space:nowrap;" valign="middle">{_esc(name)}</td>'
-        f'</tr></table>'
+        f'<table {_TABLE} width="{size}" style="border-collapse:collapse;"><tr>'
+        + _bg_cell(
+            _esc(_SRC_ALT.get(name, name[:1])), color,
+            f"width:{size}px;height:{size}px;font-size:{max(9, size // 2)}px;font-weight:800;"
+            f"color:#ffffff;text-align:center;line-height:{size}px;border-radius:{radius};",
+            f'width="{size}" height="{size}" align="center" valign="middle"',
+        )
+        + "</tr></table>"
     )
+
+
+def _src_badge(
+    name: str, size: int = 20, font_size: int = 13, label: str | None = None,
+) -> str:
+    """Logo + source name, vertically centred in a 2-cell table."""
+    return (
+        f'<table {_TABLE} style="border-collapse:collapse;"><tr>'
+        + _cell(_src_logo(name, size), f"width:{size}px;font-size:0;line-height:0;",
+                f'width="{size}" valign="middle"')
+        + _cell(_esc(name if label is None else label),
+                f"padding:0 0 0 7px;font-size:{font_size}px;font-weight:700;color:{_INK};"
+                f"line-height:{size}px;white-space:nowrap;", 'valign="middle"')
+        + "</tr></table>"
+    )
+
+
+def _src_badges(
+    names: list[str], size: int = 20, font_size: int = 13, gap: int = 12,
+    show_names: bool = True,
+) -> str:
+    """Several sources side by side in one row (one cell per source)."""
+    if not names:
+        return ""
+    cells = []
+    for i, name in enumerate(names):
+        content = _src_badge(name, size, font_size) if show_names else _src_logo(name, size)
+        pad = f"padding:0 {gap}px 0 0;" if i < len(names) - 1 else ""
+        cells.append(_cell(content, f"{pad}font-size:0;line-height:0;", 'valign="middle"'))
+    return f'<table {_TABLE} style="border-collapse:collapse;"><tr>{"".join(cells)}</tr></table>'
 
 
 def collect_source_icon_attachments(html: str) -> list[dict]:
@@ -293,19 +338,11 @@ def collect_source_icon_attachments(html: str) -> list[dict]:
     renamed to .svg still works correctly."""
     import base64 as b64
     import re
-    from pathlib import Path
 
-    icons_dir = Path(__file__).resolve().parent.parent.parent / "data" / "static" / "email-icons"
     cids = set(re.findall(r'cid:src-([\w-]+)', html))
     attachments: list[dict] = []
     for slug in sorted(cids):
-        # Try common extensions
-        path = None
-        for ext in ("png", "svg", "jpg", "jpeg"):
-            candidate = icons_dir / f"{slug}.{ext}"
-            if candidate.is_file():
-                path = candidate
-                break
+        path = _icon_file(slug)
         if path is None:
             continue
         data = path.read_bytes()
@@ -437,8 +474,14 @@ def _render_body_html(
         f'<div style="font-size:24px;font-weight:800;margin:0;">Harvest Run Report</div>'
         + _table(
             "<tr>"
-            + _cell(f"{_esc(run_date)} &middot; {''.join(_src_badge(s) for s in sources)} ",
-                    f"padding:4px 0 0;font-size:13px;color:{_MUTED};", 'valign="middle"')
+            + _cell(
+                f'<table {_TABLE} style="border-collapse:collapse;"><tr>'
+                + _cell(f"{_esc(run_date)}" + (" &middot;" if sources else ""),
+                        f"padding:0 10px 0 0;font-size:13px;color:{_MUTED};white-space:nowrap;",
+                        'valign="middle"')
+                + _cell(_src_badges(sources), "", 'valign="middle"')
+                + "</tr></table>",
+                "padding:4px 0 0;", 'valign="middle"')
             + _cell(badge, "padding:4px 0 0;", 'width="110" align="right" valign="middle"')
             + "</tr>"
         )
@@ -505,24 +548,12 @@ def _render_body_html(
     src_rows = "<tr>" + _th("Source", "left") + "".join(
         _th(h, "center") for h in ("Jobs", "Email", "Phone", "LinkedIn")
     ) + "</tr>"
-    for name, code, color in (
-        ("LinkedIn", "Li", "#0a66c2"), ("Naukri", "Nk", "#6366f1"), ("Dice", "Dc", "#ef4444"),
-    ):
+    for name in ("LinkedIn", "Naukri", "Dice"):
         s = ps.get(name, {})
         if not s.get("jobs"):
             continue
-        chip = _table(
-            "<tr>"
-            + _bg_cell(_esc(code), color,
-                       "width:28px;height:28px;font-size:12px;font-weight:800;color:#ffffff;"
-                       "text-align:center;line-height:28px;",
-                       'width="28" height="28" align="center" valign="middle"')
-            + _cell(_esc(name), "padding:0 0 0 10px;font-size:14px;font-weight:700;",
-                    'valign="middle"')
-            + "</tr>"
-        )
         src_rows += (
-            "<tr>" + _src_td(chip, "left")
+            "<tr>" + _src_td(_src_badge(name, 24, 14), "left")
             + "".join(_src_td(str(int(s.get(k, 0) or 0)), "center")
                       for k in ("jobs", "email", "phone", "linkedin"))
             + "</tr>"
