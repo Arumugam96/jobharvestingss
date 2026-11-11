@@ -106,7 +106,7 @@ async def compute_weekly_stats(
             "status": r.status,
             "jobs": r.combined_count or 0,
             "duration_s": dur,
-            "is_feed": r.run_type == "feed",
+            "is_feed": r.source == "LinkedIn Feed",
         })
 
     return {

@@ -318,9 +318,11 @@ def render_phone_insights_email_html(
         )
 
     _SECTION = (
-        '<table cellpadding="0" cellspacing="0" border="0" style="margin:0 0 10px">'
+        '<table cellpadding="0" cellspacing="0" border="0" width="100%" style="margin:0 0 10px">'
         '<tr><td style="font-size:13px;font-weight:700;color:#1E293B;'
-        'padding-bottom:6px;border-bottom:2px solid #3B82F6">{title}</td></tr></table>'
+        'padding-bottom:4px">{title}'
+        '<div style="margin-top:4px;height:2px;width:60px;background-color:#3B82F6"></div>'
+        '</td></tr></table>'
     )
 
     return f"""<!DOCTYPE html>
