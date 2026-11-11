@@ -43,7 +43,7 @@ COPY requirements.txt .
 # Cache mount keeps downloaded wheels across builds without baking them into the image.
 RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements.txt
 
-RUN --mount=type=cache,target=/root/.cache/ms-playwright playwright install chromium
+RUN playwright install chromium
 
 COPY . .
 COPY supervisord.conf /etc/supervisor/conf.d/harvest.conf
