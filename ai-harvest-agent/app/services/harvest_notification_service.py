@@ -279,14 +279,17 @@ def _src_logo(name: str, size: int = 20) -> str:
     ``collect_source_icon_attachments``). Falls back to a coloured letter tile
     only when the icon file is missing."""
     slug = _SRC_SLUGS.get(name)
-    radius = "50%" if slug in _SRC_ROUND else f"{max(3, size // 5)}px"
     if slug and _icon_file(slug):
+        # Shape (round / rounded) is baked into the PNG's alpha, not CSS — clients
+        # clip border-radius inconsistently. vertical-align:top keeps the image flush
+        # in its cell even where a client strips display:block (no baseline gap).
         return (
             f'<img src="cid:src-{slug}" alt="{_esc(name)}" title="{_esc(name)}" '
             f'width="{size}" height="{size}" style="display:block;width:{size}px;'
-            f'height:{size}px;border:0;outline:none;text-decoration:none;'
-            f'border-radius:{radius};" />'
+            f'height:{size}px;max-width:{size}px;border:0;outline:none;'
+            f'text-decoration:none;vertical-align:top;" />'
         )
+    radius = "50%" if slug in _SRC_ROUND else f"{max(3, size // 5)}px"
     color = _SRC_COLORS.get(name, _MUTED)
     return (
         f'<table {_TABLE} width="{size}" style="border-collapse:collapse;"><tr>'
@@ -303,14 +306,18 @@ def _src_logo(name: str, size: int = 20) -> str:
 def _src_badge(
     name: str, size: int = 20, font_size: int = 13, label: str | None = None,
 ) -> str:
-    """Logo + source name, vertically centred in a 2-cell table."""
+    """Logo + source name, vertically centred in a 2-cell table. Both cells are
+    pinned to the logo's height so the row can't grow around either one."""
+    exact = f"height:{size}px;line-height:{size}px;mso-line-height-rule:exactly;"
     return (
-        f'<table {_TABLE} style="border-collapse:collapse;"><tr>'
-        + _cell(_src_logo(name, size), f"width:{size}px;font-size:0;line-height:0;",
-                f'width="{size}" valign="middle"')
+        f'<table {_TABLE} height="{size}" style="border-collapse:collapse;height:{size}px;">'
+        "<tr>"
+        + _cell(_src_logo(name, size), f"width:{size}px;{exact}font-size:0;padding:0;",
+                f'width="{size}" height="{size}" valign="middle"')
         + _cell(_esc(name if label is None else label),
-                f"padding:0 0 0 7px;font-size:{font_size}px;font-weight:700;color:{_INK};"
-                f"line-height:{size}px;white-space:nowrap;", 'valign="middle"')
+                f"{exact}padding:0 0 0 7px;font-size:{font_size}px;font-weight:700;"
+                f"color:{_INK};white-space:nowrap;",
+                f'height="{size}" valign="middle"')
         + "</tr></table>"
     )
 
