@@ -159,19 +159,63 @@ export default function RunDetailView({ runId, onBack, onView }) {
                         <div style={{ fontSize: 14, fontWeight: 600, color: C.text, marginTop: 3 }}>
                           {entry.status === "running" ? "—" : fmtSeconds(entry.durationS)}
                         </div>
-                        {entry.phaseTimings.scrapeS != null && (
-                          <div style={{ fontSize: 12, color: C.textSoft, marginTop: 2 }}>
-                            Scrape {fmtSeconds(entry.phaseTimings.scrapeS)}
-                            {entry.phaseTimings.postHarvestS != null && <> · Resdex &amp; outreach {fmtSeconds(entry.phaseTimings.postHarvestS)}</>}
-                          </div>
-                        )}
+                        {entry.phaseTimings.scrapeS != null && (() => {
+                          const scrape = entry.phaseTimings.scrapeS || 0;
+                          const post = entry.phaseTimings.postHarvestS || 0;
+                          const total = scrape + post || 1;
+                          return (
+                            <>
+                              <div style={{ display: "flex", height: 5, borderRadius: 3, overflow: "hidden", marginTop: 6, gap: 2 }}>
+                                <div style={{ flex: scrape, background: C.primary, borderRadius: 3 }} />
+                                {post > 0 && <div style={{ flex: post, background: C.accent, borderRadius: 3, minWidth: 4 }} />}
+                              </div>
+                              <div style={{ display: "flex", gap: 10, marginTop: 4, fontSize: 11, color: C.textSoft }}>
+                                <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                                  <span style={{ width: 7, height: 7, borderRadius: "50%", background: C.primary, display: "inline-block" }} />
+                                  Scrape {fmtSeconds(scrape)}
+                                </span>
+                                {post > 0 && (
+                                  <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                                    <span style={{ width: 7, height: 7, borderRadius: "50%", background: C.accent, display: "inline-block" }} />
+                                    Resdex &amp; outreach {fmtSeconds(post)}
+                                  </span>
+                                )}
+                              </div>
+                            </>
+                          );
+                        })()}
                       </div>
                       {entry.runType !== "feed" && (
                         <div>
                           <div style={{ fontSize: 11, color: C.textSoft, fontWeight: 600, letterSpacing: ".05em", textTransform: "uppercase" }}>Phone Insights</div>
-                          <div style={{ fontSize: 14, fontWeight: 600, marginTop: 3, color: entry.phoneInsightsSentAt ? "#059669" : C.textSoft }}>
-                            {entry.phoneInsightsSentAt ? `Sent ${fmtDate(entry.phoneInsightsSentAt)}` : entry.completedAt ? "Pending (24h after run)" : "—"}
-                          </div>
+                          {entry.phoneInsightsSentAt ? (
+                            <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 3 }}>
+                              <span style={{
+                                display: "inline-flex", alignItems: "center", gap: 4,
+                                fontSize: 10, fontWeight: 700, letterSpacing: ".04em", textTransform: "uppercase",
+                                padding: "2px 8px", borderRadius: 999,
+                                background: "#ECFDF5", color: "#059669", border: "1px solid #A7F3D0",
+                              }}>Sent</span>
+                              <span style={{ fontSize: 13, fontWeight: 600, color: C.text }}>{fmtDate(entry.phoneInsightsSentAt)}</span>
+                            </div>
+                          ) : entry.completedAt ? (
+                            <div style={{ marginTop: 3 }}>
+                              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                                <span style={{
+                                  display: "inline-flex", alignItems: "center", gap: 4,
+                                  fontSize: 10, fontWeight: 700, letterSpacing: ".04em", textTransform: "uppercase",
+                                  padding: "2px 8px", borderRadius: 999,
+                                  background: "#FFFBEB", color: "#D97706", border: "1px solid #FCD34D",
+                                }}>Scheduled</span>
+                                <span style={{ fontSize: 13, fontWeight: 600, color: C.text }}>~24h after run</span>
+                              </div>
+                              <div style={{ fontSize: 11, color: C.textSoft, marginTop: 3 }}>
+                                Phone reveal report will be emailed automatically
+                              </div>
+                            </div>
+                          ) : (
+                            <div style={{ fontSize: 14, fontWeight: 600, marginTop: 3, color: C.textSoft }}>—</div>
+                          )}
                         </div>
                       )}
                     </div>

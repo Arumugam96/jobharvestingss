@@ -194,21 +194,6 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
       <div className="ha-pagehead">
         <div className="ha-pagehead-titles">
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            {!library && !demand && (
-              <button
-                className="ha-btn ha-btn-secondary"
-                style={{
-                  display: "inline-flex", alignItems: "center", gap: 6,
-                  height: 34, padding: "0 14px", borderRadius: 999,
-                  fontSize: 13, fontWeight: 600, color: C.primary,
-                  border: `1px solid ${C.primary}33`, background: `${C.primary}0A`,
-                  cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap",
-                }}
-                onClick={() => onNavigate("library")}
-              >
-                <Wrench size={14} /> My Workspace
-              </button>
-            )}
             {library && (
               <button
                 className="ha-btn ha-btn-secondary"
@@ -229,6 +214,21 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
           </p>
         </div>
         <div className="ha-pagehead-actions">
+          {!library && !demand && (
+            <button
+              className="ha-btn ha-btn-secondary"
+              style={{
+                display: "inline-flex", alignItems: "center", gap: 6,
+                height: 34, padding: "0 14px", borderRadius: 999,
+                fontSize: 13, fontWeight: 600, color: C.primary,
+                border: `1px solid ${C.primary}33`, background: `${C.primary}0A`,
+                cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap",
+              }}
+              onClick={() => onNavigate("library")}
+            >
+              <Wrench size={14} /> My Workspace
+            </button>
+          )}
           {!library && (
             <div ref={formatRef} style={{ position: "relative", display: "inline-flex", borderRadius: 8, border: `1px solid ${C.primary}` }}>
               <button
