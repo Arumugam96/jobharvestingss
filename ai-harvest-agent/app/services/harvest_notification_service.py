@@ -304,7 +304,7 @@ def _src_logo(name: str, size: int = 20) -> str:
 
 
 def _src_badge(
-    name: str, size: int = 20, font_size: int = 13, label: str | None = None,
+    name: str, size: int = 15, font_size: int = 13, label: str | None = None,
 ) -> str:
     """Logo + source name, vertically centred in a 2-cell table. Both cells are
     pinned to the logo's height so the row can't grow around either one."""
@@ -323,7 +323,7 @@ def _src_badge(
 
 
 def _src_badges(
-    names: list[str], size: int = 20, font_size: int = 13, gap: int = 12,
+    names: list[str], size: int = 15, font_size: int = 13, gap: int = 12,
     show_names: bool = True,
 ) -> str:
     """Several sources side by side in one row (one cell per source)."""
@@ -369,6 +369,23 @@ def collect_source_icon_attachments(html: str) -> list[dict]:
             "Base64Content": b64.b64encode(data).decode("ascii"),
         })
     return attachments
+
+
+def embed_source_icons_for_preview(html: str, attachments: list[dict] | None = None) -> str:
+    """Browser-preview copy of a report: each ``cid:src-*`` becomes a data: URI built
+    from the same inline attachments a real send carries. Preview only — Gmail
+    blocks data: images, so never send this version."""
+    import re
+
+    if attachments is None:
+        attachments = collect_source_icon_attachments(html)
+    by_cid = {a["ContentID"]: a for a in attachments}
+
+    def _sub(m: re.Match[str]) -> str:
+        a = by_cid.get(m.group(1))
+        return f"data:{a['ContentType']};base64,{a['Base64Content']}" if a else m.group(0)
+
+    return re.sub(r"cid:(src-[\w-]+)", _sub, html)
 
 
 def _split_pair(label: str, value: str, label_style: str, value_style: str) -> str:
