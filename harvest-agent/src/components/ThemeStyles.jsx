@@ -133,6 +133,9 @@ const ThemeStyles = () => (
     .ha-runhead{display:flex;justify-content:space-between;align-items:flex-start;gap:24px;flex-wrap:wrap;}
     .ha-runhead-meta{flex:0 1 auto;min-width:220px;}
     .ha-runhead-right{flex:1 1 440px;min-width:280px;display:flex;flex-direction:column;align-items:flex-end;gap:12px;}
+    .ha-runhead-split{display:flex;gap:0;}
+    .ha-runhead-timing{flex:0 0 380px;padding:20px 24px;border-right:1px solid ${C.border};display:flex;flex-direction:column;gap:18px;}
+    .ha-runhead-stats-side{flex:1;min-width:0;padding:20px 24px;display:flex;flex-direction:column;gap:12px;}
     .ha-runstats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;width:100%;}
     .ha-runstat{${GLASS_STAT}border-radius:10px;padding:11px 14px;}
     .ha-runstat b{display:block;font-size:22px;font-weight:700;line-height:1.1;color:${C.text};}
@@ -141,7 +144,7 @@ const ThemeStyles = () => (
     .ha-runstat-btn:hover{transform:translateY(-2px);box-shadow:0 10px 22px -12px rgba(15,23,42,.3), inset 0 1px 0 rgba(255,255,255,.85);}
     .ha-runstat-btn:active{transform:translateY(1px);}
     .ha-runstat-active{box-shadow:0 0 0 2px rgba(37,99,235,.55), 0 6px 20px -12px rgba(15,23,42,.22), inset 0 1px 0 rgba(255,255,255,.85);}
-    @media(max-width:720px){.ha-runhead-right{align-items:stretch;flex-basis:100%;}.ha-runhead-right .ha-pill{align-self:flex-start;}}
+    @media(max-width:720px){.ha-runhead-right{align-items:stretch;flex-basis:100%;}.ha-runhead-right .ha-pill{align-self:flex-start;}.ha-runhead-split{flex-direction:column;}.ha-runhead-timing{flex:none;border-right:none;border-bottom:1px solid ${C.border};}}
     @media(max-width:520px){.ha-runstats{grid-template-columns:repeat(2,minmax(0,1fr));}}
     /* Stat tiles (JobsPage/RunHistory StatCard) — Mail-logs .ha-stat treatment
        layered over the .ha-card base; tint comes from --tint/--tint2 vars. */

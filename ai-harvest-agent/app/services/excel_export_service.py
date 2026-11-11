@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 from typing import Any
-
+import openpyxl
 import structlog
 
 # openpyxl rejects XML control characters — strip them from every cell value
@@ -182,7 +182,6 @@ class ExcelExportService:
     ) -> "Any":
         """Assemble the 5-sheet workbook. Jobs may be UnifiedJob instances or
         scraped_job_view() dicts (the DB-backed report path)."""
-        import openpyxl
 
         wb = openpyxl.Workbook()
 
@@ -192,15 +191,13 @@ class ExcelExportService:
         _write_sheet(ws_combined, _JOB_COLUMNS, all_jobs)
 
         # ── Sheets 2-4: per-source ─────────────────────────────────────────────
-        for sheet_title in ("LinkedIn Jobs", "Naukri Jobs", "Dice Jobs"):
-            source_key = sheet_title.replace(" Jobs", "")  # "LinkedIn" | "Naukri" | "Dice"
+        for sheet_title in ("LinkedIn", "Naukri", "Dice"):
             ws = wb.create_sheet(title=sheet_title)
-            source_jobs = jobs_by_source.get(source_key, [])
-            if source_key == "LinkedIn":
-                logger.info("linkedin_sheet_created", sheet=sheet_title, job_count=len(source_jobs))
+            source_jobs = jobs_by_source.get(sheet_title, [])
+            logger.info(f"{sheet_title}_sheet_created", sheet=sheet_title, job_count=len(source_jobs))
+            
             _write_sheet(ws, _JOB_COLUMNS, source_jobs)
-            if source_key == "LinkedIn":
-                logger.info("linkedin_jobs_written_to_excel", rows=len(source_jobs))
+            logger.info("linkedin_jobs_written_to_excel", rows=len(source_jobs))
 
         # ── Sheet 5: Lead Intelligence (ALL jobs with lead status column) ────
         ws_leads = wb.create_sheet(title="Lead Intelligence")
@@ -215,11 +212,6 @@ class ExcelExportService:
         """Build the workbook fully in memory and return the .xlsx bytes —
         used by GET /download/excel and the report email, which generate the
         report from the DB on demand instead of a harvest-time file."""
-        try:
-            import openpyxl  # noqa: F401
-        except ImportError:
-            logger.error("excel_export_skipped", reason="openpyxl not installed — run: pip install openpyxl")
-            return b""
 
         if jobs_by_source is None:
             jobs_by_source = {}
@@ -243,12 +235,6 @@ class ExcelExportService:
         Build the workbook and write it to data/results/excel/.
         Returns the absolute path of the saved file.
         """
-        try:
-            import openpyxl  # noqa: F401
-        except ImportError:
-            logger.error("excel_export_skipped", reason="openpyxl not installed — run: pip install openpyxl")
-            return ""
-
         _EXCEL_DIR.mkdir(parents=True, exist_ok=True)
         ts       = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         filename = f"{ts}_harvest.xlsx"

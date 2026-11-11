@@ -137,91 +137,111 @@ export default function RunDetailView({ runId, onBack, onView }) {
           {error && <div className="ha-errbanner">{error}</div>}
           {entry && !loading && (
             <>
-              <div className="ha-detail-card">
-                <div className="ha-runhead">
-                  <div className="ha-runhead-meta">
-                    <div style={{ fontSize: 12, color: C.textSoft, fontWeight: 600, letterSpacing: ".04em", textTransform: "uppercase" }}>Run ID</div>
-                    <div style={{ fontSize: 22, fontWeight: 700, color: C.secondary, letterSpacing: "-.01em" }}>{entry.runId}</div>
-                    <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
+              <div className="ha-detail-card" style={{ padding: 0, overflow: "hidden" }}>
+                {/* Top bar: Run ID + sources | status */}
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "18px 24px", borderBottom: `1px solid ${C.border}` }}>
+                  <div>
+                    <div style={{ fontSize: 11, color: C.textSoft, fontWeight: 700, letterSpacing: ".05em", textTransform: "uppercase" }}>Run ID</div>
+                    <div style={{ fontSize: 20, fontWeight: 800, color: C.secondary, letterSpacing: "-.01em", marginTop: 2 }}>{entry.runId}</div>
+                    <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
                       {entry.sources.map((s) => <SourceChip key={s} source={s} />)}
                     </div>
-                    <div style={{ display: "flex", gap: 32, marginTop: 18, flexWrap: "wrap" }}>
-                      <div>
-                        <div style={{ fontSize: 11, color: C.textSoft, fontWeight: 600, letterSpacing: ".05em", textTransform: "uppercase" }}>Started</div>
-                        <div style={{ fontSize: 14, fontWeight: 600, color: C.text, marginTop: 3 }}>{fmtDate(entry.startedAt)}</div>
-                      </div>
-                      <div>
-                        <div style={{ fontSize: 11, color: C.textSoft, fontWeight: 600, letterSpacing: ".05em", textTransform: "uppercase" }}>Completed</div>
-                        <div style={{ fontSize: 14, fontWeight: 600, color: C.text, marginTop: 3 }}>{fmtDate(entry.completedAt)}</div>
-                      </div>
-                      <div>
-                        <div style={{ fontSize: 11, color: C.textSoft, fontWeight: 600, letterSpacing: ".05em", textTransform: "uppercase" }}>Duration</div>
-                        <div style={{ fontSize: 14, fontWeight: 600, color: C.text, marginTop: 3 }}>
-                          {entry.status === "running" ? "—" : fmtSeconds(entry.durationS)}
-                        </div>
-                        {entry.phaseTimings.scrapeS != null && (() => {
-                          const scrape = entry.phaseTimings.scrapeS || 0;
-                          const post = entry.phaseTimings.postHarvestS || 0;
-                          const total = scrape + post || 1;
-                          return (
-                            <>
-                              <div style={{ display: "flex", height: 5, borderRadius: 3, overflow: "hidden", marginTop: 6, gap: 2 }}>
-                                <div style={{ flex: scrape, background: C.primary, borderRadius: 3 }} />
-                                {post > 0 && <div style={{ flex: post, background: C.accent, borderRadius: 3, minWidth: 4 }} />}
-                              </div>
-                              <div style={{ display: "flex", gap: 10, marginTop: 4, fontSize: 11, color: C.textSoft }}>
-                                <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-                                  <span style={{ width: 7, height: 7, borderRadius: "50%", background: C.primary, display: "inline-block" }} />
-                                  Scrape {fmtSeconds(scrape)}
-                                </span>
-                                {post > 0 && (
-                                  <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-                                    <span style={{ width: 7, height: 7, borderRadius: "50%", background: C.accent, display: "inline-block" }} />
-                                    Resdex &amp; outreach {fmtSeconds(post)}
-                                  </span>
-                                )}
-                              </div>
-                            </>
-                          );
-                        })()}
-                      </div>
-                      {entry.runType !== "feed" && (
-                        <div>
-                          <div style={{ fontSize: 11, color: C.textSoft, fontWeight: 600, letterSpacing: ".05em", textTransform: "uppercase" }}>Phone Insights</div>
-                          {entry.phoneInsightsSentAt ? (
-                            <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 3 }}>
-                              <span style={{
-                                display: "inline-flex", alignItems: "center", gap: 4,
-                                fontSize: 10, fontWeight: 700, letterSpacing: ".04em", textTransform: "uppercase",
-                                padding: "2px 8px", borderRadius: 999,
-                                background: "#ECFDF5", color: "#059669", border: "1px solid #A7F3D0",
-                              }}>Sent</span>
-                              <span style={{ fontSize: 13, fontWeight: 600, color: C.text }}>{fmtDate(entry.phoneInsightsSentAt)}</span>
-                            </div>
-                          ) : entry.completedAt ? (
-                            <div style={{ marginTop: 3 }}>
-                              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                                <span style={{
-                                  display: "inline-flex", alignItems: "center", gap: 4,
-                                  fontSize: 10, fontWeight: 700, letterSpacing: ".04em", textTransform: "uppercase",
-                                  padding: "2px 8px", borderRadius: 999,
-                                  background: "#FFFBEB", color: "#D97706", border: "1px solid #FCD34D",
-                                }}>Scheduled</span>
-                                <span style={{ fontSize: 13, fontWeight: 600, color: C.text }}>~24h after run</span>
-                              </div>
-                              <div style={{ fontSize: 11, color: C.textSoft, marginTop: 3 }}>
-                                Phone reveal report will be emailed automatically
-                              </div>
-                            </div>
-                          ) : (
-                            <div style={{ fontSize: 14, fontWeight: 600, marginTop: 3, color: C.textSoft }}>—</div>
-                          )}
-                        </div>
-                      )}
-                    </div>
                   </div>
-                  <div className="ha-runhead-right">
-                    <StatusPill status={entry.status} />
+                  <StatusPill status={entry.status} />
+                </div>
+
+                {/* Body: timing left | stats right */}
+                <div className="ha-runhead-split">
+                  {/* Left: timing + phone insights */}
+                  <div className="ha-runhead-timing">
+                    <div style={{ display: "flex", gap: 24, flexWrap: "wrap" }}>
+                      <div>
+                        <div style={{ fontSize: 10, color: C.textSoft, fontWeight: 700, letterSpacing: ".06em", textTransform: "uppercase" }}>Started</div>
+                        <div style={{ fontSize: 14, fontWeight: 600, color: C.text, marginTop: 2 }}>{fmtDate(entry.startedAt)}</div>
+                      </div>
+                      <div>
+                        <div style={{ fontSize: 10, color: C.textSoft, fontWeight: 700, letterSpacing: ".06em", textTransform: "uppercase" }}>Completed</div>
+                        <div style={{ fontSize: 14, fontWeight: 600, color: C.text, marginTop: 2 }}>{fmtDate(entry.completedAt)}</div>
+                      </div>
+                    </div>
+
+                    {/* Duration with phase bar */}
+                    <div>
+                      <div style={{ fontSize: 10, color: C.textSoft, fontWeight: 700, letterSpacing: ".06em", textTransform: "uppercase" }}>Duration</div>
+                      <div style={{ fontSize: 22, fontWeight: 800, color: C.text, marginTop: 2 }}>
+                        {entry.status === "running" ? "—" : fmtSeconds(entry.durationS)}
+                      </div>
+                      {entry.phaseTimings.scrapeS != null && (() => {
+                        const scrape = entry.phaseTimings.scrapeS || 0;
+                        const post = entry.phaseTimings.postHarvestS || 0;
+                        return (
+                          <>
+                            <div style={{ display: "flex", height: 5, borderRadius: 3, overflow: "hidden", marginTop: 6, gap: 2 }}>
+                              <div style={{ flex: scrape, background: C.primary, borderRadius: 3 }} />
+                              {post > 0 && <div style={{ flex: post, background: C.accent, borderRadius: 3, minWidth: 4 }} />}
+                            </div>
+                            <div style={{ display: "flex", gap: 10, marginTop: 4, fontSize: 11, color: C.textSoft }}>
+                              <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                                <span style={{ width: 7, height: 7, borderRadius: "50%", background: C.primary, display: "inline-block" }} />
+                                Scrape {fmtSeconds(scrape)}
+                              </span>
+                              {post > 0 && (
+                                <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                                  <span style={{ width: 7, height: 7, borderRadius: "50%", background: C.accent, display: "inline-block" }} />
+                                  Resdex &amp; outreach {fmtSeconds(post)}
+                                </span>
+                              )}
+                            </div>
+                          </>
+                        );
+                      })()}
+                    </div>
+
+                    {/* Phone Insights */}
+                    {entry.runType !== "feed" && (
+                      <div style={{
+                        padding: "10px 14px", borderRadius: 9, border: `1px solid ${C.border}`,
+                        background: C.pale, display: "flex", flexDirection: "column", gap: 4,
+                      }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <span style={{ fontSize: 12, fontWeight: 700, color: C.text }}>Phone Insights</span>
+                          {entry.phoneInsightsSentAt ? (
+                            <span style={{
+                              fontSize: 10, fontWeight: 700, letterSpacing: ".04em", textTransform: "uppercase",
+                              padding: "2px 8px", borderRadius: 999,
+                              background: "#ECFDF5", color: "#059669", border: "1px solid #A7F3D0",
+                            }}>Sent</span>
+                          ) : entry.completedAt ? (
+                            <span style={{
+                              fontSize: 10, fontWeight: 700, letterSpacing: ".04em", textTransform: "uppercase",
+                              padding: "2px 8px", borderRadius: 999,
+                              background: "#FFFBEB", color: "#D97706", border: "1px solid #FCD34D",
+                            }}>Scheduled</span>
+                          ) : null}
+                        </div>
+                        {entry.phoneInsightsSentAt ? (
+                          <div style={{ fontSize: 13, fontWeight: 600, color: C.text }}>{fmtDate(entry.phoneInsightsSentAt)}</div>
+                        ) : entry.completedAt ? (
+                          <>
+                            <div style={{ fontSize: 13, fontWeight: 600, color: C.text }}>
+                              {(() => {
+                                const d = new Date(entry.completedAt);
+                                if (Number.isNaN(d.getTime())) return "~24h after run";
+                                d.setDate(d.getDate() + 1);
+                                return `~${d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}`;
+                              })()}
+                            </div>
+                            <div style={{ fontSize: 11, color: C.textSoft }}>Phone reveal report will be emailed automatically</div>
+                          </>
+                        ) : (
+                          <div style={{ fontSize: 13, color: C.textSoft }}>—</div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Right: stat cards */}
+                  <div className="ha-runhead-stats-side">
                     <div className="ha-runstats">
                       {[
                         { bucket: "all",       value: entry.jobsFound,     label: "Jobs found",        color: C.accent },
