@@ -339,7 +339,12 @@ def _src_badges(
     for i, name in enumerate(names):
         content = _src_badge(name, size, font_size) if show_names else _src_logo(name, size)
         pad = f"padding:0 {gap}px 0 0;" if i < len(names) - 1 else ""
-        cells.append(_cell(content, f"{pad}font-size:0;line-height:0;", 'valign="middle"'))
+        # Same Outlook-safe line box as _src_badge's logo cell: line-height:0 makes
+        # Word clip a bare logo's top.
+        cells.append(_cell(
+            content, f"{pad}font-size:1px;line-height:1px;mso-line-height-rule:at-least;",
+            'valign="middle"',
+        ))
     return f'<table {_TABLE} style="border-collapse:collapse;"><tr>{"".join(cells)}</tr></table>'
 
 

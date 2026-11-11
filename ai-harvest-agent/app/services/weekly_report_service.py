@@ -209,10 +209,10 @@ def render_weekly_report_html(stats: dict[str, Any]) -> str:
 
     run_header = (
         "<tr>"
-        + _th("Run ID", "left", "140")
-        + _th("Sources", "left", "110")
+        + _th("Run ID", "left", "125")
+        + _th("Sources", "left", "215")
         + _th("Status", "center", "80")
-        + _th("Jobs", "center", "60")
+        + _th("Jobs", "center", "55")
         + _th("Duration", "center", "80")
         + "</tr>"
     )
@@ -225,7 +225,7 @@ def render_weekly_report_html(stats: dict[str, Any]) -> str:
         )
         sources_html = (
             _src_badge("LinkedIn Feed", 18, 12, label="Feed") if pr["is_feed"]
-            else _src_badges(pr["sources"], 18, gap=6, show_names=False)
+            else _src_badges(pr["sources"], 18, 12, gap=10)
         )
         run_rows += (
             "<tr>"
