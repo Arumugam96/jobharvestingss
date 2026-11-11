@@ -11,6 +11,7 @@ official_email_id/contact_number when the job row itself scraped none.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -67,6 +68,17 @@ def build_excel_report_bytes(job_dicts: list[dict[str, Any]]) -> bytes:
 
 def _has(value: Any) -> bool:
     return bool(value and str(value).strip())
+
+
+_DIGITS_RE = re.compile(r"\D")
+
+
+def _norm_phone(raw: str | None) -> str:
+    """Strip a phone string to its trailing 10 digits for dedup."""
+    if not raw:
+        return ""
+    digits = _DIGITS_RE.sub("", str(raw).strip())
+    return digits[-10:] if len(digits) >= 10 else digits
 
 
 def _contact_score(job: ScrapedJobORM) -> int:
@@ -132,6 +144,10 @@ def compute_harvest_insights(jobs: list[ScrapedJobORM]) -> dict[str, Any]:
     linkedin = naukri = dice = 0
     with_email = with_phone = with_contact = with_linkedin = 0
     apollo_enriched = local_llm_contacts = 0
+    seen_phones: set[str] = set()
+    seen_phones_per_src: dict[str, set[str]] = {
+        "LinkedIn": set(), "Naukri": set(), "Dice": set(),
+    }
 
     src_stats: dict[str, dict[str, int]] = {
         "LinkedIn": {"jobs": 0, "email": 0, "phone": 0, "linkedin": 0, "poster_name": 0},
@@ -152,13 +168,18 @@ def compute_harvest_insights(jobs: list[ScrapedJobORM]) -> dict[str, Any]:
 
         recruiter = j.recruiter
         has_email = _has(j.email_id) or _has(getattr(recruiter, "official_email_id", ""))
-        has_phone = _has(j.contact_number) or _has(getattr(recruiter, "contact_number", ""))
+        job_phone = j.contact_number if _has(j.contact_number) else None
+        rec_phone = getattr(recruiter, "contact_number", "") if recruiter else None
+        rec_phone = rec_phone if _has(rec_phone) else None
+        phone_norm = _norm_phone(job_phone) or _norm_phone(rec_phone)
+        has_phone = bool(phone_norm)
         has_li = _has(j.linkedin_profile_url) or _has(getattr(recruiter, "linkedin_profile_url", ""))
         has_name = _has(j.job_poster_name) or _has(getattr(recruiter, "name", ""))
 
         if has_email:
             with_email += 1
-        if has_phone:
+        if has_phone and phone_norm not in seen_phones:
+            seen_phones.add(phone_norm)
             with_phone += 1
         if has_li:
             with_linkedin += 1
@@ -166,7 +187,8 @@ def compute_harvest_insights(jobs: list[ScrapedJobORM]) -> dict[str, Any]:
         if src in src_stats:
             if has_email:
                 src_stats[src]["email"] += 1
-            if has_phone:
+            if has_phone and phone_norm not in seen_phones_per_src.get(src, set()):
+                seen_phones_per_src.setdefault(src, set()).add(phone_norm)
                 src_stats[src]["phone"] += 1
             if has_li:
                 src_stats[src]["linkedin"] += 1

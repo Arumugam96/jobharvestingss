@@ -14,6 +14,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+import re
+
 import structlog
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -34,6 +36,16 @@ _SOURCE_ROWS = (
     ("recruiter", "Recruiter (Apollo)", ("recruiter",)),
 )
 _DONE_STATUSES = ("success", "completed", "no_results")
+
+_DIGITS_RE = re.compile(r"\D")
+
+
+def _norm_phone(raw: str | None) -> str:
+    """Strip a phone string to its trailing 10 digits for dedup comparison."""
+    if not raw:
+        return ""
+    digits = _DIGITS_RE.sub("", raw.strip())
+    return digits[-10:] if len(digits) >= 10 else digits
 
 
 def _empty(run_id: str) -> dict[str, Any]:
@@ -68,12 +80,33 @@ async def compute_phone_outreach_insights(
     if not rows:
         return _empty(run_id)
     phone_jobs = {r.id for r in rows}
-    total_phones = len(phone_jobs)
-    per_source = {
-        "job": sum(1 for r in rows if r.job_phone),
-        "recruiter": sum(1 for r in rows if r.rec_phone),
-        "company": sum(1 for r in rows if r.co_phone),
-    }
+
+    # Deduplicate by normalised phone string. Each unique number is attributed to
+    # exactly one source using priority: job > recruiter > company (the first
+    # source that produced this number). This keeps the per-source rows from
+    # overlapping, so their sum equals total_phones.
+    seen_phones: dict[str, str] = {}  # norm_phone → source key
+    phone_to_jobs: dict[str, set[str]] = {}  # norm_phone → set of job ids
+    for r in rows:
+        for phone_str, src_key in (
+            (r.job_phone, "job"),
+            (r.rec_phone, "recruiter"),
+            (r.co_phone, "company"),
+        ):
+            norm = _norm_phone(phone_str)
+            if not norm:
+                continue
+            phone_to_jobs.setdefault(norm, set()).add(r.id)
+            if norm not in seen_phones:
+                seen_phones[norm] = src_key
+
+    total_phones = len(seen_phones)
+    if total_phones == 0:
+        return _empty(run_id)
+
+    per_source = {"job": 0, "recruiter": 0, "company": 0}
+    for src_key in seen_phones.values():
+        per_source[src_key] += 1
 
     # Latest non-cleared call per job (ids are autoincrement → max(id) is newest).
     C = PhoneCallLogORM
@@ -85,25 +118,56 @@ async def compute_phone_outreach_insights(
     latest = (await db.execute(select(C).where(C.id.in_(newest.scalar_subquery())))).scalars().all()
     latest = [c for c in latest if c.job_id in phone_jobs]
 
-    called = len(latest)
+    # Deduplicate call logs by normalised phone: one call per unique number.
+    called_phones: set[str] = set()
+    answered_phones: set[str] = set()
+    unanswered_phones: set[str] = set()
+    call_by_phone: dict[str, Any] = {}  # norm_phone → call log row (for source attribution)
+    for c in latest:
+        norm = _norm_phone(c.phone_number) if hasattr(c, "phone_number") else ""
+        if not norm:
+            for p, jids in phone_to_jobs.items():
+                if c.job_id in jids:
+                    norm = p
+                    break
+        if not norm:
+            continue
+        if norm in called_phones:
+            continue
+        called_phones.add(norm)
+        call_by_phone[norm] = c
+        if c.call_status == "answered":
+            answered_phones.add(norm)
+        elif c.call_status == "unanswered":
+            unanswered_phones.add(norm)
+
+    called = len(called_phones)
     not_called = max(0, total_phones - called)
-    answered = sum(1 for c in latest if c.call_status == "answered")
-    unanswered = sum(1 for c in latest if c.call_status == "unanswered")
+    answered = len(answered_phones)
+    unanswered = len(unanswered_phones)
 
     sources = []
     for key, label, call_sources in _SOURCE_ROWS:
         count = per_source[key]
-        src_calls = [c for c in latest if (c.phone_source or "") in call_sources]
-        called_count = len(src_calls)
-        ans = sum(1 for c in src_calls if c.call_status == "answered")
-        unans = sum(1 for c in src_calls if c.call_status == "unanswered")
+        src_called = sum(
+            1 for p, sk in seen_phones.items()
+            if sk == key and p in called_phones
+        )
+        ans = sum(
+            1 for p, sk in seen_phones.items()
+            if sk == key and p in answered_phones
+        )
+        unans = sum(
+            1 for p, sk in seen_phones.items()
+            if sk == key and p in unanswered_phones
+        )
         sources.append({
             "label": label,
             "count": count,
-            "called": called_count,
+            "called": src_called,
             "answered": ans,
             "unanswered": unans,
-            "coverage": round(called_count / count * 100, 1) if count > 0 else 0,
+            "coverage": round(src_called / count * 100, 1) if count > 0 else 0,
         })
 
     return {
@@ -174,19 +238,20 @@ def render_phone_insights_email_html(
     ans_of_out = round(answered * 100 / called, 1) if called else 0
     unans_of_out = round(unanswered * 100 / called, 1) if called else 0
 
-    # ── KPI card helper ─────────────────────────────────────────────────
+    # ── KPI card helper (Outlook-safe: table cell with bgcolor) ─────────
     def _kpi(value, label: str, color: str, sub: str = "") -> str:
         sub_html = (
             f'<div style="font-size:12px;font-weight:600;color:{color};'
             f'margin-top:3px">{sub}</div>' if sub else ""
         )
         return (
-            f'<div style="background:#F8FAFC;border:1px solid #E2E8F0;'
-            f'border-radius:10px;padding:14px 10px;text-align:center">'
+            f'<td bgcolor="#F8FAFC" style="background-color:#F8FAFC;'
+            f'border:1px solid #E2E8F0;padding:14px 10px;text-align:center" '
+            f'align="center" valign="top">'
             f'<div style="font-size:30px;font-weight:700;color:{color};'
             f'line-height:1.1">{value}</div>'
             f'<div style="font-size:11px;color:#64748B;margin-top:5px;'
-            f'line-height:1.3">{label}</div>{sub_html}</div>'
+            f'line-height:1.3">{label}</div>{sub_html}</td>'
         )
 
     # ── Source rows ─────────────────────────────────────────────────────
@@ -255,22 +320,25 @@ def render_phone_insights_email_html(
 <table width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:620px;margin:0 auto;background:#ffffff">
   <!-- Header -->
   <tr>
-    <td style="background:linear-gradient(135deg,#1E40AF,#2563EB);padding:28px 32px 24px;text-align:center">
+    <td bgcolor="#2563EB" style="background-color:#2563EB;padding:28px 32px 24px;text-align:center">
       <h1 style="margin:0;font-size:22px;font-weight:700;color:#ffffff;letter-spacing:-.02em">Phone Outreach Insights</h1>
       <div style="display:inline-block;margin-top:10px;background:rgba(255,255,255,.15);color:#fff;font-size:11px;font-weight:600;padding:3px 14px;border-radius:12px;letter-spacing:.02em;line-height:28px">{src_badges}<span style="vertical-align:middle;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;letter-spacing:.05em;opacity:.85">{run_label}</span></div>
     </td>
   </tr>
-  <!-- Overview KPIs -->
+  <!-- Overview KPIs — 3 + 2 rows for Outlook compatibility -->
   <tr>
     <td style="padding:24px 24px 0">
       <div style="font-size:14px;font-weight:700;color:#1E293B;margin:0 0 14px;padding-bottom:8px;border-bottom:2px solid #2563EB;display:inline-block">Overview</div>
-      <table width="100%" cellpadding="0" cellspacing="0" border="0">
+      <table width="100%" cellpadding="0" cellspacing="6" border="0">
         <tr>
-          <td width="20%" style="padding:0 4px 10px 0">{_kpi(total, "Total Phones", "#2563EB")}</td>
-          <td width="20%" style="padding:0 4px 10px">{_kpi(called, "Outreached", "#16A34A", f"{called_pct}%")}</td>
-          <td width="20%" style="padding:0 4px 10px">{_kpi(not_called, "Not Outreached", "#D97706", f"{not_called_pct}%")}</td>
-          <td width="20%" style="padding:0 4px 10px">{_kpi(answered, "Answered", "#16A34A", f"{ans_of_out}% of outreached")}</td>
-          <td width="20%" style="padding:0 0 10px 4px">{_kpi(unanswered, "Not Answered", "#DC2626", f"{unans_of_out}% of outreached")}</td>
+          {_kpi(total, "Total Phones", "#2563EB")}
+          {_kpi(called, "Outreached", "#16A34A", f"{called_pct}%")}
+          {_kpi(not_called, "Not Outreached", "#D97706", f"{not_called_pct}%")}
+        </tr>
+        <tr>
+          {_kpi(answered, "Answered", "#16A34A", f"{ans_of_out}% of outreached")}
+          {_kpi(unanswered, "Not Answered", "#DC2626", f"{unans_of_out}% of outreached")}
+          <td></td>
         </tr>
       </table>
     </td>

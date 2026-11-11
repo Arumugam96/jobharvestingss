@@ -40,10 +40,10 @@ RUN rm -rf /var/lib/apt/lists/* \
 WORKDIR /app
 
 COPY requirements.txt .
-# --no-cache-dir: don't bake pip's download cache (~114 MB) into the image layer.
-RUN pip install --no-cache-dir -r requirements.txt
+# Cache mount keeps downloaded wheels across builds without baking them into the image.
+RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements.txt
 
-RUN playwright install chromium
+RUN --mount=type=cache,target=/root/.cache/ms-playwright playwright install chromium
 
 COPY . .
 COPY supervisord.conf /etc/supervisor/conf.d/harvest.conf

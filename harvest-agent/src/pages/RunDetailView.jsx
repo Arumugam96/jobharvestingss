@@ -139,7 +139,7 @@ export default function RunDetailView({ runId, onBack, onView }) {
             <>
               <div className="ha-detail-card" style={{ padding: 0, overflow: "hidden" }}>
                 {/* Top bar: Run ID + sources | status */}
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "18px 24px", borderBottom: `1px solid ${C.border}` }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 24px", borderBottom: `1px solid ${C.border}` }}>
                   <div>
                     <div style={{ fontSize: 11, color: C.textSoft, fontWeight: 700, letterSpacing: ".05em", textTransform: "uppercase" }}>Run ID</div>
                     <div style={{ fontSize: 20, fontWeight: 800, color: C.secondary, letterSpacing: "-.01em", marginTop: 2 }}>{entry.runId}</div>
@@ -154,7 +154,7 @@ export default function RunDetailView({ runId, onBack, onView }) {
                 <div className="ha-runhead-split">
                   {/* Left: timing + phone insights */}
                   <div className="ha-runhead-timing">
-                    <div style={{ display: "flex", gap: 24, flexWrap: "wrap" }}>
+                    <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                       <div>
                         <div style={{ fontSize: 10, color: C.textSoft, fontWeight: 700, letterSpacing: ".06em", textTransform: "uppercase" }}>Started</div>
                         <div style={{ fontSize: 14, fontWeight: 600, color: C.text, marginTop: 2 }}>{fmtDate(entry.startedAt)}</div>

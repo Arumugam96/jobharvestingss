@@ -134,7 +134,7 @@ const ThemeStyles = () => (
     .ha-runhead-meta{flex:0 1 auto;min-width:220px;}
     .ha-runhead-right{flex:1 1 440px;min-width:280px;display:flex;flex-direction:column;align-items:flex-end;gap:12px;}
     .ha-runhead-split{display:flex;gap:0;}
-    .ha-runhead-timing{flex:0 0 380px;padding:20px 24px;border-right:1px solid ${C.border};display:flex;flex-direction:column;gap:18px;}
+    .ha-runhead-timing{flex:0 0 380px;padding:10px 24px;border-right:1px solid ${C.border};display:flex;flex-direction:column;gap:5px;}
     .ha-runhead-stats-side{flex:1;min-width:0;padding:20px 24px;display:flex;flex-direction:column;gap:12px;}
     .ha-runstats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;width:100%;}
     .ha-runstat{${GLASS_STAT}border-radius:10px;padding:11px 14px;}
