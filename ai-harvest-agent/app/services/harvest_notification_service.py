@@ -281,13 +281,13 @@ def _src_logo(name: str, size: int = 20) -> str:
     slug = _SRC_SLUGS.get(name)
     if slug and _icon_file(slug):
         # Shape (round / rounded) is baked into the PNG's alpha, not CSS — clients
-        # clip border-radius inconsistently. vertical-align:top keeps the image flush
-        # in its cell even where a client strips display:block (no baseline gap).
+        # clip border-radius inconsistently. vertical-align:middle keeps the image
+        # centred where a client strips display:block and it falls back to inline.
         return (
             f'<img src="cid:src-{slug}" alt="{_esc(name)}" title="{_esc(name)}" '
             f'width="{size}" height="{size}" style="display:block;width:{size}px;'
-            f'height:{size}px;max-width:{size}px;border:0;outline:none;'
-            f'text-decoration:none;vertical-align:top;" />'
+            f'height:{size}px;border:0;outline:none;text-decoration:none;'
+            f'vertical-align:middle;" />'
         )
     radius = "50%" if slug in _SRC_ROUND else f"{max(3, size // 5)}px"
     color = _SRC_COLORS.get(name, _MUTED)
@@ -306,16 +306,22 @@ def _src_logo(name: str, size: int = 20) -> str:
 def _src_badge(
     name: str, size: int = 15, font_size: int = 13, label: str | None = None,
 ) -> str:
-    """Logo + source name, vertically centred in a 2-cell table. Both cells are
-    pinned to the logo's height so the row can't grow around either one."""
-    exact = f"height:{size}px;line-height:{size}px;mso-line-height-rule:exactly;"
+    """Logo + source name, vertically centred in a 2-cell table pinned to the
+    logo's height.
+
+    No "exactly" line-height rule anywhere: Outlook (Word) seats the image on the
+    text baseline and clips it to an exact line box (top cut off, logo too high),
+    and puts an exact line's extra leading above the label (label too low)."""
     return (
         f'<table {_TABLE} height="{size}" style="border-collapse:collapse;height:{size}px;">'
         "<tr>"
-        + _cell(_src_logo(name, size), f"width:{size}px;{exact}font-size:0;padding:0;",
+        + _cell(_src_logo(name, size),
+                f"width:{size}px;height:{size}px;font-size:1px;line-height:1px;"
+                f"mso-line-height-rule:at-least;padding:0;",
                 f'width="{size}" height="{size}" valign="middle"')
         + _cell(_esc(name if label is None else label),
-                f"{exact}padding:0 0 0 7px;font-size:{font_size}px;font-weight:700;"
+                f"height:{size}px;line-height:{font_size + 3}px;mso-line-height-rule:at-least;"
+                f"padding:0 0 0 7px;font-size:{font_size}px;font-weight:700;"
                 f"color:{_INK};white-space:nowrap;",
                 f'height="{size}" valign="middle"')
         + "</tr></table>"
