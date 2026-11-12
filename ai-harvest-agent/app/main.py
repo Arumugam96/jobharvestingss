@@ -269,6 +269,7 @@ def _ensure_apollo_phone_columns(sync_conn) -> None:
             ("purpose", "ALTER TABLE apollo_phone_requests ADD COLUMN purpose VARCHAR(20) NOT NULL DEFAULT 'finder'"),
             ("source", "ALTER TABLE apollo_phone_requests ADD COLUMN source VARCHAR(40) NOT NULL DEFAULT 'contact_finder'"),
             ("linkedin_url", "ALTER TABLE apollo_phone_requests ADD COLUMN linkedin_url TEXT"),
+            ("scraped_job_id", "ALTER TABLE apollo_phone_requests ADD COLUMN scraped_job_id VARCHAR(36)"),
         ]
         for name, ddl in pending:
             if name not in cols:

@@ -43,6 +43,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.core.tenant_context import apply_tenant, bind_session_tenant
 from app.models.apollo_phone import ApolloPhoneRequestORM, ApolloWebhookEventORM
+from app.models.harvest_run import ScrapedJobORM
 from app.models.recruiter import RecruiterORM
 from app.models.recruiter_finder import (
     RecruiterFinderItemORM,
@@ -160,7 +161,7 @@ async def create_request(
     requested_by: str | None = None, finder_job_id: str | None = None,
     finder_item_id: str | None = None, purpose: str = PURPOSE_FINDER,
     source: str = "contact_finder", recruiter_id: str | None = None,
-    linkedin_url: str | None = None,
+    linkedin_url: str | None = None, scraped_job_id: str | None = None,
 ) -> ApolloPhoneRequestORM:
     """Insert one ``pending`` row (call BEFORE the Apollo request). With
     ``recruiter_id`` the recruiter is marked phone_status PENDING in the same
@@ -171,6 +172,7 @@ async def create_request(
         apollo_person_id=apollo_person_id or None, requested_by=requested_by,
         finder_job_id=finder_job_id, finder_item_id=finder_item_id,
         recruiter_id=recruiter_id or None, linkedin_url=(linkedin_url or None),
+        scraped_job_id=scraped_job_id or None,
         purpose=(purpose or PURPOSE_FINDER)[:20], source=(source or "")[:40],
         status=PENDING, requested_at=_now(),
     )
@@ -193,6 +195,7 @@ async def begin_request(
     finder_job_id: str | None = None, finder_item_id: str | None = None,
     purpose: str = PURPOSE_FINDER, source: str = "contact_finder",
     recruiter_id: str | None = None, linkedin_url: str | None = None,
+    scraped_job_id: str | None = None,
 ) -> str:
     """Create a pending row in its own committed session and return its ``ref`` ('' on
     a DB failure — the caller then requests no phone rather than one it can't track)."""
@@ -201,6 +204,7 @@ async def begin_request(
         db, ref=ref, tenant_id=tenant_id, apollo_person_id=apollo_person_id,
         requested_by=requested_by, finder_job_id=finder_job_id, finder_item_id=finder_item_id,
         purpose=purpose, source=source, recruiter_id=recruiter_id, linkedin_url=linkedin_url,
+        scraped_job_id=scraped_job_id,
     ))
     return ref if row is not None else ""
 
@@ -254,14 +258,15 @@ async def cancel_request(db: AsyncSession, ref: str) -> None:
 async def attach_links(
     db: AsyncSession, ref: str, *, recruiter_id: str | None = None,
     finder_item_id: str | None = None, finder_job_id: str | None = None,
-    reveal_log_id: str | None = None,
+    reveal_log_id: str | None = None, scraped_job_id: str | None = None,
 ) -> None:
     """Tie the ref's row(s) to the rows a delivered phone must update. If the delivery
     already happened (race), apply the phone + its credits to the new links now."""
     for row in await _rows_for_ref(db, ref):
         new_links = {}
         for field, value in (("recruiter_id", recruiter_id), ("finder_item_id", finder_item_id),
-                             ("finder_job_id", finder_job_id), ("reveal_log_id", reveal_log_id)):
+                             ("finder_job_id", finder_job_id), ("reveal_log_id", reveal_log_id),
+                             ("scraped_job_id", scraped_job_id)):
             if value and not getattr(row, field):
                 setattr(row, field, value)
                 new_links[field] = value
@@ -443,6 +448,7 @@ async def _apply_to_links(db: AsyncSession, row: ApolloPhoneRequestORM, *, only:
     links = only if only is not None else {
         "recruiter_id": row.recruiter_id, "finder_item_id": row.finder_item_id,
         "finder_job_id": row.finder_job_id, "reveal_log_id": row.reveal_log_id,
+        "scraped_job_id": row.scraped_job_id,
     }
     found = row.status == FOUND and bool(row.phone)
     credits = row.credits_charged if found else 0
@@ -470,6 +476,13 @@ async def _apply_to_links(db: AsyncSession, row: ApolloPhoneRequestORM, *, only:
         else:
             await db.execute(update(L).where(L.id == links["reveal_log_id"], L.phone_status == PS_PENDING)
                              .values(phone_status=PS_NOT_FOUND))
+    if links.get("scraped_job_id") and found:
+        await db.execute(
+            update(ScrapedJobORM)
+            .where(ScrapedJobORM.id == links["scraped_job_id"],
+                   func.coalesce(ScrapedJobORM.contact_number, "") == "")
+            .values(contact_number=row.phone)
+        )
 
 
 async def _charge_delivery(

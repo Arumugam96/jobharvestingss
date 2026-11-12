@@ -55,6 +55,7 @@ class ApolloPhoneRequestORM(Base):
     finder_item_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     finder_job_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     reveal_log_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    scraped_job_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     requested_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
     # Whose credits: "finder" (Contact Finder — per-tenant Finder budget + global) or
     # "enrichment" (harvest / maintenance contact enrichment — global + enrichment

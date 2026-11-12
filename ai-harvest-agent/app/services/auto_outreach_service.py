@@ -428,9 +428,6 @@ async def run_auto_outreach_after_harvest(
 
         email_sender = EmailSender(settings)
         outreach = OutreachService(LLMService(settings))
-        # Size pills for the post-send Apollo phone step (band membership; resolved
-        # once — None falls back to harvest_config like the manual send does).
-        phone_sizes = outreach_phone_service.resolve_filter_sizes(company_sizes)
         sem = asyncio.Semaphore(_CONCURRENCY)
 
         async def _process(target: dict) -> None:
@@ -565,7 +562,6 @@ async def run_auto_outreach_after_harvest(
                     # skip reasons live in outreach_phone_service). Never raises.
                     await outreach_phone_service.request_phone_after_outreach(
                         recruiter_id=recruiter_id, job_id=job_id, to_email=email,
-                        company_sizes=phone_sizes,
                     )
 
                 # Throttle before this slot picks up the next recruiter so a large harvest
