@@ -8,19 +8,21 @@ DELETE /jobs/{id}/phone-verification?phone=   — "Clear status" for that number
 GET    /jobs/{id}/phone-verification/history  — every non-cleared call, newest first
 GET    /phone-verifications/latest?job_ids=   — newest call per visible job (badges)
                                                + flags of those numbers
+GET    /phone-verifications/logs              — every call in the tenant (admins only)
 GET    /phone-verifications/flags?phones=     — invalid / do-not-call / warm per number
 GET    /phone-verifications/follow-ups        — the caller's due follow-up reminders
 POST   /phone-verifications/follow-ups/{id}/done — dismiss one reminder
 POST   /phone-verifications/follow-ups/done-all  — dismiss all due reminders
 
 The per-job endpoints honour the self-assignment lock (ensure_job_access → 403
-when the job is assigned to someone else); /latest omits such jobs. Call views
+when the job is assigned to someone else); /latest omits such jobs except for
+admins, who get read-only visibility of them. Call views
 are documented on phone_verification_service.call_view, number flags on
 phone_verification_service.flag_view (keyed by the number as given).
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import structlog
@@ -29,7 +31,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.dependencies import get_current_user, get_db_session
+from app.core.dependencies import get_current_user, get_db_session, require_admin
 from app.core.tenant_context import apply_tenant
 from app.models.auth import AuthenticatedUser
 from app.models.harvest_run import ScrapedJobORM
@@ -172,18 +174,38 @@ async def latest_phone_verifications(
     if not ids:
         return {"items": {}, "flags": await pvs.flags_for_phones(db, extra_phones)}
 
-    # Drop jobs locked to someone else (same rule as ensure_job_access).
-    me = (current_user.email or "").lower()
-    locks = (await db.execute(apply_tenant(
-        select(ScrapedJobORM.id, ScrapedJobORM.assigned_to_email)
-        .where(ScrapedJobORM.id.in_(ids)),
-        ScrapedJobORM.tenant_id,
-    ))).all()
-    locked = {jid for jid, owner in locks if owner and owner.lower() != me}
-    visible = [j for j in ids if j not in locked]
+    # Drop jobs locked to someone else (same rule as ensure_job_access). Admins
+    # keep them: they read the assignee's call results (read-only — every write
+    # endpoint above still goes through ensure_job_access).
+    visible = ids
+    if not current_user.is_admin:
+        me = (current_user.email or "").lower()
+        locks = (await db.execute(apply_tenant(
+            select(ScrapedJobORM.id, ScrapedJobORM.assigned_to_email)
+            .where(ScrapedJobORM.id.in_(ids)),
+            ScrapedJobORM.tenant_id,
+        ))).all()
+        locked = {jid for jid, owner in locks if owner and owner.lower() != me}
+        visible = [j for j in ids if j not in locked]
     items = await pvs.latest_for_jobs(db, visible)
     flags = await pvs.flags_for_phones(db, [v["phone"] for v in items.values()] + extra_phones)
     return {"items": items, "flags": flags}
+
+
+@router.get("/phone-verifications/logs", summary="Every logged call in the tenant (admins only)")
+async def phone_call_logs(
+    status_filter: str = Query(default="", alias="status", pattern="^(|answered|unanswered)$"),
+    assignment: str = Query(default="", pattern="^(|assigned|unassigned)$"),
+    days: int = Query(default=0, ge=0, le=3650, description="Only calls from the last N days; 0 = all."),
+    q: str = Query(default="", max_length=200),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=200),
+    current_user: AuthenticatedUser = Depends(require_admin),
+    db: AsyncSession = Depends(get_db_session),
+) -> dict:
+    since = datetime.now(timezone.utc) - timedelta(days=days) if days else None
+    return await pvs.list_logs(db, status=status_filter, assignment=assignment, q=q,
+                               since=since, page=page, page_size=page_size)
 
 
 @router.get("/phone-verifications/flags", summary="Call-learned flags per number")

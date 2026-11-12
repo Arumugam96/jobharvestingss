@@ -17,6 +17,7 @@ import random
 from typing import Any
 
 import structlog
+from app.scrapers.page_eval import page_evaluate
 
 logger = structlog.get_logger(__name__)
 
@@ -98,11 +99,11 @@ async def human_scroll(
     for _ in range(max_rounds):
         try:
             if container is not None:
-                geo = await container.evaluate(
+                geo = await page_evaluate(container,
                     "el => ({h: el.scrollHeight, top: el.scrollTop, ch: el.clientHeight})"
                 )
             else:
-                geo = await page.evaluate(
+                geo = await page_evaluate(page,
                     "() => ({h: document.body.scrollHeight, "
                     "top: (document.scrollingElement||document.documentElement).scrollTop, "
                     "ch: window.innerHeight})"
@@ -124,7 +125,7 @@ async def human_scroll(
         step = random.randint(step_min, step_max)
         try:
             if container is not None:
-                await container.evaluate("(el, dy) => el.scrollBy(0, dy)", step)
+                await page_evaluate(container, "(el, dy) => el.scrollBy(0, dy)", step)
             else:
                 # A real wheel gesture over the viewport plus a scrollBy, so it
                 # works whether the page scrolls on the window or an inner element.
@@ -132,7 +133,7 @@ async def human_scroll(
                     await page.mouse.wheel(0, step)
                 except Exception:
                     pass
-                await page.evaluate("(dy) => window.scrollBy(0, dy)", step)
+                await page_evaluate(page, "(dy) => window.scrollBy(0, dy)", step)
         except Exception:
             break
 

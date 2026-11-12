@@ -319,7 +319,9 @@ export function PhoneFlagTag({ flags }) {
 // close delay lets the pointer cross the gap into the popover. The popover is
 // portalled to <body>: the table card's backdrop-filter would otherwise make
 // position:fixed resolve against the card and its overflow:hidden would clip it.
-export function PhoneVerifyBadge({ result, onEdit }) {
+// `mark`: show a tick (answered) / cross (unanswered) instead of the phone icon —
+// the read-only admin view of a job self-assigned by someone else.
+export function PhoneVerifyBadge({ result, onEdit, mark = false }) {
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState(null);
   const btnRef = useRef(null);
@@ -363,6 +365,7 @@ export function PhoneVerifyBadge({ result, onEdit }) {
   const st = last && PHONE_STATUSES[last.status];
   if (!st) return null;
   const { Icon } = st;
+  const BadgeIcon = mark ? (last.status === "answered" ? Check : X) : Icon;
   const oc = outcomeOf(last);
   const count = last.attempts;
   return (
@@ -372,7 +375,7 @@ export function PhoneVerifyBadge({ result, onEdit }) {
         style={{ color: st.color, background: st.bg, borderColor: st.border }}
         onMouseEnter={show} onMouseLeave={hideSoon} onFocus={show}
         onClick={show}>
-        <Icon size={13} />
+        <BadgeIcon size={13} strokeWidth={mark ? 3 : 2} />
       </button>
       {open && createPortal(
         <div ref={popRef} className="pvm-pop" role="dialog" aria-label="Call details"

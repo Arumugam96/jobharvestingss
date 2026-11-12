@@ -45,6 +45,13 @@ class Settings(BaseSettings):
     harvest_persist_batch_size: int = 10
     harvest_dedup_at_source: bool = True
     harvest_skip_already_harvested_days: int = 30
+    # Local JSON backup of each harvest's final job list. One file, replaced by
+    # the next harvest (a backup whose DB save never completed is moved aside
+    # instead of overwritten). See app/services/harvest_backup_service.py.
+    harvest_backup_path: str = "data/results/harvest_backup/latest_harvest_jobs.json"
+    # Ceiling for any single page.evaluate() in the harvest scrapers — a frozen
+    # (not crashed) tab otherwise blocks forever. See app/scrapers/page_eval.py.
+    page_evaluate_timeout_s: float = 30.0
 
     # ── Sales Navigator (standalone experimental script) ─────────────────────────
     sales_navigator_max_jobs_per_day: int = 0

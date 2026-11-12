@@ -38,6 +38,7 @@ from bs4 import BeautifulSoup
 from dateutil import parser as dateutil_parser
 from playwright.async_api import ElementHandle, Page
 
+from app.scrapers.page_eval import page_evaluate
 from app.core.company_size import normalize_company_size, parse_company_size_band
 from app.core.contact_normalize import normalize_email, normalize_phone
 from app.core.harvest_helpers import env_max_jobs_cap
@@ -701,7 +702,7 @@ async def _wait_for_page_text_stable(
     stable   = 0
     for _ in range(max_polls):
         try:
-            cur_len = await page.evaluate("() => document.body.innerText.length")
+            cur_len = await page_evaluate(page, "() => document.body.innerText.length")
         except Exception:
             break
         if cur_len == prev_len:
@@ -844,7 +845,7 @@ async def _save_dom_diagnosis(page: Page, name: str) -> None:
     """
     try:
         d = _ensure_debug_dir()
-        report = await page.evaluate(_DOM_WALK_JS)
+        report = await page_evaluate(page, _DOM_WALK_JS)
         (d / f"{name}.json").write_text(
             json.dumps({"url": page.url, "title": await page.title(), **report}, indent=2, ensure_ascii=False),
             encoding="utf-8",
@@ -1107,6 +1108,10 @@ class LinkedInAgent:
         # pipeline (no re-extract, no re-email). Empty ⇒ no source dedup.
         self._already_harvested: set[str] = already_harvested or set()
         self._skipped_already_harvested  = 0
+        # Live reference to _paginate_and_collect's accumulating job list, so
+        # _run can still return what was collected when pagination dies mid-run
+        # (browser/tab closed by the user, crash, unexpected error).
+        self._collected_jobs: list[LinkedInScrapedJob] = []
         # Anti-detection knobs for the recruiter profile-visit pass — a per-run
         # cap on NEW /in/ visits and a human-like randomized gap between them.
         # See _enrich_recruiters (the account was restricted for "high volume of
@@ -1346,7 +1351,20 @@ class LinkedInAgent:
         logger.info("results_page_loaded", source="linkedin", url=current_url, title=page_title)
         logger.info("linkedin_session_active", url=current_url)
         await _screenshot(page, "02_after_search")
-        jobs = await self._paginate_and_collect(page, f, on_batch=on_batch)
+        self._collected_jobs = []
+        try:
+            jobs = await self._paginate_and_collect(page, f, on_batch=on_batch)
+        except (LinkedInLoginError, LLMUnavailableError):
+            raise
+        except Exception as exc:
+            # The browser/tab was closed or something unexpected broke the scrape
+            # mid-run — never throw away jobs already collected (and persisted
+            # incrementally): return them so they survive the end-of-run save.
+            jobs = list(self._collected_jobs)
+            logger.warning(
+                "linkedin_pagination_aborted_keeping_jobs",
+                error=str(exc) or type(exc).__name__, kept=len(jobs),
+            )
         logger.info("linkedin_jobs_returned", count=len(jobs))
 
         # Post-harvest recruiter contact-discovery pass — deliberately after
@@ -1551,6 +1569,7 @@ class LinkedInAgent:
         (deduped) jobs so the caller can persist them incrementally.
         """
         all_jobs:    list[LinkedInScrapedJob] = []
+        self._collected_jobs = all_jobs   # same list — read by _run if we die mid-run
         seen_urls:   set[str]                 = set()
         page_num:    int                      = 0
         batch_size:  int                      = 25
@@ -1690,7 +1709,14 @@ class LinkedInAgent:
             logger.info("linkedin_page_done", page=page_num + 1, page_new=len(page_jobs), total=len(all_jobs))
             logger.info("page_processed", source="linkedin", page=page_num + 1, jobs_this_page=len(page_jobs), total_collected=len(all_jobs))
             page_num += 1
-            await _delay(page, 1_500, 2_500)   # polite inter-page delay
+            try:
+                await _delay(page, 1_500, 2_500)   # polite inter-page delay
+            except Exception as exc:
+                # The results tab is gone (closed by the user / browser died) —
+                # stop paginating and keep everything collected so far.
+                logger.warning("linkedin_page_closed_stopping", page=page_num, error=str(exc),
+                               collected=len(all_jobs))
+                break
 
         logger.info("pagination_completed", source="linkedin", pages=page_num, total=len(all_jobs))
         await self._report_progress(phase="done", done=len(all_jobs), in_batch=0)
@@ -2295,7 +2321,7 @@ class LinkedInAgent:
         """LinkedIn's own "N results" count for the current search (filter window
         applied). Best-effort: None when the header isn't found / unparseable."""
         try:
-            raw = await page.evaluate(_RESULTS_COUNT_JS)
+            raw = await page_evaluate(page, _RESULTS_COUNT_JS)
             digits = re.sub(r"\D", "", str(raw or ""))
             if not digits:
                 logger.info("linkedin_results_count_not_found", url=page.url)
@@ -2596,6 +2622,8 @@ class LinkedInAgent:
             except LLMUnavailableError:
                 # The extraction LLM is down — stop the whole page/run instead of
                 # churning through the remaining cards against a dead provider.
+                # Persist the not-yet-flushed tail first so it isn't lost.
+                await _flush_pending()
                 raise
             except Exception as exc:
                 # One bad card (timeout, stale element, transient nav failure) must
@@ -2685,7 +2713,7 @@ class LinkedInAgent:
             card_text  = ""
             card_links: list[dict] = []
             try:
-                card_eval = await el.evaluate(
+                card_eval = await page_evaluate(el,
                     "(node) => ({"
                     "  text: node.innerText || '',"
                     "  links: Array.from(node.querySelectorAll(\"a[href*='/in/']\"))"

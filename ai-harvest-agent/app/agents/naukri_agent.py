@@ -70,6 +70,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 import structlog
 from playwright.async_api import Page
 
+from app.scrapers.page_eval import page_evaluate
 from app.config import get_settings
 from app.core.contact_normalize import (
     extract_emails,
@@ -1450,10 +1451,27 @@ class NaukriAgent:
                     Best-effort: a failing callback never affects scraping.
         """
         page.on("response", self._on_response)
+        self._collected_jobs = []
         try:
             jobs = await self._paginate_and_collect(
                 page, f, on_status=on_status, on_batch=on_batch, on_progress=on_progress,
             )
+        except Exception as exc:
+            # Browser/tab closed by the user, crash, or any unexpected error
+            # mid-run: keep every job already collected (the batches persisted
+            # incrementally + the unflushed tail) instead of discarding them.
+            # Nothing collected yet → re-raise (a real failure, not 0 results).
+            jobs = list(self._collected_jobs)
+            if not jobs:
+                raise
+            logger.warning(
+                "naukri_pagination_aborted_keeping_jobs",
+                error=str(exc) or type(exc).__name__, kept=len(jobs),
+            )
+            if self.stopped_early is None:
+                self.stopped_early = STOP_BROWSER
+            # Let in-flight LLM enrichment of those jobs land (bounded; never raises).
+            await self._drain_llm()
         finally:
             try:
                 page.remove_listener("response", self._on_response)
@@ -1560,6 +1578,7 @@ class NaukriAgent:
         self._details_enabled = bool(settings.naukri_fetch_details)
 
         all_jobs: list[NaukriScrapedJob] = []
+        self._collected_jobs = all_jobs   # same list — read by _run if we die mid-run
         seen_ids: set[str] = set()
         empty_pages = 0
         total_pages: int | None = None
@@ -1838,7 +1857,7 @@ class NaukriAgent:
             except Exception:
                 pass
             try:
-                raw = await page.evaluate(_DOM_CARDS_JS)
+                raw = await page_evaluate(page, _DOM_CARDS_JS)
             except Exception as exc:
                 logger.warning("naukri_dom_cards_failed", page=page_num, error=str(exc))
                 raw = []
@@ -2243,7 +2262,7 @@ class NaukriAgent:
         spent = 0
         while spent < budget_ms and not run_guard.is_stop_requested():
             try:
-                geo = await target.evaluate(
+                geo = await page_evaluate(target,
                     "() => ({h: document.body.scrollHeight, "
                     "top: (document.scrollingElement||document.documentElement).scrollTop, "
                     "ch: window.innerHeight})"
@@ -2260,7 +2279,7 @@ class NaukriAgent:
                 await target.mouse.wheel(0, -step if up else step)
             except Exception:
                 try:
-                    await target.evaluate("(dy) => window.scrollBy(0, dy)", -step if up else step)
+                    await page_evaluate(target, "(dy) => window.scrollBy(0, dy)", -step if up else step)
                 except Exception:
                     pass
             pause = random.randint(900, 2_800)
@@ -2271,7 +2290,7 @@ class NaukriAgent:
             spent += pause
         # Drift back towards the top, where a reader would look for "Apply".
         try:
-            await target.evaluate("() => window.scrollTo({top: 0, behavior: 'smooth'})")
+            await page_evaluate(target, "() => window.scrollTo({top: 0, behavior: 'smooth'})")
         except Exception:
             pass
 
@@ -2284,7 +2303,7 @@ class NaukriAgent:
             logger.debug("naukri_detail_source", source="v4_json", job_id=job.job_id)
             return
         try:
-            fb = await target.evaluate(_DETAIL_FALLBACK_JS)
+            fb = await page_evaluate(target, _DETAIL_FALLBACK_JS)
         except Exception as exc:
             logger.debug("naukri_detail_fallback_eval_failed", error=str(exc))
             return

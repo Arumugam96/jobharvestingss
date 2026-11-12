@@ -35,6 +35,7 @@ import app.models.tenant  # noqa: F401 — registers tenants on Base.metadata
 from app.models.harvest import Base
 from app.routes import harvest, agents, tasks, health, job_parser, linkedin_harvest
 from app.routes.auth_routes import router as auth_router
+from app.routes.user_admin_routes import router as user_admin_router
 from app.routes.harvest_routes import router as harvest_agent_router
 from app.routes.linkedin_routes import router as linkedin_agent_router
 from app.routes.linkedin_feed_routes import router as linkedin_feed_router
@@ -414,6 +415,21 @@ def _ensure_phone_call_logs_columns(sync_conn) -> None:
             logger.info("phone_call_logs_column_added", column=name)
 
 
+def _ensure_users_role_column(sync_conn) -> None:
+    """One-time, idempotent ADD COLUMN for the pre-existing users table: `role`
+    ("user" | "admin"). Every existing user becomes "user"; promote admins with
+    scripts/set_user_role.py or the User roles page. Mirrors alembic 0034."""
+    inspector = sa_inspect(sync_conn)
+    if "users" not in inspector.get_table_names():
+        return  # brand-new DB — create_all already made this table with the column
+    cols = {c["name"] for c in inspector.get_columns("users")}
+    if "role" not in cols:
+        sync_conn.execute(sa_text(
+            "ALTER TABLE users ADD COLUMN role VARCHAR(20) NOT NULL DEFAULT 'user'"
+        ))
+        logger.info("users_column_added", column="role")
+
+
 def _ensure_resdex_searches_columns(sync_conn) -> None:
     """One-time, idempotent ADD COLUMN backfill for the pre-existing resdex_searches
     table: `contact_source` — the origin of the outreach contact that triggered the
@@ -636,6 +652,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # phone_call_logs gained call_outcome + outcome_details + proof (the
         # call-log popup) — same idempotent ADD COLUMN treatment.
         await conn.run_sync(_ensure_phone_call_logs_columns)
+        # users gained role (user | admin) — same idempotent ADD COLUMN treatment.
+        await conn.run_sync(_ensure_users_role_column)
         # apollo_phone_requests gained purpose/source/linkedin_url and
         # apollo_webhook_events gained reprocessed_at/reprocess_note (harvest
         # enrichment phones + backfill) — same idempotent ADD COLUMN treatment.
@@ -870,6 +888,7 @@ def create_app() -> FastAPI:
     # False, get_current_user short-circuits to a dev user so these still work.
     protected = [Depends(get_current_user)]
     app.include_router(auth_router)                   # POST /auth/request-otp, /auth/verify-otp, GET /auth/me
+    app.include_router(user_admin_router, dependencies=protected)             # GET /auth/users, PATCH /auth/users/{id}/role (admins only)
     app.include_router(frontend_router, dependencies=protected)               # GET /jobs, /lead-intelligence, /download/*, /health
     app.include_router(job_assignment_router, dependencies=protected)         # POST/DELETE /jobs/{id}/assign ("Assign to me")
     app.include_router(phone_verification_router, dependencies=protected)     # /jobs/{id}/phone-verification, /phone-verifications/* (call log + follow-ups)

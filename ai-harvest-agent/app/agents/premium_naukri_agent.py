@@ -37,6 +37,7 @@ from typing import Any
 
 import structlog
 
+from app.scrapers.page_eval import page_evaluate
 from app.models.lead_models import NaukriProfile
 
 logger = structlog.get_logger(__name__)
@@ -197,7 +198,7 @@ class PremiumNaukriAgent:
                     hint = "Run POST /naukri-setup-session to log in and save the session",
                 )
                 return False
-            has_login_form = await page.evaluate("""() => {
+            has_login_form = await page_evaluate(page, """() => {
                 return !!(
                     document.querySelector('input[type="password"][name]') ||
                     document.querySelector('form#loginform') ||
@@ -311,7 +312,7 @@ class PremiumNaukriAgent:
     async def _extract_naukri_link_from_ddg(self, page: Any) -> str:
         """Extract the first Naukri profile URL from DuckDuckGo results."""
         try:
-            links = await page.evaluate("""() => {
+            links = await page_evaluate(page, """() => {
                 const results = document.querySelectorAll(
                     'a[data-testid="result-title-a"], .result__a, article a, h2 a'
                 );
@@ -367,7 +368,7 @@ class PremiumNaukriAgent:
                     continue
 
                 # Find the first matching profile link
-                profile_url = await page.evaluate("""(searchName) => {
+                profile_url = await page_evaluate(page, """(searchName) => {
                     const links = document.querySelectorAll(
                         'a[href*="/mnjuser/"], a[href*="/profile"], ' +
                         '.profile-card a, .candidate-name a, ' +
@@ -432,7 +433,7 @@ class PremiumNaukriAgent:
                 except Exception:
                     continue
 
-            data = await page.evaluate(_NAUKRI_PROFILE_JS)
+            data = await page_evaluate(page, _NAUKRI_PROFILE_JS)
 
             found_name = data.get("recruiter_name", "").strip()
             email      = data.get("email", "").strip()
@@ -440,7 +441,7 @@ class PremiumNaukriAgent:
 
             # Fallback: scan full page text for email / phone if extraction JS missed them
             if not email or not phone:
-                page_text = await page.evaluate("() => document.body.innerText || ''")
+                page_text = await page_evaluate(page, "() => document.body.innerText || ''")
                 if not email:
                     m = _EMAIL_RE.search(page_text)
                     email = m.group(0) if m else ""

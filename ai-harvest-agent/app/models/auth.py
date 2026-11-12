@@ -16,6 +16,11 @@ class OTPPurpose:
     LOGIN = "login"
 
 
+USER_ROLE = "user"
+ADMIN_ROLE = "admin"
+USER_ROLES = (USER_ROLE, ADMIN_ROLE)
+
+
 # ── ORM Models ───────────────────────────────────────────────────────────────────
 
 class UserORM(Base):
@@ -26,6 +31,9 @@ class UserORM(Base):
     tenant_id: Mapped[str] = mapped_column(String(40), nullable=False, server_default="'internal'", index=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     is_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # "user" | "admin" (USER_ROLES). Admins can read call logs on jobs self-assigned
+    # by others and manage roles; see app/core/dependencies.require_admin.
+    role: Mapped[str] = mapped_column(String(20), nullable=False, default="user", server_default="user")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -131,3 +139,8 @@ class AuthenticatedUser(BaseModel):
     is_active: bool
     is_verified: bool
     tenant_id: str = "internal"
+    role: str = USER_ROLE
+
+    @property
+    def is_admin(self) -> bool:
+        return self.role == ADMIN_ROLE

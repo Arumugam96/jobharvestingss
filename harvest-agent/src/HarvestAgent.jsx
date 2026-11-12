@@ -23,6 +23,8 @@ import LeadIntelligencePage from "./pages/LeadIntelligencePage";
 import RecruiterContactFinderPage from "./pages/RecruiterContactFinderPage";
 import RuleEngineRedesign from "./pages/RuleEngineRedesign";
 import DemandSearchPage from "./demand/DemandSearchPage";
+import PhoneLogsPage from "./pages/PhoneLogsPage";
+import UserRolesPage from "./pages/UserRolesPage";
 
 /* Per-tenant route guard: a page whose feature flag is off for the current
  * tenant redirects to /jobs. Presentation-level only — the backend enforces
@@ -30,6 +32,14 @@ import DemandSearchPage from "./demand/DemandSearchPage";
 function FeatureGate({ feature, children }) {
   const { hasFeature } = useTenant();
   if (!hasFeature(feature)) return <Navigate to="/jobs" replace />;
+  return children;
+}
+
+/* Admin-only pages redirect everyone else to /jobs. Presentation only — the
+ * admin endpoints 403 non-admins regardless. */
+function AdminGate({ children }) {
+  const { isAdmin } = useTenant();
+  if (!isAdmin) return <Navigate to="/jobs" replace />;
   return children;
 }
 
@@ -43,6 +53,8 @@ function activeKeyFromPath(pathname) {
   if (pathname.startsWith("/contacts")) return "contacts";
   if (pathname.startsWith("/outreach") || pathname.startsWith("/mail")) return "outreach";
   if (pathname.startsWith("/demand")) return "demand";
+  if (pathname.startsWith("/phone-logs")) return "phone-logs";
+  if (pathname.startsWith("/user-roles")) return "user-roles";
   return "jobs"; // "/", "/jobs", "/jobs/:id"
 }
 
@@ -267,6 +279,8 @@ export default function HarvestAgent({ onLogout }) {
           {/* Demand Search — landing, batch (?batch=) and job (?batch=&job=) views on
               one route: /demand/... itself is proxied to the API by nginx. */}
           <Route path="/demand" element={<FeatureGate feature="demand"><DemandSearchPage /></FeatureGate>} />
+          <Route path="/phone-logs" element={<AdminGate><PhoneLogsPage /></AdminGate>} />
+          <Route path="/user-roles" element={<AdminGate><UserRolesPage /></AdminGate>} />
           <Route path="*" element={<NotFound />} />
         </Route>
       </Routes>

@@ -44,7 +44,7 @@ from typing import Any
 
 from fastapi import HTTPException
 from fastapi import status as http_status
-from sqlalchemy import func, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -540,6 +540,94 @@ async def history(db: AsyncSession, job_id: str) -> list[dict[str, Any]]:
         PhoneCallLogORM.tenant_id,
     )
     return [call_view(r) for r in (await db.execute(stmt)).scalars().all()]
+
+
+LOG_ASSIGNMENTS = ("assigned", "unassigned")
+
+
+async def list_logs(
+    db: AsyncSession,
+    *,
+    status: str = "",
+    assignment: str = "",
+    q: str = "",
+    since: datetime | None = None,
+    page: int = 1,
+    page_size: int = 50,
+) -> dict[str, Any]:
+    """Every non-cleared call in the tenant, newest first, with its job's title,
+    company and assignee (the admin Phone logs page). Jobs since deleted still
+    list (outer join) and count as unassigned. `summary` applies every filter
+    except `status`, so the answered / unanswered split stays visible."""
+    is_assigned = and_(ScrapedJobORM.assigned_to_email.is_not(None),
+                       ScrapedJobORM.assigned_to_email != "")
+    conds: list = [PhoneCallLogORM.cleared_at.is_(None)]
+    if since is not None:
+        conds.append(PhoneCallLogORM.created_at >= since)
+    if assignment == "assigned":
+        conds.append(is_assigned)
+    elif assignment == "unassigned":
+        conds.append(or_(ScrapedJobORM.assigned_to_email.is_(None),
+                         ScrapedJobORM.assigned_to_email == ""))
+    term = (q or "").strip().lower()
+    if term:
+        like = f"%{term}%"
+        conds.append(or_(*(func.lower(col).like(like) for col in (
+            ScrapedJobORM.job_title, ScrapedJobORM.company, PhoneCallLogORM.phone,
+            PhoneCallLogORM.contact_name, PhoneCallLogORM.remarks,
+        ))))
+
+    def scoped(stmt, *extra):
+        return apply_tenant(
+            stmt.select_from(PhoneCallLogORM)
+            .outerjoin(ScrapedJobORM, ScrapedJobORM.id == PhoneCallLogORM.job_id)
+            .where(*conds, *extra),
+            PhoneCallLogORM.tenant_id,
+        )
+
+    by_status = dict((await db.execute(scoped(
+        select(PhoneCallLogORM.call_status, func.count(PhoneCallLogORM.id))
+    ).group_by(PhoneCallLogORM.call_status))).all())
+    assigned_jobs = (await db.execute(scoped(
+        select(func.count(func.distinct(PhoneCallLogORM.job_id))), is_assigned,
+    ))).scalar_one()
+    answered, unanswered = int(by_status.get("answered", 0)), int(by_status.get("unanswered", 0))
+
+    status_cond = [PhoneCallLogORM.call_status == status] if status in CALL_STATUSES else []
+    total = answered if status == "answered" else unanswered if status == "unanswered" else answered + unanswered
+    page = max(1, int(page))
+    page_size = max(1, int(page_size))
+    rows = (await db.execute(scoped(
+        select(PhoneCallLogORM.id, PhoneCallLogORM.job_id, PhoneCallLogORM.call_status,
+               PhoneCallLogORM.phone, PhoneCallLogORM.contact_name, PhoneCallLogORM.remarks,
+               PhoneCallLogORM.created_at, ScrapedJobORM.job_title, ScrapedJobORM.company,
+               ScrapedJobORM.assigned_to_email, ScrapedJobORM.assigned_to_name),
+        *status_cond,
+    ).order_by(PhoneCallLogORM.created_at.desc(), PhoneCallLogORM.id.desc())
+     .offset((page - 1) * page_size).limit(page_size))).all()
+
+    items = [{
+        "id": r.id,
+        "job_id": r.job_id,
+        "status": r.call_status,
+        "phone": r.phone,
+        "contact_name": r.contact_name or "",
+        "remarks": r.remarks or "",
+        "called_at": _iso(r.created_at),
+        "job_title": r.job_title or "",
+        "company": r.company or "",
+        "assigned_to": ({"email": r.assigned_to_email,
+                         "name": r.assigned_to_name or display_name_from_email(r.assigned_to_email)}
+                        if r.assigned_to_email else None),
+    } for r in rows]
+    return {
+        "items": items,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "summary": {"total": answered + unanswered, "answered": answered,
+                    "unanswered": unanswered, "assigned_jobs": int(assigned_jobs or 0)},
+    }
 
 
 async def relink_job_ids(db: AsyncSession, mapping: dict[str, str]) -> None:

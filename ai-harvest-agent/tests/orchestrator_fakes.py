@@ -6,10 +6,15 @@ OrchestratorAgent.run_all() and _run_harvest_background_impl() run for real
 no Playwright, network or LLM. ``install_source_fakes`` wires them in.
 
 LinkedIn modes:  "ok" | "outage" (2 jobs via on_batch, then LLMUnavailableError)
+                 | "closed" (2 jobs via on_batch, then the browser is closed →
+                   Playwright TargetClosedError-like RuntimeError)
+                 | "short_return" (3 jobs flushed via on_batch, but _run returns
+                   only the first — an agent that died mid-page)
 Naukri modes:    "ok" | "gated" (waits until LinkedIn has failed, then finishes)
                  | "error" (RuntimeError) | "off"
                  | "blocked" (NaukriStoppedEarly before any job)
                  | "partial_blocked" (2 jobs, then stopped_early = blocked)
+                 | "closed" (2 jobs via on_batch, then browser closed → RuntimeError)
 """
 from __future__ import annotations
 
@@ -23,6 +28,7 @@ from app.core.exceptions import LLMUnavailableError
 from app.services.llm_service import empty_usage_summary
 
 LLM_DOWN_MSG = "Local LLM 'test-model' is unavailable — contact the admin team."
+BROWSER_CLOSED_MSG = "Target page, context or browser has been closed"
 
 # Structured on_progress payloads the fake agents send (Live Harvest card). The
 # two sources use deliberately different numbers so cross-source bleed shows up.
@@ -131,7 +137,11 @@ def install_source_fakes(monkeypatch, *, linkedin: str = "outage", naukri: str =
                 state["events"].append("linkedin_failed")
                 state["linkedin_failed"].set()
                 raise LLMUnavailableError(LLM_DOWN_MSG)
+            if linkedin == "closed":
+                raise RuntimeError(BROWSER_CLOSED_MSG)
             await on_batch([li_job(3)])
+            if linkedin == "short_return":
+                return [li_job(1)]
             return [li_job(1), li_job(2), li_job(3)]
 
         def get_token_usage(self) -> dict:
@@ -161,6 +171,8 @@ def install_source_fakes(monkeypatch, *, linkedin: str = "outage", naukri: str =
                 if naukri == "blocked":
                     raise NaukriStoppedEarly(STOP_BLOCKED)
                 await on_batch([nk_job(1), nk_job(2)])
+                if naukri == "closed":
+                    raise RuntimeError(BROWSER_CLOSED_MSG)
                 if naukri == "partial_blocked":
                     self.stopped_early = STOP_BLOCKED
                     return [nk_job(1), nk_job(2)]
@@ -230,6 +242,9 @@ class RecordingRunService:
     async def jobs_saved_today(self) -> int:
         return 0
 
+    async def get_previous_apollo_usage(self, current_run_pk: str | None = None) -> dict | None:
+        return None
+
 
 def install_route_fakes(monkeypatch) -> dict:
     """Patch run_harvest_agent's DB / email / history / sweep / outreach
@@ -244,7 +259,10 @@ def install_route_fakes(monkeypatch) -> dict:
     outreach_calls: list[dict] = []
     history: list[dict] = []
 
-    async def _call(fn):
+    write_timeouts: list[float | None] = []
+
+    async def _call(fn, timeout: float | None = None):
+        write_timeouts.append(timeout)
         return await fn(None)
 
     async def _no_sweep() -> dict:
@@ -281,4 +299,4 @@ def install_route_fakes(monkeypatch) -> dict:
     # developer's .env has RESDEX_ENABLED=true — off unless a test opts in.
     monkeypatch.setattr(route, "_start_recruiter_preflight", lambda enabled: None)
     return {"service": RecordingRunService, "outreach": outreach_calls, "history": history,
-            "apollo_sweep": apollo_sweep_calls}
+            "apollo_sweep": apollo_sweep_calls, "write_timeouts": write_timeouts}

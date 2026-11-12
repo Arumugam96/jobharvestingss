@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.config import Settings, get_settings
 from app.core.security import InvalidTokenError, decode_access_token
 from app.core.tenant_context import bind_session_tenant, set_current_tenant
-from app.models.auth import AuthenticatedUser, UserORM
+from app.models.auth import ADMIN_ROLE, AuthenticatedUser, UserORM
 from app.models.tenant import INTERNAL_TENANT_ID, SEED_TENANTS
 from app.services.email_service import EmailSender
 from app.services.llm_service import LLMService
@@ -134,6 +134,7 @@ async def get_current_user(
             is_active=True,
             is_verified=True,
             tenant_id=dev_tenant,
+            role=ADMIN_ROLE,
         )
 
     unauthorized = HTTPException(
@@ -177,6 +178,15 @@ async def get_current_user(
     set_current_tenant(user.tenant_id)
     await bind_session_tenant(db)
     return AuthenticatedUser.model_validate(user)
+
+
+async def require_admin(
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> AuthenticatedUser:
+    """Like get_current_user, but 403 unless the user's role is admin."""
+    if not current_user.is_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admins only")
+    return current_user
 
 
 async def get_current_tenant(

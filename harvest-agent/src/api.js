@@ -91,6 +91,19 @@ export function logout() {
   return request("/auth/logout", { method: "POST" });
 }
 
+/** GET /auth/users — users and their roles (admins only). Returns { items: [{id, email, tenant_id, role, is_active, created_at}] }. */
+export function listUsers() {
+  return request("/auth/users");
+}
+
+/** PATCH /auth/users/{id}/role — set a user's role, "user" | "admin" (admins only). */
+export function setUserRole(userId, role) {
+  return request(`/auth/users/${encodeURIComponent(userId)}/role`, {
+    method: "PATCH",
+    body: JSON.stringify({ role }),
+  });
+}
+
 // ── Jobs ─────────────────────────────────────────────────────────────────────
 
 /** GET /jobs — paginated, filterable, sortable list of harvested jobs. */
@@ -190,6 +203,13 @@ export function getPhoneVerifications(jobIds = [], phones = []) {
  * first. Returns { job_id, items: [callView] }. */
 export function getPhoneCallHistory(jobId) {
   return request(`/jobs/${encodeURIComponent(jobId)}/phone-verification/history`);
+}
+
+/** GET /phone-verifications/logs — every logged call in the tenant (admins only).
+ * params: { status, assignment, days, q, page, page_size }.
+ * Returns { items, total, page, page_size, summary: {total, answered, unanswered, assigned_jobs} }. */
+export function getPhoneLogs(params = {}) {
+  return request(`/phone-verifications/logs${qs(params)}`);
 }
 
 /** GET /phone-verifications/follow-ups — the current user's due follow-up calls.

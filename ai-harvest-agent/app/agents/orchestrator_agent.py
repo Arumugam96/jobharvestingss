@@ -141,6 +141,29 @@ _SOURCE_PRIORITY = ["naukri", "linkedin", "dice"]
 _SOURCE_DISPLAY = {"naukri": "Naukri", "linkedin": "LinkedIn", "dice": "Dice"}
 
 
+def _with_flushed(returned: list, flushed: list) -> list:
+    """`returned` plus every job from `flushed` (the batches already persisted
+    incrementally via on_persist) that it doesn't contain, matched by normalized
+    job_url (object identity for URL-less jobs).
+
+    The end-of-run save REPLACES the run's incrementally-persisted rows with the
+    final list, so any job that was saved mid-run but missing from what the agent
+    returned (it died mid-page, its tab/browser was closed, …) would otherwise be
+    deleted again. Order: returned first, then the missing flushed jobs."""
+    out = list(returned)
+    seen_urls = {normalize_job_url(j.job_url) for j in returned if getattr(j, "job_url", "")}
+    seen_ids = {id(j) for j in returned}
+    for j in flushed:
+        key = normalize_job_url(getattr(j, "job_url", "") or "")
+        if (key and key in seen_urls) or id(j) in seen_ids:
+            continue
+        if key:
+            seen_urls.add(key)
+        seen_ids.add(id(j))
+        out.append(j)
+    return out
+
+
 # ── Converters: source-specific dataclass → UnifiedJob ────────────────────────
 
 def _merge_token_usage(a: dict, b: dict) -> dict:
@@ -441,14 +464,35 @@ class OrchestratorAgent:
                 stage        = "unified",
             )
 
+        # Steps 2b–4 are best-effort: a failure in enrichment / classification /
+        # verification degrades that step only — the harvested jobs are still
+        # returned and saved, never lost to a post-processing error.
+
         # ── Step 2b: cross-source lead enrichment ────────────────────────────
-        from app.services.lead_enrichment_service import LeadEnrichmentService
-        all_unified = LeadEnrichmentService().enrich(all_unified)
+        try:
+            from app.services.lead_enrichment_service import LeadEnrichmentService
+            all_unified = LeadEnrichmentService().enrich(all_unified)
+        except Exception as exc:
+            logger.exception("orchestrator_lead_enrichment_failed", error=str(exc),
+                             note="jobs kept without cross-source enrichment")
 
         # ── Step 3: classify + apply business filters ─────────────────────────
-        svc         = BusinessFilterService()
-        all_unified = svc.classify_all(all_unified, config.filters)
-        all_unified = svc.apply_all(all_unified, config.filters)
+        svc = BusinessFilterService()
+        try:
+            classified: list[UnifiedJob] | None = svc.classify_all(all_unified, config.filters)
+        except Exception as exc:
+            classified = None
+            logger.exception("orchestrator_classification_failed", error=str(exc),
+                             note="jobs kept unclassified; business filters skipped")
+        if classified is not None:
+            all_unified = classified
+            # Filters only run on classified jobs — filtering unclassified ones
+            # could wrongly drop them.
+            try:
+                all_unified = svc.apply_all(all_unified, config.filters)
+            except Exception as exc:
+                logger.exception("orchestrator_business_filter_failed", error=str(exc),
+                                 note="jobs kept unfiltered")
 
         logger.info(
             "classification_completed",
@@ -461,9 +505,13 @@ class OrchestratorAgent:
 
         # ── Step 4: company verification (optional) ───────────────────────────
         if config.filters.verification.enabled:
-            from app.agents.verification_agent import VerificationAgent
-            verifier    = VerificationAgent(config.filters.verification, headless=True)
-            all_unified = await verifier.verify_batch(all_unified)
+            try:
+                from app.agents.verification_agent import VerificationAgent
+                verifier    = VerificationAgent(config.filters.verification, headless=True)
+                all_unified = await verifier.verify_batch(all_unified)
+            except Exception as exc:
+                logger.exception("orchestrator_verification_failed", error=str(exc),
+                                 note="jobs kept unverified")
 
         # ── Step 5: cross-source deduplication ────────────────────────────────
         _li_before_dedup = sum(1 for j in all_unified if j.source == "LinkedIn")
@@ -706,9 +754,18 @@ class OrchestratorAgent:
         # the run-level on_status still receives every message (latest overall).
         def _status_for(src: str) -> Callable[[str], Awaitable[None]]:
             async def _cb(msg: str) -> None:
-                await tracker.message(src, msg)
-                if on_status:
-                    await on_status(msg)
+                # Best-effort: a status-sink failure must never fail the scrape
+                # (e.g. LinkedIn's wait-for-login message). SourceStatusTracker
+                # .message is currently commented out in source_status.py, hence
+                # the getattr.
+                try:
+                    per_source = getattr(tracker, "message", None)
+                    if per_source is not None:
+                        await per_source(src, msg)
+                    if on_status:
+                        await on_status(msg)
+                except Exception as exc:
+                    logger.debug("orchestrator_status_callback_failed", source=src, error=str(exc))
             return _cb
 
         # Structured live progress (Rule Engine "Live Harvest" card): each agent's
@@ -843,6 +900,9 @@ class OrchestratorAgent:
                         wait_for_human=naukri_wait_for_human,
                     )
                     await _start("naukri")
+                    # Every job handed to on_batch (= already persisted) — kept
+                    # even if the scrape later dies (browser closed, crash, …).
+                    naukri_so_far: list[NaukriScrapedJob] = []
                     try:
                         agent = NaukriAgent(
                             already_harvested=self._already_harvested,
@@ -857,6 +917,7 @@ class OrchestratorAgent:
                         async def _naukri_on_batch(scraped_batch: list[NaukriScrapedJob]) -> None:
                             if not scraped_batch:
                                 return
+                            naukri_so_far.extend(scraped_batch)
                             await tracker.add_jobs("naukri", len(scraped_batch))
                             if on_persist:
                                 await on_persist([_naukri_to_unified(j) for j in scraped_batch])
@@ -904,6 +965,8 @@ class OrchestratorAgent:
                                 scraped = await _run_on(await guest.new_page())
                         else:
                             scraped = await _run_on(page)
+                        # Never drop a job that was already persisted mid-run.
+                        scraped = _with_flushed(scraped, naukri_so_far)
                         unified = [_naukri_to_unified(j) for j in scraped]
                         logger.info("orchestrator_source_done", source="naukri", count=len(unified))
                         logger.info("batch_saved", source="Naukri", count=len(unified))
@@ -937,12 +1000,19 @@ class OrchestratorAgent:
                         )
                         return "Naukri", []
                     except Exception as exc:
+                        # Keep whatever Naukri already scraped + persisted — the
+                        # end-of-run save must not delete those rows.
+                        partial = [_naukri_to_unified(j) for j in naukri_so_far]
                         logger.exception(
-                            "orchestrator_naukri_error", error=str(exc),
-                            note="Naukri failed; LinkedIn and Dice results are retained",
+                            "orchestrator_naukri_error", error=str(exc), partial_jobs=len(partial),
+                            note="Naukri failed; its partial jobs + LinkedIn and Dice results are retained",
                         )
-                        await tracker.fail("naukri", REASON_ERROR, error=str(exc) or type(exc).__name__)
-                        return "Naukri", []
+                        await tracker.fail(
+                            "naukri", REASON_ERROR, error=str(exc) or type(exc).__name__,
+                            count=len(partial),
+                            message=f"Stopped — error ({len(partial)} jobs kept)" if partial else None,
+                        )
+                        return "Naukri", partial
 
                 async def _harvest_linkedin(page: Any) -> tuple[str, list[UnifiedJob]]:
                     if await _skip_if_stopped("linkedin"):
@@ -982,6 +1052,9 @@ class OrchestratorAgent:
                             on_batch=_linkedin_on_batch,
                             on_progress=_progress_for("linkedin"),
                         )
+                        # Never drop a job that was already persisted mid-run (e.g.
+                        # a page's flushed batches when that page's scrape died).
+                        scraped = _with_flushed(scraped, scraped_so_far)
                         # ── Checkpoint 2: jobs received by orchestrator ────────
                         logger.info("linkedin_jobs_received_by_orchestrator", count=len(scraped))
                         unified = [_linkedin_to_unified(j) for j in scraped]
@@ -1008,12 +1081,17 @@ class OrchestratorAgent:
                         await _finish("linkedin", len(unified))
                         return "LinkedIn", unified
                     except LinkedInLoginError as exc:
+                        partial = [_linkedin_to_unified(j) for j in scraped_so_far]
                         logger.warning(
                             "orchestrator_linkedin_login_failed", error=str(exc),
+                            partial_jobs=len(partial),
                             note="LinkedIn skipped; other sources are retained",
                         )
-                        await tracker.fail("linkedin", REASON_LOGIN_REQUIRED, error=str(exc))
-                        return "LinkedIn", []
+                        await tracker.fail(
+                            "linkedin", REASON_LOGIN_REQUIRED, error=str(exc),
+                            count=len(partial) if partial else None,
+                        )
+                        return "LinkedIn", partial
                     except LLMUnavailableError as exc:
                         # The extraction LLM is down. Stop ONLY LinkedIn (the one
                         # LLM consumer): keep the jobs it scraped before the outage
@@ -1035,12 +1113,19 @@ class OrchestratorAgent:
                         )
                         return "LinkedIn", partial
                     except Exception as exc:
+                        # Keep whatever LinkedIn already scraped + persisted — the
+                        # end-of-run save must not delete those rows.
+                        partial = [_linkedin_to_unified(j) for j in scraped_so_far]
                         logger.exception(
-                            "orchestrator_linkedin_error", error=str(exc),
-                            note="LinkedIn failed; other sources are retained",
+                            "orchestrator_linkedin_error", error=str(exc), partial_jobs=len(partial),
+                            note="LinkedIn failed; its partial jobs + other sources are retained",
                         )
-                        await tracker.fail("linkedin", REASON_ERROR, error=str(exc) or type(exc).__name__)
-                        return "LinkedIn", []
+                        await tracker.fail(
+                            "linkedin", REASON_ERROR, error=str(exc) or type(exc).__name__,
+                            count=len(partial),
+                            message=f"Stopped — error ({len(partial)} jobs kept)" if partial else None,
+                        )
+                        return "LinkedIn", partial
 
                 async def _harvest_dice(page: Any) -> tuple[str, list[UnifiedJob]]:
                     if await _skip_if_stopped("dice"):

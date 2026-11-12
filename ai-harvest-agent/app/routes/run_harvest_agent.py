@@ -57,8 +57,10 @@ from app.services.harvest_run_service import (
     data_source_mode,
     db_read,
     db_write,
+    final_save_timeout,
     resolve_read,
 )
+from app.services.harvest_backup_service import write_harvest_backup
 from app.services import run_guard
 from app.services.job_tracker import JobTracker
 from app.services.reenrichment_service import run_reenrichment_sweep
@@ -482,12 +484,25 @@ async def _run_harvest_background_impl(
             "failed", err_msg,
         )
 
-        if run_pk and partial is not None:
-            if partial.all_jobs:
+        if partial is not None and partial.all_jobs:
+            # Local backup first (replaced by the next harvest) — the jobs survive
+            # even if the DB save below fails or the process dies mid-save.
+            partial_dicts = [j.to_dict() for j in partial.all_jobs]
+            await write_harvest_backup(
+                run_id=run_id, run_pk=run_pk, status="failed", jobs=partial_dicts,
+            )
+            if run_pk:
                 # Replace any provisional incrementally-persisted rows with the
                 # partial set (delete + insert atomically).
-                scraped_dicts = [j.to_dict() for j in partial.all_jobs]
-                await db_write(lambda db: HarvestRunService(db).replace_run_jobs(run_pk, scraped_dicts))
+                saved = await db_write(
+                    lambda db: HarvestRunService(db).replace_run_jobs(run_pk, partial_dicts),
+                    timeout=final_save_timeout(len(partial_dicts)),
+                ) is True
+                await write_harvest_backup(
+                    run_id=run_id, run_pk=run_pk, status="failed", jobs=partial_dicts,
+                    db_saved=saved,
+                )
+        if run_pk and partial is not None:
             if partial.llm_calls:
                 await db_write(lambda db: HarvestRunService(db).bulk_insert_llm_calls(run_pk, partial.llm_calls))
             await _persist_reenrich_queue(run_pk, partial.reenrich_queue, log)
@@ -615,18 +630,31 @@ async def _run_harvest_background_impl(
     # incrementally during the scrape and inserts the final classified/deduped
     # set, so the end state is exactly result.all_jobs with no duplicates.
     persisted = False
+    scraped_dicts = [j.to_dict() for j in result.all_jobs]
+    run_state = "stopped" if run_guard.is_stop_requested() else "completed"
+    # Local JSON backup of the final job list, written BEFORE the DB save (one
+    # file, replaced by the next harvest) — so the jobs survive a failed save or
+    # a process death mid-save. Rewritten below with the save's outcome.
+    await write_harvest_backup(run_id=run_id, run_pk=run_pk, status=run_state, jobs=scraped_dicts)
     if run_pk:
-        scraped_dicts = [j.to_dict() for j in result.all_jobs]
+        # Its own, job-count-scaled timeout — the default 30s DB-write cap rolled
+        # large runs' final save back.
         persisted = await db_write(
-            lambda db: HarvestRunService(db).replace_run_jobs(run_pk, scraped_dicts)
+            lambda db: HarvestRunService(db).replace_run_jobs(run_pk, scraped_dicts),
+            timeout=final_save_timeout(len(scraped_dicts)),
         ) is True
         if not persisted:
             # The DB still holds the provisional incremental rows (or nothing) —
             # never report from those; fall back to the in-memory final list.
             log.error(
                 "harvest_final_persist_failed", jobs=len(scraped_dicts),
-                note="report built from the in-memory job list",
+                note="report built from the in-memory job list; jobs kept in the local backup",
             )
+    await write_harvest_backup(
+        run_id=run_id, run_pk=run_pk, status=run_state, jobs=scraped_dicts,
+        db_saved=persisted,  # False (kept by the next run) when there's no DB run row
+    )
+    if run_pk:
         await db_write(lambda db: HarvestRunService(db).bulk_insert_llm_calls(run_pk, result.llm_calls))
         await _persist_reenrich_queue(run_pk, result.reenrich_queue, log)
 

@@ -143,29 +143,35 @@ class LeadIntelligenceOrchestrator:
         linkedin_posts: list[LinkedInPost] = []
 
         if "linkedin" in request.search_sources:
-            _sm = _SessionManager("linkedin")
-            async with BrowserManager(
-                headless      = browser_headless,
-                storage_state = _sm.storage_state_arg(),
-            ) as li_bm:
-                linkedin_page = await li_bm.new_page()
-                logger.info(
-                    "linkedin_browser_ready",
-                    session_file = str(_sm.session_path),
-                    session_ok   = _sm.session_exists(),
-                )
-                linkedin_agent = LinkedInLeadAgent(
-                    max_posts    = max_posts,
-                    max_pages    = li_cfg.get("max_pages", 5),
-                    scroll_times = li_cfg.get("scroll_times", 8),
-                )
-                try:
-                    linkedin_posts = await linkedin_agent.search_posts(
-                        page    = linkedin_page,
-                        keyword = request.keyword,
+            # Launch/browser failures (incl. the user closing it) must not abort
+            # the run — keep whatever posts were collected and carry on.
+            try:
+                _sm = _SessionManager("linkedin")
+                async with BrowserManager(
+                    headless      = browser_headless,
+                    storage_state = _sm.storage_state_arg(),
+                ) as li_bm:
+                    linkedin_page = await li_bm.new_page()
+                    logger.info(
+                        "linkedin_browser_ready",
+                        session_file = str(_sm.session_path),
+                        session_ok   = _sm.session_exists(),
                     )
-                except Exception as exc:
-                    logger.exception("linkedin_agent_error", error=str(exc))
+                    linkedin_agent = LinkedInLeadAgent(
+                        max_posts    = max_posts,
+                        max_pages    = li_cfg.get("max_pages", 5),
+                        scroll_times = li_cfg.get("scroll_times", 8),
+                    )
+                    try:
+                        linkedin_posts = await linkedin_agent.search_posts(
+                            page    = linkedin_page,
+                            keyword = request.keyword,
+                        )
+                    except Exception as exc:
+                        logger.exception("linkedin_agent_error", error=str(exc))
+            except Exception as exc:
+                logger.exception("linkedin_stage_failed", error=str(exc),
+                                 kept_posts=len(linkedin_posts))
 
         result.linkedin_posts_found = len(linkedin_posts)
         logger.info(
@@ -204,147 +210,154 @@ class LeadIntelligenceOrchestrator:
         #          naukri_session_required=True on the result and skip enrichment
         #          so the caller knows to run POST /naukri-setup-session first.
         if fallback_enabled and "premium_naukri" in request.search_sources:
-            # ── Try to extract Naukri cookies from the user's Chrome session ─
-            # This allows Chrome to keep running while Playwright reuses the session.
-            _naukri_storage_state: str | None = None
+            # Any Naukri failure (launch, session check, browser closed by the
+            # user, …) keeps the LinkedIn leads + enrichment done so far; the
+            # run still dedups, validates and saves JSON/Excel below.
             try:
-                from app.services.chrome_session_extractor import extract_naukri_session as _extract_cdp
-                _cdp_result = await _extract_cdp()
-                if _cdp_result.get("status") == "ready":
-                    _naukri_storage_state = _cdp_result.get("session_file")
-                    logger.info(
-                        "naukri_session_restored_successfully",
-                        session_file  = _naukri_storage_state,
-                        cookies_found = _cdp_result.get("cookies_found"),
-                        message       = "Naukri session restored — reusing authenticated Chrome profile",
+                # ── Try to extract Naukri cookies from the user's Chrome session ─
+                # This allows Chrome to keep running while Playwright reuses the session.
+                _naukri_storage_state: str | None = None
+                try:
+                    from app.services.chrome_session_extractor import extract_naukri_session as _extract_cdp
+                    _cdp_result = await _extract_cdp()
+                    if _cdp_result.get("status") == "ready":
+                        _naukri_storage_state = _cdp_result.get("session_file")
+                        logger.info(
+                            "naukri_session_restored_successfully",
+                            session_file  = _naukri_storage_state,
+                            cookies_found = _cdp_result.get("cookies_found"),
+                            message       = "Naukri session restored — reusing authenticated Chrome profile",
+                        )
+                    else:
+                        # Not logged in or action required
+                        logger.warning(
+                            "naukri_cdp_not_authenticated",
+                            status  = _cdp_result.get("status"),
+                            message = _cdp_result.get("message"),
+                            reason  = _cdp_result.get("reason"),
+                        )
+                except Exception as _ce:
+                    logger.warning(
+                        "chrome_cookie_extraction_failed",
+                        error  = str(_ce),
+                        action = "Falling back to PersistentBrowserManager with data/chrome_profile",
+                    )
+
+                # ── Open Naukri browser context ───────────────────────────────────
+                # Preferred path: BrowserManager + storage_state (Chrome stays running)
+                # Fallback path:  PersistentBrowserManager with dedicated profile
+                if _naukri_storage_state:
+                    _naukri_ctx = BrowserManager(
+                        headless      = browser_headless,
+                        storage_state = _naukri_storage_state,
                     )
                 else:
-                    # Not logged in or action required
-                    logger.warning(
-                        "naukri_cdp_not_authenticated",
-                        status  = _cdp_result.get("status"),
-                        message = _cdp_result.get("message"),
-                        reason  = _cdp_result.get("reason"),
-                    )
-            except Exception as _ce:
-                logger.warning(
-                    "chrome_cookie_extraction_failed",
-                    error  = str(_ce),
-                    action = "Falling back to PersistentBrowserManager with data/chrome_profile",
-                )
-
-            # ── Open Naukri browser context ───────────────────────────────────
-            # Preferred path: BrowserManager + storage_state (Chrome stays running)
-            # Fallback path:  PersistentBrowserManager with dedicated profile
-            if _naukri_storage_state:
-                _naukri_ctx = BrowserManager(
-                    headless      = browser_headless,
-                    storage_state = _naukri_storage_state,
-                )
-            else:
-                _naukri_ctx = PersistentBrowserManager(
-                    profile_dir = chrome_profile,
-                    headless    = browser_headless,
-                    slow_mo     = browser_slow_mo,
-                )
-
-            async with _naukri_ctx as bm:
-                naukri_page  = await bm.new_page()
-                naukri_agent = PremiumNaukriAgent(
-                    max_profiles = naukri_cfg.get("max_profiles", 3)
-                )
-
-                # ── One-time session check before the loop ────────────────────
-                session_ok = await naukri_agent._verify_naukri_session(naukri_page)
-                naukri_agent._session_ok = session_ok   # pre-cache so per-call check is skipped
-
-                if not session_ok:
-                    _hint = (
-                        "Naukri Premium session not found in Chrome profile. "
-                        "Run POST /naukri-setup-session, log in at recruit.naukri.com, "
-                        "close the browser, then re-run this workflow."
-                    )
-                    result.naukri_session_required = True
-                    result.naukri_session_hint     = _hint
-                    logger.warning(
-                        "naukri_session_required",
-                        action = "Run POST /naukri-setup-session",
-                        hint   = _hint,
-                    )
-                else:
-                    logger.info("naukri_session_verified", url=naukri_page.url)
-
-                    to_enrich = [r for r in initial_records if _needs_enrichment(r)]
-                    logger.info(
-                        "naukri_search_started",
-                        total_leads    = len(initial_records),
-                        to_enrich      = len(to_enrich),
-                        reason         = "email_missing OR phone_missing OR location_missing",
+                    _naukri_ctx = PersistentBrowserManager(
+                        profile_dir = chrome_profile,
+                        headless    = browser_headless,
+                        slow_mo     = browser_slow_mo,
                     )
 
-                    # Baseline confidence before enrichment (for improvement tracking)
-                    from app.agents.confidence_validator import _score as _conf_score
-                    pre_scores = {r.lead_id: _conf_score(r) for r in to_enrich}
+                async with _naukri_ctx as bm:
+                    naukri_page  = await bm.new_page()
+                    naukri_agent = PremiumNaukriAgent(
+                        max_profiles = naukri_cfg.get("max_profiles", 3)
+                    )
 
-                    result.recruiters_enriched = len(to_enrich)
+                    # ── One-time session check before the loop ────────────────────
+                    session_ok = await naukri_agent._verify_naukri_session(naukri_page)
+                    naukri_agent._session_ok = session_ok   # pre-cache so per-call check is skipped
 
-                    for record in to_enrich:
-                        if not record.recruiter_name:
-                            continue
-                        # Snapshot pre-enrichment values
-                        _pre_email   = record.official_email
-                        _pre_phone   = record.contact_number
-                        _pre_loc     = record.location
-                        _pre_company = record.current_company
+                    if not session_ok:
+                        _hint = (
+                            "Naukri Premium session not found in Chrome profile. "
+                            "Run POST /naukri-setup-session, log in at recruit.naukri.com, "
+                            "close the browser, then re-run this workflow."
+                        )
+                        result.naukri_session_required = True
+                        result.naukri_session_hint     = _hint
+                        logger.warning(
+                            "naukri_session_required",
+                            action = "Run POST /naukri-setup-session",
+                            hint   = _hint,
+                        )
+                    else:
+                        logger.info("naukri_session_verified", url=naukri_page.url)
 
-                        try:
-                            naukri_profile = await naukri_agent.search_recruiter(
-                                page            = naukri_page,
-                                recruiter_name  = record.recruiter_name,
-                                current_company = record.current_company or record.company,
-                            )
-                            if naukri_profile:
-                                result.premium_naukri_fallbacks += 1
-                                self._merger.enrich_with_naukri(
-                                    record,
-                                    naukri_profile,
-                                    company = record.current_company or record.company,
+                        to_enrich = [r for r in initial_records if _needs_enrichment(r)]
+                        logger.info(
+                            "naukri_search_started",
+                            total_leads    = len(initial_records),
+                            to_enrich      = len(to_enrich),
+                            reason         = "email_missing OR phone_missing OR location_missing",
+                        )
+
+                        # Baseline confidence before enrichment (for improvement tracking)
+                        from app.agents.confidence_validator import _score as _conf_score
+                        pre_scores = {r.lead_id: _conf_score(r) for r in to_enrich}
+
+                        result.recruiters_enriched = len(to_enrich)
+
+                        for record in to_enrich:
+                            if not record.recruiter_name:
+                                continue
+                            # Snapshot pre-enrichment values
+                            _pre_email   = record.official_email
+                            _pre_phone   = record.contact_number
+                            _pre_loc     = record.location
+                            _pre_company = record.current_company
+
+                            try:
+                                naukri_profile = await naukri_agent.search_recruiter(
+                                    page            = naukri_page,
+                                    recruiter_name  = record.recruiter_name,
+                                    current_company = record.current_company or record.company,
                                 )
+                                if naukri_profile:
+                                    result.premium_naukri_fallbacks += 1
+                                    self._merger.enrich_with_naukri(
+                                        record,
+                                        naukri_profile,
+                                        company = record.current_company or record.company,
+                                    )
 
-                                # Track which fields were newly populated
-                                if not _pre_email and record.official_email:
-                                    result.emails_added += 1
-                                    logger.info(
-                                        "email_added",
-                                        recruiter = record.recruiter_name,
-                                        email     = record.official_email,
-                                        source    = "Premium Naukri",
-                                    )
-                                if not _pre_phone and record.contact_number:
-                                    result.phones_added += 1
-                                    logger.info(
-                                        "phone_added",
-                                        recruiter = record.recruiter_name,
-                                        phone     = record.contact_number,
-                                        source    = "Premium Naukri",
-                                    )
-                                if not _pre_loc and record.location:
-                                    result.locations_added += 1
-                                    logger.info(
-                                        "location_added",
-                                        recruiter = record.recruiter_name,
-                                        location  = record.location,
-                                        source    = "Premium Naukri",
-                                    )
-                                if not _pre_company and record.current_company:
-                                    result.companies_updated += 1
+                                    # Track which fields were newly populated
+                                    if not _pre_email and record.official_email:
+                                        result.emails_added += 1
+                                        logger.info(
+                                            "email_added",
+                                            recruiter = record.recruiter_name,
+                                            email     = record.official_email,
+                                            source    = "Premium Naukri",
+                                        )
+                                    if not _pre_phone and record.contact_number:
+                                        result.phones_added += 1
+                                        logger.info(
+                                            "phone_added",
+                                            recruiter = record.recruiter_name,
+                                            phone     = record.contact_number,
+                                            source    = "Premium Naukri",
+                                        )
+                                    if not _pre_loc and record.location:
+                                        result.locations_added += 1
+                                        logger.info(
+                                            "location_added",
+                                            recruiter = record.recruiter_name,
+                                            location  = record.location,
+                                            source    = "Premium Naukri",
+                                        )
+                                    if not _pre_company and record.current_company:
+                                        result.companies_updated += 1
 
-                        except Exception as exc:
-                            logger.warning(
-                                "premium_naukri_record_error",
-                                recruiter = record.recruiter_name,
-                                error     = str(exc),
-                            )
+                            except Exception as exc:
+                                logger.warning(
+                                    "premium_naukri_record_error",
+                                    recruiter = record.recruiter_name,
+                                    error     = str(exc),
+                                )
+            except Exception as exc:
+                logger.exception("naukri_enrichment_stage_failed", error=str(exc),
+                                 enriched_so_far=result.premium_naukri_fallbacks)
 
         # ── Step 4: Deduplication ────────────────────────────────────────────
         merged_records = self._merger.deduplicate(initial_records)

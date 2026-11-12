@@ -53,7 +53,7 @@ const styles = `
 .ajm-chip.other { background: #F8FAFC; border-color: #E2E8F0; color: #475569; cursor: default; }
 .ajm-chip span.nm { overflow: hidden; text-overflow: ellipsis; }
 .ajm-av { flex: none; width: 22px; height: 22px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; color: #fff; }
-.ajm-locked > td:not(.ajm-action) { opacity: .55; }
+.ajm-locked > td:not(.ajm-action):not(.ajm-keep) { opacity: .55; }
 .ajm-overlay { position: fixed; inset: 0; background: rgba(15,23,42,.45); -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px); display: flex; align-items: center; justify-content: center; padding: 24px; z-index: 1000; }
 .ajm-card { width: 100%; max-width: 440px; ${GLASS_MODAL} border-radius: 12px; display: flex; flex-direction: column; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #1E293B; }
 .ajm-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 22px; border-bottom: 1px solid #E2E8F0; }

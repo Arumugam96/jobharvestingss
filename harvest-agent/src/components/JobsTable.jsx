@@ -9,6 +9,7 @@ import PhoneVerifyModal, {
 import AssignJobModal, { AssignJobStyles, AssignCell, useCurrentUserEmail, isAssignedToOther } from "./AssignJob";
 import { getOutreachStatus, getPhoneVerifications, logPhoneCall } from "../api";
 import { C } from "../theme";
+import { useTenant } from "../TenantContext";
 import {
   WhatsAppIcon, LinkedInIcon, SourceChip, SortHeader, PlainHeader,
   Select, SearchableSelect, MultiSelect, ContactActionBtn, DualContact, CompanySizeCell, PocCell,
@@ -165,6 +166,7 @@ export default function JobsTable({
   // "Assign to me": the logged-in user, the open modal, and assignments changed
   // in this session (overlaid on the server's row.assignedTo until the next fetch).
   const myEmail = useCurrentUserEmail();
+  const { isAdmin } = useTenant();
   const [assignModalJob, setAssignModalJob] = useState(null);
   const [assignOverrides, setAssignOverrides] = useState({}); // { [jobId]: assignedTo | null }
   const assignedOf = (j) => (j.id in assignOverrides ? assignOverrides[j.id] : j.assignedTo);
@@ -487,7 +489,7 @@ export default function JobsTable({
                   <td className="ha-td">
                     <DualContact parts={c.emailParts} link="mailto:" cls="ha-mail" />
                   </td>
-                  <td className="ha-td" style={{ whiteSpace: "nowrap" }}>
+                  <td className={"ha-td" + (locked && isAdmin ? " ajm-keep" : "")} style={{ whiteSpace: "nowrap" }}>
                     {c.phone && !locked ? (
                       <div className="pvm-cell">
                         <PhoneVerifyButton verified={phoneVerify[j.id]?.phone === c.phone}
@@ -496,6 +498,15 @@ export default function JobsTable({
                         {/* A stored result only applies while the row still shows the same number. */}
                         <PhoneVerifyBadge result={phoneVerify[j.id]?.phone === c.phone ? phoneVerify[j.id] : null}
                           onEdit={() => setPhoneModal({ job: j, phone: c.phone, phoneSource: c.phoneParts[0]?.variant || "", pocName: c.pocName, pocKind: c.pocKind, email: c.email })} />
+                        <PhoneFlagTag flags={phoneFlags[c.phone]} />
+                        <ApolloPhoneChip job={j} contact={c} />
+                      </div>
+                    ) : c.phone && locked && isAdmin ? (
+                      // Admin, job self-assigned by someone else: read-only tick / cross
+                      // for the assignee's latest call — no shield, no "Log call".
+                      <div className="pvm-cell">
+                        <div className="pvm-val"><DualContact parts={c.phoneParts} link="tel:" cls="ha-tel" /></div>
+                        <PhoneVerifyBadge mark result={phoneVerify[j.id]?.phone === c.phone ? phoneVerify[j.id] : null} />
                         <PhoneFlagTag flags={phoneFlags[c.phone]} />
                         <ApolloPhoneChip job={j} contact={c} />
                       </div>

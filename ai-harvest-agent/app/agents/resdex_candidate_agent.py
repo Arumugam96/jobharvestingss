@@ -54,6 +54,7 @@ from urllib.parse import urlparse
 
 import structlog
 
+from app.scrapers.page_eval import page_evaluate
 from app.models.resdex import ResdexSearchStatus
 from app.services.resdex_types import (
     ResdexBatchResult,
@@ -155,7 +156,7 @@ async def detect_challenge(page: Any) -> str | None:
     if "/challenge" in path or "captcha" in path:
         return f"challenge page {url.split('?')[0]}"
     try:
-        info = await page.evaluate(_CHALLENGE_JS, list(_CHALLENGE_SELECTORS))
+        info = await page_evaluate(page, _CHALLENGE_JS, list(_CHALLENGE_SELECTORS))
     except Exception:  # noqa: BLE001
         return None
     if not isinstance(info, dict):
@@ -492,14 +493,14 @@ class ResdexCandidateAgent:
         links: dict[str, str] = {}
         try:
             await page.locator(".tuple[data-tuple-id]").first.wait_for(state="attached", timeout=20_000)
-            links = await page.evaluate(_LINKS_JS)
+            links = await page_evaluate(page, _LINKS_JS)
         except Exception:  # noqa: BLE001 — zero results renders no tuples
             pass
         await self._guard()   # a wall rendered over / instead of the results
         if await self._read_results():
             # Scrolling may render more tuples (lazy list) — add their links.
             try:
-                more = await page.evaluate(_LINKS_JS)
+                more = await page_evaluate(page, _LINKS_JS)
                 for uid, href in (more or {}).items():
                     links.setdefault(uid, href)
             except Exception:  # noqa: BLE001
@@ -511,7 +512,7 @@ class ResdexCandidateAgent:
             return cards, int(payload.get("totalResumes") or len(cards)), applied
 
         # JSON unavailable — hand the rendered cards' text to the LLM extractor.
-        rendered = await page.evaluate(_TEXT_CARDS_JS) if links else []
+        rendered = await page_evaluate(page, _TEXT_CARDS_JS) if links else []
         cards = []
         for index, c in enumerate(rendered):
             if not c.get("text"):

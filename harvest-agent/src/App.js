@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { BrowserRouter } from "react-router-dom";
 import HarvestAgent from "./HarvestAgent";
 import LoginPage from "./LoginPage";
@@ -28,6 +28,14 @@ function App() {
   // The tenant "slip" from GET /auth/me (branding + feature flags). Defaults to
   // the internal full-access slip until /auth/me resolves (dev bypass keeps it).
   const [tenant, setTenant] = useState(INTERNAL_TENANT);
+  // The dev-bypass user is always an admin (backend get_current_user), so start
+  // there and a hard reload of an admin page isn't bounced before /auth/me lands.
+  const [role, setRole] = useState(AUTH_ENABLED ? "user" : "admin");
+  const applyMe = useCallback((me) => {
+    if (!me) return;
+    if (me.tenant) setTenant(me.tenant);
+    setRole(me.role || "user");
+  }, []);
   // True when the BACKEND reports it runs with AUTH_ENABLED=false (see
   // /auth/me's auth_bypass flag). Detected at runtime so a production build —
   // compiled with auth on — still shows the tenant-switcher pill when pointed
@@ -63,11 +71,11 @@ function App() {
     let cancelled = false;
     getMe()
       .then((me) => {
-        if (!cancelled && me && me.tenant) setTenant(me.tenant);
+        if (!cancelled) applyMe(me);
       })
       .catch(() => { /* slip is presentation-only — keep the fallback */ });
     return () => { cancelled = true; };
-  }, []);
+  }, [applyMe]);
 
   // Session restore: on every startup, validate the HttpOnly session cookie via
   // GET /auth/me. A live session restores the authenticated state with no OTP; a
@@ -82,7 +90,7 @@ function App() {
       getMe()
         .then((me) => {
           if (cancelled) return;
-          if (me && me.tenant) setTenant(me.tenant);
+          applyMe(me);
           setDevBypass(!!(me && me.auth_bypass));
           setReconnecting(false);
           setStatus("authed");
@@ -103,14 +111,14 @@ function App() {
     };
     attempt(0);
     return () => { cancelled = true; clearTimeout(timer); };
-  }, [restoreAttempt]);
+  }, [restoreAttempt, applyMe]);
 
   if (!AUTH_ENABLED) {
     // dev bypass — pair with backend AUTH_ENABLED=false. The slip comes from
     // /auth/me under the selected X-Dev-Tenant (effect above); the floating
     // switcher flips tenants without any login.
     return (
-      <TenantProvider tenant={tenant}>
+      <TenantProvider tenant={tenant} role={role}>
         <BrowserRouter>
           <HarvestAgent />
           <DevTenantSwitcher />
@@ -150,7 +158,7 @@ function App() {
           // landing page uses the fresh-login flag to play its intro once.
           try {
             const me = await getMe();
-            if (me && me.tenant) setTenant(me.tenant);
+            applyMe(me);
             setDevBypass(!!(me && me.auth_bypass));
           } catch { /* slip is presentation-only — enter with the default */ }
           try { sessionStorage.setItem("ss_fresh_login", "1"); } catch { /* ignore */ }
@@ -164,7 +172,7 @@ function App() {
   // spinner stay non-routed short-circuits, so a deep link never renders the app
   // shell before the session is confirmed. Cookie-based auth is unchanged.
   return (
-    <TenantProvider tenant={tenant}>
+    <TenantProvider tenant={tenant} role={role}>
       <BrowserRouter>
         <HarvestAgent
           // With the backend bypass active there's no session to revoke and the
@@ -177,6 +185,7 @@ function App() {
             }
             try { sessionStorage.removeItem("ss_intro_played"); } catch { /* ignore */ }
             setTenant(INTERNAL_TENANT);
+            setRole("user");
             setStatus("anon");
           }}
         />

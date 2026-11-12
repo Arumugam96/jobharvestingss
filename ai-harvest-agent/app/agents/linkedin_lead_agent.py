@@ -35,6 +35,7 @@ from typing import Any
 
 import structlog
 
+from app.scrapers.page_eval import page_evaluate
 from app.models.lead_models import LinkedInPost
 
 logger = structlog.get_logger(__name__)
@@ -166,7 +167,7 @@ class LinkedInLeadAgent:
 
             # Container-count diagnostic — written to file so it survives across the API boundary
             try:
-                _diag = await page.evaluate("""() => {
+                _diag = await page_evaluate(page, """() => {
                     var r = {};
                     r.url = location.href.slice(0, 120);
                     r.title = document.title.slice(0, 80);
@@ -263,7 +264,7 @@ class LinkedInLeadAgent:
             )
             await page.wait_for_timeout(2_500)
 
-            data = await page.evaluate("""() => {
+            data = await page_evaluate(page, """() => {
                 const headline = document.querySelector(
                     '.text-body-medium.break-words, .pv-text-details__left-panel .text-body-medium'
                 )?.textContent?.trim() || '';
@@ -328,7 +329,7 @@ class LinkedInLeadAgent:
         """Scroll down to trigger lazy-loaded posts."""
         for _ in range(self._scroll_times):
             try:
-                await page.evaluate("window.scrollBy(0, window.innerHeight * 1.5)")
+                await page_evaluate(page, "window.scrollBy(0, window.innerHeight * 1.5)")
                 await page.wait_for_timeout(800)
             except Exception:
                 break
@@ -341,7 +342,7 @@ class LinkedInLeadAgent:
         Returns a list of raw dicts (pre-model).
         """
         try:
-            return await page.evaluate("""() => {
+            return await page_evaluate(page, """() => {
                 var posts = [];
 
                 // LinkedIn 2026 DOM: posts use div[role='listitem'] as containers.

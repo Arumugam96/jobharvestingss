@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import {
   SlidersHorizontal, LayoutList, History, Send, BarChart3, Radar, UserSearch, LogOut,
-  ChevronsLeft, ChevronsRight, Contact, FileSpreadsheet,
+  ChevronsLeft, ChevronsRight, Contact, FileSpreadsheet, Phone, ShieldCheck,
 } from "lucide-react";
 import HealthBadge from "./HealthBadge";
 import { useTenant } from "../TenantContext";
@@ -75,7 +75,7 @@ function sidebarVars(accent, isClient) {
 let committedThisLoad = false;
 
 export default function Sidebar({ activePage, onNavigate = () => {}, jobsCount, runsCount, onLogout, railCollapsed = false }) {
-  const { tenant, theme, isClient, hasFeature } = useTenant();
+  const { tenant, theme, isClient, hasFeature, isAdmin } = useTenant();
 
   // `committed` = the "keep the rail open" choice. Turned ON when the user clicks a
   // nav option (or the open button), OFF by the close button — so navigating keeps
@@ -176,6 +176,13 @@ export default function Sidebar({ activePage, onNavigate = () => {}, jobsCount, 
               <NavItem glyph={Send} active={activePage === "outreach"} onClick={() => go("outreach")}>Mail logs</NavItem>
             )}
           </div>
+          {isAdmin && (
+            <div>
+              <div className="ha-navhead"><span>Admin</span></div>
+              <NavItem glyph={Phone} active={activePage === "phone-logs"} onClick={() => go("phone-logs")}>Phone logs</NavItem>
+              <NavItem glyph={ShieldCheck} active={activePage === "user-roles"} onClick={() => go("user-roles")}>User roles</NavItem>
+            </div>
+          )}
           {showReports && (
             <div>
               <div className="ha-navhead"><span>Reports</span></div>

@@ -52,6 +52,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 import structlog
+from app.scrapers.page_eval import page_evaluate
 
 if TYPE_CHECKING:
     from app.scrapers.browser_manager import PersistentBrowserManager
@@ -150,7 +151,7 @@ async def login_form_visible(page: Any) -> bool:
     mid-navigation, closed tab) counts as visible — never report "logged in"
     for a page we couldn't inspect."""
     try:
-        return bool(await page.evaluate(_LOGIN_FORM_JS, list(LOGIN_FORM_SELECTORS)))
+        return bool(await page_evaluate(page, _LOGIN_FORM_JS, list(LOGIN_FORM_SELECTORS)))
     except Exception as exc:
         logger.debug("naukri_recruiter_login_form_check_failed", error=str(exc))
         return True

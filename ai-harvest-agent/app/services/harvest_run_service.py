@@ -273,8 +273,25 @@ async def resolve_read(
 _DB_WRITE_TIMEOUT = 30.0
 _DB_READ_TIMEOUT = 15.0
 
+# End-of-run job save (replace_run_jobs): one atomic delete + insert of the whole
+# run, with a per-row recruiter upsert — far slower than a 10-job incremental
+# batch, especially over the remote-harvest DB tunnel. The fixed 30s write cap
+# rolled large runs back. Scale with the job count instead, within bounds.
+_FINAL_SAVE_BASE_S = 120.0
+_FINAL_SAVE_PER_JOB_S = 0.5
+_FINAL_SAVE_MAX_S = 1800.0
 
-async def db_write(coro_fn: Callable[[AsyncSession], Awaitable[_T]]) -> _T | None:
+
+def final_save_timeout(n_jobs: int) -> float:
+    """Timeout (s) for saving a run's final job list: 120s + 0.5s per job,
+    capped at 30 min (1,000 jobs → 620s)."""
+    return min(_FINAL_SAVE_MAX_S, _FINAL_SAVE_BASE_S + _FINAL_SAVE_PER_JOB_S * max(0, n_jobs))
+
+
+async def db_write(
+    coro_fn: Callable[[AsyncSession], Awaitable[_T]],
+    timeout: float | None = None,
+) -> _T | None:
     """Best-effort DB mirror for the harvest workflow.
 
     A DB outage must never break the file-based flow that already works
@@ -282,18 +299,22 @@ async def db_write(coro_fn: Callable[[AsyncSession], Awaitable[_T]]) -> _T | Non
     short-lived session via get_session_factory() so it works both inside a
     request (alongside the usual Depends(get_db_session)) and from a detached
     asyncio.create_task, which has no FastAPI dependency injection available.
+
+    ``timeout`` overrides the default 30s cap (e.g. final_save_timeout() for the
+    end-of-run job save).
     """
+    limit = timeout if timeout is not None else _DB_WRITE_TIMEOUT
     try:
         session_factory = get_session_factory(get_settings())
         async with session_factory() as db:
             await bind_session_tenant(db)
             try:
-                result = await asyncio.wait_for(coro_fn(db), timeout=_DB_WRITE_TIMEOUT)
+                result = await asyncio.wait_for(coro_fn(db), timeout=limit)
                 await db.commit()
                 return result
             except asyncio.TimeoutError:
                 await db.rollback()
-                logger.warning("harvest_db_write_timeout", timeout=_DB_WRITE_TIMEOUT)
+                logger.warning("harvest_db_write_timeout", timeout=limit)
                 return None
             except Exception:
                 await db.rollback()

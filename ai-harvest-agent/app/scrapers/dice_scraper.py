@@ -14,6 +14,7 @@ from urllib.parse import urlencode
 import structlog
 from playwright.async_api import ElementHandle, Page
 
+from app.scrapers.page_eval import page_evaluate
 from app.models.harvest_config import FiltersConfig
 
 logger = structlog.get_logger(__name__)
@@ -464,63 +465,71 @@ class DiceScraper:
         )
         logger.info("pagination_started", source="dice", safety_cap=safety_cap)
 
-        while len(all_jobs) < safety_cap:
-            page_url = self._build_search_url(self._filters, page_num)
-            logger.info("search_url_generated", source="dice", page=page_num, url=page_url)
+        # Any failure mid-run (tab/browser closed by the user, crash, …) keeps
+        # the jobs collected so far; only a failure before the first job raises.
+        try:
+            while len(all_jobs) < safety_cap:
+                page_url = self._build_search_url(self._filters, page_num)
+                logger.info("search_url_generated", source="dice", page=page_num, url=page_url)
 
-            try:
-                await self.search_jobs(page_num)
-            except RuntimeError as exc:
-                if page_num == 1:
-                    raise
-                logger.warning("dice_page_nav_failed", page=page_num, error=str(exc))
-                break
-
-            page_title = await self._page.title()
-            logger.info("search_page_opened", source="dice", page=page_num, url=self._page.url, title=page_title)
-            logger.info("waiting_for_results", source="dice", page=page_num, url=self._page.url)
-
-            # wait_for_load_state("load") already called inside search_jobs → apply_filters
-            page_title = await self._page.title()
-            logger.info("results_page_loaded", source="dice", page=page_num, url=self._page.url, title=page_title)
-
-            await _screenshot(self._page, f"dice_page_{page_num:02d}_results")
-            logger.info("dice_jobs_page_opened", url=self._page.url)
-
-            remaining  = safety_cap - len(all_jobs)
-            try:
-                page_jobs = await self.extract_job_cards(remaining, seen_urls)
-            except Exception as exc:
-                # A page-wide extraction failure must not discard jobs already
-                # collected from earlier pages — stop paginating and return them.
-                logger.warning("dice_page_extract_failed", page=page_num, error=str(exc))
-                break
-
-            if not page_jobs:
-                empty_pages += 1
-                logger.info("dice_page_empty", page=page_num, consecutive_empty=empty_pages)
-                if empty_pages >= 2:
-                    logger.info("next_page_not_found", source="dice", page=page_num, reason="consecutive_empty_pages")
+                try:
+                    await self.search_jobs(page_num)
+                except RuntimeError as exc:
+                    if page_num == 1:
+                        raise
+                    logger.warning("dice_page_nav_failed", page=page_num, error=str(exc))
                     break
-            else:
-                empty_pages = 0
-                for j in page_jobs:
-                    url = (j.job_url or "").split("?")[0].rstrip("/").lower()
-                    if url and url not in seen_urls:
-                        seen_urls.add(url)
-                        all_jobs.append(j)
-                logger.info("next_page_found", source="dice", page=page_num, jobs_this_page=len(page_jobs))
 
-            logger.info("dice_page_done", page=page_num, page_new=len(page_jobs), total=len(all_jobs))
-            logger.info("page_processed", source="dice", page=page_num, jobs_this_page=len(page_jobs), total_collected=len(all_jobs))
+                page_title = await self._page.title()
+                logger.info("search_page_opened", source="dice", page=page_num, url=self._page.url, title=page_title)
+                logger.info("waiting_for_results", source="dice", page=page_num, url=self._page.url)
 
-            has_next = await self.paginate(page_num)
-            if not has_next:
-                logger.info("next_page_not_found", source="dice", page=page_num, reason="next_button_disabled")
-                break
+                # wait_for_load_state("load") already called inside search_jobs → apply_filters
+                page_title = await self._page.title()
+                logger.info("results_page_loaded", source="dice", page=page_num, url=self._page.url, title=page_title)
 
-            page_num += 1
-            await _delay(self._page, 400, 700)
+                await _screenshot(self._page, f"dice_page_{page_num:02d}_results")
+                logger.info("dice_jobs_page_opened", url=self._page.url)
+
+                remaining  = safety_cap - len(all_jobs)
+                try:
+                    page_jobs = await self.extract_job_cards(remaining, seen_urls)
+                except Exception as exc:
+                    # A page-wide extraction failure must not discard jobs already
+                    # collected from earlier pages — stop paginating and return them.
+                    logger.warning("dice_page_extract_failed", page=page_num, error=str(exc))
+                    break
+
+                if not page_jobs:
+                    empty_pages += 1
+                    logger.info("dice_page_empty", page=page_num, consecutive_empty=empty_pages)
+                    if empty_pages >= 2:
+                        logger.info("next_page_not_found", source="dice", page=page_num, reason="consecutive_empty_pages")
+                        break
+                else:
+                    empty_pages = 0
+                    for j in page_jobs:
+                        url = (j.job_url or "").split("?")[0].rstrip("/").lower()
+                        if url and url not in seen_urls:
+                            seen_urls.add(url)
+                            all_jobs.append(j)
+                    logger.info("next_page_found", source="dice", page=page_num, jobs_this_page=len(page_jobs))
+
+                logger.info("dice_page_done", page=page_num, page_new=len(page_jobs), total=len(all_jobs))
+                logger.info("page_processed", source="dice", page=page_num, jobs_this_page=len(page_jobs), total_collected=len(all_jobs))
+
+                has_next = await self.paginate(page_num)
+                if not has_next:
+                    logger.info("next_page_not_found", source="dice", page=page_num, reason="next_button_disabled")
+                    break
+
+                page_num += 1
+                await _delay(self._page, 400, 700)
+        except Exception as exc:
+            if not all_jobs:
+                raise
+            logger.warning("dice_pagination_aborted_keeping_jobs", page=page_num,
+                           error=str(exc) or type(exc).__name__, kept=len(all_jobs))
 
         logger.info("pagination_completed", source="dice", pages=page_num, total=len(all_jobs))
         logger.info("dice_harvest_complete", pages=page_num, total=len(all_jobs))
@@ -664,7 +673,7 @@ class DiceScraper:
         # JS-direct click is the most reliable approach (bypasses Playwright
         # viewport/focus/clickability checks that may fail for fixed overlays).
         try:
-            dismissed = await self._page.evaluate("""
+            dismissed = await page_evaluate(self._page, """
                 () => {
                     // ConsentManager-specific accept button classes (dice.com CMP)
                     const cmpBtns = document.querySelectorAll(
@@ -693,7 +702,7 @@ class DiceScraper:
         # ── Nuclear fallback: hide the consent overlay via CSS if click fails ──
         # This ensures the full viewport is used for card rendering and scrolling.
         try:
-            hidden = await self._page.evaluate("""
+            hidden = await page_evaluate(self._page, """
                 () => {
                     // Find the fixed/absolute overlay containing the consent banner
                     for (const btn of document.querySelectorAll('button')) {
@@ -736,7 +745,7 @@ class DiceScraper:
         # Dice.com shows a "Make your next move" login overlay on search pages
         # when unauthenticated. Close it if present.
         try:
-            await self._page.evaluate("""
+            await page_evaluate(self._page, """
                 () => {
                     // Try close / dismiss buttons on overlays
                     const closeSels = [
@@ -788,20 +797,20 @@ class DiceScraper:
         if container:
             prev_h = -1
             for _ in range(6):
-                h = await container.evaluate("el => el.scrollHeight")
+                h = await page_evaluate(container, "el => el.scrollHeight")
                 if h == prev_h:
                     break
                 prev_h = h
-                await container.evaluate("el => el.scrollTo(0, el.scrollHeight)")
+                await page_evaluate(container, "el => el.scrollTo(0, el.scrollHeight)")
                 await _delay(self._page, 200, 350)
         else:
             prev_h = -1
             for _ in range(4):
-                h = await self._page.evaluate("document.body.scrollHeight")
+                h = await page_evaluate(self._page, "document.body.scrollHeight")
                 if h == prev_h:
                     break
                 prev_h = h
-                await self._page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                await page_evaluate(self._page, "window.scrollTo(0, document.body.scrollHeight)")
                 await _delay(self._page, 300, 500)
 
     async def _parse_card_elements(
@@ -890,7 +899,7 @@ class DiceScraper:
         if seen_urls is None:
             seen_urls = set()
         try:
-            raw_jobs: list[dict] = await self._page.evaluate("""
+            raw_jobs: list[dict] = await page_evaluate(self._page, """
                 () => {
                     function getText(root, sels) {
                         for (const s of sels) {
