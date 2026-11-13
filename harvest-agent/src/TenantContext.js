@@ -30,13 +30,19 @@ const TenantContext = createContext({ tenant: INTERNAL_TENANT, role: "user" });
 
 // `role` is the signed-in user's role from /auth/me ("user" | "admin") — it
 // rides along with the slip so any component can gate admin-only UI.
-export function TenantProvider({ tenant, role = "user", children }) {
-  const value = useMemo(() => ({ tenant: tenant || INTERNAL_TENANT, role }), [tenant, role]);
+// `authBypass` is true when auth is disabled (frontend REACT_APP_AUTH_ENABLED=false
+// or the backend reporting AUTH_ENABLED=false via /auth/me's auth_bypass) — used to
+// show dev-only chrome such as the sidebar's backend-health pill.
+export function TenantProvider({ tenant, role = "user", authBypass = false, children }) {
+  const value = useMemo(
+    () => ({ tenant: tenant || INTERNAL_TENANT, role, authBypass }),
+    [tenant, role, authBypass],
+  );
   return <TenantContext.Provider value={value}>{children}</TenantContext.Provider>;
 }
 
 export function useTenant() {
-  const { tenant, role } = useContext(TenantContext);
+  const { tenant, role, authBypass = false } = useContext(TenantContext);
   const features = tenant.features || {};
   return {
     tenant,
@@ -45,6 +51,7 @@ export function useTenant() {
     isClient: tenant.type === "client",
     // Presentation only — admin endpoints enforce the role server-side.
     isAdmin: role === "admin",
+    authBypass,
     // Internal (or a missing features map) keeps today's full nav; clients see
     // only the flags their tenant config sets to true.
     hasFeature: (key) => (tenant.type === "client" ? features[key] === true : features[key] !== false),

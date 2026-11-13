@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from "react";
 import DOMPurify from "dompurify";
 import EmailComposeModal from "./components/EmailComposeModal";
 import LinkedInMessageModal from "./components/LinkedInMessageModal";
-import { getOutreachStatus, getJobOutreachDetail, openLoginRequired, ApiError } from "./api";
+import { getOutreachStatus, getJobOutreachDetail, runJobResdexSearch, openLoginRequired, ApiError } from "./api";
 import LiveBrowserView from "./components/LiveBrowserView";
 import { useCurrentUserEmail, isAssignedToOther } from "./components/AssignJob";
 import { GLASS, GLASS_BTN, PAGE_BG, GLASS_FALLBACK } from "./theme";
@@ -35,6 +35,7 @@ import {
   Clock,
   Laptop,
   Tags,
+  Loader2,
 } from "lucide-react";
 
 const WhatsAppIcon = ({ size = 16 }) => (
@@ -174,7 +175,7 @@ const RESDEX_STATUS = {
   },
   session_expired: {
     tone: "bad", Icon: Lock, title: "Naukri recruiter login needed", badge: "Login needed", login: true,
-    text: "The recruiter session had expired, so Resdex wasn't searched for this job. Log in once and the next run will search again — the query below is ready if you want to search now.",
+    text: "The recruiter session had expired, so Resdex wasn't searched for this job. Log in, then click Run Resdex search. The queries below are saved if you want to search by hand.",
   },
   session_busy: {
     tone: "neutral", Icon: Lock, title: "Recruiter login window was open", badge: "Skipped",
@@ -192,9 +193,20 @@ const RESDEX_STATUS = {
   // Recruiter not logged in: requirements + T1–T3 queries built, Resdex not searched.
   queries_only: {
     tone: "neutral", Icon: Search, title: "Queries ready, not searched", badge: "Queries only · not searched", login: true,
-    text: "Connect the Naukri recruiter session and re-run to find candidates, or copy a query into Resdex by hand.",
+    text: "The Naukri recruiter was logged out during the harvest, so all three search tiers were saved but Resdex wasn't searched. Log in, then click Run Resdex search, or copy a query into Resdex by hand.",
   },
 };
+
+// {code, message} of a failed POST /jobs/{id}/resdex-search (detail {code, message}).
+function resdexRunError(err) {
+  const d = err instanceof ApiError && err.body && typeof err.body.detail === "object" && err.body.detail
+    ? err.body.detail : null;
+  return {
+    code: d?.code || "",
+    message: d?.message || (err instanceof ApiError ? err.message : "Could not reach the harvest backend."),
+  };
+}
+const RUN_NEEDS_LOGIN = new Set(["recruiter_logged_out", "session_busy"]);
 
 const asList = (v) => (Array.isArray(v) ? v : v == null || v === "" ? [] : [v]);
 const lc = (s) => String(s || "").toLowerCase();
@@ -539,12 +551,18 @@ function ResdexSearchPanel({ resdex }) {
 }
 
 // Collapsed by default (accordion): the header carries the one-line summary.
-function ResdexCandidatesSection({ resdex, onLogin }) {
+// "Run Resdex search" (POST /jobs/{id}/resdex-search): shown while Resdex wasn't
+// searched for the job (resdex.can_run — queries only, login needed, cap, error).
+// `running` while the background search is in flight; `runError` {code, message}.
+function ResdexCandidatesSection({ resdex, onLogin, onRun, running = false, runError = null }) {
   const [open, setOpen] = useState(false);
   const cands = resdex.candidates || [];
   const must = normMust(resdex.requirements);
   const st = RESDEX_STATUS[resdex.status];
-  const badge = cands.length ? `${cands.length} matched` : (st?.badge || resdex.status || "—");
+  const badge = running ? "Searching Resdex…"
+    : cands.length ? `${cands.length} matched` : (st?.badge || resdex.status || "—");
+  const canRun = !!resdex.can_run && !!onRun;
+  const showLogin = !!st?.login || RUN_NEEDS_LOGIN.has(runError?.code);
   const emailedN = cands.filter((c) => c.emailed).length;
   const sourceLabel = CONTACT_SOURCE_LABEL[resdex.contact_source] || "";
 
@@ -581,11 +599,29 @@ function ResdexCandidatesSection({ resdex, onLogin }) {
               {(st?.text || resdex.error) && (
                 <p>{st?.text}{resdex.status === "error" && resdex.error ? ` ${resdex.error}` : ""}</p>
               )}
-              {st?.login && (
-                <div className="ha-rx-state-acts">
-                  <button type="button" className="ha-rx-btn ha-rx-btn-primary" onClick={onLogin}>
-                    <Monitor size={13} /> Open Live Browser to log in
-                  </button>
+              {(canRun || showLogin) && (
+                <div>
+                  <div className="ha-rx-state-acts">
+                    {canRun && (
+                      <button type="button" className="ha-rx-btn ha-rx-btn-primary" onClick={onRun}
+                        disabled={running}
+                        title="Search Resdex now with the saved queries. No email is sent.">
+                        {running ? <Loader2 size={13} className="ha-spin" /> : <Search size={13} />}
+                        {running ? "Searching Resdex…" : "Run Resdex search"}
+                      </button>
+                    )}
+                    {showLogin && (
+                      <button type="button" className={`ha-rx-btn${canRun ? "" : " ha-rx-btn-primary"}`} onClick={onLogin}>
+                        <Monitor size={13} /> Open Live Browser to log in
+                      </button>
+                    )}
+                  </div>
+                  {running && (
+                    <p className="ha-rx-run-note">Searching Resdex with the saved queries. This page updates when it finishes.</p>
+                  )}
+                  {!running && runError && (
+                    <p className="ha-rx-run-note ha-rx-run-err" role="alert">{runError.message}</p>
+                  )}
                 </div>
               )}
             </div>
@@ -693,23 +729,53 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
     }
   };
 
-  const refreshOutreach = useCallback(async () => {
-    if (!job.id) return;
-    // Refetched together with the sent-state map, so a send/log from the
-    // composers (onSent / onLogged) also refreshes the Outreach email panel.
-    getJobOutreachDetail(job.id)
+  const loadDetail = useCallback(() => {
+    if (!job.id) return Promise.resolve();
+    return getJobOutreachDetail(job.id)
       .then((d) => { setDetail(d || null); setDetailError(false); setLockMsg(""); })
       .catch((err) => {
         if (err instanceof ApiError && err.status === 403) setLockMsg(err.message);
         else setDetailError(true);
       });
+  }, [job.id]);
+
+  // "Run Resdex search" for a job the harvest only saved queries for. The search
+  // runs in the background; detail.resdex_running stays true until it ends.
+  const [rxStarting, setRxStarting] = useState(false);
+  const [rxError, setRxError] = useState(null);
+  const rxRunning = rxStarting || !!detail?.resdex_running;
+  const runResdexSearch = async () => {
+    if (!job.id || rxRunning) return;
+    setRxStarting(true);
+    setRxError(null);
+    try {
+      await runJobResdexSearch(job.id);
+      await loadDetail();
+    } catch (err) {
+      setRxError(resdexRunError(err));
+    } finally {
+      setRxStarting(false);
+    }
+  };
+  // Poll while the search is in flight; the last poll brings the new result.
+  useEffect(() => {
+    if (!detail?.resdex_running) return undefined;
+    const t = setInterval(() => { loadDetail(); }, 5000);
+    return () => clearInterval(t);
+  }, [detail?.resdex_running, loadDetail]);
+
+  const refreshOutreach = useCallback(async () => {
+    if (!job.id) return;
+    // Refetched together with the sent-state map, so a send/log from the
+    // composers (onSent / onLogged) also refreshes the Outreach email panel.
+    loadDetail();
     try {
       const map = await getOutreachStatus([job.id]);
       setOutreach((map && map[job.id]) || {});
     } catch {
       // best-effort — icons fall back to the default (not-sent) state
     }
-  }, [job.id]);
+  }, [job.id, loadDetail]);
   useEffect(() => { refreshOutreach(); }, [refreshOutreach]);
 
   // Demand Search jobs (uploaded / manually added requirements) are never contacted:
@@ -950,6 +1016,9 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
           <ResdexCandidatesSection
             resdex={detail.resdex}
             onLogin={openRecruiterLogin}
+            onRun={locked ? undefined : runResdexSearch}
+            running={rxRunning}
+            runError={rxError}
           />
         )}
         {loginNote && <div className="ha-rx-err">{loginNote}</div>}
@@ -1203,6 +1272,9 @@ const styles = `
   .ha-rx-state h3 { margin: 0; font-size: 14.5px; font-weight: 700; color: #1E293B; }
   .ha-rx-state p { margin: 0; font-size: 13px; color: #334155; max-width: 72ch; }
   .ha-rx-state-acts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+  .ha-rx-btn:disabled { opacity: .75; cursor: default; }
+  .ha-rx-state p.ha-rx-run-note { margin-top: 8px; font-size: 12px; color: #475569; }
+  .ha-rx-state p.ha-rx-run-err { color: #B91C1C; }
   .ha-rx-state-bad { border-color: #FECACA; background: #FEF2F2; }
   .ha-rx-state-bad .ha-rx-state-ico { color: #B91C1C; border-color: #FECACA; }
   .ha-rx-state-warn { border-color: #FCE3BC; background: #FFF7EC; }

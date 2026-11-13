@@ -57,7 +57,13 @@ from app.services.harvest_run_service import db_read, db_write
 from app.services.jd_llm_enrichment import llm_configured
 from app.services.llm_service import LLMService
 from app.services.resdex_budget import try_reserve_candidates
-from app.services.resdex_query import build_tiers, skill_coverage, term_key
+from app.services.resdex_query import (
+    build_tiers,
+    skill_coverage,
+    term_key,
+    tier_previews,
+    tiers_from_stored,
+)
 from app.services.resdex_types import (
     CANDIDATE_FIELDS,
     ResdexBatchResult,
@@ -331,20 +337,39 @@ async def _persist(search: ResdexSearchORM, cands: list[ResdexCandidateORM]) -> 
     return bool(await db_write(_write))
 
 
+def _tier_queries(req: dict | None) -> list[dict] | None:
+    """All T1..T3 queries + filters for ``req`` (resdex_query.tier_previews) — what
+    a search row stores in tier_queries; None when nothing can be built."""
+    if not req:
+        return None
+    try:
+        s = get_settings()
+        return tier_previews(req, int(s.resdex_active_within_months or 0),
+                             str(getattr(s, "resdex_active_in", "") or "")) or None
+    except Exception as exc:
+        logger.warning("resdex_tier_queries_failed", error=str(exc))
+        return None
+
+
 async def _record(
     *, tenant_id: str, run_id: str, job_url: str, target: dict, status: str,
     requirements: dict | None = None, result: ResdexBatchResult | None = None,
     error: str | None = None, picks: list[tuple[dict, str, float, list[str]]] | None = None,
+    tier_queries: list[dict] | None = None,
 ) -> list[dict]:
     """Store one search (+ its picked candidates); returns the candidate dicts, or []
     when nothing was picked or the write failed (an unstored candidate is never
-    emailed — the detail page and the outreach stamp both need the row)."""
+    emailed — the detail page and the outreach stamp both need the row).
+    ``tier_queries`` defaults to all three tiers rebuilt from ``requirements``."""
+    if tier_queries is None:
+        tier_queries = _tier_queries(requirements)
     search_id = str(uuid.uuid4())
     search = ResdexSearchORM(
         id=search_id, tenant_id=tenant_id, run_id=run_id, job_url=job_url,
         job_title=(target.get("job_title") or "")[:500],
         company=(target.get("company") or "")[:500],
-        requirements=requirements, boolean_query=(result.query if result else "") or "",
+        requirements=requirements, tier_queries=tier_queries,
+        boolean_query=(result.query if result else "") or "",
         filters=(result.filters if result else None) or None,
         tier=result.tier if result else 0, searches_used=result.searches_used if result else 0,
         status=status, result_count=result.result_count if result else 0,
@@ -577,12 +602,43 @@ async def _prepare(
         logger.info("resdex_queries_only", run_id=run_id, jobs=len(jobs))
         return out
 
-    runner = batch_runner or _default_batch_runner
     waiter = login_waiter if login_waiter is not None else (
         _default_login_waiter if batch_runner is None else None
     )
-    batch_started = datetime.now(timezone.utc)
     await _stage(on_stage, "searching")
+    found, _ = await _search_and_record(
+        jobs, requirements=requirements, targets={n: ts[0] for n, ts in selected.items()},
+        tenant_id=tenant_id, run_id=run_id, runner=batch_runner or _default_batch_runner,
+        waiter=waiter, llm=llm, settings=settings, sem=sem, timeout_s=timeout_s,
+    )
+    for norm, cands in found.items():
+        _assign(norm, cands)
+
+    logger.info(
+        "resdex_prepare_complete", run_id=run_id, selected=len(selected),
+        searched=len(jobs), reused=len(reused), jobs_with_candidates=len(
+            {normalize_job_url(u) for u in out}
+        ),
+    )
+    return out
+
+
+async def _search_and_record(
+    jobs: list[ResdexJobQuery], *, requirements: dict[str, dict], targets: dict[str, dict],
+    tenant_id: str, run_id: str, runner: BatchRunner, waiter: LoginWaiter | None, llm: Any,
+    settings: Any, sem: asyncio.Semaphore, timeout_s: float,
+    tier_queries: dict[str, list[dict] | None] | None = None,
+) -> tuple[dict[str, list[dict]], dict[str, str]]:
+    """Search 4–7 of the pipeline for ``jobs`` (normalized job_url keys): one browser
+    batch (+ the one login wait / retry when ``waiter`` is set), card extraction,
+    picking, the daily candidate cap, and one stored search per job. Returns
+    ({norm: stored candidate dicts} for jobs with candidates, {norm: stored status}).
+    ``tier_queries`` overrides a job's stored tiers (default: rebuilt from its
+    requirements)."""
+    tq = tier_queries or {}
+    statuses: dict[str, str] = {}
+    found: dict[str, list[dict]] = {}
+    batch_started = datetime.now(timezone.utc)
     try:
         results = dict(await runner(jobs, headless=False, min_results=_MIN_RESULTS) or {})
         if waiter is not None:
@@ -594,12 +650,13 @@ async def _prepare(
                 results[job.job_url] = _queries_only(job)
     except Exception as exc:
         logger.warning("resdex_batch_failed", run_id=run_id, jobs=len(jobs), error=str(exc))
-        results = {}
         for job in jobs:
             await _record(tenant_id=tenant_id, run_id=run_id, job_url=job.job_url,
-                          target=selected[job.job_url][0], status=ResdexSearchStatus.ERROR,
-                          requirements=requirements[job.job_url], error=str(exc)[:1000])
-        return out
+                          target=targets[job.job_url], status=ResdexSearchStatus.ERROR,
+                          requirements=requirements[job.job_url], error=str(exc)[:1000],
+                          tier_queries=tq.get(job.job_url))
+            statuses[job.job_url] = ResdexSearchStatus.ERROR
+        return found, statuses
 
     # Profile extraction (LLM-bound) runs concurrently across jobs; the budget
     # reservation + DB write below then go job by job, in batch order.
@@ -618,8 +675,10 @@ async def _prepare(
         result = results.get(norm)
         if picks is None or not isinstance(result, ResdexBatchResult):
             await _record(tenant_id=tenant_id, run_id=run_id, job_url=norm,
-                          target=selected[norm][0], status=ResdexSearchStatus.ERROR,
-                          requirements=req, error="no result from the Resdex runner")
+                          target=targets[norm], status=ResdexSearchStatus.ERROR,
+                          requirements=req, error="no result from the Resdex runner",
+                          tier_queries=tq.get(norm))
+            statuses[norm] = ResdexSearchStatus.ERROR
             continue
         status = ResdexSearchStatus.MATCHED if picks else (
             result.status if result.status and result.status != ResdexSearchStatus.MATCHED
@@ -635,18 +694,68 @@ async def _prepare(
             picks = picks[:granted]
             if not picks:
                 status, error = ResdexSearchStatus.CAP_REACHED, "daily candidate cap reached"
-        _assign(norm, await _record(
-            tenant_id=tenant_id, run_id=run_id, job_url=norm, target=selected[norm][0],
+        cands = await _record(
+            tenant_id=tenant_id, run_id=run_id, job_url=norm, target=targets[norm],
             status=status, requirements=req, result=result, error=error, picks=picks,
-        ))
+            tier_queries=tq.get(norm),
+        )
+        statuses[norm] = status
+        if cands:
+            found[norm] = cands
+    return found, statuses
 
-    logger.info(
-        "resdex_prepare_complete", run_id=run_id, selected=len(selected),
-        searched=len(jobs), reused=len(reused), jobs_with_candidates=len(
-            {normalize_job_url(u) for u in out}
-        ),
-    )
-    return out
+
+async def run_saved_search(
+    *, job_url: str, run_id: str, target: dict, requirements: dict,
+    tier_queries: list[dict] | None = None, batch_runner: BatchRunner | None = None,
+    llm: Any = None,
+) -> str:
+    """Search Resdex now for ONE job from a search stored earlier (typically a
+    queries-only search from a harvest that ran while the recruiter was logged
+    out) — the job page's "Run Resdex search". No requirements LLM call: the
+    stored ``tier_queries`` are run as they are (rebuilt from the stored
+    ``requirements`` only for rows from before that column). Uses the daily caps,
+    pacing and CAPTCHA hand-off like a harvest search, never waits for a login
+    (a gone session ends queries-only again — log in, then click again) and sends
+    no email. Stores a new search row for the job (the page shows the newest).
+    Returns that row's status, "" when nothing was stored. Never raises."""
+    try:
+        settings = get_settings()
+        if not settings.resdex_enabled:
+            return ""
+        norm = normalize_job_url(job_url)
+        if not norm or not isinstance(requirements, dict) or not requirements:
+            return ""
+        tenant_id = get_current_tenant_id()
+        max_tiers = int(settings.resdex_max_searches_per_job)
+        fixed = int(getattr(settings, "resdex_search_tier", 0) or 0)
+        tiers = tiers_from_stored(tier_queries, max_tiers, fixed_tier=fixed)
+        stored = tier_queries if tiers else None
+        if not tiers:
+            tiers = build_tiers(requirements, max_tiers,
+                                int(settings.resdex_active_within_months),
+                                fixed_tier=fixed,
+                                active_in=str(getattr(settings, "resdex_active_in", "") or ""))
+        if not tiers:
+            await _record(tenant_id=tenant_id, run_id=run_id, job_url=norm, target=target,
+                          status=ResdexSearchStatus.ERROR, requirements=requirements,
+                          error="no searchable requirements", tier_queries=tier_queries)
+            return ResdexSearchStatus.ERROR
+        if llm is None:
+            llm = _default_llm(settings)       # only for text result cards
+        _, statuses = await _search_and_record(
+            [ResdexJobQuery(job_url=norm, tiers=tiers)], requirements={norm: requirements},
+            targets={norm: target}, tenant_id=tenant_id, run_id=run_id,
+            runner=batch_runner or _default_batch_runner, waiter=None, llm=llm,
+            settings=settings, sem=asyncio.Semaphore(_LLM_CONCURRENCY),
+            timeout_s=float(settings.resdex_llm_timeout_s), tier_queries={norm: stored},
+        )
+        status = statuses.get(norm, "")
+        logger.info("resdex_saved_search_done", job_url=norm, run_id=run_id, status=status)
+        return status
+    except Exception as exc:
+        logger.warning("resdex_saved_search_failed", job_url=job_url, error=str(exc))
+        return ""
 
 
 def _recruiter_logged_in() -> bool:

@@ -68,6 +68,11 @@ class ResdexSearchORM(Base):
     requirements: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     boolean_query: Mapped[str] = mapped_column(Text, nullable=False, default="")
     filters: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # Every ladder tier built from `requirements` — [{"tier", "query", "filters"}],
+    # T1..T3 — stored with the search so a queries-only (logged-out) search keeps
+    # all three, and "Run Resdex search" on the job page later runs exactly these.
+    # NULL for rows before this column / searches with no requirements. Alembic 0035.
+    tier_queries: Mapped[list | None] = mapped_column(JSON, nullable=True)
     tier: Mapped[int] = mapped_column(Integer, nullable=False, default=0)      # ladder tier that produced the result
     searches_used: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     status: Mapped[str] = mapped_column(String(30), nullable=False, default=ResdexSearchStatus.ERROR)

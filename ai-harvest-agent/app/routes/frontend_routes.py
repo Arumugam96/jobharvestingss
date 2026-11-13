@@ -9,6 +9,8 @@ GET /jobs/{id}             — single job by id (DB primary key, or an md5
                               fallback — see _job_id())
 GET /jobs/{id}/outreach-detail — Resdex candidates + outreach emails for a job
                               (DB only)
+POST /jobs/{id}/resdex-search — run a job's stored Resdex queries now (e.g. after
+                              a logged-out harvest); background, 202
 GET /lead-intelligence     — recruiter intelligence records (paginated)
 GET /lead-intelligence/{id}— single recruiter profile
 GET /download/json         — harvest JSON report, generated from the DB
@@ -609,24 +611,42 @@ def _naukri_verified_badge() -> bool:
     return bool(getattr(get_settings(), "resdex_show_naukri_verified", True))
 
 
+def _stored_tier_views(stored: Any) -> list[dict]:
+    """The search row's stored tier_queries as [{tier, query, filters}], [] when
+    absent / malformed."""
+    out: list[dict] = []
+    for item in stored if isinstance(stored, list) else []:
+        if isinstance(item, dict) and item.get("query"):
+            try:
+                tier = int(item.get("tier") or 0)
+            except (TypeError, ValueError):
+                continue
+            filters = item.get("filters") if isinstance(item.get("filters"), dict) else {}
+            out.append({"tier": tier, "query": str(item["query"]), "filters": dict(filters)})
+    return out
+
+
 def _resdex_tier_views(s: Any) -> list[dict]:
-    """All three ladder tiers for the search's stored requirements — whatever
-    RESDEX_SEARCH_TIER is — so the tiers that were not searched can be run by hand.
-    The searched tier shows the query + filters actually used (stored row);
-    the others are rebuilt from the requirements (deterministic)."""
+    """All three ladder tiers of the search — whatever RESDEX_SEARCH_TIER is — so
+    the tiers that were not searched can be run by hand. The stored tier_queries
+    when the row has them (every search since alembic 0035, incl. queries-only
+    ones); older rows rebuild them from the stored requirements (deterministic).
+    The searched tier shows the query + filters actually used (stored row)."""
     from app.config import get_settings
     from app.services.resdex_query import tier_previews
 
-    req = s.requirements if isinstance(s.requirements, dict) else None
-    if not req:
-        return []
-    try:
-        settings = get_settings()
-        tiers = tier_previews(req, int(settings.resdex_active_within_months or 0),
-                              str(settings.resdex_active_in or ""))
-    except Exception as exc:  # a malformed stored requirement must not break the page
-        logger.warning("resdex_tier_preview_failed", error=str(exc))
-        return []
+    tiers = _stored_tier_views(getattr(s, "tier_queries", None))
+    if not tiers:
+        req = s.requirements if isinstance(s.requirements, dict) else None
+        if not req:
+            return []
+        try:
+            settings = get_settings()
+            tiers = tier_previews(req, int(settings.resdex_active_within_months or 0),
+                                  str(settings.resdex_active_in or ""))
+        except Exception as exc:  # a malformed stored requirement must not break the page
+            logger.warning("resdex_tier_preview_failed", error=str(exc))
+            return []
     for t in tiers:
         t["searched"] = bool(s.tier) and t["tier"] == s.tier and bool(s.searches_used)
         if t["searched"] and s.boolean_query:
@@ -635,9 +655,15 @@ def _resdex_tier_views(s: Any) -> list[dict]:
 
 
 def _resdex_search_view(s: Any) -> dict:
+    from app.services.resdex_job_search_service import can_run
+
     candidates = [_resdex_candidate_view(c) for c in (s.candidates or [])]
     return {
         "status":        s.status,
+        # Resdex was not (fully) searched — the job page offers "Run Resdex search"
+        # (POST /jobs/{id}/resdex-search) with these stored queries.
+        "can_run":       can_run(s.status) and isinstance(s.requirements, dict)
+                         and bool(s.requirements),
         "searched_at":   _iso(s.created_at),
         "requirements":  s.requirements,
         "boolean_query": s.boolean_query,
@@ -772,12 +798,53 @@ async def get_job_outreach_detail(
     if result["job"] is None:
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
     ensure_job_access(result["job"].assigned_to_email, current_user)
+    from app.services.resdex_job_search_service import is_running
+
     return {
         "job_id":  job_id,
         "job_url": result["job_url"],
         "resdex":  result["resdex"],
+        # True while this job's "Run Resdex search" is in flight (the page polls).
+        "resdex_running": is_running(job_id),
         "emails":  result["emails"],
     }
+
+
+@router.post(
+    "/jobs/{job_id}/resdex-search",
+    status_code = status.HTTP_202_ACCEPTED,
+    summary     = "Run the Resdex search for one job",
+    description = (
+        "Search Naukri Resdex now for a job whose harvest stored the Resdex queries "
+        "without searching (recruiter logged out, session expired, daily cap, error). "
+        "Runs the stored T1–T3 queries — no new LLM requirements step — in the "
+        "background; poll GET /jobs/{id}/outreach-detail (`resdex_running`). No email "
+        "is sent. Needs the Naukri recruiter login; 409 while a harvest is running."
+    ),
+    responses   = {
+        403: {"description": "Job assigned to someone else"},
+        404: {"description": "Job not found"},
+        409: {"description": "Precondition failed — detail {code, message}"},
+    },
+)
+async def run_job_resdex_search(
+    job_id: str,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> Any:
+    from fastapi.responses import JSONResponse
+
+    from app.services import resdex_job_search_service as rjs
+
+    async def _assigned(db):
+        job = await HarvestRunService(db).get_scraped_job_by_id(job_id)
+        return job.assigned_to_email if job is not None else None
+
+    ensure_job_access(await db_read(_assigned), current_user)
+    try:
+        started = await rjs.start_job_search(job_id)
+    except rjs.ResdexJobSearchError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.to_detail()) from exc
+    return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content=started)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

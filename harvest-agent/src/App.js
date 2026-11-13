@@ -118,7 +118,7 @@ function App() {
     // /auth/me under the selected X-Dev-Tenant (effect above); the floating
     // switcher flips tenants without any login.
     return (
-      <TenantProvider tenant={tenant} role={role}>
+      <TenantProvider tenant={tenant} role={role} authBypass>
         <BrowserRouter>
           <HarvestAgent />
           <DevTenantSwitcher />
@@ -172,7 +172,7 @@ function App() {
   // spinner stay non-routed short-circuits, so a deep link never renders the app
   // shell before the session is confirmed. Cookie-based auth is unchanged.
   return (
-    <TenantProvider tenant={tenant} role={role}>
+    <TenantProvider tenant={tenant} role={role} authBypass={devBypass}>
       <BrowserRouter>
         <HarvestAgent
           // With the backend bypass active there's no session to revoke and the

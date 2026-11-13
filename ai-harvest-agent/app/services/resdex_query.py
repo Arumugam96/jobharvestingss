@@ -336,6 +336,39 @@ def tier_previews(
     return out
 
 
+def tiers_from_stored(
+    stored: Any, max_tiers: int, fixed_tier: int = 0,
+) -> list[ResdexTier]:
+    """The search ladder from a search's stored ``tier_queries`` (tier_previews
+    shape), with build_tiers' rules: ``fixed_tier`` 1-3 → that one tier only;
+    otherwise T1..T{min(3, max_tiers)}, skipping a tier identical to the previous
+    one. Malformed entries are dropped; [] when nothing usable is stored."""
+    rows: dict[int, ResdexTier] = {}
+    for item in stored if isinstance(stored, list) else []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            t = int(item.get("tier") or 0)
+        except (TypeError, ValueError):
+            continue
+        query = str(item.get("query") or "").strip()
+        if 1 <= t <= MAX_TIERS and query and t not in rows:
+            filters = item.get("filters") if isinstance(item.get("filters"), dict) else {}
+            rows[t] = ResdexTier(tier=t, query=query, filters=dict(filters))
+    fixed = int(fixed_tier or 0)
+    if 1 <= fixed <= MAX_TIERS:
+        return [rows[fixed]] if fixed in rows else []
+    tiers: list[ResdexTier] = []
+    for t in range(1, min(MAX_TIERS, max(1, int(max_tiers or 1))) + 1):
+        tier = rows.get(t)
+        if tier is None:
+            continue
+        if tiers and tiers[-1].query == tier.query and tiers[-1].filters == tier.filters:
+            continue
+        tiers.append(tier)
+    return tiers
+
+
 # ── Coverage ──────────────────────────────────────────────────────────────────
 
 def skill_coverage(candidate: dict, req: dict) -> tuple[float, list[str]]:

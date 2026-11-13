@@ -19,8 +19,10 @@ export const CONTACT_FILTER_OPTIONS = [
   { value: "email_company", label: "Enriched contact email",        summaryLabel: "Enriched contact email" },
   { value: "mobile",        label: "Phone",                         summaryLabel: "Phone" },
   { value: "linkedin",      label: "LinkedIn",                      summaryLabel: "LinkedIn" },
-  // Resdex matches live in resdex_searches, not on the job rows, so a purely
-  // client-side table can only evaluate this token when the caller has stamped
+  // "Resdex contacts" = jobs selected for a Resdex search (any outcome, incl.
+  // queries-only from a logged-out harvest). Those live in resdex_searches, not
+  // on the job rows, so a purely client-side table can only evaluate this token
+  // when the caller has stamped
   // `hasResdex` on its rows (RunDetailView does, via GET /jobs?contact=resdex).
   // Otherwise it is hidden (CLIENT_CONTACT_FILTER_OPTIONS).
   { group: "Resdex", serverOnly: true },

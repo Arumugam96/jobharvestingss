@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -32,7 +33,22 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.models.harvest_config import NotificationConfig  # noqa: E402
-from app.services.harvest_notification_service import send_harvest_report  # noqa: E402
+from app.services.harvest_notification_service import (  # noqa: E402
+    embed_source_icons_for_preview,
+    send_harvest_report,
+)
+
+
+def _write_preview(path: Path, captured: dict) -> None:
+    """Write the captured HTML with the inline logo attachments embedded, so the
+    logos render when the file is opened in a browser."""
+    atts = captured.get("inline_attachments") or []
+    html = embed_source_icons_for_preview(captured["html_body"], atts)
+    path.write_text(html, encoding="utf-8")
+    missing = sorted(set(re.findall(r"cid:src-([\w-]+)", html)))
+    print(f"Source logos embedded: {[a['Filename'] for a in atts] or 'none'}")
+    if missing:
+        print(f"WARNING: no icon file for {missing} — these logos will be broken")
 
 
 class _MockSettings:
@@ -139,7 +155,7 @@ async def _sample_main(args):
     if args.dry_run:
         out_dir = Path(__file__).parent
         html_path = out_dir / "test_harvest_email.html"
-        html_path.write_text(sender.captured["html_body"], encoding="utf-8")
+        _write_preview(html_path, sender.captured)
         print(f"Subject: {sender.captured['subject']}")
         print(f"HTML rendered to {html_path}")
         print("Open the HTML in a browser to preview the email template.")
@@ -293,7 +309,7 @@ async def _db_main(args):
         sys.exit(1)
     out_dir = Path(__file__).parent
     html_path = out_dir / "test_harvest_email.html"
-    html_path.write_text(sender.captured["html_body"], encoding="utf-8")
+    _write_preview(html_path, sender.captured)
     print(f"\nSubject: {sender.captured['subject']}")
     print(f"From:    {sender.captured['sender_identity']}")
     print(f"HTML rendered to {html_path}")

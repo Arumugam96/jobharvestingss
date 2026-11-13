@@ -434,8 +434,8 @@ def _ensure_resdex_searches_columns(sync_conn) -> None:
     """One-time, idempotent ADD COLUMN backfill for the pre-existing resdex_searches
     table: `contact_source` — the origin of the outreach contact that triggered the
     search (job_post | recruiter_profile | apollo | apollo_hr), shown as a badge on
-    the job detail page. Mirrors alembic 0024 — create_all never alters an existing
-    table."""
+    the job detail page (alembic 0024); `tier_queries` — all T1..T3 queries + filters
+    built for the search (alembic 0035). create_all never alters an existing table."""
     inspector = sa_inspect(sync_conn)
     if "resdex_searches" not in inspector.get_table_names():
         return  # brand-new DB — create_all already made this table with the column
@@ -445,6 +445,9 @@ def _ensure_resdex_searches_columns(sync_conn) -> None:
             "ALTER TABLE resdex_searches ADD COLUMN contact_source VARCHAR(30) NOT NULL DEFAULT ''"
         ))
         logger.info("resdex_searches_column_added", column="contact_source")
+    if "tier_queries" not in cols:
+        sync_conn.execute(sa_text("ALTER TABLE resdex_searches ADD COLUMN tier_queries JSON"))
+        logger.info("resdex_searches_column_added", column="tier_queries")
 
 
 def _backfill_scraped_jobs_location(sync_conn) -> None:

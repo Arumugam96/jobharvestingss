@@ -20,7 +20,7 @@ import structlog
 from sqlalchemy import Text, and_, case, delete, exists, func, not_, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.ext.compiler import compiles
-from sqlalchemy.orm import aliased, noload
+from sqlalchemy.orm import noload
 from sqlalchemy.sql.functions import FunctionElement
 
 from app.config import get_settings
@@ -47,7 +47,7 @@ from app.models.harvest_run import (
     ScrapedJobORM,
 )
 from app.models.recruiter import RecruiterORM
-from app.models.resdex import ResdexSearchORM, ResdexSearchStatus
+from app.models.resdex import ResdexSearchORM
 from app.services.company_service import get_companies_by_keys, normalize_company_key
 from app.services.recruiter_service import upsert_recruiter
 
@@ -83,7 +83,8 @@ def _not_demand_run():
 # "none" rows with no contact at all. Selected tokens are OR-combined.
 # "email"/"mobile" count the poster/recruiter value OR the Company-tagged
 # company(+location) HR contact; "email_poster" / "email_company" split the two.
-# "resdex" matches jobs whose latest Resdex search kept candidates (DB path only).
+# "resdex" matches jobs selected for a Resdex search — any stored search, incl.
+# queries-only ones from a logged-out harvest (DB path only).
 CONTACT_FILTER_TOKENS = {
     "email", "email_poster", "email_company", "mobile", "linkedin",
     "no_email", "no_mobile", "no_linkedin", "none", "resdex",
@@ -164,21 +165,15 @@ def _compile_normalized_job_url_pg(element, compiler, **kw) -> str:
     return f"lower(rtrim(btrim(split_part(split_part({url}, '#', 1), '?', 1)), '/'))"
 
 
-def _resdex_match_expr():
-    """Jobs whose LATEST Resdex search (same tenant + normalized job_url) is
-    "matched" — i.e. ≥1 candidate kept. Latest-only so the filter agrees with the
-    job detail page (GET /jobs/{id}/outreach-detail shows the newest search)."""
-    latest = aliased(ResdexSearchORM)
-    newer = aliased(ResdexSearchORM)
+def _resdex_selected_expr():
+    """Jobs that were selected for a Resdex search — any resdex_searches row for the
+    job (same tenant + normalized job_url), whatever its outcome: matched,
+    no_results, queries_only (recruiter logged out — queries stored, not searched),
+    session_expired, cap_reached, error, skipped_no_jd. The job detail page shows
+    that search (the newest one) under "Naukri Resdex candidates"."""
     return exists().where(
-        latest.tenant_id == ScrapedJobORM.tenant_id,
-        latest.job_url == _normalized_job_url(ScrapedJobORM.job_url),
-        latest.status == ResdexSearchStatus.MATCHED,
-        ~exists().where(
-            newer.tenant_id == latest.tenant_id,
-            newer.job_url == latest.job_url,
-            newer.created_at > latest.created_at,
-        ),
+        ResdexSearchORM.tenant_id == ScrapedJobORM.tenant_id,
+        ResdexSearchORM.job_url == _normalized_job_url(ScrapedJobORM.job_url),
     )
 
 
@@ -191,7 +186,7 @@ def _contact_token_exprs() -> dict[str, Any]:
         "no_mobile":   not_(p["mobile"]),
         "no_linkedin": not_(p["linkedin"]),
         "none":        and_(not_(p["email"]), not_(p["mobile"]), not_(p["linkedin"])),
-        "resdex":      _resdex_match_expr(),
+        "resdex":      _resdex_selected_expr(),
     }
 
 
@@ -1450,14 +1445,8 @@ def scraped_job_view(job: ScrapedJobORM) -> dict[str, Any]:
     phone_recruiter = (recruiter.contact_number if recruiter else "") or None
     email = email_scraped or email_recruiter
     phone = phone_scraped or phone_recruiter
-    # Company+location Apollo HR contact (attached at insert time only when the job
-    # had no scraped/recruiter email). Kept separate from the poster above; it is the
-    # LAST-resort outreach recipient. See bulk_insert_scraped_jobs / company_
-    # location_contact_service. outreach_to_name tracks whoever we'd actually email so
-    # the greeting matches the recipient (poster's name for a scraped/recruiter email,
-    # the company contact's name otherwise).
-    company_contact_email = (getattr(job, "company_contact_email", "") or "") or None
-    company_contact_name = (getattr(job, "company_contact_name", "") or "") or None
+    company_contact_email = job.get(company_contact_email, None)
+    company_contact_name = job.get(company_contact_name, None)
     outreach_to_email = email or company_contact_email
     if email:
         outreach_to_name = job.job_poster_name or (recruiter.person_name if recruiter else None)
@@ -1525,8 +1514,7 @@ def scraped_job_view(job: ScrapedJobORM) -> dict[str, Any]:
         "phone_recruiter":        phone_recruiter,
         # The recruiter row's phone_status (VERIFIED / PUBLIC / PENDING while an Apollo
         # phone is on its way / NOT_FOUND) — drives the jobs table's phone badges.
-        "phone_recruiter_status": ((getattr(recruiter, "phone_status", "") or "") or None)
-                                  if recruiter else None,
+        "phone_recruiter_status": recruiter.get("phone_status", None) if recruiter else None,
         # Company+location Apollo HR contact (separate from the poster above) and the
         # resolved outreach recipient. email_id above stays scraped-or-recruiter only
         # (UI/reports unchanged); auto-outreach uses outreach_to_email/outreach_to_name,

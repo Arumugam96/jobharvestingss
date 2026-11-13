@@ -18,11 +18,10 @@ What it does (three phases, in order)
               LLMService.extract_json), backfill the scraped_jobs row, and upsert
               recruiter identity. Drains the WHOLE backlog by default and retries
               aged tasks instead of expiring them (override with --max-age-days).
-    Phase 2 — run_apollo_recruiter_sweep(): every recruiter that now has a
-              LinkedIn URL but still no email is sent to Apollo (by LinkedIn URL)
-              for email/phone; the result is written to the recruiters table.
-              Apollo's own recheck cooldown (APOLLO_RECHECK_DAYS) prevents
-              re-billing a profile tried recently.
+    Phase 2 — run_apollo_recruiter_sweep(): OFF unless --with-apollo. Recruiters
+              that have a LinkedIn URL, no email, and have NEVER been sent to
+              Apollo are looked up (by LinkedIn URL), at most --apollo-limit
+              (default 100). A profile Apollo already tried is never re-sent.
     Phase 3 — run_outreach_sweep(): send the initial recruiter outreach for every
               job that now has a resolvable email but hasn't been contacted, reusing
               the end-of-harvest auto-outreach flow (same dedup/suppression/
@@ -31,24 +30,21 @@ What it does (three phases, in order)
 
 Usage
 ─────
-    # Full workflow (drain tasks, Apollo-enrich, then outreach the enriched recruiters):
+    # Default: re-extract + outreach, NO Apollo credits spent:
     python scripts/reenrich_and_apollo.py
 
     # Only re-extract jobs (no Apollo credits, no emails sent):
-    python scripts/reenrich_and_apollo.py --skip-apollo --skip-outreach
-
-    # Only run the Apollo phase against already-known recruiters:
-    python scripts/reenrich_and_apollo.py --skip-reenrich --skip-outreach
-
-    # Enrich but don't email; or email without spending fresh Apollo credits:
     python scripts/reenrich_and_apollo.py --skip-outreach
-    python scripts/reenrich_and_apollo.py --skip-reenrich --skip-apollo
+
+    # Opt in to Apollo for never-tried recruiters only (max 100 by default):
+    python scripts/reenrich_and_apollo.py --skip-reenrich --skip-outreach --with-apollo
+    python scripts/reenrich_and_apollo.py --with-apollo --apollo-limit 25
 
     # Recover the latest run's jobs first (e.g. the newest 83), no Apollo/emails:
-    python scripts/reenrich_and_apollo.py --newest-first --reenrich-limit 83 --skip-apollo --skip-outreach
+    python scripts/reenrich_and_apollo.py --newest-first --reenrich-limit 83 --skip-outreach
 
-    # Cap work / credits / sends, and see per-task debug logs:
-    python scripts/reenrich_and_apollo.py --reenrich-limit 100 --apollo-limit 50 --outreach-limit 50 --verbose
+    # Cap work / sends, and see per-task debug logs:
+    python scripts/reenrich_and_apollo.py --reenrich-limit 100 --outreach-limit 50 --verbose
 
 Runs against whatever DATABASE_URL / .env resolves to (the same DB the app uses) —
 inside the container: `docker exec -it <api> python scripts/reenrich_and_apollo.py`.
@@ -91,8 +87,8 @@ async def _run(args: argparse.Namespace) -> None:
     else:
         print("== Phase 1: skipped (--skip-reenrich) ==")
 
-    if not args.skip_apollo:
-        print("== Phase 2: Apollo recruiter enrichment (email by LinkedIn URL) ==")
+    if args.with_apollo and not args.skip_apollo:
+        print(f"== Phase 2: Apollo recruiter enrichment (never-tried only, limit {args.apollo_limit}) ==")
         apollo = await run_apollo_recruiter_sweep(limit=args.apollo_limit)
         print(
             f"  candidates={apollo['candidates']}  attempted={apollo['attempted']}  "
@@ -101,7 +97,7 @@ async def _run(args: argparse.Namespace) -> None:
         if apollo["candidates"] and not apollo["attempted"]:
             print("  note: nothing attempted -- check APOLLO_API_KEY, or all candidates are in cooldown.")
     else:
-        print("== Phase 2: skipped (--skip-apollo) ==")
+        print("== Phase 2: skipped (Apollo off — pass --with-apollo to spend credits) ==")
 
     if not args.skip_outreach:
         print("== Phase 3: auto-outreach (email not-yet-contacted enriched recruiters) ==")
@@ -134,8 +130,9 @@ def main() -> None:
         help="Max pending re-enrichment tasks to process (default: all).",
     )
     parser.add_argument(
-        "--apollo-limit", type=int, default=_ALL,
-        help="Max recruiters to send to Apollo (default: all missing-email recruiters).",
+        "--apollo-limit", type=int, default=100,
+        help="Max recruiters to send to Apollo when --with-apollo is given (default: 100). "
+             "Only never-tried recruiters are eligible.",
     )
     parser.add_argument(
         "--outreach-limit", type=int, default=_ALL,
@@ -152,7 +149,14 @@ def main() -> None:
         help="Re-enrich the most recently queued tasks first (default: oldest first).",
     )
     parser.add_argument("--skip-reenrich", action="store_true", help="Skip phase 1 (LLM re-extraction).")
-    parser.add_argument("--skip-apollo", action="store_true", help="Skip phase 2 (Apollo enrichment).")
+    parser.add_argument(
+        "--with-apollo", action="store_true",
+        help="Run phase 2 (Apollo enrichment — SPENDS CREDITS). Off by default.",
+    )
+    parser.add_argument(
+        "--skip-apollo", action="store_true",
+        help="No-op, kept for old command lines (phase 2 is already off unless --with-apollo).",
+    )
     parser.add_argument(
         "--skip-outreach", action="store_true",
         help="Skip phase 3 (auto-outreach emails to enriched recruiters).",

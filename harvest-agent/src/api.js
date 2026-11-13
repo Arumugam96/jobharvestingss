@@ -132,6 +132,17 @@ export function getJobOutreachDetail(jobId) {
   return request(`/jobs/${encodeURIComponent(jobId)}/outreach-detail`);
 }
 
+/** POST /jobs/{id}/resdex-search — search Naukri Resdex now for a job whose harvest
+ * saved the queries without searching (recruiter logged out, session expired, cap,
+ * error). Runs the saved T1–T3 queries in the background (202 {job_id, status:
+ * "running"}); poll getJobOutreachDetail until `resdex_running` is false. A failed
+ * check is a 409 with detail {code, message} — code: recruiter_logged_out |
+ * session_busy | harvest_running | already_searched | no_saved_queries | demand_job |
+ * resdex_disabled. No email is sent. */
+export function runJobResdexSearch(jobId) {
+  return request(`/jobs/${encodeURIComponent(jobId)}/resdex-search`, { method: "POST" });
+}
+
 /** POST /jobs/{id}/assign — "Assign to me", with an optional note. Returns
  * { job_id, assigned_to: {email, name, assigned_at, note} }; 409 when someone
  * else already holds the job. Once assigned, only the assignee can open the job

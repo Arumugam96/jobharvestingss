@@ -24,16 +24,34 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.services.harvest_notification_service import _IST, _to_ist  # noqa: E402
+from app.services.harvest_notification_service import (  # noqa: E402
+    _IST,
+    _to_ist,
+    collect_source_icon_attachments,
+    embed_source_icons_for_preview,
+)
 from app.services.weekly_report_service import (  # noqa: E402
     render_weekly_report_html,
 )
+
+
+def _write_preview(path: Path, html: str) -> None:
+    """Write the HTML with the inline logo attachments embedded, so the logos
+    render when the file is opened in a browser."""
+    atts = collect_source_icon_attachments(html)
+    preview = embed_source_icons_for_preview(html, atts)
+    path.write_text(preview, encoding="utf-8")
+    missing = sorted(set(re.findall(r"cid:src-([\w-]+)", preview)))
+    print(f"Source logos embedded: {[a['Filename'] for a in atts] or 'none'}")
+    if missing:
+        print(f"WARNING: no icon file for {missing} — these logos will be broken")
 
 
 def _sample_stats() -> dict:
@@ -115,7 +133,7 @@ async def _sample_main(args):
     if args.dry_run:
         out_dir = Path(__file__).parent
         html_path = out_dir / "test_weekly_report_email.html"
-        html_path.write_text(html, encoding="utf-8")
+        _write_preview(html_path, html)
         print(f"\nHTML rendered to {html_path}")
         print("Open the HTML in a browser to preview the email template.")
         return
@@ -204,7 +222,7 @@ async def _db_main(args):
     if args.dry_run:
         out_dir = Path(__file__).parent
         html_path = out_dir / "test_weekly_report_email.html"
-        html_path.write_text(html, encoding="utf-8")
+        _write_preview(html_path, html)
         print(f"\nHTML rendered to {html_path}")
         print("Open the HTML in a browser to preview the email template.")
         return

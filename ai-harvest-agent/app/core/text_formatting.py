@@ -538,16 +538,6 @@ def restructure_description_html(html: str) -> str:
 
 
 # ── Job-title normalization (LinkedIn "verified" a11y artifact) ─────────────────
-
-# LinkedIn renders a "verified job" title anchor with two child spans — a visible
-# one and a visually-hidden accessibility label that appends " with verification":
-#   <a class="job-card-list__title--link">
-#     <span aria-hidden="true">Windows Device Driver</span>
-#     <span class="visually-hidden">Windows Device Driver with verification</span>
-#   </a>
-# Playwright's inner_text() returns BOTH spans (the hidden one is clipped, not
-# display:none), so a scraped title can arrive as "<Title> <Title> with verification"
-# (or just "<Title> with verification"). These strip that artifact deterministically.
 _VERIFIED_SUFFIX_RE = re.compile(r"\s*with verification\s*$", re.IGNORECASE)
 _TITLE_DUP_RE = re.compile(r"^(.+?)\s+\1$")
 
@@ -559,9 +549,7 @@ def normalize_job_title(title: str) -> str:
         "Windows Device Driver Windows Device Driver with verification" -> "Windows Device Driver"
         "Windows Device Driver with verification"                       -> "Windows Device Driver"
 
-    Only activates when the trailing " with verification" marker is present, so a
-    legitimately worded title is returned unchanged (only stripped of surrounding
-    whitespace). Idempotent — safe to call more than once."""
+    Only activates when the trailing " with verification" marker is present"""
     t = (title or "").strip()
     if not _VERIFIED_SUFFIX_RE.search(t):
         return t

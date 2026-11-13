@@ -75,7 +75,7 @@ function sidebarVars(accent, isClient) {
 let committedThisLoad = false;
 
 export default function Sidebar({ activePage, onNavigate = () => {}, jobsCount, runsCount, onLogout, railCollapsed = false }) {
-  const { tenant, theme, isClient, hasFeature, isAdmin } = useTenant();
+  const { tenant, theme, isClient, hasFeature, isAdmin, authBypass } = useTenant();
 
   // `committed` = the "keep the rail open" choice. Turned ON when the user clicks a
   // nav option (or the open button), OFF by the close button — so navigating keeps
@@ -197,7 +197,8 @@ export default function Sidebar({ activePage, onNavigate = () => {}, jobsCount, 
               <span className="ha-nav-label">Sign out</span>
             </button>
           )}
-          <HealthBadge />
+          {/* Backend-health pill is dev-only: shown only when auth is disabled. */}
+          {authBypass && <HealthBadge />}
         </div>
       </aside>
     </div>
@@ -217,13 +218,21 @@ const styles = `
   .ha-sb-slot.is-open{width:240px;}
 
   .ha-sidebar{position:sticky;top:0;height:100vh;width:100%;z-index:50;box-sizing:border-box;
-    display:flex;flex-direction:column;padding:10px;overflow-x:hidden;overflow-y:auto;scrollbar-width:none;
+    display:flex;flex-direction:column;padding:10px;overflow-x:hidden;overflow-y:auto;
+    /* Thin, translucent scrollbar — overflow-y:auto means it only appears when the
+       nav is taller than the viewport. Standard props (Firefox / Chrome 121+). */
+    scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.22) transparent;
     background:
       radial-gradient(360px 240px at 50% -60px, rgba(255,255,255,.16), transparent 70%),
       linear-gradient(175deg, var(--sb1), var(--sb2) 90%);
     -webkit-backdrop-filter:blur(16px) saturate(140%);backdrop-filter:blur(16px) saturate(140%);
     font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;}
-  .ha-sidebar::-webkit-scrollbar{display:none;}
+  .ha-sidebar:hover{scrollbar-color:rgba(255,255,255,.38) transparent;}
+  /* WebKit fallback (older Chrome / Safari). */
+  .ha-sidebar::-webkit-scrollbar{width:6px;}
+  .ha-sidebar::-webkit-scrollbar-track{background:transparent;}
+  .ha-sidebar::-webkit-scrollbar-thumb{background:rgba(255,255,255,.22);border-radius:999px;}
+  .ha-sidebar::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.38);}
   .ha-sidebar *{box-sizing:border-box;}
 
   .ha-sb-pin{position:absolute;top:10px;right:10px;z-index:2;display:grid;place-items:center;

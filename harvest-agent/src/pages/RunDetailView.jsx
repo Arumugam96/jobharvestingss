@@ -29,7 +29,7 @@ export default function RunDetailView({ runId, onBack, onView }) {
   const [jobsLoading, setJobsLoading] = useState(true);
   const [jobsError, setJobsError] = useState("");
   const [pageSizeSel, setPageSizeSel] = useState("100");
-  // Resdex matches live server-side (resdex_searches), so the run's matched job
+  // Resdex searches live server-side (resdex_searches), so the run's Resdex-selected job
   // ids are fetched separately and stamped as `hasResdex` on the rows. Only when
   // that lookup succeeds does the Contact filter offer "Resdex contacts".
   const [resdexAvailable, setResdexAvailable] = useState(false);

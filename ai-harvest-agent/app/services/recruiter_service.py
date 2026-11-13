@@ -347,10 +347,9 @@ async def list_recruiters_missing_email(db: AsyncSession, *, limit: int) -> list
 
     Returns plain dicts (not ORM rows) so the caller can run slow Apollo network
     calls without holding a DB session on detached rows — same pattern as
-    HarvestRunService.list_pending_reenrichment. The Apollo recheck cooldown
-    (settings.apollo_recheck_days) is enforced downstream inside
-    apollo_contact_fallback via `apollo_enriched_at`, so it's returned here rather
-    than filtered on — a profile in cooldown is skipped, not silently dropped.
+    HarvestRunService.list_pending_reenrichment. Only profiles Apollo has NEVER been
+    asked about (apollo_enriched_at IS NULL) — a profile is looked up at most once
+    (apollo_contact_fallback enforces the same rule).
     """
     stmt = (
         select(RecruiterORM)
@@ -358,6 +357,7 @@ async def list_recruiters_missing_email(db: AsyncSession, *, limit: int) -> list
             RecruiterORM.linkedin_profile_url.isnot(None),
             RecruiterORM.linkedin_profile_url != "",
             RecruiterORM.official_email_id == "",
+            RecruiterORM.apollo_enriched_at.is_(None),
         )
         .order_by(RecruiterORM.last_seen_at.desc())
         .limit(limit)

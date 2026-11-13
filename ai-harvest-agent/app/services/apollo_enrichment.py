@@ -8,7 +8,8 @@ credit-conservation rules live in exactly one spot:
   * no-op when Apollo isn't configured or there's no LinkedIn URL;
   * email only — phones are never requested here (they're requested after a sent
     outreach email: app/services/outreach_phone_service.py);
-  * skip if this profile was tried within settings.apollo_recheck_days.
+  * skip if Apollo was EVER tried for this profile (apollo_enriched_at set) — no
+    re-sweeps. (Company / company-location lookups still use apollo_recheck_days.)
 
 The helper only *decides + calls* Apollo and returns what it found. Persistence
 stays in each agent's existing save_enrichment(...) call, which now takes
@@ -99,13 +100,18 @@ async def apollo_contact_fallback(
     if already_email:
         return _SKIP  # nothing left worth a credit
 
-    # Recheck cooldown — don't re-bill/re-hit a profile tried recently.
+    # One lookup per profile, ever. Apollo bills a matched person even when it has no
+    # email, and a miss almost never turns into a hit later (a 30-day re-sweep on
+    # 2026-11-13 re-paid ~480 old misses for a 16% hit rate), so a profile Apollo has
+    # already been asked about is never re-sent automatically. On-demand lookups go
+    # through Recruiter Finder, which doesn't use this helper.
     last = _aware_utc(apollo_enriched_at)
     if last is not None:
-        age = datetime.now(timezone.utc) - last
-        if age < timedelta(days=settings.apollo_recheck_days):
-            logger.info("apollo_skip_cooldown", linkedin_url=linkedin_url, age_days=age.days)
-            return _SKIP
+        logger.info(
+            "apollo_skip_already_tried", linkedin_url=linkedin_url,
+            age_days=(datetime.now(timezone.utc) - last).days,
+        )
+        return _SKIP
 
     # Explicit marker that the Apollo fallback tier was reached for this profile
     # (i.e. the LLM/regex extraction came up empty and the gate/cooldown passed).
