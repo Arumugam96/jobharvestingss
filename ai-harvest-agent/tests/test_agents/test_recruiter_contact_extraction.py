@@ -122,12 +122,15 @@ async def test_llm_value_is_returned() -> None:
 
 
 @pytest.mark.asyncio
-async def test_no_llm_falls_back_to_modal_regex_only() -> None:
-    # No LLM: regex may run, but ONLY over the modal text (owner's own).
+async def test_no_llm_extracts_nothing_even_from_modal() -> None:
+    # LLM-only mode: the regex-over-modal fallback was removed, so without an LLM
+    # no email/phone is taken, even one in the owner's own contact modal.
     page = _FakePage(modal_text="Email jane@acme.com Phone +91 90000 10000")
     out = await _extract_linkedin_contact_info(page, "https://www.linkedin.com/in/someone/",
                                                company_domain="acme.com", llm_service=None)
-    assert out["email"] == "jane@acme.com"
+    assert out["email"] == ""
+    assert out["phone"] == ""
+    assert out["contact_section_found"] is True  # the modal was still found and read
     assert page.inner_text_called is False
 
 

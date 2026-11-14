@@ -27,10 +27,14 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 
 def _settings(**overrides) -> Settings:
+    # _env_file=None keeps the developer's .env (e.g. EXTRACTION_FALLBACK_MODEL)
+    # out of these tests; a leaked fallback would add an unmocked second provider.
     base = dict(
+        _env_file=None,
         anthropic_api_key="test-anthropic-key",
         anthropic_model="claude-sonnet-4-6",
         extraction_llm_model="claude",
+        extraction_fallback_model="",
         local_llm_url="http://localhost:11434",
         local_llm_model="llama3.1:8b",
         openrouter_api_key="test-openrouter-key",
@@ -83,14 +87,19 @@ SAMPLE_EXTRACTED = {
         ("", "claude", "claude-sonnet-4-6"),
         ("claude", "claude", "claude-sonnet-4-6"),
         ("Claude", "claude", "claude-sonnet-4-6"),
-        ("claude-opus-4-8", "claude", "claude-opus-4-8"),
         ("ollama", "ollama", "llama3.1:8b"),
         ("llama3.1:8b", "ollama", "llama3.1:8b"),
         ("mistral", "ollama", "mistral"),
         ("openrouter", "openrouter", "google/gemma-3-27b-it:free"),
         ("OpenRouter", "openrouter", "google/gemma-3-27b-it:free"),
-        ("openrouter/google/gemma-3-27b-it:free", "openrouter", "google/gemma-3-27b-it:free"),
-        ("openrouter/anthropic/claude-sonnet-4.6", "openrouter", "anthropic/claude-sonnet-4.6"),
+        # The "claude-*" and "openrouter/<model-id>" forms were removed (commit
+        # 4098302): only the bare keywords pick Claude / OpenRouter, so these now
+        # fall through to "anything else" -> a local model of that name.
+        ("claude-opus-4-8", "ollama", "claude-opus-4-8"),
+        ("openrouter/google/gemma-3-27b-it:free", "ollama",
+         "openrouter/google/gemma-3-27b-it:free"),
+        ("openrouter/anthropic/claude-sonnet-4.6", "ollama",
+         "openrouter/anthropic/claude-sonnet-4.6"),
     ],
 )
 def test_resolve_extraction_target(extraction_llm_model, expected_provider, expected_model) -> None:
@@ -186,7 +195,7 @@ async def test_extract_json_ollama_connection_error(httpx_mock) -> None:
     httpx_mock.add_exception(httpx.ConnectError("connection refused"), is_reusable=True)
     svc = LLMService(_settings(extraction_llm_model="ollama"))
 
-    with pytest.raises(LLMError, match="unreachable"):
+    with pytest.raises(LLMError, match=r"unavailable \(connection refused\)"):
         await svc.extract_json(content="content", schema_description=SAMPLE_SCHEMA)
 
 
@@ -226,8 +235,12 @@ async def test_extract_json_openrouter_path(httpx_mock) -> None:
 
 @pytest.mark.asyncio
 async def test_extract_json_openrouter_explicit_model_id(httpx_mock) -> None:
+    # A specific OpenRouter model id is chosen via OPENROUTER_MODEL; the inline
+    # "openrouter/<model-id>" form of EXTRACTION_LLM_MODEL no longer exists.
     httpx_mock.add_response(method="POST", url=OPENROUTER_URL, json=_openrouter_response(json.dumps(SAMPLE_EXTRACTED)))
-    svc = LLMService(_settings(extraction_llm_model="openrouter/anthropic/claude-sonnet-4.6"))
+    svc = LLMService(_settings(
+        extraction_llm_model="openrouter", openrouter_model="anthropic/claude-sonnet-4.6",
+    ))
 
     await svc.extract_json(content="content", schema_description=SAMPLE_SCHEMA)
 
@@ -406,8 +419,10 @@ async def test_call_log_records_failure_and_retry_count_on_connection_error(http
     call = svc.get_call_log()[0]
     assert call["success"] is False
     assert call["response"] is None
-    assert "unreachable" in call["error_message"]
-    assert call["retry_count"] == 2  # stop_after_attempt(3) -> 3 attempts -> 2 retries
+    assert "unavailable (connection refused)" in call["error_message"]
+    # A down local server raises LLMUnavailableError, which fails fast (no retries).
+    assert call["retry_count"] == 0
+    assert len(httpx_mock.get_requests()) == 1
 
 
 @pytest.mark.asyncio

@@ -5,13 +5,14 @@ of truth:
   • the chosen domain is placed into the `keywords=` box as-is (no boolean
     OR-set, no native f_F function filter);
   • a user-typed keyword always wins over the domain;
-  • location is optional — only emitted when a value is provided.
+  • location is optional — a blank one resolves to Worldwide (geoId 92000000).
 """
 from __future__ import annotations
 
 from urllib.parse import parse_qs, urlparse
 
 from app.agents.linkedin_agent import LinkedInAgent
+from app.core.linkedin_geo import WORLDWIDE_GEOID
 from app.models.harvest_config import FiltersConfig
 
 
@@ -56,9 +57,13 @@ def test_non_it_domain_no_keyword_is_blank() -> None:
     assert p["keywords"] == [""]
 
 
-def test_location_omitted_when_empty() -> None:
-    url = LinkedInAgent._build_search_url(FiltersConfig(domain="Data Engineering", location=""))
-    assert "location=" not in url
+def test_location_defaults_to_worldwide_when_empty() -> None:
+    # A blank location is scoped explicitly to Worldwide via its geoId (see
+    # app/core/linkedin_geo.resolve_geo); omitting it would let LinkedIn fall back
+    # to the scraping account's home location.
+    p = _params(domain="Data Engineering", location="")
+    assert p["location"] == ["Worldwide"]
+    assert p["geoId"] == [WORLDWIDE_GEOID]
 
 
 def test_location_included_when_provided() -> None:
