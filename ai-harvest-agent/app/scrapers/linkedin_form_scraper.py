@@ -28,7 +28,6 @@ Anti-detection
 """
 from __future__ import annotations
 
-import asyncio
 import random
 import re
 from dataclasses import dataclass

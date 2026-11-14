@@ -37,7 +37,6 @@ from app.models.linkedin import (
     LinkedInSearchConfig,
     LinkedInSearchResult,
 )
-from app.models.job_parser import EmploymentType, WorkMode
 from app.scrapers.linkedin_scraper import LinkedInJobCard, LinkedInScraper
 from app.services.gemini_service import GeminiService
 

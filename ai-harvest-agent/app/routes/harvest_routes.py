@@ -31,9 +31,7 @@ from app.models.auth import AuthenticatedUser
 from app.models.harvest_config import HarvestConfig
 from app.models.response_models import (
     HarvestFiltersSnapshot,
-    HarvestJob,
     HarvestRunResponse,
-    ResultFileSummary,
     ResultsListResponse,
     ScheduleStatusResponse,
 )

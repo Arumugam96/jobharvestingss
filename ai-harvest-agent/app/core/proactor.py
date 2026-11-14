@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from typing import Any, Callable, Awaitable, TypeVar
+from typing import Callable, Awaitable, TypeVar
 
 T = TypeVar("T")
 

@@ -18,9 +18,8 @@ import asyncio
 import json
 import re
 from dataclasses import asdict, dataclass
-from typing import Optional
 
-from playwright.async_api import Browser, Page, Playwright, async_playwright
+from playwright.async_api import Page, async_playwright
 
 from app.scrapers.browser_manager import IGNORE_DEFAULT_ARGS
 

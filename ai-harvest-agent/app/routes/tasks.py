@@ -1,7 +1,7 @@
 """Celery background task management endpoints."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends
 
 from app.core.security import require_api_key
 from app.models.response import APIResponse

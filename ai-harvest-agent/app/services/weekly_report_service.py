@@ -16,7 +16,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.models.harvest_run import HarvestRunORM, ScrapedJobORM
-from app.models.recruiter import RecruiterORM
 from app.services.email_service import EmailSender, report_identity_from
 from app.services.harvest_notification_service import (
     _IST,
@@ -65,7 +64,7 @@ async def _week_source_stats(
     """Per-source job counts + contact counts for the given runs."""
     if not run_ids:
         return {}
-    J, R = ScrapedJobORM, RecruiterORM
+    J = ScrapedJobORM
     rows = (await db.execute(
         select(
             J.source,

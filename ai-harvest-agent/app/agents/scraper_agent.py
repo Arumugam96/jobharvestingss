@@ -9,8 +9,6 @@ from bs4 import BeautifulSoup
 from app.agents.base_agent import BaseAgent
 from app.models.agent import AgentType
 from app.prompts.extraction_prompts import build_extraction_prompt, extraction_system_prompt
-from app.services.llm_service import LLMService
-from app.services.playwright_service import PlaywrightService
 
 logger = structlog.get_logger(__name__)
 

@@ -435,10 +435,10 @@ class LinkedInLeadAgent:
                             if (namePos >= 0) {
                                 var afterName = fullContainerText.slice(namePos + authorName.length);
                                 // Strip leading degree indicator (· 2nd, · 3rd+, • 2nd, etc.)
-                                afterName = afterName.replace(/^[\s·•]+\d+(st|nd|rd|th)\+?[\s·•]*/i, '');
+                                afterName = afterName.replace(/^[\\s·•]+\\d+(st|nd|rd|th)\\+?[\\s·•]*/i, '');
                                 // Headline ends at the time pattern (e.g. 1d, 2d, 1w, 3mo, 1yr)
                                 // followed optionally by • Edited, then • Follow or just Follow
-                                var timeRx = /\s*\d+[dwhmyo][a-z]*[\s·•]*(Edited[\s·•]*)?(Follow|Repost)/;
+                                var timeRx = /\\s*\\d+[dwhmyo][a-z]*[\\s·•]*(Edited[\\s·•]*)?(Follow|Repost)/;
                                 var tIdx = afterName.search(timeRx);
                                 if (tIdx > 0) {
                                     headline = afterName.slice(0, tIdx).trim();

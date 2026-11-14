@@ -36,7 +36,7 @@ import structlog
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import Settings, get_settings
+from app.config import get_settings
 from app.core.persona_titles import titles_for_persona, titles_for_personas
 from app.core.tenant_context import apply_tenant, get_current_tenant_id, set_current_tenant
 from app.models.recruiter_finder import (

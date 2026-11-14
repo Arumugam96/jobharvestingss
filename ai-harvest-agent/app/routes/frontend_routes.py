@@ -35,7 +35,6 @@ from typing import Any
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import Response
-from pydantic import BaseModel
 
 from app.core.company_size import band_to_tier
 from app.core.dependencies import get_current_user

@@ -17,7 +17,7 @@ import asyncio
 import re
 
 import structlog
-from playwright.async_api import Browser, Page, async_playwright
+from playwright.async_api import Page, async_playwright
 
 from app.models.harvest_config import VerificationConfig
 from app.models.unified_job import UnifiedJob

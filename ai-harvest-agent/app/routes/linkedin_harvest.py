@@ -20,7 +20,6 @@ LinkedIn harvest endpoint.
 """
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime, timezone
 
 import structlog
@@ -29,7 +28,6 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from app.config import Settings, get_settings
 from app.core.security import require_api_key
 from app.models.linkedin import (
-    EnrichedLinkedInJob,
     HarvestJob,
     HarvestJobSummary,
     HarvestStatus,

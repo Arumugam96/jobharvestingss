@@ -39,7 +39,6 @@ from job_parser_service.models import (
     BatchParseResponse,
     JobParseRequest,
     JobParseResponse,
-    ParsedJobDescription,
 )
 
 logger = structlog.get_logger(__name__)

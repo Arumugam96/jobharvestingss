@@ -1855,7 +1855,6 @@ class LinkedInAgent:
         from app.agents.prospect_intelligence_agent import _extract_linkedin_contact_info, _infer_department
         from app.services.apollo_enrichment import apollo_contact_fallback
         from app.services.company_enrichment_service import resolve_apollo_org
-        from app.models.recruiter import RecruiterORM
         from app.services.recruiter_service import link_recruiter_jobs_by_url, save_enrichment, upsert_recruiter
 
         settings = get_settings()

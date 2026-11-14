@@ -34,7 +34,6 @@ from typing import Any, Awaitable, Callable
 import structlog
 
 from app.agents.linkedin_agent import (
-    LINKEDIN_SESSION_FILE,
     LinkedInAgent,
     LinkedInLoginError,
     LinkedInScrapedJob,
@@ -666,7 +665,6 @@ class OrchestratorAgent:
 
         if config.sources.linkedin:
             logger.info("orchestrator_dispatching", source="linkedin")
-            session_path   = str(LINKEDIN_SESSION_FILE) if LINKEDIN_SESSION_FILE.exists() else None
             agent          = LinkedInAgent()
             attempted += 1
             try:
