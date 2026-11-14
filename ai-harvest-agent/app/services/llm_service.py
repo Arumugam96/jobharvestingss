@@ -396,14 +396,14 @@ class LLMService:
 
           ""                          -> Claude, using the default anthropic_model
           "claude"                    -> Claude, using the default anthropic_model
-          "claude-*"                  -> Claude, using that specific model id
           "ollama"                    -> local LLM at local_llm_url, model = local_llm_model
           "openrouter"                -> OpenRouter, model = openrouter_model
-          "openrouter/<model-id>"     -> OpenRouter, using that model id directly
-                                          (OpenRouter model ids themselves contain
-                                          slashes, e.g. "google/gemma-3-27b-it:free")
           anything else               -> local LLM at local_llm_url, using that value
                                           as the model name
+
+        Matching is case-insensitive. There is no inline model-id form: a specific
+        Claude / OpenRouter model is chosen via ANTHROPIC_MODEL / OPENROUTER_MODEL,
+        so values like "claude-opus-4-8" or "openrouter/<id>" are local model names.
         """
         raw = (raw or "").strip()
         lowered = raw.lower()

@@ -792,9 +792,8 @@ class OrchestratorAgent:
             async def _cb(msg: str) -> None:
                 """Send msg to the tracker (if supported) and on_status; never raises."""
                 # Best-effort: a status-sink failure must never fail the scrape
-                # (e.g. LinkedIn's wait-for-login message). SourceStatusTracker
-                # .message is currently commented out in source_status.py, hence
-                # the getattr.
+                # (e.g. LinkedIn's wait-for-login message). getattr keeps this safe
+                # for trackers that don't implement a per-source .message.
                 try:
                     per_source = getattr(tracker, "message", None)
                     if per_source is not None:

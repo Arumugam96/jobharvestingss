@@ -3034,6 +3034,10 @@ class LinkedInAgent:
 
         A returned recruiter_email / recruiter_phone is kept only when it is
         grounded in the content sent to the LLM (ground_email / ground_phone).
+
+        The posting date is not asked of the LLM: it is resolved in Python from
+        the card text, then the detail text (_resolve_posted_date), and always
+        returned as result["posted"] (None when no date phrase is found).
         """
         if self._llm_fallback_calls >= self._LLM_FALLBACK_MAX_CALLS_PER_RUN:
             logger.warning(

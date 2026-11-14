@@ -221,12 +221,16 @@ class SourceStatusTracker:
         if self._touch(source, state="running", message=message):
             await self._emit(force=True)
 
-    # async def message(self, source: str, msg: str) -> None:
-    #     """Latest human-readable progress line for ONE source (throttled persist)."""
-    #     if not msg:
-    #         return
-    #     if self._touch(source, message=msg):
-    #         await self._emit(force=False)
+    async def message(self, source: str, msg: str) -> None:
+        """Latest human-readable progress line for ONE source (throttled persist).
+
+        The orchestrator's per-source status callback routes here, and the UI reads
+        ``sources.linkedin.message`` to spot the "log in" prompt — the run-level
+        message is shared by every source and can be overwritten by Naukri/Dice."""
+        if not msg:
+            return
+        if self._touch(source, message=msg):
+            await self._emit(force=False)
 
     async def add_jobs(self, source: str, n: int, message: str | None = None) -> None:
         """A batch of ``n`` freshly-scraped jobs — bumps the live count (persisted

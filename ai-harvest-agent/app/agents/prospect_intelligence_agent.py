@@ -719,10 +719,9 @@ async def _extract_linkedin_contact_info(
     2. Try to click the "Contact info" link to open the modal.
     3. Capture the contact-info text (modal, then scoped profile card).
     4. When an `llm_service` is provided, let the LLM decide email / phone from
-       that captured text — authoritative over the regex heuristics, which drop
-       valid gmail/yahoo addresses and non-matching phone formats. The regex
-       result is kept only as a fallback when no LLM is available or it returns
-       nothing.
+       that captured text. The LLM is the sole source (LLM-only mode): there is
+       no regex fallback, so with no LLM, or an LLM that returns null, email and
+       phone stay empty.
 
     Returns:
         {email, phone, profile_opened, contact_section_found, headline, location}
