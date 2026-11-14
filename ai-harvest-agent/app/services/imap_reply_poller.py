@@ -58,11 +58,14 @@ def _state_path(settings: Settings) -> str:
 def _load_state(settings: Settings) -> dict[str, int]:
     """Read the persisted ``uidvalidity`` / ``last_uid`` pair.
 
-    A missing or unreadable file yields zeros, so the poller treats it as a first run.
+    A missing or unreadable file — or valid JSON that isn't an object — yields zeros,
+    so the poller treats it as a first run (no saved cursor).
     """
     try:
         with open(_state_path(settings), "r", encoding="utf-8") as fh:
             data = json.load(fh)
+        if not isinstance(data, dict):
+            return {"uidvalidity": 0, "last_uid": 0}
         return {
             "uidvalidity": int(data.get("uidvalidity", 0)),
             "last_uid": int(data.get("last_uid", 0)),
@@ -170,7 +173,9 @@ def _fetch_new_messages(settings: Settings) -> tuple[list[dict[str, Any]], int, 
     """Connect, select the mailbox, and fetch every message with UID greater than the
     stored high-water mark. Returns (items, uidvalidity, max_uid_fetched). Pure read +
     parse — no DB, no state write (the caller persists the mark only after a successful
-    DB commit). Blocking; call via asyncio.to_thread."""
+    DB commit). With NO saved cursor (first run, or the state file was deleted) nothing
+    is fetched: the mailbox's current highest UID is returned as the new mark, so the
+    existing mailbox history is never ingested. Blocking; call via asyncio.to_thread."""
     state = _load_state(settings)
     conn: imaplib.IMAP4 | imaplib.IMAP4_SSL
     if settings.imap_use_ssl:
@@ -197,6 +202,16 @@ def _fetch_new_messages(settings: Settings) -> tuple[list[dict[str, Any]], int, 
                 uidvalidity = int(uv[0])
             except (ValueError, TypeError):
                 uidvalidity = 0
+
+        if state["uidvalidity"] == 0 and state["last_uid"] == 0:
+            # No saved cursor: start from "now" (the current highest UID) instead of
+            # ingesting the whole mailbox history as new replies.
+            typ, data = conn.uid("search", None, "UID *")
+            top = 0
+            if typ == "OK" and data and data[0]:
+                top = max((int(x) for x in data[0].split()), default=0)
+            logger.info("imap_cursor_initialised", uidvalidity=uidvalidity, last_uid=top)
+            return [], uidvalidity, top
 
         # A UIDVALIDITY change means UIDs were renumbered — the old mark is meaningless.
         last_uid = state["last_uid"] if uidvalidity == state["uidvalidity"] else 0

@@ -11,7 +11,9 @@ Everything is reused from the manual per-recruiter flow (app/routes/outreach_rou
                   the desk contact block passed in so it lands above the sign-off
   * transport   — EmailSender.send_email_with_attachments (delivered body already
                   carries the desk contact block)
-  * dedup guard — outreach_log_service.initial_email_sent (idempotent across runs)
+  * dedup guard — outreach_log_service.initial_email_sent (idempotent across runs),
+                  plus claim_initial_send right before the SMTP hand-off (a "pending"
+                  row that a concurrent manual send / sweep sees and backs off from)
   * do-not-contact — suppression_service.is_suppressed + RecruiterORM.unsubscribed
   * daily limits — one initial email per recipient address per day (any job, any
                   tenant), one per company+location per day for Apollo HR contacts
@@ -62,8 +64,11 @@ from app.services.company_location_contact_service import (
 )
 from app.services.company_service import normalize_company_key
 from app.services.outreach_log_service import (
+    PENDING_STATUS,
     build_email_outreach_row,
+    claim_initial_send,
     companies_replied_since,
+    finalize_send,
     initial_email_sent,
     posting_already_emailed,
     recipient_emailed_since,
@@ -437,11 +442,16 @@ async def run_auto_outreach_after_harvest(
         sem = asyncio.Semaphore(_CONCURRENCY)
 
         async def _process(target: dict) -> None:
-            """Check, generate (LLM), send and log one outreach email, bounded by ``sem``.
+            """Check, generate (LLM), claim, send and log one outreach email, bounded
+            by ``sem``.
 
-            Skips bump ``skipped_<reason>``; a send failure is logged as a "failed"
-            row rather than raised. On success it may link Resdex candidates, advance
-            the company+location rotation, and request an Apollo phone for a recruiter
+            Skips bump ``skipped_<reason>``. Before sending, the send-log row is claimed
+            as "pending" (claim_initial_send re-checks for a sent/pending initial email
+            for the job, or to the address today — a hit counts as skipped_already, a DB
+            failure as skipped_error); after the send it is flipped to "sent"/"failed"
+            (finalize_send), and a failure to persist that is logged at error level. A
+            send failure is recorded as a "failed" row rather than raised. On success it
+            may link Resdex candidates, advance the company+location rotation, and request an Apollo phone for a recruiter
             contact, then sleeps _SEND_DELAY_SECONDS to throttle the relay.
             """
             async with sem:
@@ -500,6 +510,44 @@ async def run_auto_outreach_after_harvest(
                 full_body = draft.body
 
                 outreach_id = str(uuid4())
+                row = build_email_outreach_row(
+                    id=outreach_id,
+                    job_id=job_id,
+                    recruiter_id=recruiter_id,
+                    provider_message_id=None,
+                    company=target["company"],
+                    client_type=client_type,
+                    tone=_AUTO_TONE,
+                    to_email=email,
+                    from_email=reply_to,
+                    subject=draft.subject,
+                    body=full_body,
+                    body_html=render_outreach_email_html(
+                        full_body, target["job_title"], target["job_url"],
+                        candidate_block=candidate_block, candidate_html=candidate_html,
+                    ),
+                    fallback_used=draft.fallback_used,
+                    status=PENDING_STATUS,
+                    error_message=None,
+                    sent_by=sent_by,
+                    job_url=job_url,   # normalized + stored for the posting-dedup backstop
+                )
+
+                # Claim the send BEFORE the SMTP hand-off: re-check for a sent/pending
+                # initial email (this job, or this address today) and insert the row as
+                # "pending" in one committed transaction, so a concurrent manual send or
+                # sweep backs off. db_write commits; None means the DB failed — never
+                # send unverified.
+                async def _claim(db, _row=row):
+                    """Claim the send; "claimed", or "duplicate" when one already exists."""
+                    existing = await claim_initial_send(db, _row, recipient_since=today_start)
+                    return "claimed" if existing is None else "duplicate"
+
+                claim = await db_write(_claim)
+                if claim != "claimed":
+                    counts["skipped_already" if claim == "duplicate" else "skipped_error"] += 1
+                    return
+
                 send_status, error_message, message_id = "sent", None, None
                 try:
                     message_id = await email_sender.send_email_with_attachments(
@@ -520,37 +568,21 @@ async def run_auto_outreach_after_harvest(
                     send_status, error_message = "failed", str(exc)
                     logger.warning("auto_outreach_send_failed", to=email, error=str(exc))
 
-                row = build_email_outreach_row(
-                    id=outreach_id,
-                    job_id=job_id,
-                    recruiter_id=recruiter_id,
-                    provider_message_id=message_id,
-                    company=target["company"],
-                    client_type=client_type,
-                    tone=_AUTO_TONE,
-                    to_email=email,
-                    from_email=reply_to,
-                    subject=draft.subject,
-                    body=full_body,
-                    body_html=render_outreach_email_html(
-                        full_body, target["job_title"], target["job_url"],
-                        candidate_block=candidate_block, candidate_html=candidate_html,
-                    ),
-                    fallback_used=draft.fallback_used,
-                    status=send_status,
-                    error_message=error_message,
-                    sent_by=sent_by,
-                    job_url=job_url,   # normalized + stored for the posting-dedup backstop
-                )
+                # Flip the claimed row to its outcome. db_write commits and swallows
+                # errors (returns None) — a lost update leaves the row "pending", which
+                # still blocks a re-send, so it is logged loudly for follow-up.
+                async def _persist(db):
+                    """Apply the send outcome to the claimed row; True when it was found."""
+                    return await finalize_send(
+                        db, outreach_id, status=send_status,
+                        provider_message_id=message_id, error_message=error_message,
+                    )
 
-                # db_write awaits the callback, so it must return an awaitable —
-                # wrap the synchronous db.add in an async fn. db_write commits.
-                async def _persist(db, _row=row):
-                    """Add the send-log row (db_write commits); returns its id."""
-                    db.add(_row)
-                    return _row.id
-
-                await db_write(_persist)
+                if not await db_write(_persist):
+                    logger.error(
+                        "auto_outreach_persist_failed", outreach_id=outreach_id,
+                        job_id=job_id, to=email, send_status=send_status,
+                    )
 
                 if send_status == "sent" and cands and candidate_block:
                     # Link the included Resdex candidates to this email (detail page).

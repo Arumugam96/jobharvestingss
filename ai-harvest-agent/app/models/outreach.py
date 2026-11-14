@@ -59,7 +59,9 @@ class EmailOutreachORM(Base):
     llm_generated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     fallback_used: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     # "sent" | "failed" — the send-time transport outcome (accepted by Mailjet or
-    # not). Post-send delivery is tracked separately in delivery_status below.
+    # not); "pending" while a claimed send's SMTP hand-off is in flight (see
+    # outreach_log_service.claim_initial_send) — never counted as sent. Post-send
+    # delivery is tracked separately in delivery_status below.
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="sent")
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     # The logged-in user who triggered the send (AuthenticatedUser.email).

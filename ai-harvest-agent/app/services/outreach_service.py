@@ -230,8 +230,9 @@ class OutreachService:
 
         ``regenerate`` asks for a distinctly different variation. An LLM error or empty
         reply yields the deterministic fallback with ``fallback_used=True``; ``meta``
-        records the call either way. Unlike the email path, no platform-mention
-        correction is applied to the LLM text.
+        records the call either way. Like the email path, the LLM text gets the
+        platform-mention correction (_fix_platform), so e.g. a Naukri job's message never
+        calls the posting "your LinkedIn post".
         """
         company = (job.get("company") or "").strip()
         prompt = outreach_prompts.build_linkedin_prompt(job)
@@ -241,6 +242,7 @@ class OutreachService:
         text, meta = await self._complete(prompt, outreach_prompts.LINKEDIN_SYSTEM_PROMPT, json_mode=False)
         message = _strip_fences(text)
         if meta.success and message:
+            message = self._fix_platform(message, job)
             return LinkedinDraft(message=message, fallback_used=False, meta=meta)
         if meta.success and not message:
             meta.success = False

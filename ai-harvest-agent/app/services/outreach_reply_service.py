@@ -20,9 +20,10 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.core.tenant_context import apply_tenant
+from app.core.tenant_context import apply_tenant, get_current_tenant_id
 from app.models.outreach import EmailOutreachORM
 from app.models.outreach_reply import OutreachReplyORM
+from app.services.email_html_sanitizer import sanitize_email_html
 from app.services.email_service import EmailSender
 
 logger = structlog.get_logger(__name__)
@@ -30,6 +31,8 @@ logger = structlog.get_logger(__name__)
 # All <angle-bracket> message-ids in a header value (In-Reply-To / References).
 _MSGID_RE = re.compile(r"<[^>]+>")
 _PREVIEW_LEN = 160
+# String(255) columns on OutreachReplyORM — inbound values are truncated to fit.
+_SHORT_COL_LEN = 255
 _AUTO_REPLY_SUBJECT_PREFIXES = (
     "automatic reply:",
     "out of office:",
@@ -185,6 +188,30 @@ def _detect_auto_reply(item: dict) -> bool:
     return False
 
 
+def _clean(value: Any, limit: int | None = None) -> str:
+    """Inbound text made safe to store: NUL bytes stripped (Postgres rejects them in
+    text) and, when ``limit`` is given, truncated to the column length."""
+    text = str(value or "").replace("\x00", "")
+    return text[:limit] if limit else text
+
+
+def _message_id(item: dict) -> str:
+    """The item's own Message-ID as stored (stripped, NUL-free, column-truncated)."""
+    raw = _header_value(item, "MessageId", "Message-Id", "Message-ID").strip()
+    return _clean(raw, _SHORT_COL_LEN)
+
+
+def _scrub_json(value: Any) -> Any:
+    """Copy of a JSON-like payload with NUL bytes stripped from every string."""
+    if isinstance(value, str):
+        return value.replace("\x00", "")
+    if isinstance(value, dict):
+        return {_scrub_json(k): _scrub_json(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_scrub_json(v) for v in value]
+    return value
+
+
 def reply_preview(body: str, limit: int = _PREVIEW_LEN) -> str:
     """One-line preview of a reply body for the notification/toast (collapsed
     whitespace, truncated with an ellipsis)."""
@@ -195,13 +222,16 @@ def reply_preview(body: str, limit: int = _PREVIEW_LEN) -> str:
 # ── Matching ─────────────────────────────────────────────────────────────────
 
 async def _match_outreach(
-    db: AsyncSession, *, in_reply_to: str, references: str, from_email: str
+    db: AsyncSession, *, in_reply_to: str, references: str, from_email: str,
+    received_at: datetime | None = None,
 ) -> EmailOutreachORM | None:
     """Find the send this reply answers. Primary: the reply's In-Reply-To/References
     carry our stamped Message-ID (EmailOutreachORM.provider_message_id). Fallback:
-    the most-recent email we sent TO this sender. Runs under all-access (the webhook
-    has no tenant), so it can match across tenants; the caller adopts the matched
-    row's tenant."""
+    the newest SUCCESSFULLY-SENT email to this sender whose send time is at or before
+    ``received_at`` (a reply can't answer a later send). When those fallback candidates
+    belong to more than one tenant the reply is left unmatched (None) rather than
+    guessing. Runs under all-access (the webhook has no tenant), so it can match
+    across tenants; the caller adopts the matched row's tenant."""
     candidates = _msgids(in_reply_to, references)
     if candidates:
         row = (
@@ -217,14 +247,26 @@ async def _match_outreach(
 
     sender = (from_email or "").strip().lower()
     if sender:
+        sent_time = func.coalesce(EmailOutreachORM.sent_at, EmailOutreachORM.created_at)
+        conds = [
+            func.lower(EmailOutreachORM.to_email) == sender,
+            EmailOutreachORM.channel == "email",
+            EmailOutreachORM.status == "sent",
+        ]
+        if received_at is not None:
+            when = received_at.astimezone(timezone.utc) if received_at.tzinfo else received_at
+            conds.append(sent_time <= when)
+        tenants = (
+            await db.execute(select(EmailOutreachORM.tenant_id).where(*conds).distinct().limit(2))
+        ).scalars().all()
+        if len(tenants) > 1:
+            logger.info("inbound_reply_sender_match_ambiguous", tenants=len(tenants))
+            return None
         row = (
             await db.execute(
                 select(EmailOutreachORM)
-                .where(
-                    func.lower(EmailOutreachORM.to_email) == sender,
-                    EmailOutreachORM.channel == "email",
-                )
-                .order_by(EmailOutreachORM.created_at.desc())
+                .where(*conds)
+                .order_by(sent_time.desc())
                 .limit(1)
             )
         ).scalar_one_or_none()
@@ -240,74 +282,132 @@ async def record_inbound_replies(
 ) -> dict[str, int]:
     """Parse a Brevo inbound-parse batch, store each reply, stamp the matched send's
     ``replied_at``, and forward to the tenant's alert mailbox. Returns
-    {received, stored, matched, forwarded}. Always tolerant — a malformed item is
-    skipped, never raised, so Brevo doesn't retry the whole batch."""
+    {received, stored, matched, forwarded, duplicates}.
+
+    Idempotent per Message-ID: an item whose message id is already stored (a Brevo
+    retry, a poller overlap) or repeats earlier in the same payload is skipped and
+    counted in ``duplicates``. Each item is written inside its own SAVEPOINT, so one
+    item's failure (logged and skipped) can't poison the session for the rest. Text is
+    stripped of NUL bytes and truncated to the column lengths; ``body_html`` is
+    allow-list sanitized before storing.
+
+    COMMITS the session once the batch is written, and only then sends the forward
+    alerts (stamping ``forwarded`` in a second commit), so an alert never goes out for
+    a reply that wasn't persisted. A failure of that first commit is rolled back and
+    re-raised (nothing was stored — the caller should let the provider retry / not
+    advance its cursor)."""
     items = _as_items(payload)
     settings = get_settings()
-    stored = matched = forwarded = 0
+    stored = matched = forwarded = duplicates = 0
 
+    # Message-IDs already captured — the webhook path's dedup (the pollers also
+    # pre-filter, this makes every ingestion path idempotent).
+    ids = {mid for mid in map(_message_id, items) if mid}
+    seen: set[str] = set()
+    if ids:
+        seen = set(
+            (
+                await db.execute(
+                    select(OutreachReplyORM.message_id).where(OutreachReplyORM.message_id.in_(ids))
+                )
+            ).scalars().all()
+        )
+
+    to_forward: list[tuple[OutreachReplyORM, str]] = []
     for item in items:
         try:
+            message_id = _message_id(item) or None
+            if message_id is not None and message_id in seen:
+                duplicates += 1
+                continue
+
             from_email, from_name = _addr(item.get("From") or item.get("from"))
             to_email, _ = _first_recipient(item)
             subject = str(item.get("Subject") or item.get("subject") or "").strip()
             in_reply_to = _header_value(item, "InReplyTo", "In-Reply-To")
             references = _header_value(item, "References")
-            message_id = _header_value(item, "MessageId", "Message-Id", "Message-ID") or None
             body = _body_text(item)
             received_at = _parse_dt(
                 item.get("SentAtDate") or item.get("Date") or _header_value(item, "Date")
             )
+            raw_html = item.get("RawHtmlBody") or item.get("HtmlBody") or ""
+            body_html = sanitize_email_html(_clean(raw_html)) if isinstance(raw_html, str) else ""
 
             is_auto = _detect_auto_reply(item)
 
-            send = await _match_outreach(
-                db, in_reply_to=in_reply_to, references=references, from_email=from_email
-            )
-            tenant_id = send.tenant_id if send is not None else "internal"
+            async with db.begin_nested():
+                send = await _match_outreach(
+                    db, in_reply_to=in_reply_to, references=references,
+                    from_email=from_email, received_at=received_at,
+                )
+                tenant_id = send.tenant_id if send is not None else "internal"
 
-            reply = OutreachReplyORM(
-                tenant_id=tenant_id,
-                outreach_id=send.id if send is not None else None,
-                job_id=send.job_id if send is not None else None,
-                recruiter_id=send.recruiter_id if send is not None else None,
-                from_email=from_email,
-                from_name=from_name,
-                to_email=to_email,
-                company=(send.company if send is not None else "") or "",
-                subject=subject,
-                body=body,
-                body_html=(item.get("RawHtmlBody") or item.get("HtmlBody") or None),
-                message_id=message_id,
-                in_reply_to=in_reply_to or references or None,
-                received_at=received_at,
-                is_auto_reply=is_auto,
-                raw=item,
-            )
+                reply = OutreachReplyORM(
+                    tenant_id=tenant_id,
+                    outreach_id=send.id if send is not None else None,
+                    job_id=send.job_id if send is not None else None,
+                    recruiter_id=send.recruiter_id if send is not None else None,
+                    from_email=_clean(from_email, _SHORT_COL_LEN),
+                    from_name=_clean(from_name, _SHORT_COL_LEN),
+                    to_email=_clean(to_email, _SHORT_COL_LEN),
+                    company=_clean((send.company if send is not None else "") or "",
+                                   _SHORT_COL_LEN),
+                    subject=_clean(subject),
+                    body=_clean(body),
+                    body_html=body_html or None,
+                    message_id=message_id,
+                    in_reply_to=_clean(in_reply_to or references) or None,
+                    received_at=received_at,
+                    is_auto_reply=is_auto,
+                    raw=_scrub_json(item),
+                )
 
-            if send is not None:
-                matched += 1
                 # Denormalized "has reply" flag — auto-replies (OOO etc.) don't
                 # count as a real prospect reply, so skip the stamp.
-                if not is_auto and (send.replied_at is None or received_at > send.replied_at):
+                if send is not None and not is_auto and (
+                    send.replied_at is None or received_at > send.replied_at
+                ):
                     send.replied_at = received_at
 
-            db.add(reply)
-            await db.flush()  # assign reply.id before we build the forward/log
+                db.add(reply)
+                await db.flush()  # assign reply.id before we build the forward/log
             stored += 1
-
-            if await _forward_reply(reply, tenant_id, email_sender, settings):
-                reply.forwarded = True
-                forwarded += 1
+            if send is not None:
+                matched += 1
+            if message_id is not None:
+                seen.add(message_id)
+            to_forward.append((reply, tenant_id))
         except Exception as exc:  # one bad item must not sink the batch
             logger.warning("inbound_reply_item_failed", error=str(exc))
             continue
 
+    try:
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+
+    # Alerts go out only for replies that are durably stored.
+    for reply, tenant_id in to_forward:
+        if await _forward_reply(reply, tenant_id, email_sender, settings):
+            reply.forwarded = True
+            forwarded += 1
+    if forwarded:
+        try:
+            await db.commit()
+        except Exception as exc:  # the replies are stored; only the flag is lost
+            await db.rollback()
+            logger.warning("inbound_reply_forward_flag_failed", error=str(exc))
+
     logger.info(
         "inbound_replies_recorded",
         received=len(items), stored=stored, matched=matched, forwarded=forwarded,
+        duplicates=duplicates,
     )
-    return {"received": len(items), "stored": stored, "matched": matched, "forwarded": forwarded}
+    return {
+        "received": len(items), "stored": stored, "matched": matched,
+        "forwarded": forwarded, "duplicates": duplicates,
+    }
 
 
 async def _forward_reply(
@@ -359,7 +459,8 @@ def reply_to_dict(row: OutreachReplyORM) -> dict[str, Any]:
     """Serialize a reply as an INBOUND thread message — same shape the frontend
     thread renderer consumes for sends, tagged ``direction="inbound"`` so it renders
     as a received message (not a send). The id is prefixed so it can't collide with a
-    send-row id in the merged thread."""
+    send-row id in the merged thread. ``body_html`` is re-sanitized on the way out so
+    rows stored before sanitize-on-store existed are safe to render too."""
     received = row.received_at or row.created_at
     return {
         "id": f"reply-{row.id}",
@@ -376,7 +477,7 @@ def reply_to_dict(row: OutreachReplyORM) -> dict[str, Any]:
         "to_email": row.to_email,
         "subject": row.subject,
         "body": row.body,
-        "body_html": row.body_html,
+        "body_html": sanitize_email_html(row.body_html) or None,
         "status": "received",
         "is_read": row.is_read,
         "is_auto_reply": row.is_auto_reply,
@@ -460,11 +561,16 @@ async def mark_reply_read(db: AsyncSession, reply_id: str, *, read: bool = True)
 
 
 async def mark_all_replies_read(db: AsyncSession) -> int:
-    """Mark every unread reply (for the current tenant) read. Returns the count."""
+    """Mark every unread reply of the caller's OWN tenant read. Returns the count.
+
+    Scoped to exactly ``get_current_tenant_id()`` even for internal (all-access)
+    users, so an internal "Mark all read" never clears client tenants' unread
+    replies (those are cleared one by one, via mark_reply_read)."""
     rows = (
         await db.execute(
-            apply_tenant(select(OutreachReplyORM), OutreachReplyORM.tenant_id).where(
-                OutreachReplyORM.is_read.is_(False)
+            select(OutreachReplyORM).where(
+                OutreachReplyORM.tenant_id == get_current_tenant_id(),
+                OutreachReplyORM.is_read.is_(False),
             )
         )
     ).scalars().all()

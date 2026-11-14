@@ -85,10 +85,14 @@ async def run_outreach_sweep(limit: int | None = None) -> dict:
     """Send initial outreach to every not-yet-contacted recruiter with a resolvable
     email, reusing the end-of-harvest auto-outreach flow.
 
-    Returns auto-outreach's summary dict (enabled/eligible + per-outcome counts). Add
-    a `candidates` key: how many job rows were selected before dedup. `limit` defaults
-    to a very large value (drain the whole eligible backlog); pass a smaller number to
-    cap sends. Never raises."""
+    The selected rows are grouped by their ``tenant_id`` and each group is handed to
+    auto-outreach with that tenant bound (set_current_tenant), so client jobs are sent
+    and logged under their own tenant, never the default 'internal'.
+
+    Returns auto-outreach's summary dict (enabled/eligible + per-outcome counts, summed
+    across tenants), plus `candidates` (job rows selected before dedup) and `tenants`
+    (tenant groups run). `limit` defaults to a very large value (drain the whole
+    eligible backlog); pass a smaller number to cap sends. Never raises."""
     lim = limit if limit is not None else 1_000_000
     settings = get_settings()
 
@@ -108,9 +112,33 @@ async def run_outreach_sweep(limit: int | None = None) -> dict:
     # Same minimum company-size floor the end-of-harvest send applies, from the
     # current Rule Engine config (empty ⇒ no gate).
     company_sizes = ConfigService().load().filters.company_sizes
-    summary = await run_auto_outreach_after_harvest(
-        rows, run_id=_SWEEP_RUN_ID, company_sizes=company_sizes,
-    )
+
+    # The candidate query spans every tenant, but outreach rows are stamped with (and
+    # the dedup guards scoped to) the CURRENT tenant — so run each tenant's jobs with
+    # that tenant bound, like run_apollo_resdex_sweep; restore afterwards.
+    by_tenant: dict[str, list[ScrapedJobORM]] = {}
+    for row in rows:
+        by_tenant.setdefault(row.tenant_id or "internal", []).append(row)
+    summary: dict = {}
+    prev_tenant = get_current_tenant_id()
+    try:
+        for tid, tenant_rows in by_tenant.items():
+            set_current_tenant(tid)
+            part = await run_auto_outreach_after_harvest(
+                tenant_rows, run_id=_SWEEP_RUN_ID, company_sizes=company_sizes,
+            )
+            # Merge the per-tenant summaries: counts add up, flags/messages carry over.
+            for key, value in part.items():
+                prior = summary.get(key)
+                if type(value) is int and type(prior) is int:  # not bool
+                    summary[key] = prior + value
+                elif key == "enabled":
+                    summary[key] = bool(prior) or bool(value)
+                else:
+                    summary[key] = value
+    finally:
+        set_current_tenant(prev_tenant)
+    summary["tenants"] = len(by_tenant)
     summary["candidates"] = len(rows)
     logger.info("outreach_sweep_done", **summary)
     return summary

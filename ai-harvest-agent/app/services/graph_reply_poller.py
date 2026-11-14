@@ -62,10 +62,12 @@ def _state_path(settings: Settings) -> str:
 
 
 def _load_last_received(settings: Settings) -> datetime | None:
-    """The stored received-time high-water mark (aware UTC), or None if absent/unreadable."""
+    """The stored received-time high-water mark (aware UTC), or None if absent/unreadable
+    (including valid JSON that isn't an object)."""
     try:
         with open(_state_path(settings), "r", encoding="utf-8") as fh:
-            raw = json.load(fh).get("last_received")
+            data = json.load(fh)
+        raw = data.get("last_received") if isinstance(data, dict) else None
         if not raw:
             return None
         dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
@@ -224,8 +226,10 @@ def _max_received(messages: list[dict[str, Any]]) -> datetime | None:
 async def poll_once(now: datetime | None = None) -> dict[str, int]:
     """One poll cycle: pull new messages from the M365 mailbox via Graph, record them
     through the shared reply pipeline, and advance the received-time high-water mark.
-    Best-effort — any failure is logged and swallowed so an outage never breaks the
-    scheduler. Returns {received, stored, matched, forwarded}."""
+    With NO saved mark (first run, or the state file was deleted) nothing is fetched:
+    the mark is initialised to ``now`` so the existing mailbox history is never
+    ingested. Best-effort — any failure is logged and swallowed so an outage never
+    breaks the scheduler. Returns {received, stored, matched, forwarded}."""
     settings = get_settings()
     now = now or datetime.now(timezone.utc)
     empty = {"received": 0, "stored": 0, "matched": 0, "forwarded": 0}
@@ -239,9 +243,18 @@ async def poll_once(now: datetime | None = None) -> dict[str, int]:
         logger.warning("graph_poll_skipped", reason="no_mailbox")
         return empty
 
+    since = _load_last_received(settings)
+    if since is None:
+        # No saved cursor: start from now instead of ingesting the mailbox history.
+        try:
+            _save_last_received(settings, now)
+            logger.info("graph_cursor_initialised", last_received=now.isoformat())
+        except Exception as exc:
+            logger.warning("graph_cursor_init_failed", error=str(exc))
+        return empty
+
     try:
         token = await _get_token(settings, now)
-        since = _load_last_received(settings)
         messages = await _fetch_new_messages(settings, token, since)
     except httpx.HTTPStatusError as exc:
         body = exc.response.text[:400] if exc.response is not None else ""

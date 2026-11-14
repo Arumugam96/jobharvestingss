@@ -16,8 +16,11 @@ in `email_outreach`, which is the source of truth for the "already contacted" st
 """
 from __future__ import annotations
 
+import hmac
+import html
 import math
 import re
+import time
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -29,7 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.core.dependencies import get_current_user, get_db_session, get_email_sender, get_llm_service
-from app.core.tenant_context import get_current_tenant_id
+from app.core.tenant_context import bind_session_tenant, get_current_tenant_id
 from app.core.text_formatting import normalize_job_title
 from app.models.auth import AuthenticatedUser
 from app.models.harvest_run import LlmCallType
@@ -41,10 +44,12 @@ from app.services.job_assignment_service import ensure_job_access
 from app.services.llm_service import LLMService
 from app.services.outreach_service import OutreachService
 from app.services.outreach_log_service import (
+    PENDING_STATUS,
+    apply_send_outcome,
     build_email_outreach_row,
+    claim_initial_send,
     contact_names_for_rows,
-    get_by_id,
-    initial_email_sent,
+    get_by_id_for_tenant,
     latest_sent_email,
     outreach_list_stats,
     outreach_to_dict,
@@ -244,7 +249,14 @@ async def send_email(
     sender as the OTP email); the composer's address (`from_email`) becomes the
     Reply-To so the recruiter's reply reaches the salesperson. Always returns 200
     with a `status` so the failed row is persisted (raising would roll back the
-    session)."""
+    session).
+
+    Duplicate-safe: the send-log row is first claimed as "pending" and committed (an
+    initial send re-checks for an existing sent/pending initial email in the same
+    transaction — status "duplicate" if found, unless `force`), then the SMTP hand-off
+    runs and the row is flipped to "sent"/"failed" and committed; a failure of that
+    last commit is logged at error level. A `parent_outreach_id` must be a send
+    visible to the caller's tenant (404 otherwise)."""
     to_email = (body.to_email or "").strip()
     from_email = (body.from_email or "").strip()
     logger.info(f"the Email from {from_email} is sent to {to_email}")
@@ -280,17 +292,15 @@ async def send_email(
             job_url = job.job_url or ""
 
     # A send is a follow-up when it's linked to a prior outreach; otherwise it's an
-    # initial contact. Generate ≠ Sent — this row is only written after the SMTP
-    # attempt below, and status="sent" only on a real success.
+    # initial contact. Generate ≠ Sent — the row is claimed as "pending" before the
+    # SMTP attempt below, and becomes status="sent" only on a real success.
     outreach_kind = "followup" if body.parent_outreach_id else "initial"
-
-    # Duplicate-send guard (initial only): if this job/recruiter was already
-    # emailed once and the user hasn't explicitly confirmed a re-send, don't send
-    # again — report the existing send so the UI can ask for confirmation.
-    if outreach_kind == "initial" and not body.force:
-        existing = await initial_email_sent(db, job_id=body.job_id, recruiter_id=recruiter_id)
-        if existing is not None:
-            return {"status": "duplicate", "existing": outreach_to_dict(existing)}
+    if body.parent_outreach_id and await get_by_id_for_tenant(db, body.parent_outreach_id) is None:
+        # The parent must be a send this tenant can see — never thread onto another
+        # tenant's row.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Parent outreach not found",
+        )
 
     # No file attachment: the corporate-overview deck is delivered as a link in the
     # body (OUTREACH_DECK_URL) rather than a ~7 MB attachment, keeping the send fast.
@@ -298,6 +308,46 @@ async def send_email(
     # event webhooks echo it back, letting us map events to this exact send.
     outreach_id = str(uuid4())
     sent_at = datetime.now(timezone.utc)
+
+    # Row shape lives in build_email_outreach_row, shared with the automated
+    # end-of-harvest sweep so the two writers can't drift. body_html is the same render
+    # the send builds (signature card included) so the log records the message as
+    # actually delivered. Written as "pending" first: the send claim.
+    row = build_email_outreach_row(
+        id=outreach_id,
+        job_id=body.job_id,
+        recruiter_id=recruiter_id,
+        outreach_kind=outreach_kind,
+        parent_outreach_id=body.parent_outreach_id,
+        provider_message_id=None,
+        company=company,
+        client_type=client_type,
+        tone=body.tone or "",
+        to_email=to_email,
+        from_email=from_email,
+        subject=body.subject,
+        body=body.body,
+        body_html=render_outreach_email_html(body.body, job_title, job_url),
+        fallback_used=body.fallback_used,
+        status=PENDING_STATUS,
+        error_message=None,
+        sent_by=current_user.email,
+        sent_at=sent_at,
+    )
+
+    # Duplicate-send guard (initial only): if this job/recruiter was already emailed
+    # (or a send is in flight) and the user hasn't explicitly confirmed a re-send,
+    # don't send again — report the existing send so the UI can ask for confirmation.
+    # The re-check and the pending insert happen in one transaction, committed BEFORE
+    # the SMTP hand-off, so a concurrent request (double click, auto-outreach) sees it.
+    existing = await claim_initial_send(
+        db, row, check=(outreach_kind == "initial" and not body.force),
+    )
+    if existing is not None:
+        return {"status": "duplicate", "existing": outreach_to_dict(existing)}
+    await db.commit()
+    await bind_session_tenant(db)  # the commit ended the tenant-bound transaction
+
     send_status, error_message, message_id = "sent", None, None
     try:
         message_id = await email_sender.send_email_with_attachments(
@@ -315,33 +365,18 @@ async def send_email(
         send_status, error_message = "failed", str(exc)
         logger.warning("outreach_send_failed", to=to_email, error=str(exc))
 
-    # Row shape (incl. the optimistic delivered-on-success seed) lives in
-    # build_email_outreach_row, shared with the automated end-of-harvest sweep so the
-    # two writers can't drift. body_html is the same render the send built (signature
-    # card included) so the log records the message as actually delivered.
-    row = build_email_outreach_row(
-        id=outreach_id,
-        job_id=body.job_id,
-        recruiter_id=recruiter_id,
-        outreach_kind=outreach_kind,
-        parent_outreach_id=body.parent_outreach_id,
-        provider_message_id=message_id,
-        company=company,
-        client_type=client_type,
-        tone=body.tone or "",
-        to_email=to_email,
-        from_email=from_email,
-        subject=body.subject,
-        body=body.body,
-        body_html=render_outreach_email_html(body.body, job_title, job_url),
-        fallback_used=body.fallback_used,
-        status=send_status,
-        error_message=error_message,
-        sent_by=current_user.email,
-        sent_at=sent_at,
+    # Flip the claimed row to its real outcome (incl. the optimistic delivered seed).
+    apply_send_outcome(
+        row, status=send_status, provider_message_id=message_id, error_message=error_message,
     )
-    db.add(row)
-    await db.flush()
+    try:
+        await db.commit()
+    except Exception as exc:  # the email may be out — the row is stuck "pending"
+        await db.rollback()
+        logger.error(
+            "outreach_send_persist_failed", outreach_id=outreach_id, job_id=body.job_id,
+            to=to_email, send_status=send_status, error=str(exc),
+        )
 
     if send_status == "sent" and outreach_kind == "initial":
         # Apollo phone for the contact we just emailed — fire-and-forget so it never
@@ -367,8 +402,9 @@ async def generate_followup(
 ) -> dict:
     """Draft a follow-up outreach email for a job, using the prior outreach as
     context so it reads as a second-touch nudge rather than a fresh introduction.
-    The prior message is the explicit `parent_outreach_id` if given, else the
-    latest successfully-sent email for the job/recruiter. Records the LLM call in
+    The prior message is the explicit `parent_outreach_id` if given (and visible to
+    the caller's tenant), else the latest successfully-sent email for the
+    job/recruiter. Records the LLM call in
     `llm_calls` (call_type=email_followup)."""
     view = await _load_job_view(db, body.job_id, current_user)
     tone = body.mode if body.mode in TONES else "Formal"
@@ -377,7 +413,8 @@ async def generate_followup(
 
     prior = None
     if body.parent_outreach_id:
-        prior = await get_by_id(db, body.parent_outreach_id)
+        # Tenant-scoped: another tenant's send (to_email/subject/body) is never read.
+        prior = await get_by_id_for_tenant(db, body.parent_outreach_id)
     if prior is None:
         prior = await latest_sent_email(db, job_id=body.job_id, recruiter_id=view.get("_recruiter_id"))
 
@@ -608,9 +645,12 @@ async def mark_all_replies_read_route(
     current_user: AuthenticatedUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
 ) -> dict:
-    """Mark every unread reply read (the bell's "Mark all read")."""
+    """Mark every unread reply of the caller's own tenant read (the bell's "Mark all
+    read") — an internal user's click never clears client tenants' replies. ``unread``
+    is what remains visible to the caller afterwards (non-zero for an internal user
+    while client tenants still have unread replies)."""
     count = await mark_all_replies_read(db)
-    return {"status": "ok", "marked": count, "unread": 0}
+    return {"status": "ok", "marked": count, "unread": await unread_reply_count(db)}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -637,6 +677,31 @@ async def outreach_suppressed(
 # /outreach prefix so it's covered by the existing nginx proxy allowlist.
 webhook_router = APIRouter(prefix="/outreach", tags=["Outreach"])
 
+# WARN-ONLY mode: a webhook with no configured token still accepts requests (product
+# decision), but says so in the log — at most once per endpoint per this interval.
+_NO_TOKEN_WARN_INTERVAL_SECONDS = 3600.0
+_no_token_warned_at: dict[str, float] = {}
+
+
+def _check_webhook_token(endpoint: str, token: str | None, expected: str) -> None:
+    """Guard an unauthenticated provider webhook by its shared URL token.
+
+    With a configured ``expected`` token the supplied one must match — compared in
+    constant time (hmac.compare_digest) — else 401. With none configured the request
+    is accepted (WARN-ONLY) and a warning is logged, rate-limited to once per
+    ``_NO_TOKEN_WARN_INTERVAL_SECONDS`` per endpoint."""
+    if expected:
+        if not hmac.compare_digest((token or "").encode("utf-8"), expected.encode("utf-8")):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid webhook token",
+            )
+        return
+    now = time.monotonic()
+    last = _no_token_warned_at.get(endpoint)
+    if last is None or now - last >= _NO_TOKEN_WARN_INTERVAL_SECONDS:
+        _no_token_warned_at[endpoint] = now
+        logger.warning("webhook_accepted_without_token", endpoint=endpoint)
+
 
 @webhook_router.post("/mailjet-events", status_code=status.HTTP_200_OK)
 async def mailjet_events(
@@ -649,9 +714,9 @@ async def mailjet_events(
     single event object or a batch array; both are handled. Always returns 200 so
     Mailjet doesn't retry on a benign no-match."""
     settings = get_settings()
-    expected = (settings.mailjet_webhook_token or "").strip()
-    if expected and (token or "") != expected:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid webhook token")
+    _check_webhook_token(
+        "mailjet-events", token, (settings.mailjet_webhook_token or "").strip(),
+    )
     events = payload if isinstance(payload, list) else [payload] if isinstance(payload, dict) else []
     updated = await record_delivery_events(db, events)
     logger.info("mailjet_events_received", count=len(events), updated=updated)
@@ -670,9 +735,7 @@ async def brevo_events(
     event object or a batch array; both are handled. Always returns 200 so Brevo doesn't
     retry on a benign no-match."""
     settings = get_settings()
-    expected = (settings.brevo_webhook_token or "").strip()
-    if expected and (token or "") != expected:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid webhook token")
+    _check_webhook_token("brevo-events", token, (settings.brevo_webhook_token or "").strip())
     events = payload if isinstance(payload, list) else [payload] if isinstance(payload, dict) else []
     updated = await record_brevo_events(db, events)
     logger.info("brevo_events_received", count=len(events), updated=updated)
@@ -694,8 +757,7 @@ async def brevo_inbound_reply(
     event webhooks. Always 200 so Brevo doesn't retry on a benign no-match."""
     settings = get_settings()
     expected = (settings.brevo_inbound_token or settings.brevo_webhook_token or "").strip()
-    if expected and (token or "") != expected:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid webhook token")
+    _check_webhook_token("inbound-reply", token, expected)
     result = await record_inbound_replies(db, payload, email_sender)
     return {"received": result["received"], "stored": result["stored"],
             "matched": result["matched"], "forwarded": result["forwarded"]}
@@ -737,7 +799,11 @@ async def unsubscribe_page(
         return HTMLResponse(_unsub_page("This unsubscribe link is invalid or malformed.", ok=False), status_code=400)
     await add_suppression(db, email=email, source="self_link")
     logger.info("outreach_unsubscribed", source="self_link")
-    return HTMLResponse(_unsub_page(f"<strong>{email}</strong> has been removed from our outreach list. You won't receive further emails from us."))
+    # The email is HTML-escaped: the page must never render token content as markup.
+    return HTMLResponse(_unsub_page(
+        f"<strong>{html.escape(email)}</strong> has been removed from our outreach list. "
+        "You won't receive further emails from us."
+    ))
 
 
 @webhook_router.post("/unsubscribe", status_code=status.HTTP_200_OK)
