@@ -16,6 +16,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.tenant_context import apply_tenant, get_current_tenant_id
 from app.models.harvest_run import ScrapedJobORM
 from app.models.recruiter import RecruiterDiscoveryRunORM, RecruiterORM
 
@@ -73,6 +74,13 @@ async def upsert_recruiter(
     recruiter first seen without a URL later gets promoted to the URL-based
     dedup_key (below), and one first seen with a URL still gets found by a
     later URL-less posting.
+
+    When ``tenant_id`` is given (Contact Finder, call referrals) every lookup is
+    restricted to that tenant's rows, so one tenant's hit never merges into (or
+    overwrites fields on) another tenant's recruiter. dedup_key is globally
+    unique, so when another tenant already owns the plain key the new row gets a
+    tenant-qualified key (``<tenant>:<key>``). Harvest callers omit ``tenant_id``
+    and keep the original unscoped lookup (new rows default to 'internal').
     """
     person_name = (person_name or "").strip()
     if not person_name:
@@ -82,20 +90,34 @@ async def upsert_recruiter(
     li_url = normalize_linkedin_url(raw_url) if raw_url else None
     name_key = compute_name_company_key(person_name, company_name)
 
+    def _scoped(stmt):
+        """Restrict a RecruiterORM lookup to the caller's tenant when one was given.
+        Oldest row first: an unscoped (harvest) lookup that also sees a tenant's
+        qualified copy of the same person keeps resolving to the original row."""
+        stmt = stmt.where(RecruiterORM.tenant_id == tenant_id) if tenant_id else stmt
+        return stmt.order_by(RecruiterORM.first_seen_at.asc())
+
     existing: RecruiterORM | None = None
     if li_url:
-        result = await db.execute(select(RecruiterORM).where(RecruiterORM.linkedin_profile_url == li_url))
-        existing = result.scalar_one_or_none()
+        result = await db.execute(
+            _scoped(select(RecruiterORM).where(RecruiterORM.linkedin_profile_url == li_url))
+        )
+        existing = result.scalars().first()
     if existing is None:
-        result = await db.execute(select(RecruiterORM).where(RecruiterORM.name_company_key == name_key))
-        existing = result.scalar_one_or_none()
+        result = await db.execute(
+            _scoped(select(RecruiterORM).where(RecruiterORM.name_company_key == name_key))
+        )
+        existing = result.scalars().first()
 
     now = datetime.now(timezone.utc)
 
     if existing is not None:
         if li_url and not existing.linkedin_profile_url:
             existing.linkedin_profile_url = li_url
-            existing.dedup_key = compute_dedup_key(person_name, company_name, li_url)
+            new_key = compute_dedup_key(person_name, company_name, li_url)
+            if tenant_id and existing.dedup_key.startswith(f"{tenant_id}:"):
+                new_key = f"{tenant_id}:{new_key}"  # keep a tenant-qualified key qualified
+            existing.dedup_key = new_key
         if company_name and not existing.company_name:
             existing.company_name = company_name
         if designation and not existing.designation:
@@ -129,8 +151,37 @@ async def upsert_recruiter(
             db.add(recruiter)
             await db.flush()
     except IntegrityError:
-        result = await db.execute(select(RecruiterORM).where(RecruiterORM.dedup_key == recruiter.dedup_key))
-        return result.scalar_one_or_none()
+        result = await db.execute(
+            _scoped(select(RecruiterORM).where(RecruiterORM.dedup_key == recruiter.dedup_key))
+        )
+        found = result.scalar_one_or_none()
+        if found is not None or not tenant_id:
+            return found
+        # The plain key belongs to ANOTHER tenant: give this tenant its own row
+        # under a tenant-qualified key instead of merging into theirs.
+        qualified = f"{tenant_id}:{recruiter.dedup_key}"
+        recruiter = RecruiterORM(
+            id=str(uuid.uuid4()),
+            dedup_key=qualified,
+            name_company_key=name_key,
+            linkedin_profile_url=li_url,
+            person_name=person_name,
+            company_name=company_name,
+            designation=designation,
+            harvest_source=harvest_source,
+            first_seen_at=now,
+            last_seen_at=now,
+            tenant_id=tenant_id,
+        )
+        try:
+            async with db.begin_nested():
+                db.add(recruiter)
+                await db.flush()
+        except IntegrityError:
+            result = await db.execute(
+                _scoped(select(RecruiterORM).where(RecruiterORM.dedup_key == qualified))
+            )
+            return result.scalar_one_or_none()
     return recruiter
 
 
@@ -168,6 +219,7 @@ async def save_enrichment(
     enrichment_source: str = "",
     apollo_attempted: bool = False,
     apollo_person_id: str = "",
+    stamp_enriched: bool = True,
 ) -> None:
     """Cache one recruiter's scraped contact-discovery result on their
     RecruiterORM row, so RecruiterContactAgent and ProspectIntelligenceAgent
@@ -176,9 +228,11 @@ async def save_enrichment(
     Only overwrites a field when the new value is non-default/non-empty —
     a re-enrichment run that finds *less* than a previous one (e.g. a
     LinkedIn profile that's since gone private) shouldn't erase what was
-    already verified. last_enriched_at is stamped on every call (we always
-    attempted enrichment); last_verified only when `verified=True` — i.e.
-    contact info was actually confirmed present this pass, not merely attempted.
+    already verified. last_enriched_at is stamped on every call by default (we
+    always attempted enrichment); pass ``stamp_enriched=False`` when the profile
+    was NOT actually visited, so last_enriched_at is left untouched. last_verified
+    is stamped only when `verified=True` — i.e. contact info was actually
+    confirmed present this pass, not merely attempted.
     """
     recruiter = await db.get(RecruiterORM, recruiter_id)
     if recruiter is None:
@@ -220,7 +274,8 @@ async def save_enrichment(
         recruiter.confidence_score = confidence_score
     _apply("enrichment_source", enrichment_source)
     now = datetime.now(timezone.utc)
-    recruiter.last_enriched_at = now
+    if stamp_enriched:
+        recruiter.last_enriched_at = now
     if verified:
         recruiter.last_verified = now
     if apollo_attempted:
@@ -410,14 +465,16 @@ async def save_discovery_run(
     debug_path: str = "",
     started_at: datetime | None = None,
     completed_at: datetime | None = None,
+    tenant_id: str | None = None,
 ) -> None:
     """Add one recruiter-discovery run history row and flush (the caller commits).
 
-    Empty output paths are stored as NULL; ``tenant_id`` is not set here, so the
-    row gets the column's server default.
+    Empty output paths are stored as NULL. The row is owned by ``tenant_id`` when
+    given, else by the current context's tenant (get_current_tenant_id()).
     """
     db.add(RecruiterDiscoveryRunORM(
         id=str(uuid.uuid4()),
+        tenant_id=tenant_id or get_current_tenant_id(),
         run_id=run_id,
         source_filter=source_filter,
         harvest_sources=harvest_sources,
@@ -442,16 +499,17 @@ async def save_discovery_run(
 
 
 async def list_discovery_runs(db: AsyncSession, limit: int = 50) -> list[RecruiterDiscoveryRunORM]:
-    """Newest discovery runs first, up to ``limit`` (no tenant filter is applied)."""
+    """Newest discovery runs first, up to ``limit``, scoped to the current tenant."""
+    stmt = apply_tenant(select(RecruiterDiscoveryRunORM), RecruiterDiscoveryRunORM.tenant_id)
     result = await db.execute(
-        select(RecruiterDiscoveryRunORM).order_by(RecruiterDiscoveryRunORM.created_at.desc()).limit(limit)
+        stmt.order_by(RecruiterDiscoveryRunORM.created_at.desc()).limit(limit)
     )
     return list(result.scalars())
 
 
 async def get_discovery_run(db: AsyncSession, run_id: str) -> RecruiterDiscoveryRunORM | None:
-    """The discovery run with this human-readable ``run_id``, or None (not tenant-scoped)."""
-    result = await db.execute(
-        select(RecruiterDiscoveryRunORM).where(RecruiterDiscoveryRunORM.run_id == run_id)
-    )
+    """The discovery run with this human-readable ``run_id``, or None when it is
+    missing or owned by another tenant (scoped to the current tenant)."""
+    stmt = select(RecruiterDiscoveryRunORM).where(RecruiterDiscoveryRunORM.run_id == run_id)
+    result = await db.execute(apply_tenant(stmt, RecruiterDiscoveryRunORM.tenant_id))
     return result.scalar_one_or_none()

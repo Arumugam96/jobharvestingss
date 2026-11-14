@@ -9,7 +9,6 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -40,12 +39,15 @@ class Settings(BaseSettings):
     anthropic_max_retries:  int = 3            # tenacity retry attempts
 
     # ── CORS ──────────────────────────────────────────────────────────────────
-    cors_origins: list[str] = ["*"]
+    # Kept as a plain comma-separated string: pydantic-settings JSON-decodes list
+    # fields read from the environment, so CORS_ORIGINS="http://a,http://b" (the
+    # format the main app's .env uses) would fail to load. Use cors_origins_list.
+    cors_origins: str = "*"
 
-    @field_validator("cors_origins", mode="before")
-    @classmethod
-    def parse_cors(cls, v: str | list[str]) -> list[str]:
-        return [o.strip() for o in v.split(",")] if isinstance(v, str) else v
+    @property
+    def cors_origins_list(self) -> list[str]:
+        """CORS_ORIGINS split on commas, blanks dropped (["*"] when empty)."""
+        return [o.strip() for o in self.cors_origins.split(",") if o.strip()] or ["*"]
 
     @property
     def auth_enabled(self) -> bool:

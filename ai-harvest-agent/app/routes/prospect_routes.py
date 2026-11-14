@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 from app.agents.prospect_intelligence_agent import ProspectIntelligenceAgent
 from app.config import get_settings
 from app.core.proactor import needs_proactor, run_in_proactor
+from app.core.tenant_context import get_current_tenant_id, is_all_access
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(tags=["Prospect Intelligence Agent"])
@@ -166,7 +167,12 @@ async def run_prospect_intelligence(
 
 @router.get("/prospect-results", status_code=status.HTTP_200_OK)
 async def list_prospect_results() -> Any:
-    """List all saved lead intelligence JSON result files, newest first."""
+    """List all saved lead intelligence JSON result files, newest first.
+
+    The files are shared (not tenant-tagged), so only an all-access (internal)
+    tenant may list them; any other tenant gets an empty listing."""
+    if not is_all_access(get_current_tenant_id()):
+        return {"total_runs": 0, "runs": []}
     _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     files = sorted(
         _OUTPUT_DIR.glob("*_lead_intelligence.json"),
@@ -197,7 +203,15 @@ async def list_prospect_results() -> Any:
 
 @router.get("/prospect-results/{run_id}", status_code=status.HTTP_200_OK)
 async def get_prospect_result(run_id: str) -> Any:
-    """Retrieve the full JSON output of one lead intelligence run."""
+    """Retrieve the full JSON output of one lead intelligence run.
+
+    File-backed and untagged, so only an all-access (internal) tenant may read it;
+    any other tenant gets 404 (same as a missing run)."""
+    if not is_all_access(get_current_tenant_id()):
+        return JSONResponse(
+            status_code=404,
+            content={"detail": f"No result found for run_id '{run_id}'"},
+        )
     _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     path = _OUTPUT_DIR / f"{run_id}_lead_intelligence.json"
     if not path.exists():

@@ -704,8 +704,19 @@ class HarvestRunService:
     # ── Read ─────────────────────────────────────────────────────────────────
 
     async def get_by_job_id(self, job_id: str) -> HarvestRunORM | None:
-        """Look up an orchestrator run by its ephemeral poll id (GET /harvest-status/{job_id})."""
-        result = await self._db.execute(select(HarvestRunORM).where(HarvestRunORM.job_id == job_id))
+        """Look up an orchestrator run by its ephemeral poll id (GET /harvest-status/{job_id}),
+        scoped to the current tenant — another tenant's job_id resolves to None."""
+        stmt = select(HarvestRunORM).where(HarvestRunORM.job_id == job_id)
+        stmt = apply_tenant(stmt, HarvestRunORM.tenant_id)  # no cross-tenant lookup by job_id
+        result = await self._db.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def get_by_job_id_any_tenant(self, job_id: str) -> HarvestRunORM | None:
+        """UNSCOPED lookup by job_id for internal/background callers only (e.g. the
+        shared single-flight guard describing whichever run holds the slot). Never
+        call this from a request handler that returns the row to a client."""
+        stmt = select(HarvestRunORM).where(HarvestRunORM.job_id == job_id)
+        result = await self._db.execute(stmt)
         return result.scalar_one_or_none()
 
     async def get_by_run_id(self, run_id: str, source: str | None = None) -> HarvestRunORM | None:
@@ -1463,8 +1474,8 @@ def scraped_job_view(job: ScrapedJobORM) -> dict[str, Any]:
     phone_recruiter = (recruiter.contact_number if recruiter else "") or None
     email = email_scraped or email_recruiter
     phone = phone_scraped or phone_recruiter
-    company_contact_email = job.get(company_contact_email, None)
-    company_contact_name = job.get(company_contact_name, None)
+    company_contact_email = getattr(job, "company_contact_email", None) or None
+    company_contact_name = getattr(job, "company_contact_name", None) or None
     outreach_to_email = email or company_contact_email
     if email:
         outreach_to_name = job.job_poster_name or (recruiter.person_name if recruiter else None)
@@ -1532,7 +1543,7 @@ def scraped_job_view(job: ScrapedJobORM) -> dict[str, Any]:
         "phone_recruiter":        phone_recruiter,
         # The recruiter row's phone_status (VERIFIED / PUBLIC / PENDING while an Apollo
         # phone is on its way / NOT_FOUND) — drives the jobs table's phone badges.
-        "phone_recruiter_status": recruiter.get("phone_status", None) if recruiter else None,
+        "phone_recruiter_status": getattr(recruiter, "phone_status", None) if recruiter else None,
         # Company+location Apollo HR contact (separate from the poster above) and the
         # resolved outreach recipient. email_id above stays scraped-or-recruiter only
         # (UI/reports unchanged); auto-outreach uses outreach_to_email/outreach_to_name,

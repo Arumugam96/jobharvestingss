@@ -3,9 +3,15 @@ from __future__ import annotations
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, status
 from fastapi.responses import Response
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.core.dependencies import get_db_session, get_llm_service, get_playwright_service
+from app.config import get_settings
+from app.core.dependencies import (
+    get_db_session,
+    get_llm_service,
+    get_playwright_service,
+    get_session_factory,
+)
 from app.core.security import require_api_key
 from app.models.agent import AgentConfig, AgentType
 from app.models.harvest import HarvestJob, HarvestJobCreate, HarvestJobWithResults, JobStatus
@@ -33,39 +39,54 @@ async def start_harvest(
 ) -> APIResponse[HarvestJob]:
     """Create a harvest job and run the matching agent on it in a background task.
 
-    Returns the newly created job immediately (202). The background run marks the job running,
-    stores the agent's output as a single page-1 result, then marks it completed, or failed with the
-    exception text.
+    Returns the newly created job immediately (202). The job row is committed before the
+    response so the background run can see it. The background run uses its OWN DB session
+    (the request-scoped one is closed once the response is sent): it marks the job running,
+    stores the agent's output as a single page-1 result, then marks it completed, or failed
+    with the exception text, committing after each status change.
     """
     svc = HarvestService(db)
     job = await svc.create_job(payload)
+    await db.commit()  # visible to the background task's separate session
+    # Same engine as the request session (the shared app engine in production).
+    session_factory = (
+        async_sessionmaker(db.bind, expire_on_commit=False)
+        if db.bind is not None else get_session_factory(get_settings())
+    )
 
     async def _run_job() -> None:
-        """Background body: run the orchestrator for this job and record result/failure via `svc`.
+        """Background body: run the orchestrator for this job and record result/failure
+        through a fresh session of its own (same engine as the request).
 
-        Never raises; any exception is stored on the job as a failure message.
+        Any orchestrator exception is stored on the job as a failure message.
         """
-        try:
-            await svc.mark_running(job.id)
-            orchestrator = AgentOrchestrator(llm, playwright)
-            result = await orchestrator.run(
-                job_id=job.id,
-                url=payload.url,
-                goal=payload.goal,
-                config=AgentConfig(
-                    agent_type=AgentType(payload.agent_type),
-                    max_iterations=payload.max_pages * 3,
-                ),
-            )
-            await svc.add_result(
-                job_id=job.id,
-                page_url=payload.url,
-                page_number=1,
-                extracted_data=result,
-            )
-            await svc.mark_completed(job.id)
-        except Exception as exc:
-            await svc.mark_failed(job.id, str(exc))
+        async with session_factory() as bg_db:
+            bg_svc = HarvestService(bg_db)
+            try:
+                await bg_svc.mark_running(job.id)
+                await bg_db.commit()
+                orchestrator = AgentOrchestrator(llm, playwright)
+                result = await orchestrator.run(
+                    job_id=job.id,
+                    url=payload.url,
+                    goal=payload.goal,
+                    config=AgentConfig(
+                        agent_type=AgentType(payload.agent_type),
+                        max_iterations=payload.max_pages * 3,
+                    ),
+                )
+                await bg_svc.add_result(
+                    job_id=job.id,
+                    page_url=payload.url,
+                    page_number=1,
+                    extracted_data=result,
+                )
+                await bg_svc.mark_completed(job.id)
+                await bg_db.commit()
+            except Exception as exc:
+                await bg_db.rollback()
+                await bg_svc.mark_failed(job.id, str(exc))
+                await bg_db.commit()
 
     background_tasks.add_task(_run_job)
     return APIResponse(data=job, message="Harvest job queued")

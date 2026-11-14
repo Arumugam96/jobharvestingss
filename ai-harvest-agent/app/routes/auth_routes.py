@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
 from app.core.dependencies import get_current_user, get_db_session, get_email_sender
-from app.core.security import create_access_token
+from app.core.security import client_ip, create_access_token
 from app.models.auth import (
     AuthenticatedUser,
     MessageResponse,
@@ -15,7 +15,12 @@ from app.models.auth import (
     TokenResponse,
     VerifyOTPIn,
 )
-from app.services.auth_service import AuthService, OTPRequestError, OTPVerifyError
+from app.services.auth_service import (
+    AuthService,
+    OTPRequestError,
+    OTPVerifyError,
+    OTPVerifyThrottledError,
+)
 from app.services.email_service import EmailSender
 from app.services.session_service import SessionService
 
@@ -52,6 +57,7 @@ def _clear_session_cookie(response: Response, settings: Settings) -> None:
 @router.post("/request-otp", response_model=MessageResponse, summary="Request a login OTP")
 async def request_otp(
     payload: RequestOTPIn,
+    request: Request,
     db: AsyncSession = Depends(get_db_session),
     settings: Settings = Depends(get_settings),
     email_sender: EmailSender = Depends(get_email_sender),
@@ -60,11 +66,12 @@ async def request_otp(
 
     Any previous unused code for the address is invalidated. Always answers with the same generic
     message (so it does not reveal whether the email is known); returns 429 with a `Retry-After`
-    header when a code was requested too recently.
+    header when a code was requested too recently for the email, or the client IP has made
+    too many OTP requests in the throttle window.
     """
     service = AuthService(db, settings, email_sender)
     try:
-        await service.request_otp(payload.email)
+        await service.request_otp(payload.email, client_ip=client_ip(request))
     except OTPRequestError as exc:
         # Returned (not raised): raising here would propagate through
         # get_db_session's dependency and roll back anything the service
@@ -92,11 +99,21 @@ async def verify_otp(
     On success the user is created if new (tenant chosen by `workspace`, else by email domain), a
     persistent session is minted and set as the HttpOnly session cookie, and a JWT is returned for
     API clients. Returns 401 for a wrong, expired, already-used or attempt-exhausted code; a wrong
-    code still counts against the attempt cap.
+    code still counts against the attempt cap. Every failure also counts against the client IP;
+    after too many in the throttle window the IP gets 429 (with `Retry-After`) instead.
     """
     service = AuthService(db, settings, email_sender)
     try:
-        user = await service.verify_otp(payload.email, payload.otp, workspace=payload.workspace)
+        user = await service.verify_otp(
+            payload.email, payload.otp, workspace=payload.workspace,
+            client_ip=client_ip(request),
+        )
+    except OTPVerifyThrottledError as exc:
+        return JSONResponse(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            content={"detail": "Too many failed attempts. Please try again later."},
+            headers={"Retry-After": str(exc.retry_after)},
+        )
     except OTPVerifyError:
         # Returned (not raised) so the failed-attempt increment the service
         # just recorded survives — see AuthService.verify_otp for why.

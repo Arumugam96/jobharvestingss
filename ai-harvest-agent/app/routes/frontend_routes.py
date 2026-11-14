@@ -39,6 +39,7 @@ from pydantic import BaseModel
 
 from app.core.company_size import band_to_tier
 from app.core.dependencies import get_current_user
+from app.core.tenant_context import get_current_tenant_id, is_all_access
 from app.models.auth import AuthenticatedUser
 from app.services.harvest_run_service import (
     CONTACT_FILTER_TOKENS,
@@ -89,7 +90,12 @@ def _lead_id(r: dict) -> str:
 
 
 def _load_all_jobs() -> list[dict]:
-    """Load jobs from the most recent combined JSON file."""
+    """Load jobs from the most recent combined JSON file.
+
+    The file is shared (not tenant-tagged), so only an all-access (internal)
+    tenant may read this JSON fallback; any other tenant gets []."""
+    if not is_all_access(get_current_tenant_id()):
+        return []
     if not _COMBINED_DIR.exists():
         return []
     files = sorted(
@@ -111,7 +117,13 @@ def _load_all_jobs() -> list[dict]:
 
 
 def _load_lead_records() -> list[dict]:
-    """Load recruiter records from the most recent lead-intelligence JSON."""
+    """Load recruiter records from the most recent lead-intelligence JSON.
+
+    The file is shared (not tenant-tagged), so only an all-access (internal)
+    tenant may read it; any other tenant gets [] (so GET /lead-intelligence is
+    empty and GET /lead-intelligence/{id} is 404 for them)."""
+    if not is_all_access(get_current_tenant_id()):
+        return []
     if not _LEAD_DIR.exists():
         return []
 

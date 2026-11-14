@@ -17,12 +17,21 @@ router = APIRouter(dependencies=[Depends(require_api_key)])
     summary="Get Celery task status",
 )
 async def get_task(task_id: str) -> APIResponse[Task]:
-    """Return the Celery status of `task_id`, with its result when ready or error when failed."""
+    """Return the Celery status of `task_id`, with its result when ready or error when failed.
+
+    A status outside TaskStatus (e.g. "UNKNOWN" when Celery isn't installed) is reported
+    as PENDING — Celery's own answer for an id it knows nothing about — with the reason
+    in `error`, instead of failing the request with a 500.
+    """
     info = get_task_status(task_id)
+    try:
+        task_status = TaskStatus(info["status"])
+    except ValueError:
+        task_status = TaskStatus.PENDING
     task = Task(
         task_id=task_id,
         task_name="harvest.run_job",
-        status=TaskStatus(info["status"]),
+        status=task_status,
         result=info.get("result"),
         error=info.get("error"),
     )
