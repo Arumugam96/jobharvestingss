@@ -147,6 +147,14 @@ export default function NotificationBell({ repliesEnabled = true }) {
       }, TOAST_MS);
     });
   }, [toasts]);
+  // Cancel any pending toast auto-dismiss timers on unmount.
+  useEffect(() => {
+    const timers = toastTimers; // the map object is mutated in place, so read it at cleanup time
+    return () => {
+      Object.values(timers.current).forEach(clearTimeout);
+      timers.current = {};
+    };
+  }, []);
 
   // Close the dropdown on an outside click.
   useEffect(() => {
@@ -185,17 +193,21 @@ export default function NotificationBell({ repliesEnabled = true }) {
 
   /**
    * "Mark all read": clears both lists locally, then calls POST /outreach/replies/read-all
-   * (if replies are enabled) and POST /phone-verifications/follow-ups/done-all.
+   * (if replies are enabled) and POST /phone-verifications/follow-ups/done-all. read-all only
+   * marks the caller's own tenant, so the badge takes the `unread` count it returns (an
+   * internal user can still have other tenants' unread replies).
    */
   const clearAll = async () => {
     setReplies([]);
     setRepliesUnread(0);
     setFollowUps([]);
     setFollowUpsDue(0);
-    await Promise.allSettled([
+    const [repliesRes] = await Promise.allSettled([
       repliesEnabled ? markAllRepliesRead() : Promise.resolve(),
       markAllFollowUpsDone(),
     ]);
+    const left = repliesRes.status === "fulfilled" ? repliesRes.value?.unread : undefined;
+    if (typeof left === "number" && left > 0) setRepliesUnread(left);
   };
 
   const label = unread > 0 ? `${unread} notification${unread === 1 ? "" : "s"}` : "Notifications";

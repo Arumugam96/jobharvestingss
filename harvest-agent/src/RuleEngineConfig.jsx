@@ -5,7 +5,7 @@ import {
 } from "lucide-react";
 import {
   getHarvestConfig, saveHarvestConfig, runHarvestAgent, getHarvestStatus,
-  getRunHistory, getRunHistoryEntry, getActiveRun, setupLinkedinSession, ApiError,
+  getRunHistory, getRunHistoryEntry, getActiveRun, setupLinkedinSession, ApiError, isTransientError,
   getNaukriRecruiterStatus, startNaukriRecruiterLogin, verifyNaukriRecruiter,
   saveSchedule, getScheduleStatus,
 } from "./api";
@@ -573,14 +573,25 @@ export default function RuleEngineConfig({
   // human-readable `message` that changes to a "waiting for login…" prompt
   // if LinkedIn isn't authenticated (see LinkedInAgent._wait_for_manual_login).
   // Falls back to run-history for the final result once status stops "running".
+  // Transient errors (network, 429, 5xx) retry with backoff — 10s doubling to a
+  // 60s cap, reset by any good read — so a blip never marks a live run failed.
   function pollHarvestStatus(jobId, runId) {
+    let retryDelay = 10000;
+    /** Show `msg` and re-run tick after the current backoff delay, then double it (60s cap). */
+    const retryLater = (msg) => {
+      setRunMessage(msg);
+      pollTimer.current = setTimeout(tick, retryDelay);
+      retryDelay = Math.min(retryDelay * 2, 60000);
+    };
     /**
      * One status poll: update live progress every 6s while running; on 404 fall
-     * back to run history; finish with success/failed and release the run mutex.
+     * back to run history; retry transient errors with backoff; finish with
+     * success/failed only from a terminal status and release the run mutex.
      */
     const tick = async () => {
       try {
         const status = await getHarvestStatus(jobId);
+        retryDelay = 10000;
         setSourceStatus(status.sources || null);
         if (status.status === "running") {
           setRunMessage(status.message || "Running…");
@@ -634,16 +645,21 @@ export default function RuleEngineConfig({
               onRunComplete();
             }
           } catch {
-            setRunMessage("Harvest running — no live status available yet; retrying…");
-            pollTimer.current = setTimeout(tick, 10000);
+            retryLater("Harvest running — no live status available yet; retrying…");
             return;
           }
           setHarvestRunning(false);
           return;
         }
+        if (isTransientError(err)) {
+          retryLater("Lost contact with the backend while checking harvest status — the harvest may still be running; retrying…");
+          return;
+        }
+        // Non-transient client error (e.g. 403): stop polling, but the run's real
+        // outcome is unknown — say so rather than claiming it failed.
         setStallWarn("");
         setRunState("failed");
-        setRunMessage(err instanceof ApiError ? err.message : "Lost connection while checking harvest status.");
+        setRunMessage(`Could not check harvest status (${err.message}) — the harvest may still be running; see Run History.`);
         setHarvestRunning(false);
       }
     };

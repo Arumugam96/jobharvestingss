@@ -30,7 +30,7 @@ export const StatusPill = ({ status }) => {
   const Icon = tone.Icon;
   return (
     <span className="ha-pill" style={{ ...tone, display: "inline-flex", alignItems: "center", gap: 5 }}>
-      <Icon size={12} className={status === "running" ? "ha-spin" : ""} /> {status.replace("_", " ")}
+      <Icon size={12} className={status === "running" ? "ha-spin" : ""} /> {status.replace(/_/g, " ")}
     </span>
   );
 };
@@ -128,7 +128,7 @@ export function Select({ label, value, onChange, options, variant }) {
 // Searchable single-select — a drop-in replacement for <Select> with the SAME
 // contract (value / onChange(value) / options:[{value,label}]). The field is a
 // typeable input; focus opens a floating panel of options filtered by the typed
-// text (case-insensitive, startsWith ranked above includes). Selecting an option
+// text (case-insensitive prefix match: the label must start with it). Selecting an option
 // calls onChange(option.value); the "×" clears back to the first option's value
 // (the "all" sentinel). Keyboard: ↑/↓ move, Enter select, Esc close; click-outside
 // closes (same mousedown pattern as MultiSelect). The panel reuses GLASS_PANEL and

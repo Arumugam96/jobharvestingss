@@ -6,6 +6,7 @@ import { C } from "../theme";
 import { Select, StatCard } from "../components/ui";
 import JobsTable, { PAGE_SIZE_OPTIONS } from "../components/JobsTable";
 import { mapApiJob, fetchAllJobs, jobContact, pocKindLabel, partSourceLabel } from "../lib/jobsData";
+import { csvCell } from "../lib/csv";
 import { useHarvestData } from "../HarvestDataContext";
 import { useTenant } from "../TenantContext";
 
@@ -170,6 +171,8 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
   // Export the FULL filtered dataset, not just the loaded page: re-run the
   // current filter params without pagination through fetchAllJobs (which pulls
   // every matching page) and build the CSV from all rows.
+  /** Fetch every row matching the current filters and download them as a CSV file
+   * (cells escaped by csvCell, so formula-like values are neutralised). */
   async function exportCsv() {
     if (exporting) return;
     setExporting(true);
@@ -186,7 +189,7 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
           c.pocName || "—", pocKindLabel(c.pocKind), j.postedDate || "—",
           c.email || "—", partSourceLabel(c.emailParts), c.phone || "—", partSourceLabel(c.phoneParts),
           c.phone || "—", c.linkedin || "—", j.jobDescription || "—",
-        ].map((v) => '"' + String(v).replace(/"/g, '""') + '"').join(",");
+        ].map(csvCell).join(","); // csvCell neutralises =, +, -, @ formula injection
       });
       // Prepend a UTF-8 BOM so Excel detects the encoding — without it Excel reads
       // the file as Windows-1252 and turns the "—" placeholder into "â€"".

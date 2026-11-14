@@ -49,7 +49,7 @@ const clean = (v) => (v == null ? "" : String(v).trim());
  * Distinct, present values for one contact channel in display priority order:
  * the value scraped from the job post ("Job"), the enriched recruiter record's
  * ("Recruiter"), then the inferred company(+job-location) HR contact
- * ("Apollo Resolved"). Identical strings are deduped. Older JSON-read rows carry only
+ * ("Enriched"). Identical strings are deduped. Older JSON-read rows carry only
  * the merged poster value (no split fields) — it stands in for Job/Recruiter
  * (labeled "Contact" when shown next to a Company value). Mirrored server-side
  * by job_dict_contact()/_contact_presence_exprs() in harvest_run_service.py.
@@ -158,7 +158,7 @@ function mapApiJobFields(j) {
     mobileRecruiterStatus: j.phone_recruiter_status || null,
     // Inferred HR contact found by (company + job location) via Apollo, attached
     // only to jobs with no scraped-poster and no enriched-recruiter email. Shown
-    // inline with an "Apollo Resolved" tag in the table; its own section in the detail view.
+    // inline with an "Enriched" tag in the table; its own section in the detail view.
     emailCompany: j.company_contact_email || null,
     mobileCompany: j.company_contact_phone || null,
     companyContactName: j.company_contact_name || null,

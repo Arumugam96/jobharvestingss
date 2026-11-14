@@ -56,7 +56,7 @@ const LinkedInIcon = ({ size = 16 }) => (
 // and the enriched recruiter record. Both present (and distinct) → two labeled
 // lines (Job / Recruiter); single source → unlabeled; neither → em-dash.
 // `fallback` covers rows that carry only the merged value (JSON read path).
-// `recruiterSource` "apollo" (Apollo revealed the recruiter value) labels it "Apollo"
+// `recruiterSource` "apollo" (Apollo revealed the recruiter value) labels it "Enriched"
 // instead of "Recruiter" — also when it's the only value shown.
 function DualContactVal({ scraped, recruiter, fallback, recruiterSource }) {
   const s = (scraped || "").trim();

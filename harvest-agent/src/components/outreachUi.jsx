@@ -70,6 +70,8 @@ export function avatarColor(seed) {
 // Delivery engagement — derived from the send status + latest Mailjet event.
 export function engagement(it) {
   if (it.status === "failed") return { label: "Failed", color: "#B91C1C", dot: "#B91C1C" };
+  // "pending" = the send is claimed but SMTP hasn't finished (or the process died mid-send).
+  if (it.status === "pending") return { label: "Sending", color: "#B45309", dot: "#D97706" };
   switch (it.delivery_status) {
     case "clicked":
       return { label: "Clicked", color: "#0D9488", dot: "#0D9488" };
@@ -161,6 +163,7 @@ export const STATUS_META = {
   Opened:       { Icon: MailOpen,          color: "#0E7C5A", bg: "#E7F7F0" },
   Clicked:      { Icon: MousePointerClick, color: "#0D7D74", bg: "#E4F5F3" },
   Sent:         { Icon: Send,              color: "#64748B", bg: "#F1F5F9" },
+  Sending:      { Icon: Send,              color: "#B45309", bg: "#FEF3C7" },
   Failed:       { Icon: Ban,               color: "#DC2626", bg: "#FDECEC" },
   Bounced:      { Icon: CornerUpLeft,      color: "#DC2626", bg: "#FDECEC" },
   Blocked:      { Icon: Ban,               color: "#DC2626", bg: "#FDECEC" },
@@ -175,6 +178,7 @@ export const STATUS_META = {
 // (e.g. Delivered → Opened → Clicked).
 export function engagementLabels(it) {
   if (it.status === "failed") return ["Failed"];
+  if (it.status === "pending") return ["Sending"];
   const ds = it.delivery_status;
   if (ds === "bounced") return ["Bounced"];
   if (ds === "blocked") return ["Blocked"];

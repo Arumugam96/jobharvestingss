@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { X, RefreshCw, Copy, Check, Sparkles, AlertCircle, Send } from "lucide-react";
 import { generateLinkedinMessage, logLinkedinSent, ApiError } from "../api";
 import OutreachBodyField from "./OutreachBodyField";
@@ -59,6 +59,10 @@ export default function LinkedInMessageModal({ job = {}, onClose = () => {}, onL
   const [copied, setCopied] = useState(false);
   const [marking, setMarking] = useState(false);
   const [marked, setMarked] = useState(false);
+  // Pending "close 0.9s after Mark as sent" timer — cleared on unmount so it can't
+  // call onClose for a modal that's already gone.
+  const closeTimer = useRef(null);
+  useEffect(() => () => clearTimeout(closeTimer.current), []);
 
   /** Fetches an LLM draft (a fresh one when `regenerate`) into the message box. */
   const generate = useCallback(async (regenerate) => {
@@ -101,7 +105,7 @@ export default function LinkedInMessageModal({ job = {}, onClose = () => {}, onL
       if (res.status === "sent") {
         setMarked(true);
         onLogged();
-        setTimeout(onClose, 900);
+        closeTimer.current = setTimeout(onClose, 900);
       } else {
         setError("Could not record the LinkedIn message as sent.");
       }

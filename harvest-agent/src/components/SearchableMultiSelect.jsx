@@ -79,7 +79,9 @@ export default function SearchableMultiSelect({
     if (open) { setQuery(""); searchRef.current?.focus(); }
   }, [open]);
 
-  const allChecked = options.length > 0 && selected.length === options.length;
+  // Membership, not counts — a stale selection (values no longer in `options`) of
+  // the same size must not read as "all selected".
+  const allChecked = options.length > 0 && options.every((o) => selected.includes(o));
   const someChecked = selected.length > 0 && !allChecked;
   useEffect(() => {
     if (selectAllRef.current) selectAllRef.current.indeterminate = someChecked;

@@ -126,6 +126,10 @@ export default function EmailComposeModal({
   // never clobbers an address the user already typed.
   const toTouched = useRef(false);
   const fromTouched = useRef(false);
+  // Pending "close 0.9s after a successful send" timer — cleared on unmount so it
+  // can't call onClose for a modal that's already gone.
+  const closeTimer = useRef(null);
+  useEffect(() => () => clearTimeout(closeTimer.current), []);
 
   // Manual follow-up mode shows the previously sent email(s) first and only drafts
   // a new follow-up once the user clicks "Generate follow-up" (draftStarted).
@@ -294,7 +298,7 @@ export default function EmailComposeModal({
       if (res.status === "sent") {
         setSent(true);
         onSent();                 // let the caller refresh the DB-backed icon state
-        setTimeout(onClose, 900);
+        closeTimer.current = setTimeout(onClose, 900);
       } else if (res.status === "duplicate") {
         // An initial email was already sent to this recruiter/job — ask to confirm.
         setDuplicate(res.existing || {});
