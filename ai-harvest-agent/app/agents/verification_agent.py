@@ -36,6 +36,10 @@ def _company_slug(company: str) -> str:
 
 
 def _candidate_urls(company: str) -> list[str]:
+    """Guess career-page URLs as https://www.<slug>.com plus each known careers suffix.
+
+    Returns [] when the company name has no alphanumeric characters.
+    """
     slug = _company_slug(company)
     if not slug:
         return []
@@ -54,6 +58,7 @@ class VerificationAgent:
     """
 
     def __init__(self, cfg: VerificationConfig, headless: bool = True) -> None:
+        """Keep the verification config and whether the verification browser runs headless."""
         self._cfg      = cfg
         self._headless = headless
 
@@ -75,6 +80,10 @@ class VerificationAgent:
             sem     = asyncio.Semaphore(_MAX_CONCURRENT)
 
             async def _one(job: UnifiedJob) -> None:
+                """Verify one job in its own browser context, bounded by the concurrency semaphore.
+
+                Any error marks the job "career_page_not_found" instead of failing the batch.
+                """
                 async with sem:
                     try:
                         ctx  = await browser.new_context(user_agent=_USER_AGENT)
@@ -101,6 +110,13 @@ class VerificationAgent:
         return jobs
 
     async def _check(self, page: Page, job: UnifiedJob) -> str:
+        """Try each candidate career URL and match job-title words against the page HTML.
+
+        The first URL answering with status < 400 decides: "verified" if at least
+        max(1, n // 2) of the n title words longer than 3 chars appear in the page,
+        else "not_verified".
+        Navigation errors move on to the next URL; "career_page_not_found" if none load.
+        """
         for url in _candidate_urls(job.company):
             try:
                 resp = await page.goto(url, wait_until="domcontentloaded", timeout=_NAV_TIMEOUT_MS)

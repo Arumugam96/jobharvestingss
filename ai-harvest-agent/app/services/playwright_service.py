@@ -37,6 +37,7 @@ class PlaywrightService:
     """Manages a pool of Playwright browser contexts for concurrent harvesting."""
 
     def __init__(self, settings: Settings) -> None:
+        """Store settings only; the browser is launched later by ``start()``."""
         self._settings = settings
         self._playwright: Playwright | None = None
         self._browser: Browser | None = None
@@ -65,6 +66,9 @@ class PlaywrightService:
     # ── Context manager for pages ─────────────────────────────────────────────────
 
     async def _new_context(self) -> BrowserContext:
+        """Open a fresh browser context with the configured viewport and a fixed desktop
+        Chrome user agent. Asserts that ``start()`` has run.
+        """
         assert self._browser, "PlaywrightService not started"
         return await self._browser.new_context(
             viewport={
@@ -172,6 +176,9 @@ class PlaywrightService:
     # ── Snapshot helper ───────────────────────────────────────────────────────────
 
     async def _snapshot(self, page: Page) -> PageSnapshot:
+        """Capture the page for the LLM: HTML (first 50k chars), visible text (20k), up to
+        100 absolute http(s) links, form field structure, and a viewport screenshot as base64.
+        """
         html = await page.content()
         title = await page.title()
         url = page.url

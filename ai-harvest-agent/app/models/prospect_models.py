@@ -95,6 +95,7 @@ class ProspectResult:
     enrichment_audit:      list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialise every field, including the enrichment diagnostics and audit trail."""
         return {
             "company_name":         self.company_name,
             "person_name":          self.person_name,
@@ -153,6 +154,7 @@ class ProspectIntelligenceResult:
     results: list[ProspectResult] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialise the run summary counters and output paths (excludes ``results``)."""
         return {
             "run_id":            self.run_id,
             "started_at":        self.started_at,

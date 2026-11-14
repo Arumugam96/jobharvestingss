@@ -304,6 +304,7 @@ export default function LoginPage({ onAuthenticated }) {
     [email]
   );
 
+  /** Validate the email and request the first OTP (moves to the code step on success). */
   const handleEmailSubmit = () => {
     if (!emailValid) {
       setError("Enter your Sightspectrum email address.");
@@ -320,6 +321,10 @@ export default function LoginPage({ onAuthenticated }) {
     return next;
   };
 
+  /**
+   * OTP cell input: digits only; a multi-digit value (autofill / typing fast)
+   * spreads across the following cells, then focus advances.
+   */
   const handleCellChange = (i, raw) => {
     const val = raw.replace(/\D/g, "");
     if (!val) {
@@ -341,6 +346,7 @@ export default function LoginPage({ onAuthenticated }) {
     if (i < OTP_LENGTH - 1) cellRefs.current[i + 1]?.focus();
   };
 
+  /** Backspace on an empty cell clears the previous one; arrows move; Enter verifies. */
   const handleCellKey = (i, e) => {
     if (e.key === "Backspace" && !digits[i] && i > 0) {
       e.preventDefault();
@@ -357,6 +363,7 @@ export default function LoginPage({ onAuthenticated }) {
     }
   };
 
+  /** Paste a code: its digits replace all cells from the first; focus the last filled. */
   const handlePaste = (e) => {
     const text = (e.clipboardData.getData("text") || "").replace(/\D/g, "");
     if (!text) return;
@@ -417,6 +424,7 @@ export default function LoginPage({ onAuthenticated }) {
   const locked = attempts >= MAX_ATTEMPTS;
   const resendBlocked = cooldown > 0 || resends >= MAX_RESENDS || busy;
 
+  /** Return to the email step, resetting the code, messages, attempt/resend counters. */
   const goBack = () => {
     setStep("email");
     setDigits(Array(OTP_LENGTH).fill(""));

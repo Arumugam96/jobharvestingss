@@ -76,7 +76,7 @@ def get_pipeline_search_only(
     """
     Phase-1-only pipeline (no Gemini).
     GeminiService is intentionally omitted (defaults to None inside the service).
-    No GEMINI_API_KEY required for this dependency.
+    No ANTHROPIC_API_KEY required for this dependency.
     """
     return LinkedInPipelineService(settings=settings, gemini=None)
 
@@ -98,13 +98,14 @@ No detail pages are visited and Gemini is **not** called, so this is fast
 (~10 s) and free.  Use it to validate your search config before running the
 full harvest.
 
-`GEMINI_API_KEY` is **not** required for this endpoint.
+`ANTHROPIC_API_KEY` is **not** required for this endpoint.
 """,
 )
 async def linkedin_search(
     config:   LinkedInSearchConfig,
     pipeline: LinkedInPipelineService = Depends(get_pipeline_search_only),
 ) -> APIResponse[LinkedInSearchResult]:
+    """Run search phase 1 only and return the raw job cards; 500 with the error on failure."""
 
     log = logger.bind(keywords=config.keywords)
     log.info("linkedin_search_requested")
@@ -151,17 +152,18 @@ wall-clock time ≈ slowest individual job × a few, not the sum of all jobs.
 are backfilled automatically.  `effective_*` properties on each job reflect
 the merged result.
 
-`GEMINI_API_KEY` is required.  Use `POST /search` to preview without it.
+`ANTHROPIC_API_KEY` is required.  Use `POST /search` to preview without it.
 """,
     responses={
         200: {"description": "Pipeline complete — check `errors` field for partial failures"},
-        503: {"description": "GEMINI_API_KEY not configured"},
+        503: {"description": "ANTHROPIC_API_KEY not configured"},
     },
 )
 async def linkedin_harvest(
     config:   LinkedInSearchConfig,
     pipeline: LinkedInPipelineService = Depends(get_pipeline),
 ) -> APIResponse[LinkedInHarvestResult]:
+    """Run the full search + describe + LLM parse pipeline synchronously; 500 on failure."""
 
     log = logger.bind(keywords=config.keywords, max_jobs=config.max_jobs)
     log.info("linkedin_harvest_requested")
@@ -220,6 +222,11 @@ async def linkedin_harvest_async(
     background_tasks: BackgroundTasks,
     pipeline:         LinkedInPipelineService = Depends(get_pipeline),
 ) -> APIResponse[HarvestJobSummary]:
+    """Register an in-memory harvest job and run the full pipeline on it as a background task.
+
+    Job state lives only in this process's memory: it is lost on restart and not shared between
+    workers.
+    """
 
     job = HarvestJob(config=config)
     _harvest_jobs[job.id] = job
@@ -254,6 +261,7 @@ Returns the current status of a background harvest job.
 """,
 )
 async def get_harvest_job(job_id: str) -> APIResponse[HarvestJob]:
+    """Return the in-memory harvest job with its result or error once finished; 404 if unknown."""
     job = _harvest_jobs.get(job_id)
     if job is None:
         raise HTTPException(

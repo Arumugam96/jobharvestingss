@@ -8,7 +8,8 @@ Naukri RECRUITER session routes (see app/agents/naukri_recruiter_agent.py).
   POST /naukri-recruiter/autologin  open a Launcher-issued naukri.com auto-login URL
 
 None of these type credentials or kill any Chrome; all use the dedicated
-recruiter profile (settings.naukri_recruiter_profile_dir).
+recruiter profile (settings.naukri_recruiter_profile_dir). They stay open to any
+signed-in user: the Demand page lets ordinary users reconnect the recruiter session.
 """
 from __future__ import annotations
 
@@ -41,6 +42,9 @@ class AutologinRequest(BaseModel):
 
 
 async def _run(factory) -> dict:
+    """Await the coroutine built by `factory`, on a Proactor loop thread when the current loop
+    can't spawn browser subprocesses (Windows reload mode).
+    """
     if needs_proactor():
         return await run_in_proactor(factory)
     return await factory()
@@ -48,11 +52,22 @@ async def _run(factory) -> dict:
 
 @router.get("/status", status_code=status.HTTP_200_OK)
 async def recruiter_status() -> Any:
+    """Return the last recorded recruiter-session state; cheap, never launches a browser.
+
+    Includes the profile directory, whether a login window is open and the browser mode, so the UI
+    can tell whether Connect is usable.
+    """
     return read_status()
 
 
 @router.post("/verify", status_code=status.HTTP_200_OK)
 async def recruiter_verify() -> Any:
+    """Open the recruiter profile headless and check whether recruit.naukri.com is logged in.
+
+    Returns `status` "ready" or "action_required" merged with the check result, "busy" (plus the
+    current status) while a login window is open, or "failed" with a truncated error message.
+    Always HTTP 200.
+    """
     st = read_status()
     if st["login_window_open"]:
         return {"status": "busy", "message": "A recruiter login window is open — finish it first.", **st}
@@ -66,6 +81,13 @@ async def recruiter_verify() -> Any:
 
 @router.post("/login", status_code=status.HTTP_200_OK)
 async def recruiter_login(body: LoginRequest | None = None) -> Any:
+    """Start a headed recruiter login window in the background for a human to complete.
+
+    Uses the Naukri Launcher when enabled ("mode": "launcher"), otherwise a plain browser window
+    on recruit.naukri.com ("mode": "browser"). Returns immediately with "started" (then poll
+    GET /status), or "busy" if a login window is already open. `timeout_s` defaults to 600 when
+    no body is sent.
+    """
     timeout_s = body.timeout_s if body else 600
     if not start_login_window(timeout_s=timeout_s):
         return {"status": "busy", "message": "A recruiter login window is already open."}
@@ -94,6 +116,12 @@ async def recruiter_login(body: LoginRequest | None = None) -> Any:
 
 @router.post("/autologin", status_code=status.HTTP_200_OK)
 async def recruiter_autologin(body: AutologinRequest) -> Any:
+    """Open a Launcher-issued naukri.com auto-login URL in the recruiter profile.
+
+    The URL is validated first ("failed" with the reason if rejected). Returns "busy" while a login
+    window is open, otherwise "ready"/"action_required" with the post-login check, or "failed" on
+    error. Always HTTP 200.
+    """
     try:
         url = validate_autologin_url(body.url)
     except ValueError as exc:

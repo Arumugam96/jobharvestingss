@@ -101,6 +101,7 @@ class UnifiedJob:
     contact_number:         str | None = None   # Recruiter phone / mobile
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialise the job to a plain dict; domain_hint and hiring_hint are omitted."""
         return {
             "job_title":              self.job_title,
             "company":                self.company,

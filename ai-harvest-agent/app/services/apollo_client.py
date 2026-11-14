@@ -44,6 +44,7 @@ and the result's ``phone_requested`` is False — no webhook will follow.
 from __future__ import annotations
 
 import math
+from datetime import date
 from typing import Any
 from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 
@@ -81,17 +82,25 @@ class ApolloAPIError(HarvestException):
     """A non-retryable Apollo failure (bad key, permanent 4xx, or a transient
     error that survived all retries). Subclasses HarvestException so the central
     harvest_exception_handler renders it if it ever reaches a route. ``details``
-    (provider status/path/body) is internal-only — never serialized to clients."""
+    (provider status/path/body) is internal-only — never serialized to clients.
+    ``transient`` is True when a 429 / 5xx / network failure outlived the retries — the
+    profile was never really looked up, so callers must not record it as tried."""
 
     expose_details = False
+    transient = False
 
-    def __init__(self, message: str, details: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self, message: str, details: dict[str, Any] | None = None, *, transient: bool = False,
+    ) -> None:
+        """502 ENRICHMENT_API_ERROR; ``details`` is kept for logs, never sent to clients.
+        ``transient`` marks a retryable failure that exhausted the retries."""
         super().__init__(
             message=message,
             code="ENRICHMENT_API_ERROR",
             status_code=502,  # bad gateway — upstream provider
             details=details or {},
         )
+        self.transient = transient
 
 
 class _ApolloRetryable(Exception):
@@ -122,6 +131,11 @@ class ApolloOrgResult(BaseModel):
 
     @classmethod
     def from_dict(cls, org: dict[str, Any] | None) -> "ApolloOrgResult | None":
+        """Build from an Apollo organization dict; None when ``org`` is empty or missing.
+
+        Falls back across Apollo's alternate keys (``primary_domain``/``domain``,
+        ``city``/``organization_city``, ...) since the two endpoints name them differently.
+        """
         if not org:
             return None
         return cls(
@@ -160,13 +174,27 @@ class ApolloPersonResult(BaseModel):
     # webhook delivery is expected. False when no phone was asked for, the reveal was
     # downgraded (no webhook URL), or Apollo rejected the webhook_url.
     phone_requested: bool = False
+    # True when the daily credit cap (global or enrichment sub-cap) refused the call, so
+    # Apollo was never asked — NOT a miss; callers must not record the profile as tried.
+    budget_denied: bool = False
 
     @classmethod
     def no_match(cls) -> "ApolloPersonResult":
+        """The empty result for Apollo's 200-with-no-person response."""
         return cls(matched=False)
 
     @classmethod
+    def denied_by_cap(cls) -> "ApolloPersonResult":
+        """The empty result for a call the daily credit cap refused (no request was sent)."""
+        return cls(matched=False, budget_denied=True)
+
+    @classmethod
     def from_person(cls, person: dict[str, Any] | None) -> "ApolloPersonResult":
+        """Normalize an Apollo person dict into a matched result (no_match() if empty).
+
+        Locked-email sentinels are dropped, the name falls back to first + last, and
+        ``phone_requested`` is left False here (the caller sets it after a reveal request).
+        """
         if not person:
             return cls.no_match()
         primary = _clean_email(person.get("email"))
@@ -190,10 +218,12 @@ class ApolloPersonResult(BaseModel):
 
     @property
     def has_email(self) -> bool:
+        """True when a primary (unlocked) email was revealed; ignores secondary_email."""
         return bool(self.email)
 
     @property
     def has_phone(self) -> bool:
+        """True when a phone came back synchronously (webhook-delivered phones don't count)."""
         return bool(self.phone)
 
 
@@ -247,6 +277,11 @@ class ApolloClient:
     """Async wrapper around Apollo's people-match REST API."""
 
     def __init__(self, settings: Settings, *, purpose: str = "enrichment") -> None:
+        """Capture API key, base URL, timeout and phone-webhook config from settings.
+
+        ``purpose`` selects which daily budget credits count toward: "enrichment"
+        (global cap plus the enrichment sub-cap) or "finder" (global cap only).
+        """
         self._settings = settings
         # Which daily budget this client's credits count toward: "enrichment"
         # (harvest/maintenance contact enrichment — also gated by the enrichment
@@ -264,6 +299,7 @@ class ApolloClient:
 
     @property
     def enabled(self) -> bool:
+        """True when an Apollo API key is configured; without one no calls are made."""
         return bool(self._api_key)
 
     @property
@@ -286,8 +322,10 @@ class ApolloClient:
     ) -> ApolloPersonResult:
         """POST /people/match — match one person by LinkedIn URL (name/company/
         domain are secondary hints) and optionally reveal email/phone. Returns a
-        no-match result (not an error) when Apollo finds nobody. ``webhook_ref``
-        tags the phone webhook URL so the async delivery can be correlated."""
+        no-match result (not an error) when Apollo finds nobody, and a
+        ``budget_denied`` one (no request sent) when the daily cap refuses the credit.
+        ``webhook_ref`` tags the phone webhook URL so the async delivery can be
+        correlated."""
         if not self.enabled:
             raise ApolloAPIError(_MSG_NOT_CONFIGURED)
         if not linkedin_url:
@@ -311,8 +349,9 @@ class ApolloClient:
         if domain:
             params["domain"] = domain
 
-        if not await self._reserve_credit("people/match"):
-            return ApolloPersonResult.no_match()
+        day = await self._reserve_credit("people/match")
+        if not day:
+            return ApolloPersonResult.denied_by_cap()
 
         consumed = 0
         try:
@@ -323,7 +362,7 @@ class ApolloClient:
             result.phone_requested = phone_requested and result.matched
             consumed = _reported_credits(data, _person_credits(result))
         finally:
-            await self._settle_credit("people/match", 1, consumed)
+            await self._settle_credit("people/match", 1, consumed, day=day)
         self._log_result("people/match", linkedin_url, result)
         return result
 
@@ -338,8 +377,8 @@ class ApolloClient:
         """POST /people/match keyed on an Apollo person **id** (not a LinkedIn URL) —
         used to reveal the email of a person returned by search_people. Mirrors the
         standalone script's enrich_person_email: reveal flags go in the query params,
-        the id in the JSON body. Returns a no-match result when Apollo finds nobody or
-        the daily cap is reached."""
+        the id in the JSON body. Returns a no-match result when Apollo finds nobody, and
+        a ``budget_denied`` one (no request sent) when the daily cap is reached."""
         if not self.enabled:
             raise ApolloAPIError(_MSG_NOT_CONFIGURED)
         if not person_id:
@@ -353,8 +392,9 @@ class ApolloClient:
         if want_phone:
             params["webhook_url"] = self._webhook_url_for(webhook_ref)
 
-        if not await self._reserve_credit("people/match"):
-            return ApolloPersonResult.no_match()
+        day = await self._reserve_credit("people/match")
+        if not day:
+            return ApolloPersonResult.denied_by_cap()
 
         consumed = 0
         try:
@@ -366,7 +406,7 @@ class ApolloClient:
             result.phone_requested = phone_requested and result.matched
             consumed = _reported_credits(data, _person_credits(result))
         finally:
-            await self._settle_credit("people/match", 1, consumed)
+            await self._settle_credit("people/match", 1, consumed, day=day)
         self._log_result("people/match", person_id, result)
         return result
 
@@ -384,7 +424,8 @@ class ApolloClient:
         company_name = (company_name or "").strip()
         if not company_name:
             return None
-        if not await self._reserve_credit("mixed_companies/search"):
+        day = await self._reserve_credit("mixed_companies/search")
+        if not day:
             return None
 
         consumed = 0
@@ -399,7 +440,7 @@ class ApolloClient:
             # 1 credit per page of results — an empty page returned nothing billable.
             consumed = _reported_credits(data, 1 if orgs else 0)
         finally:
-            await self._settle_credit("mixed_companies/search", 1, consumed)
+            await self._settle_credit("mixed_companies/search", 1, consumed, day=day)
         if not orgs:
             logger.info("apollo_org_search_no_match", company=company_name)
             return None
@@ -482,7 +523,8 @@ class ApolloClient:
         domain = (domain or "").strip()
         if not domain:
             return None
-        if not await self._reserve_credit("organizations/enrich"):
+        day = await self._reserve_credit("organizations/enrich")
+        if not day:
             return None
         consumed = 0
         try:
@@ -491,7 +533,7 @@ class ApolloClient:
             result = ApolloOrgResult.from_dict(org)
             consumed = _reported_credits(data, 1 if result else 0)
         finally:
-            await self._settle_credit("organizations/enrich", 1, consumed)
+            await self._settle_credit("organizations/enrich", 1, consumed, day=day)
         logger.info(
             "apollo_org_enriched",
             domain=domain,
@@ -510,7 +552,8 @@ class ApolloClient:
     ) -> list[ApolloPersonResult]:
         """POST /people/bulk_match in batches of <=10. Each item is a dict of
         match hints, e.g. {"linkedin_url": ...} or {"name","organization_name"}.
-        Returns one ApolloPersonResult per input item, order-preserved.
+        Returns one ApolloPersonResult per input item, order-preserved; items the
+        daily cap could not cover come back ``budget_denied`` (never sent).
         ``webhook_ref`` tags the phone webhook URL (one ref for the whole call)."""
         if not self.enabled:
             raise ApolloAPIError(_MSG_NOT_CONFIGURED)
@@ -521,9 +564,11 @@ class ApolloClient:
         for start in range(0, len(items), _BULK_MAX):
             chunk = items[start:start + _BULK_MAX]
             # A bulk_match reveals up to len(chunk) people, so it costs that many
-            # credits — reserve them together; stop early (return what we have) once
-            # the daily cap can't cover this chunk.
-            if not await self._reserve_credit("people/bulk_match", cost=len(chunk)):
+            # credits — reserve them together; stop early once the daily cap can't
+            # cover this chunk, marking every item not sent as budget_denied.
+            day = await self._reserve_credit("people/bulk_match", cost=len(chunk))
+            if not day:
+                results.extend(ApolloPersonResult.denied_by_cap() for _ in items[start:])
                 break
             payload: dict[str, Any] = {
                 "details": chunk,
@@ -551,35 +596,39 @@ class ApolloClient:
                 # bulk_match reports its real charge in ``credits_consumed``.
                 consumed = _reported_credits(data, sum(_person_credits(r) for r in chunk_results))
             finally:
-                await self._settle_credit("people/bulk_match", len(chunk), consumed)
+                await self._settle_credit("people/bulk_match", len(chunk), consumed, day=day)
             results.extend(chunk_results)
         return results
 
     # ── Internals ──────────────────────────────────────────────────────────────
 
-    async def _reserve_credit(self, endpoint: str, cost: int = 1) -> bool:
+    async def _reserve_credit(self, endpoint: str, cost: int = 1) -> date | None:
         """Reserve ``cost`` credit-calls against the global per-UTC-day Apollo cap
         (and, for ``purpose="enrichment"``, the enrichment sub-cap) BEFORE issuing a
         credit-spending request. Called by the reveal endpoints (people/match,
         people/bulk_match) and the organization lookups (organizations/enrich,
         mixed_companies/search) — only the people listing is free and never reserves.
-        Returns False when the day's budget is exhausted (caller short-circuits to its
-        empty value). Best-effort (fails open on DB error) — see
-        app/services/apollo_budget.py. Imported lazily to keep the client importable
-        without a DB session."""
+        Returns the UTC date of the reservation (truthy; hand it to ``_settle_credit``)
+        or None when the day's budget is exhausted (caller short-circuits to its empty
+        value). Best-effort (fails open on DB error) — see app/services/apollo_budget.py.
+        Imported lazily to keep the client importable without a DB session."""
         from app.services import apollo_budget
 
-        allowed = await apollo_budget.try_consume(cost, purpose=self.purpose)
-        if not allowed:
+        day = await apollo_budget.try_reserve(cost, purpose=self.purpose)
+        if day is None:
             logger.info(
                 "apollo_daily_cap_reached", endpoint=endpoint, cost=cost, purpose=self.purpose
             )
-        return allowed
+        return day
 
-    async def _settle_credit(self, endpoint: str, reserved: int, consumed: int) -> None:
+    async def _settle_credit(
+        self, endpoint: str, reserved: int, consumed: int, day: Any = None,
+    ) -> None:
         """Reconcile a ``_reserve_credit(reserved)`` hold to the ``consumed`` credits the
         response indicated (0 when the call failed / returned nothing billable): the
         unused part goes back to the daily counters and the real charge is ledgered.
+        ``day`` is the reservation date ``_reserve_credit`` returned, so the release hits
+        that day's counter even after UTC midnight (anything else → today).
         Best-effort, never raises — see apollo_budget.settle."""
         from app.services import apollo_budget
 
@@ -588,7 +637,10 @@ class ApolloClient:
                 "apollo_credit_settled", endpoint=endpoint, reserved=reserved,
                 consumed=consumed, purpose=self.purpose,
             )
-        await apollo_budget.settle(reserved, consumed, purpose=self.purpose, endpoint=endpoint)
+        await apollo_budget.settle(
+            reserved, consumed, purpose=self.purpose, endpoint=endpoint,
+            day=day if isinstance(day, date) else None,
+        )
 
     def _webhook_url_for(self, ref: str = "") -> str:
         """The configured webhook URL plus our ``token`` (authenticates the unsigned
@@ -666,6 +718,12 @@ class ApolloClient:
         params: dict[str, Any] | None = None,
         json: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        """POST to an Apollo endpoint and return the parsed JSON body (one tenacity attempt).
+
+        429 / 5xx / connect or timeout errors raise _ApolloRetryable, so the decorator
+        retries up to 3 attempts with backoff. Other 4xx and non-JSON bodies raise
+        ApolloAPIError immediately. Does not check or record credit budgets.
+        """
         url = f"{self._base_url}{path}"
         headers = {
             "X-Api-Key": self._api_key,
@@ -708,14 +766,17 @@ class ApolloClient:
         params: dict[str, Any] | None = None,
         json: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        """Retrying POST; a transient failure that outlives the retries becomes an
+        ApolloAPIError with ``transient=True``."""
         try:
             return await self._request_once(path, params=params, json=json)
         except _ApolloRetryable as exc:
             # Exhausted the retry budget on a transient failure.
             logger.warning("apollo_unavailable_after_retries", path=path, error=str(exc))
-            raise ApolloAPIError(_MSG_UNAVAILABLE) from exc
+            raise ApolloAPIError(_MSG_UNAVAILABLE, transient=True) from exc
 
     def _log_result(self, endpoint: str, linkedin_url: str, result: ApolloPersonResult) -> None:
+        """Log a match outcome: no match, contact revealed (credits used), or match w/o contact."""
         if not result.matched:
             logger.info("apollo_no_match", endpoint=endpoint, linkedin_url=linkedin_url,
                         person_id=result.id)
@@ -785,5 +846,6 @@ def _strip_phone(payload: dict[str, Any] | None) -> dict[str, Any] | None:
 
 
 def _bool(v: bool) -> str:
+    """Render a bool as Apollo's query-param form, "true" or "false"."""
     # Apollo expects lowercase string booleans in query params.
     return "true" if v else "false"

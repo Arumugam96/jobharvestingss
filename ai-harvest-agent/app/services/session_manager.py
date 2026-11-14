@@ -104,6 +104,8 @@ class SessionManager:
     """
 
     def __init__(self, source: str, account: str | None = None) -> None:
+        """Resolve the session file path for ``source``/``account`` and create the
+        sessions directory. Raises ValueError for an unknown source."""
         if source not in _SOURCE_CONFIG:
             raise ValueError(f"Unknown source '{source}'. Valid: {list(_SOURCE_CONFIG)}")
         self._source  = source
@@ -126,6 +128,7 @@ class SessionManager:
 
     @property
     def session_path(self) -> Path:
+        """Path of this source/account's storage-state JSON (may not exist yet)."""
         return self._path
 
     def session_exists(self) -> bool:

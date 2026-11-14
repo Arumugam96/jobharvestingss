@@ -77,6 +77,10 @@ class LogCallRequest(BaseModel):
 
 
 def _split_phones(raw: str) -> list[str]:
+    """Split a comma-separated phone list, trimming blanks and duplicates and capping the count.
+
+    Returns [] for a non-string (a direct, non-HTTP call receives the Query() default object).
+    """
     if not isinstance(raw, str):  # a direct (non-HTTP) call gets the Query() default
         return []
     phones = [p.strip() for p in raw.split(",") if p.strip()]
@@ -86,6 +90,7 @@ def _split_phones(raw: str) -> list[str]:
 async def _load_job_guarded(
     db: AsyncSession, job_id: str, user: AuthenticatedUser
 ) -> ScrapedJobORM:
+    """Load the job for a per-job endpoint: 404 if missing, 403 if assigned to someone else."""
     job = await HarvestRunService(db).get_scraped_job_by_id(job_id)
     if job is None:
         raise HTTPException(
@@ -110,6 +115,13 @@ async def log_phone_call(
     current_user: AuthenticatedUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
 ) -> dict:
+    """Log one call on the job (status, outcome, details, proof, optional reminder).
+
+    Closes any open follow-up on the same job + number before inserting the new row. Returns the
+    call view plus `attempts` (non-cleared calls on the job) and the number's `flags`. 403/404 per
+    the assignment lock; 422 for an invalid status/outcome, missing remarks on an answered call
+    without an outcome, or oversized details.
+    """
     job = await _load_job_guarded(db, job_id, current_user)
     row = await pvs.log_call(
         db, job, current_user,
@@ -140,6 +152,11 @@ async def clear_phone_call(
     current_user: AuthenticatedUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
 ) -> dict:
+    """"Clear status": soft-delete the job's active calls for `phone` (every number when blank).
+
+    Also closes their open follow-ups. Returns `{"job_id", "cleared": <rows cleared>}`; 403/404
+    per the assignment lock.
+    """
     await _load_job_guarded(db, job_id, current_user)
     cleared = await pvs.clear_calls(db, job_id, phone)
     logger.info("phone_call_cleared", job_id=job_id, user=current_user.email, cleared=cleared)
@@ -156,6 +173,7 @@ async def phone_call_history(
     current_user: AuthenticatedUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
 ) -> dict:
+    """Every non-cleared call on the job, newest first; 403/404 per the assignment lock."""
     await _load_job_guarded(db, job_id, current_user)
     return {"job_id": job_id, "items": await pvs.history(db, job_id)}
 
@@ -168,6 +186,12 @@ async def latest_phone_verifications(
     current_user: AuthenticatedUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
 ) -> dict:
+    """Newest non-cleared call per job, for the table's status badges, plus number flags.
+
+    `job_ids` and `phones` are comma-separated and capped at 200. For non-admins, jobs assigned to
+    someone else are silently omitted; admins see them read-only. `flags` cover the numbers of the
+    returned calls plus any extra `phones`. Returns `{"items": {job_id: call}, "flags": {...}}`.
+    """
     ids = [j.strip() for j in job_ids.split(",") if j.strip()]
     ids = list(dict.fromkeys(ids))[:LATEST_MAX_IDS]
     extra_phones = _split_phones(phones)
@@ -203,6 +227,11 @@ async def phone_call_logs(
     current_user: AuthenticatedUser = Depends(require_admin),
     db: AsyncSession = Depends(get_db_session),
 ) -> dict:
+    """Admin Phone logs page: every non-cleared call in the tenant, newest first, paginated.
+
+    Filters: `status` (answered/unanswered), `assignment` (assigned/unassigned), `days` (0 = all
+    time) and free-text `q`. Requires the admin role.
+    """
     since = datetime.now(timezone.utc) - timedelta(days=days) if days else None
     return await pvs.list_logs(db, status=status_filter, assignment=assignment, q=q,
                                since=since, page=page, page_size=page_size)
@@ -225,6 +254,10 @@ async def due_call_followups(
     current_user: AuthenticatedUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
 ) -> dict:
+    """The caller's follow-up reminders that are now due, newest due first.
+
+    Returns `{"due": <total count>, "items": [...]}` with at most `limit` items.
+    """
     due, items = await pvs.due_followups(db, current_user, limit)
     return {"due": due, "items": items}
 
@@ -238,6 +271,7 @@ async def dismiss_all_call_followups(
     current_user: AuthenticatedUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
 ) -> dict:
+    """Mark every currently due follow-up of the caller done; returns `{"updated": <rows>}`."""
     updated = await pvs.dismiss_all(db, current_user)
     return {"updated": updated}
 
@@ -253,5 +287,6 @@ async def dismiss_call_followup(
     current_user: AuthenticatedUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
 ) -> dict:
+    """Mark one follow-up reminder done; 404 if the call log is missing, 403 if it isn't yours."""
     row = await pvs.dismiss_followup(db, log_id, current_user)
     return {"id": row.id, "done": True}

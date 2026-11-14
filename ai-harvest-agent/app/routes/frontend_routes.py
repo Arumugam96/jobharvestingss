@@ -39,6 +39,7 @@ from pydantic import BaseModel
 
 from app.core.company_size import band_to_tier
 from app.core.dependencies import get_current_user
+from app.core.tenant_context import get_current_tenant_id, is_all_access
 from app.models.auth import AuthenticatedUser
 from app.services.harvest_run_service import (
     CONTACT_FILTER_TOKENS,
@@ -72,12 +73,14 @@ _LEAD_DIR      = Path("data/results/lead_intelligence")
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _job_id(job: dict) -> str:
+    """JSON-fallback job id: first 16 hex chars of MD5 of the job URL (else title + company)."""
     url = job.get("job_url") or ""
     content = url or f"{job.get('job_title','')}{job.get('company','')}"
     return hashlib.md5(content.encode(), usedforsecurity=False).hexdigest()[:16]
 
 
 def _lead_id(r: dict) -> str:
+    """Stable lead id: MD5 of the LinkedIn profile URL, else of "name::company" (16 hex chars)."""
     url = r.get("linkedin_profile_url") or r.get("linkedin_url") or ""
     if url:
         return hashlib.md5(url.encode(), usedforsecurity=False).hexdigest()[:16]
@@ -87,7 +90,12 @@ def _lead_id(r: dict) -> str:
 
 
 def _load_all_jobs() -> list[dict]:
-    """Load jobs from the most recent combined JSON file."""
+    """Load jobs from the most recent combined JSON file.
+
+    The file is shared (not tenant-tagged), so only an all-access (internal)
+    tenant may read this JSON fallback; any other tenant gets []."""
+    if not is_all_access(get_current_tenant_id()):
+        return []
     if not _COMBINED_DIR.exists():
         return []
     files = sorted(
@@ -109,7 +117,13 @@ def _load_all_jobs() -> list[dict]:
 
 
 def _load_lead_records() -> list[dict]:
-    """Load recruiter records from the most recent lead-intelligence JSON."""
+    """Load recruiter records from the most recent lead-intelligence JSON.
+
+    The file is shared (not tenant-tagged), so only an all-access (internal)
+    tenant may read it; any other tenant gets [] (so GET /lead-intelligence is
+    empty and GET /lead-intelligence/{id} is 404 for them)."""
+    if not is_all_access(get_current_tenant_id()):
+        return []
     if not _LEAD_DIR.exists():
         return []
 
@@ -166,6 +180,12 @@ def _job_matches_contact(job: dict, tokens: list[str]) -> bool:
 
 
 def _apply_job_filters(jobs: list[dict], **f: Any) -> list[dict]:
+    """Filter job dicts in memory with the same filters GET /jobs passes to the DB query.
+
+    Used by the JSON-fallback read. Text filters are case-insensitive. With no `source`, Demand
+    Search jobs are excluded (same default as the DB path); a `run_id` only matches dicts that
+    carry one, since the JSON file isn't run-scoped.
+    """
     keyword       = (f.get("keyword")       or "").lower()
     company       = (f.get("company")       or "").lower()
     company_exact = f.get("company_exact")  or ""
@@ -243,6 +263,7 @@ def _apply_job_filters(jobs: list[dict], **f: Any) -> list[dict]:
 
 
 def _date_gte(posted: str | None, bound: str) -> bool:
+    """True when `posted` is on/after `bound` (YYYY-MM-DD prefix compare); undated jobs pass."""
     if not posted:
         return True
     try:
@@ -252,6 +273,7 @@ def _date_gte(posted: str | None, bound: str) -> bool:
 
 
 def _date_lte(posted: str | None, bound: str) -> bool:
+    """True when `posted` is on/before `bound` (YYYY-MM-DD prefix compare); undated jobs pass."""
     if not posted:
         return True
     try:
@@ -261,15 +283,18 @@ def _date_lte(posted: str | None, bound: str) -> bool:
 
 
 def _apply_sort(jobs: list[dict], sort_by: str, sort_order: str) -> list[dict]:
+    """Sort job dicts by a JOB_SORT_FIELDS field, case-insensitively (default posted_date)."""
     if sort_by not in JOB_SORT_FIELDS:
         sort_by = "posted_date"
     if sort_by == "job_poster_name":
         # The POC column (poster, else Company-tagged contact) — mirrors the DB
         # path's poc_name_expr() ordering.
         def key(j: dict) -> str:
+            """Sort key: the lowercased POC name the table shows."""
             return job_dict_contact(j)["poc_name"].lower()
     else:
         def key(j: dict) -> str:
+            """Sort key: the field's value as a lowercased string ("" when missing)."""
             # str() first: older combined files may hold a non-string in the sort
             # field (e.g. a numeric posted_date) — .lower() alone would 500 the route.
             return str(j.get(sort_by) or "").lower()
@@ -277,6 +302,7 @@ def _apply_sort(jobs: list[dict], sort_by: str, sort_order: str) -> list[dict]:
 
 
 def _paginate(items: list, page: int, page_size: int) -> tuple[list, int, int]:
+    """Slice one page of `items`; returns (page_items, total, total_pages >= 1)."""
     total       = len(items)
     total_pages = max(1, math.ceil(total / page_size)) if page_size > 0 else 1
     start       = (page - 1) * page_size
@@ -349,6 +375,7 @@ async def list_jobs(
     ]
 
     def _json_fallback() -> tuple[list[dict], int, int]:
+        """Read, filter, sort and page the latest combined JSON file (fallback path)."""
         all_jobs = _load_all_jobs()
         filtered = _apply_job_filters(
             all_jobs,
@@ -457,19 +484,27 @@ async def list_jobs(
 async def job_facets(
     source: str = Query("", description="'Demand' = facets of Demand Search jobs only (left out otherwise)"),
 ) -> dict:
+    """Distinct Company / Job title / POC filter values and whole-dataset stats for the jobs page.
+
+    `source=Demand` returns facets of Demand Search jobs only; otherwise they are left out. On a
+    DB error in database mode returns empty lists and empty stats instead of failing.
+    """
     # isinstance: a direct call (tests) gets the Query(...) default object.
     demand = isinstance(source, str) and source.strip().lower() == DEMAND_SOURCE.lower()
 
     def _facets_from_json() -> dict:
+        """Compute the same facets and stats from the latest combined JSON file."""
         jobs = _load_all_jobs()
 
         def _distinct(key: str) -> list[str]:
+            """Sorted distinct non-empty values of `key` across the loaded jobs."""
             return sorted({j.get(key) or "" for j in jobs} - {""})
 
         # Same contact semantics as the DB path (poster/recruiter + Company-tagged).
         contacts = [job_dict_contact(j) for j in jobs]
 
         def _count(flag: str) -> int:
+            """Number of jobs whose contact info has a truthy `flag`."""
             return sum(1 for c in contacts if c[flag])
 
         return {
@@ -506,6 +541,7 @@ async def job_facets(
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _get_job_from_json(job_id: str) -> dict | None:
+    """Find a job by its hash id in the latest combined JSON file, or None."""
     for job in _load_all_jobs():
         if job.get("id") == job_id:
             return job
@@ -555,10 +591,16 @@ async def get_job(
 # scraped_job_view / GET /jobs so the list view gets no extra queries.
 
 def _iso(dt: Any) -> str | None:
+    """ISO-8601 string for a datetime, or None."""
     return dt.isoformat() if dt is not None else None
 
 
 def _resdex_candidate_view(c: Any) -> dict:
+    """Serialise a stored Resdex candidate for the job page.
+
+    Drops session-bound /v3/preview profile links (kept as "" instead) and rebuilds the
+    reopenable Resdex result-list link and position from the stored search context.
+    """
     from app.services.resdex_types import (
         clean_profile_url,
         resdex_link_context,
@@ -606,6 +648,7 @@ def _resdex_candidate_view(c: Any) -> dict:
 
 
 def _naukri_verified_badge() -> bool:
+    """Whether candidate cards show the "Naukri Verified" badge (RESDEX_SHOW_NAUKRI_VERIFIED)."""
     from app.config import get_settings
 
     return bool(getattr(get_settings(), "resdex_show_naukri_verified", True))
@@ -655,6 +698,11 @@ def _resdex_tier_views(s: Any) -> list[dict]:
 
 
 def _resdex_search_view(s: Any) -> dict:
+    """Serialise a Resdex search row with its candidates, all three query tiers and `can_run`.
+
+    `can_run` is true when the search didn't (fully) run and stored requirements exist, so the
+    job page can offer "Run Resdex search".
+    """
     from app.services.resdex_job_search_service import can_run
 
     candidates = [_resdex_candidate_view(c) for c in (s.candidates or [])]
@@ -684,6 +732,7 @@ def _resdex_search_view(s: Any) -> dict:
 
 
 def _outreach_email_view(e: Any, included: list[Any]) -> dict:
+    """Serialise an outreach email row plus the Resdex candidates it carried (`included`)."""
     return {
         "id":            e.id,
         # The email row's OWN job / recruiter ids — the /mail/:id thread page
@@ -831,11 +880,19 @@ async def run_job_resdex_search(
     job_id: str,
     current_user: AuthenticatedUser = Depends(get_current_user),
 ) -> Any:
+    """Start a background Resdex search for one job from its stored T1-T3 queries.
+
+    No new LLM requirements step and no email is sent. Returns 202 `{job_id, status}`; poll
+    GET /jobs/{id}/outreach-detail (`resdex_running`). 403 if the job is assigned to someone
+    else; 404/409 with `{code, message}` when a precondition fails (e.g. Resdex disabled, a
+    harvest running).
+    """
     from fastapi.responses import JSONResponse
 
     from app.services import resdex_job_search_service as rjs
 
     async def _assigned(db):
+        """Return the job's assignee email, or None when the job is missing."""
         job = await HarvestRunService(db).get_scraped_job_by_id(job_id)
         return job.assigned_to_email if job is not None else None
 

@@ -6,6 +6,7 @@ import { C } from "../theme";
 import { Select, StatCard } from "../components/ui";
 import JobsTable, { PAGE_SIZE_OPTIONS } from "../components/JobsTable";
 import { mapApiJob, fetchAllJobs, jobContact, pocKindLabel, partSourceLabel } from "../lib/jobsData";
+import { csvCell } from "../lib/csv";
 import { useHarvestData } from "../HarvestDataContext";
 import { useTenant } from "../TenantContext";
 
@@ -23,6 +24,20 @@ import { useTenant } from "../TenantContext";
 // apart from Harvested Jobs'.
 const DEMAND_SOURCE = "Demand";
 
+/**
+ * Harvested Jobs page (also reused as My Workspace and Demand Jobs): date range, stat cards and
+ * a server-paginated JobsTable fed by GET /jobs, with whole-dataset dropdowns/stats from
+ * GET /jobs/facets, plus CSV / Excel / JSON export. Views are cached in HarvestDataContext so
+ * returning to the same URL renders instantly and revalidates quietly.
+ * @param {object} props
+ * @param {Function} props.onNavigate - navigate by page key ("jobs", "library").
+ * @param {Function} props.onView - open a job's detail view (passed to JobsTable).
+ * @param {string|number} props.pageSizeSel - rows per page; onPageSizeChange sets it.
+ * @param {boolean} [props.urlState] - let JobsTable sync its filters to the URL.
+ * @param {boolean} [props.demand] - Demand Jobs mode: source pinned to "Demand", own cache.
+ * @param {React.ReactNode} [props.demandTabs] - Demand Search tabs rendered in demand mode.
+ * @param {boolean} [props.library] - My Workspace mode: only jobs assigned to the current user.
+ */
 export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeChange, urlState = false, demand = false, demandTabs = null, library = false }) {
   const { jobsViewRef: sharedViewRef } = useHarvestData();
   const demandViewRef = useRef(null);
@@ -139,11 +154,14 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
   // Close format dropdown on outside click.
   useEffect(() => {
     if (!formatOpen) return;
+    /** Close the format menu when a mousedown lands outside it. */
     const close = (e) => { if (formatRef.current && !formatRef.current.contains(e.target)) setFormatOpen(false); };
     document.addEventListener("mousedown", close);
     return () => document.removeEventListener("mousedown", close);
   }, [formatOpen]);
 
+  /** Export in the selected format: JSON / Excel navigate to the backend download URLs; CSV is
+   * built client-side by exportCsv(). */
   function doExport() {
     if (exportFormat === "json") { window.location.href = downloadJsonUrl(); return; }
     if (exportFormat === "excel") { window.location.href = downloadExcelUrl(); return; }
@@ -153,6 +171,8 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
   // Export the FULL filtered dataset, not just the loaded page: re-run the
   // current filter params without pagination through fetchAllJobs (which pulls
   // every matching page) and build the CSV from all rows.
+  /** Fetch every row matching the current filters and download them as a CSV file
+   * (cells escaped by csvCell, so formula-like values are neutralised). */
   async function exportCsv() {
     if (exporting) return;
     setExporting(true);
@@ -169,7 +189,7 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
           c.pocName || "—", pocKindLabel(c.pocKind), j.postedDate || "—",
           c.email || "—", partSourceLabel(c.emailParts), c.phone || "—", partSourceLabel(c.phoneParts),
           c.phone || "—", c.linkedin || "—", j.jobDescription || "—",
-        ].map((v) => '"' + String(v).replace(/"/g, '""') + '"').join(",");
+        ].map(csvCell).join(","); // csvCell neutralises =, +, -, @ formula injection
       });
       // Prepend a UTF-8 BOM so Excel detects the encoding — without it Excel reads
       // the file as Windows-1252 and turns the "—" placeholder into "â€"".

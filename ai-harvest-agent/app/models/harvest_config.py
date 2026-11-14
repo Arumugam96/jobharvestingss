@@ -10,6 +10,8 @@ from the saved config that the UI Rule Engine writes.
 from __future__ import annotations
 
 import os
+import re
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Literal
 
 import structlog
@@ -29,6 +31,48 @@ NAUKRI_COMPANY_TYPES: tuple[str, ...] = (
     "Indian MNC", "Foreign MNC", "Corporate", "Startup", "MNC", "Govt/PSU", "Others",
 )
 
+# LinkedIn account ids the harvest may run under (the Rule Engine's Account 1 / 2;
+# same set POST /linkedin-setup-session accepts). The id is joined into the Chrome
+# profile dir and the session filename, so anything else is rejected.
+LINKEDIN_ACCOUNTS: tuple[str, ...] = ("1", "2")
+# Legacy spellings of the default account (session_manager._DEFAULT_ACCOUNTS) → "1".
+_DEFAULT_ACCOUNT_ALIASES = {"", "default", "primary"}
+
+# The project data dir (ai-harvest-agent/data — /app/data in the container), the
+# same anchor ConfigService resolves chrome_profile against.
+_DATA_DIR = Path(__file__).resolve().parents[2] / "data"
+_WINDOWS_ABS_RE = re.compile(r"^[A-Za-z]:[\\/]")
+
+
+def chrome_profile_problem(value: str) -> str | None:
+    """Why `value` is not an acceptable browser.chrome_profile, or None if it is.
+
+    Rejects any ".." segment, and a same-OS absolute path (or a Windows
+    drive-relative one) that is not strictly inside the project data dir. A
+    relative path is anchored under the project root by ConfigService; an
+    absolute path for the OTHER OS (e.g. "/app/data/..." seen on Windows) is
+    normalized by ConfigService to data/<basename>, so both are allowed."""
+    raw = value or ""
+    if "\x00" in raw:
+        return "chrome_profile must not contain NUL characters"
+    if ".." in re.split(r"[\\/]", raw):
+        return "chrome_profile must not contain '..'"
+    on_windows = os.name == "nt"
+    looks_windows_abs = bool(_WINDOWS_ABS_RE.match(raw)) or "\\" in raw
+    if (looks_windows_abs and not on_windows) or (raw.startswith("/") and on_windows):
+        return None  # foreign-OS absolute: ConfigService normalizes it into data/
+    pure = PureWindowsPath(raw) if on_windows else PurePosixPath(raw)
+    if not (pure.drive or pure.root):
+        return None  # relative: anchored under the project root
+    data_dir = _DATA_DIR.resolve()
+    try:
+        resolved = Path(raw).resolve()
+    except (OSError, ValueError):
+        return "chrome_profile is not a valid path"
+    if resolved == data_dir or not resolved.is_relative_to(data_dir):
+        return f"chrome_profile must be a directory inside {data_dir}"
+    return None
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Sources
@@ -44,6 +88,19 @@ class SourcesConfig(BaseModel):
     # a second account with its own session file + Chrome profile. Selected in
     # the Rule Engine UI. See app/services/session_manager.py (account keying).
     linkedin_account: str = "1"
+
+    @field_validator("linkedin_account", mode="before")
+    @classmethod
+    def _known_linkedin_account(cls, v: object) -> str:
+        """Accept only LINKEDIN_ACCOUNTS ("1"/"2"); None and the legacy default
+        aliases ("", "default", "primary") become "1". Anything else raises (422 on
+        PUT /harvest-config): the id is joined into a filesystem path."""
+        acct = "" if v is None else str(v).strip()
+        if acct in _DEFAULT_ACCOUNT_ALIASES:
+            return "1"
+        if acct not in LINKEDIN_ACCOUNTS:
+            raise ValueError(f"linkedin_account must be one of {', '.join(LINKEDIN_ACCOUNTS)}")
+        return acct
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -170,11 +227,30 @@ class FiltersConfig(BaseModel):
 # ══════════════════════════════════════════════════════════════════════════════
 
 class ScheduleConfig(BaseModel):
-    """APScheduler trigger definition."""
+    """APScheduler trigger definition.
+
+    tenant_id is the tenant a scheduled run (and its jobs) is stamped with; None
+    keeps the pre-existing behaviour of running as the internal tenant."""
     frequency: Literal["hourly", "daily", "weekly"] = "daily"
     run_time:  str  = "09:00"          # HH:MM  (used when frequency == "daily" or "weekly")
     timezone:  str  = "Asia/Kolkata"   # IANA timezone name
     enabled:   bool = False
+    tenant_id: str | None = None       # target tenant of scheduled runs (None = internal)
+
+    @field_validator("tenant_id", mode="before")
+    @classmethod
+    def _known_tenant(cls, v: object) -> str | None:
+        """None/blank → None (internal). Otherwise must be a seeded tenant id, else
+        raises (422 on PUT /harvest-config)."""
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return None
+        from app.models.tenant import SEED_TENANTS
+
+        known = [t["id"] for t in SEED_TENANTS]
+        tid = str(v).strip()
+        if tid not in known:
+            raise ValueError(f"schedule.tenant_id must be one of {', '.join(known)}")
+        return tid
 
     @field_validator("run_time", mode="before")
     @classmethod
@@ -224,6 +300,16 @@ class BrowserConfig(BaseModel):
     headless:       bool = False
     slow_mo_ms:     int  = Field(0, ge=0, le=3000)
     chrome_profile: str  = "data/chrome_profile"
+
+    @field_validator("chrome_profile")
+    @classmethod
+    def _safe_chrome_profile(cls, v: str) -> str:
+        """Reject a ".." path or an absolute one outside the data dir (422 on PUT
+        /harvest-config); see chrome_profile_problem."""
+        problem = chrome_profile_problem(v)
+        if problem:
+            raise ValueError(problem)
+        return v
 
     @property
     def resolved_headless(self) -> bool:

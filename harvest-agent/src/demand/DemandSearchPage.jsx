@@ -77,6 +77,8 @@ export default function DemandSearchPage() {
 
 // ── Demand jobs: the Harvested Jobs page + job detail page, Demand rows only ───
 
+/** Demand "All jobs" view: the Harvested Jobs page in `demand` mode (Demand-source rows only)
+ * with the Demand tabs on top; job rows open /jobs/{id} with a Back link to this view. */
 function DemandJobsView() {
   const { pageSizeSel, setPageSizeSel } = useHarvestData();
   const navigate = useNavigate();
@@ -122,10 +124,18 @@ function DemandTabs({ view, onSelect }) {
   );
 }
 
+/**
+ * Demand Search landing page: header with recruiter session / quota pills, the view tabs and
+ * the New search card (file upload or manual entry). Starting a batch calls POST /demand/upload
+ * or POST /demand/create and navigates to ?processing=<run_id>; a running harvest opens
+ * HarvestRunningModal. Also hosts the recruiter-login LiveBrowserView (useDemandUsage).
+ * onOpenBatch / onOpenJob are only used by the currently hidden Batches / Jobs tabs.
+ */
 function DemandLanding({ onOpenBatch, onOpenJob }) {
   const [params] = useSearchParams();
   const navigate = useNavigate();
   const view = VIEWS.some((v) => v.key === params.get("view")) ? params.get("view") : "new";
+  /** Switch landing tab via the ?view= query param. */
   const setView = (v) => navigate(`/demand?view=${v}`);
   const sess = useDemandUsage();
   const [mode, setMode] = useState("upload");      // New search: upload | manual
@@ -160,9 +170,11 @@ function DemandLanding({ onOpenBatch, onOpenJob }) {
       setStarting(false);
     }
   };
+  /** Start a file batch (POST /demand/upload) named after the file minus its extension. */
   const chooseFile = (f) => {
     if (f) startBatch(() => demandUpload(f, (f.name || "").replace(/\.[^.]+$/, "")));
   };
+  /** Start a manual batch (POST /demand/create) from the draft, then reset the draft. */
   const startManual = () => startBatch(
     () => createManual({ batch_name: draft.batchName.trim(), jobs: checkDraft(draft).payloadJobs }),
     () => setDraft(newDraft()),
@@ -227,9 +239,21 @@ function DemandLanding({ onOpenBatch, onOpenJob }) {
   );
 }
 
+/**
+ * New-search card with an Upload file | Add manually switch. Upload mode is a drag-and-drop /
+ * browse target (.xlsx/.xls/.csv/.docx) plus the column requirements and limits; manual mode
+ * renders the `manual` element.
+ * @param {object} props
+ * @param {Function} props.onFile - called with the chosen/dropped File.
+ * @param {"upload"|"manual"} props.mode - current entry mode.
+ * @param {Function} props.setMode - mode setter.
+ * @param {React.ReactNode} props.manual - manual-entry form to show in manual mode.
+ * @param {boolean} [props.starting] - a batch is being started; disables the drop zone.
+ */
 function UploadCard({ onFile, mode, setMode, manual, starting = false }) {
   const [dragging, setDragging] = useState(false);
   const inputId = "dm-file-input";
+  /** Open the hidden file input's picker. */
   const pick = () => document.getElementById(inputId)?.click();
   return (
     <div className="ha-card dm-card">
@@ -290,6 +314,7 @@ function UploadCard({ onFile, mode, setMode, manual, starting = false }) {
 
 // ── Shared list helpers ───────────────────────────────────────────────────────
 
+/** Return `value` once it has stopped changing for `ms` milliseconds (default 300). */
 function useDebounced(value, ms = 300) {
   const [v, setV] = useState(value);
   useEffect(() => {
@@ -303,6 +328,7 @@ const SOURCE_OPTIONS = [
   { value: "all", label: "All" }, { value: "file", label: "File" }, { value: "manual", label: "Manual" },
 ];
 
+/** Labelled native date input; onChange receives the "YYYY-MM-DD" string. */
 function DateField({ label, value, onChange, min, max }) {
   return (
     <label className="dm-date">
@@ -312,6 +338,8 @@ function DateField({ label, value, onChange, min, max }) {
   );
 }
 
+/** Offset pager: "Showing a–b of N {unit}" with Previous / Next; onPage gets the new offset.
+ * Renders nothing when total is 0. */
 function PageNav({ total, offset, size, onPage, unit }) {
   if (!total) return null;
   const from = offset + 1;
@@ -341,10 +369,13 @@ function useListFilters() {
   useEffect(() => { setOffset(0); }, [dq, source, from, to]);
   const params = { q: dq, source, date_from: from, date_to: to };
   const active = !!(dq || source !== "all" || from || to);
+  /** Reset search text, source and date range (the offset resets via the effect above). */
   const clear = () => { setQ(""); setSource("all"); setFrom(""); setTo(""); };
   return { q, setQ, source, setSource, from, setFrom, to, setTo, offset, setOffset, params, active, clear };
 }
 
+/** Filter bar for the list tabs: search box, extra `children` filters, source select, uploaded
+ * date range and "Clear filters"; `f` is the object returned by useListFilters(). */
 function ListFilters({ f, searchLabel, placeholder, children }) {
   return (
     <div className="dm-filters">
@@ -369,6 +400,8 @@ const BATCH_STATUS_OPTIONS = [
   { value: "stopped", label: "Stopped" }, { value: "failed", label: "Failed" },
 ];
 
+/** Batches tab (currently hidden): filterable, paged table of this tenant's batches from
+ * GET /demand/batches; clicking a batch name calls onOpenBatch(run_id). */
 // eslint-disable-next-line no-unused-vars -- Batches tab hidden for now (see VIEWS)
 function BatchesTab({ onOpenBatch }) {
   const f = useListFilters();

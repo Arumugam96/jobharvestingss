@@ -55,16 +55,19 @@ class ResdexJobSearchError(Exception):
     is {code, message} (the job page keys its message on ``code``)."""
 
     def __init__(self, status_code: int, code: str, message: str) -> None:
+        """Keep the HTTP status, machine-readable ``code`` and user-facing message."""
         super().__init__(message)
         self.status_code = status_code
         self.code = code
         self.message = message
 
     def to_detail(self) -> dict:
+        """The ``{code, message}`` dict routes pass as the HTTPException detail."""
         return {"code": self.code, "message": self.message}
 
 
 def _guard_run_id(job_id: str) -> str:
+    """The run_guard run id that identifies this job's per-job Resdex search."""
     return f"resdex_{job_id}"
 
 
@@ -75,6 +78,8 @@ def is_running(job_id: str) -> bool:
 
 
 def can_run(status: str | None) -> bool:
+    """True when a latest-search ``status`` means Resdex wasn't (fully) searched yet,
+    so the job page may offer "Run Resdex search" (see ``RUNNABLE_STATUSES``)."""
     return (status or "") in RUNNABLE_STATUSES
 
 
@@ -90,6 +95,7 @@ def _recruiter_session() -> dict:
 async def _job_and_latest_search(job_id: str) -> tuple[Any, Any]:
     """(ScrapedJobORM, its newest ResdexSearchORM | None) for this tenant, or (None, None)."""
     async def _q(db):
+        """Load the job, then its newest tenant-scoped search by normalized job URL."""
         job = await HarvestRunService(db).get_scraped_job_by_id(job_id)
         if job is None:
             return None, None

@@ -49,6 +49,7 @@ _PLACEHOLDERS = {"", "-", "--", "---", "–", "—", "n/a", "na", "n.a.", "null"
 
 
 def _norm(h: str) -> str:
+    """Normalise a header for matching: lowercase, non-alphanumeric runs -> single spaces."""
     return re.sub(r"[^a-z0-9]+", " ", str(h).lower()).strip()
 
 
@@ -86,6 +87,7 @@ def _map_columns(headers: list[str]) -> dict[str, str | None]:
 
 
 def _clean_domain(value: str) -> str:
+    """Reduce a website/URL cell to a bare lowercase host without ``www.`` or a path."""
     v = value.strip()
     if not v:
         return ""
@@ -101,6 +103,7 @@ def _clean_domain(value: str) -> str:
 
 
 def _clean_linkedin(value: str) -> str:
+    """Trim a LinkedIn cell and add ``https://`` to a scheme-less linkedin.com URL."""
     v = value.strip()
     if not v:
         return ""
@@ -112,8 +115,18 @@ def _clean_linkedin(value: str) -> str:
 def _dedupe_key(row: dict) -> str:
     # Only treat the LinkedIn field as an identity when it is an ACTUAL profile URL — a
     # stray placeholder/garbage value must never become the dedupe key for the whole file.
+    """Identity of an import row: the LinkedIn URL when it is a real linkedin.com URL,
+    else company + person name (lowercased).
+
+    A row with neither (a company-only row) is keyed on company + location + title +
+    domain, so company-only rows for one company that differ in any of those are
+    separate lookups; only an exact repeat is marked duplicate.
+    """
     if "linkedin.com" in row["linkedin_url"].lower():
         return "li:" + row["linkedin_url"].lower().rstrip("/")
+    if not row["person_name"]:
+        parts = (row["company"], row["location"], row["title"], row["domain"])
+        return "co:" + "|".join(p.lower() for p in parts)
     return "cp:" + row["company"].lower() + "|" + row["person_name"].lower()
 
 
@@ -155,6 +168,7 @@ def parse_and_validate(content: bytes, filename: str, *, max_rows: int = 1000) -
         df = df.iloc[:max_rows]
 
     def cell(record, field):
+        """Trimmed value of ``field``'s mapped column; "" if unmapped or a placeholder ("N/A")."""
         col = mapping.get(field)
         if not col:
             return ""

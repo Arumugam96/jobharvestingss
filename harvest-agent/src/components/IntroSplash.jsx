@@ -14,6 +14,11 @@ import { useTenant } from "../TenantContext";
 
 const PALETTE = [[37, 99, 235], [99, 102, 241], [124, 58, 237], [192, 38, 211], [13, 148, 136]];
 
+/**
+ * Interpolates around the PALETTE colour wheel for a particle.
+ * @param {number} t Position on the wheel; wraps, so any real number works.
+ * @returns {string} "r,g,b" for use inside an rgba() string.
+ */
 function particleColor(t) {
   const n = PALETTE.length;
   const f = ((t % 1) + 1) % 1 * n;
@@ -22,6 +27,11 @@ function particleColor(t) {
   return `${(a[0] + (b[0] - a[0]) * k) | 0},${(a[1] + (b[1] - a[1]) * k) | 0},${(a[2] + (b[2] - a[2]) * k) | 0}`;
 }
 
+/**
+ * Full-screen canvas of ~150–300 particles (fewer on narrow screens) that spiral in
+ * from outside and settle into orbits around the logo, with a fading trail.
+ * Runs a requestAnimationFrame loop until unmounted; resizes with the window.
+ */
 function IntroParticles() {
   const ref = useRef(null);
   useEffect(() => {
@@ -29,6 +39,7 @@ function IntroParticles() {
     if (!cv) return undefined;
     const ctx = cv.getContext("2d");
     let raf, W, H;
+    /** Matches the canvas backing store to its CSS size at up to 2x devicePixelRatio. */
     const resize = () => {
       const dpr = Math.min(2, window.devicePixelRatio || 1);
       W = cv.clientWidth; H = cv.clientHeight;
@@ -50,6 +61,7 @@ function IntroParticles() {
       };
     });
     const t0 = performance.now();
+    /** Draws one animation frame (fade previous, then each particle's glow + dot) and re-queues. */
     const frame = (now) => {
       const el = now - t0, T = el / 1000, cx = W / 2, cy = H / 2;
       ctx.fillStyle = "rgba(255,255,255,0.17)"; ctx.fillRect(0, 0, W, H);
@@ -74,6 +86,12 @@ function IntroParticles() {
   return <canvas ref={ref} className="is-fx" />;
 }
 
+/**
+ * One-time post-login splash overlay (logo, spectrum ring, particles) that plays for
+ * 2.4s, dissolves over 0.9s, then unmounts. The tagline names the tenant for client
+ * workspaces. Skipped when sessionStorage "ss_intro_played" is set or the user
+ * prefers reduced motion; sets that flag when it starts playing.
+ */
 export default function IntroSplash() {
   const { tenant, isClient } = useTenant();
   const reducedMotion = useMemo(

@@ -19,6 +19,10 @@ _LOCAL_CHARS = "A-Za-z0-9._%+-"
 # Obfuscated separators accepted when de-obfuscating "name [at] acme [dot] com".
 _AT_SEP = r"(?:\s*[\[({<]\s*at\s*[\])}>]\s*|\s+at\s+|\s*@\s*)"
 _DOT_SEP = r"(?:\s*[\[({<]\s*dot\s*[\])}>]\s*|\s+dot\s+|\s*\.\s*)"
+# An "@" or bracketed "[at]"; a bare " at " only counts together with an
+# obfuscated dot ("[dot]", "(dot)", " dot ") somewhere in the domain.
+_AT_EXPLICIT_RE = re.compile(r"@|[\[({<]\s*at\s*[\])}>]", re.I)
+_DOT_OBFUSCATED_RE = re.compile(r"[\[({<]\s*dot\s*[\])}>]|\s+dot\s+", re.I)
 # The de-obfuscated domain must END there — not continue with another label
 # ("acme(dot)co(dot)in" must not ground "x@acme.co"). A sentence-ending
 # ". Next" is fine: domain dots are never followed by whitespace.
@@ -33,6 +37,7 @@ _WS_RE = re.compile(r"\s+")
 
 
 def _sources(texts: Iterable[str | None]) -> list[str]:
+    """Materialise the source texts as a list, dropping None and empty strings."""
     return [t for t in texts if t]
 
 
@@ -46,7 +51,9 @@ def ground_email(candidate: str | None, sources: Iterable[str | None]) -> tuple[
       * it is a prefix of such a run whose remainder starts with a letter
         (text glued onto the address) and it ends on a real TLD; or
       * de-obfuscation: its local part and every domain label occur, in that
-        order, joined only by at/dot separators ("[at]", "(dot)", " at ", …).
+        order, joined only by at/dot separators ("[at]", "(dot)", " dot ", …).
+        A bare " at " counts only when the domain also uses an obfuscated dot,
+        so prose such as "team at Booking.com" is never read as an address.
     The returned address uses the source's own spelling.
     """
     cand = (candidate or "").strip().strip("<>").strip()
@@ -84,8 +91,13 @@ def ground_email(candidate: str | None, sources: Iterable[str | None]) -> tuple[
     )
     deob = re.compile(pattern, re.I)
     for src in srcs:
-        m = deob.search(src)
-        if m:
+        for m in deob.finditer(src):
+            # A bare " at " is ordinary prose ("team at Booking.com") unless the
+            # domain is obfuscated too ("x at acme dot com", "x at acme[dot]com").
+            at_sep = src[m.end(1):m.start(2)]
+            if not _AT_EXPLICIT_RE.search(at_sep) \
+                    and not _DOT_OBFUSCATED_RE.search(src[m.start(2):m.end()]):
+                continue
             parts = m.groups()
             return f"{parts[0]}@{'.'.join(parts[1:])}", "deobfuscated"
     return None, "not_in_source"

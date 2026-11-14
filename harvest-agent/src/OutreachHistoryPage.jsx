@@ -42,6 +42,7 @@ const ymd = (d) =>
 function rangeBounds(key) {
   const now = new Date();
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  /** New Date `n` days after `base` (negative = before). */
   const addDays = (base, n) => { const x = new Date(base); x.setDate(x.getDate() + n); return x; };
   switch (key) {
     case "today":     return { from: ymd(today), to: ymd(today) };
@@ -255,6 +256,7 @@ export default function OutreachHistoryPage() {
   // Close the date dropdown on an outside click.
   useEffect(() => {
     if (!dateOpen) return undefined;
+    /** Close the dropdown when the press lands outside it. */
     const onDown = (e) => { if (dateRef.current && !dateRef.current.contains(e.target)) setDateOpen(false); };
     window.addEventListener("mousedown", onDown);
     return () => window.removeEventListener("mousedown", onDown);
@@ -271,6 +273,7 @@ export default function OutreachHistoryPage() {
   }, []);
 
   const anyFilter = !!(dq || dCompany || hasDateFilter || engagement);
+  /** Clear search, company, engagement and date-range filters. */
   const resetFilters = () => { setSearch(""); setCompanyQ(""); setEngagement(""); setRangeKey("all"); setCustomFrom(""); setCustomTo(""); };
   // Single-select: clicking the active card clears the filter, any other card switches to it.
   const toggleEngagement = useCallback((key) => setEngagement((cur) => (cur === key ? "" : key)), []);
@@ -288,6 +291,7 @@ export default function OutreachHistoryPage() {
         all = all.concat(res.items || []);
       }
       const head = ["Contact", "Email", "Company", "Client", "Subject", "Tone", "Type", "Status", "Engagement", "Sent"];
+      /** Quote a CSV cell, doubling embedded quotes (null → empty). */
       const esc = (v) => `"${String(v == null ? "" : v).replace(/"/g, '""')}"`;
       const rows = all.map((it) => [
         it.contact_name || "", it.to_email || "", it.company || "", it.client_type || "",

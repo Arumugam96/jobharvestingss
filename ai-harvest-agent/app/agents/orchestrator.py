@@ -30,6 +30,7 @@ class AgentOrchestrator:
         llm_service: LLMService,
         playwright_service: PlaywrightService,
     ) -> None:
+        """Keep the shared LLM and Playwright services that every created agent is given."""
         self._llm = llm_service
         self._playwright = playwright_service
 
@@ -99,6 +100,7 @@ class AgentOrchestrator:
         return {"records": all_records, "total": len(all_records), "pipeline": "two-stage"}
 
     def list_agents(self) -> list[dict[str, str]]:
+        """List registered agent types with their class docstring as the description."""
         return [
             {"type": k.value, "description": cls.__doc__ or ""}
             for k, cls in _AGENT_REGISTRY.items()

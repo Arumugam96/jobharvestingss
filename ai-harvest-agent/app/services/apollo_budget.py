@@ -6,7 +6,8 @@ useless — the cap MUST be DB-backed to hold across runs/processes. This module
 the `apollo_daily_usage` counter (one row per UTC date) and exposes a single atomic
 ``try_consume`` that ApolloClient calls BEFORE every credit-spending request. When the
 day's budget is exhausted, ``try_consume`` returns False and the client short-circuits
-to its empty/no-match result (never raises).
+to its empty result — flagged ``budget_denied`` for person reveals, so callers can
+tell a cap denial from a real miss (never raises).
 
 Three caps bound Apollo spend:
   * ``APOLLO_DAILY_CAP`` — the account-wide ceiling; EVERY credit reserves against it.
@@ -17,6 +18,8 @@ Three caps bound Apollo spend:
     the remaining global headroom.
   * ``RECRUITER_FINDER_DAILY_CAP`` — Recruiter Finder's own per-tenant cap, enforced
     separately in app/services/recruiter_finder_budget.py.
+
+(ApolloClient uses ``try_reserve``, the same gate returning the reservation date.)
 
 Atomicity: the gate is a single conditional ``UPDATE ... WHERE count + cost <= cap``
 whose row-count tells us whether the bump was allowed — row-locked in Postgres and
@@ -51,6 +54,7 @@ logger = structlog.get_logger(__name__)
 
 
 def _utc_today():
+    """Today's date in UTC: the key of the daily counter row (caps reset at UTC midnight)."""
     return datetime.now(timezone.utc).date()
 
 
@@ -168,17 +172,13 @@ def _min_remaining(a: int | None, b: int | None) -> int | None:
     return min(a, b)
 
 
-async def try_consume(
+async def try_reserve(
     cost: int = 1, *, cap: int | None = None, purpose: str | None = None
-) -> bool:
-    """Atomically reserve ``cost`` Apollo credit-calls for today, if the daily caps
-    allow. Returns True when reserved (caller may spend), False when a cap is reached
-    (caller must skip). ``cap`` defaults to settings.apollo_daily_cap; ``cap <= 0``
-    means unlimited (always allowed, still counted). With ``purpose``, the per-purpose
-    row is reserved first (sub-capped for "enrichment") in the SAME transaction — if
-    either the purpose or the global gate denies, both bumps are rolled back.
-    Fail-open on any DB error.
-    """
+) -> date | None:
+    """Same gate as ``try_consume``, but returns the UTC date the credits were reserved
+    on (None when a cap denied them). Pass that date to ``settle(day=...)`` so a release
+    that runs after UTC midnight lands on the reservation's counter row, not the next
+    day's. Fail-open on any DB error (returns today's date)."""
     settings = get_settings()
     cap = settings.apollo_daily_cap if cap is None else cap
     today = _utc_today()
@@ -193,16 +193,30 @@ async def try_consume(
                         "apollo_enrichment_cap_reached",
                         purpose=purpose, cap=p_cap, date=str(today),
                     )
-                    return False
+                    return None
             if not await _reserve(db, today, cap, cost):
                 await db.rollback()  # also undoes the purpose bump above
                 logger.info("apollo_daily_cap_reached", cap=cap, date=str(today))
-                return False
+                return None
             await db.commit()
-            return True
+            return today
     except Exception as exc:
         logger.warning("apollo_budget_check_failed", error=str(exc))
-        return True  # fail-open: don't block enrichment on a DB blip
+        return today  # fail-open: don't block enrichment on a DB blip
+
+
+async def try_consume(
+    cost: int = 1, *, cap: int | None = None, purpose: str | None = None
+) -> bool:
+    """Atomically reserve ``cost`` Apollo credit-calls for today, if the daily caps
+    allow. Returns True when reserved (caller may spend), False when a cap is reached
+    (caller must skip). ``cap`` defaults to settings.apollo_daily_cap; ``cap <= 0``
+    means unlimited (always allowed, still counted). With ``purpose``, the per-purpose
+    row is reserved first (sub-capped for "enrichment") in the SAME transaction — if
+    either the purpose or the global gate denies, both bumps are rolled back.
+    Fail-open on any DB error. Use ``try_reserve`` to also learn the reservation date.
+    """
+    return await try_reserve(cost, cap=cap, purpose=purpose) is not None
 
 
 async def _release(db: AsyncSession, today, cost: int, purpose: str | None) -> None:
@@ -252,16 +266,19 @@ async def _settle(
 
 
 async def settle(
-    reserved: int, consumed: int, *, purpose: str | None = None, endpoint: str = ""
+    reserved: int, consumed: int, *, purpose: str | None = None, endpoint: str = "",
+    day: date | None = None,
 ) -> None:
     """Reconcile a ``try_consume(reserved)`` reservation to the ``consumed`` credits the
-    Apollo response actually indicated (see module docstring). Best-effort — never
-    raises; a DB error leaves the (conservative, over-counted) reservation in place."""
+    Apollo response actually indicated (see module docstring). ``day`` is the date the
+    reservation was made on (``try_reserve``'s return value) so a settle that runs after
+    UTC midnight adjusts that day's counters; None = today. Best-effort — never raises;
+    a DB error leaves the (conservative, over-counted) reservation in place."""
     settings = get_settings()
     try:
         factory = get_session_factory(settings)
         async with factory() as db:
-            await _settle(db, _utc_today(), reserved, consumed, purpose, endpoint)
+            await _settle(db, day or _utc_today(), reserved, consumed, purpose, endpoint)
             await db.commit()
     except Exception as exc:
         logger.warning(

@@ -32,7 +32,7 @@ import asyncio
 import random
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -231,7 +231,7 @@ class _S:
 # ── LinkedIn filter URL param maps ────────────────────────────────────────────
 _WORK_MODE_MAP: dict[str, str] = {"Remote": "2", "Hybrid": "3", "Onsite": "1", "Any": ""}
 _JOB_TYPE_MAP:  dict[str, str] = {"Contract": "C", "Permanent": "F", "Part-time": "P", "Any": ""}
-_DATE_MAP:      dict[int, str] = {24: "r86400", 168: "r604800", 720: "r2592000"}
+# Posted-within window: f_TPR=r<hours*3600> for any positive window (_build_filtered_url).
 
 _STEALTH: list[str] = [
     "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});",
@@ -275,12 +275,14 @@ _WHITESPACE   = re.compile(r"[ \t]{2,}")
 
 
 def _clean(text: str) -> str:
+    """Replace zero-width/soft-hyphen junk, collapse runs of spaces and newlines, and strip."""
     text = _UNICODE_JUNK.sub(" ", text)
     text = _WHITESPACE.sub(" ", text)
     return re.sub(r"\n+", " ", text).strip()
 
 
 def _infer_work_mode(location: str) -> str:
+    """Map a location string to remote / hybrid / onsite by keyword, else "not_specified"."""
     loc = (location or "").lower()
     if "remote" in loc:
         return "remote"
@@ -291,17 +293,48 @@ def _infer_work_mode(location: str) -> str:
     return "not_specified"
 
 
+# "3 days ago", "30+ days ago", "2 weeks ago", "1 month ago", "5 hours ago", …
+_POSTED_RELATIVE_RE = re.compile(
+    r"(\d+)\+?\s*(seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?|months?|years?)\b",
+    re.IGNORECASE,
+)
+_POSTED_UNIT_DAYS = {"s": 0, "m": 0, "h": 0, "d": 1, "w": 7, "mo": 30, "y": 365}
+
+
 def _format_posted(raw: str) -> str:
-    """Normalise posted date to YYYY-MM-DD. Handles ISO datetime and relative text."""
+    """Normalise a posted label to YYYY-MM-DD, or "" when it can't be resolved.
+
+    Handles ISO dates/datetimes and relative text: "just now"/"today", "yesterday",
+    "N seconds/minutes/hours ago" (today), "N days ago", "N+ days ago" (lower bound),
+    weeks, months (30 days) and years (365 days). Anything else returns "" rather
+    than pretending the job was posted today.
+    """
+    raw = (raw or "").strip()
     if not raw:
-        return datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    raw = raw.strip()
-    if "T" in raw and len(raw) >= 10:
-        return raw[:10]
+        return ""
     if re.match(r"\d{4}-\d{2}-\d{2}", raw):
         return raw[:10]
-    # Relative text like "2 days ago", "1 week ago" — use today
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = datetime.now(timezone.utc)
+    low = raw.lower()
+    if any(k in low for k in ("just now", "moments ago", "today")):
+        return today.strftime("%Y-%m-%d")
+    if "yesterday" in low:
+        return (today - timedelta(days=1)).strftime("%Y-%m-%d")
+    m = _POSTED_RELATIVE_RE.search(low)
+    if not m:
+        return ""
+    unit = m.group(2)
+    key = "mo" if unit.startswith("mo") else ("m" if unit.startswith("mi") else unit[0])
+    return (today - timedelta(days=int(m.group(1)) * _POSTED_UNIT_DAYS[key])).strftime("%Y-%m-%d")
+
+
+def _mask_email(email: str) -> str:
+    """Log-safe form of an account email: first character of the local part, then
+    "***@" and the domain ("j***@acme.com"); "***" when it has no "@"."""
+    local, sep, domain = (email or "").partition("@")
+    if not sep:
+        return "***" if email else ""
+    return f"{local[:1]}***@{domain}"
 
 
 async def _delay(page: Page, lo: int, hi: int) -> None:
@@ -310,6 +343,7 @@ async def _delay(page: Page, lo: int, hi: int) -> None:
 
 
 async def _first_text(root: Page | ElementHandle, selectors: list[str]) -> str:
+    """Stripped inner text of the first selector that matches with non-blank text, else ""."""
     for sel in selectors:
         try:
             el = await root.query_selector(sel)
@@ -323,6 +357,7 @@ async def _first_text(root: Page | ElementHandle, selectors: list[str]) -> str:
 
 
 async def _first_attr(root: Page | ElementHandle, selectors: list[str], attr: str) -> str:
+    """Stripped `attr` value of the first selector with a non-empty value, else ""."""
     for sel in selectors:
         try:
             el = await root.query_selector(sel)
@@ -356,6 +391,7 @@ class LinkedInFormScraper:
     """
 
     def __init__(self) -> None:
+        """Read the LinkedIn credentials from settings; the browser starts in __aenter__."""
         self._pw:               Playwright     | None = None
         self._browser:          Browser        | None = None
         self._context:          BrowserContext | None = None
@@ -367,6 +403,10 @@ class LinkedInFormScraper:
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     async def __aenter__(self) -> "LinkedInFormScraper":
+        """Launch a visible stealth Chromium, loading the saved session file if present.
+
+        Records whether a saved session was loaded so _run can verify it before searching.
+        """
         self._pw = await async_playwright().start()
         self._browser = await self._pw.chromium.launch(
             headless = False,
@@ -397,6 +437,7 @@ class LinkedInFormScraper:
         return self
 
     async def __aexit__(self, *_: Any) -> None:
+        """Close the context, browser and Playwright driver (errors here are not suppressed)."""
         if self._context:
             await self._context.close()
         if self._browser:
@@ -430,6 +471,13 @@ class LinkedInFormScraper:
     # ── Internal flow ──────────────────────────────────────────────────────────
 
     async def _run(self, page: Page, f: FiltersConfig) -> list[ScrapedJob]:
+        """Full search flow: auth, fill + submit the form, apply filters, scroll, extract.
+
+        Verifies a saved session (falling back to credential login when it expired) or logs in with
+        credentials when configured. After submitting the form it re-navigates to a URL carrying the
+        work-mode / job-type / date filters. Raises LinkedInBlockedError on a login/checkpoint
+        redirect and LinkedInNoResultsError when no cards are found.
+        """
 
         # ── Step 0: Login or verify saved session ─────────────────────────────
         if self._has_saved_session:
@@ -526,6 +574,10 @@ class LinkedInFormScraper:
     # ── Form interaction ───────────────────────────────────────────────────────
 
     async def _fill(self, page: Page, selectors: list[str], value: str) -> bool:
+        """Type `value` into the first visible field among `selectors`, human-paced.
+
+        Falls back to a direct page.fill() per selector. Returns False if no selector worked.
+        """
         for sel in selectors:
             try:
                 # Wait for element to be in DOM and visible (more reliable than is_visible poll)
@@ -557,6 +609,7 @@ class LinkedInFormScraper:
         return False
 
     async def _submit(self, page: Page) -> None:
+        """Click the first visible search submit button, else press Enter; never raises."""
         # Try clicking a submit button
         for sel in _S.SUBMIT:
             try:
@@ -577,6 +630,7 @@ class LinkedInFormScraper:
     # ── Overlay dismissal ──────────────────────────────────────────────────────
 
     async def _dismiss_overlays(self, page: Page) -> None:
+        """Best-effort close of the cookie banner and sign-in modal, then Escape any modal."""
         # Cookie banner
         for sel in _S.COOKIE:
             try:
@@ -655,6 +709,10 @@ class LinkedInFormScraper:
         max_jobs: int,
         job_type: str,
     ) -> list[ScrapedJob]:
+        """Collect up to `max_jobs` unique job cards from the results list.
+
+        Waits up to 10 s per card selector for cards to render; cards without a URL are dropped.
+        """
         # Wait for at least one card selector to appear
         for sel in _S.CARD:
             try:
@@ -690,6 +748,10 @@ class LinkedInFormScraper:
         el:       ElementHandle,
         job_type: str,
     ) -> ScrapedJob | None:
+        """Parse one result card into a ScrapedJob; None when it has no title or parsing fails.
+
+        Strips the query string from the job URL and stamps the requested `job_type` on the job.
+        """
         try:
             title   = await _first_text(el, _S.TITLE)
             company = await _first_text(el, _S.COMPANY)
@@ -731,7 +793,10 @@ class LinkedInFormScraper:
         work_mode:           str,
         search_window_hours: int,
     ) -> str:
-        """Build a LinkedIn Jobs search URL with all active filter params."""
+        """Build a LinkedIn Jobs search URL with all active filter params.
+
+        Any positive search_window_hours becomes f_TPR=r<seconds> (24/48/72/168/720 h).
+        """
         from urllib.parse import urlencode
         params: dict[str, str] = {
             "keywords": keywords,
@@ -748,7 +813,7 @@ class LinkedInFormScraper:
             params["geoId"] = geo_id
         wt  = _WORK_MODE_MAP.get(work_mode, "")
         jt  = _JOB_TYPE_MAP.get(job_type, "")
-        tpr = _DATE_MAP.get(search_window_hours, "")
+        tpr = f"r{int(search_window_hours) * 3600}" if (search_window_hours or 0) > 0 else ""
         if wt:  params["f_WT"]  = wt
         if jt:  params["f_JT"]  = jt
         if tpr: params["f_TPR"] = tpr
@@ -757,8 +822,9 @@ class LinkedInFormScraper:
     # ── Login ──────────────────────────────────────────────────────────────────
 
     async def _login(self, page: Page) -> None:
-        """Authenticate with LinkedIn credentials from settings."""
-        logger.info("linkedin_login_started", email=self._email)
+        """Authenticate with LinkedIn credentials from settings (the account email is logged
+        masked only)."""
+        logger.info("linkedin_login_started", email=_mask_email(self._email))
 
         await page.goto(
             "https://www.linkedin.com/login",
@@ -938,6 +1004,7 @@ class LinkedInFormScraper:
         return False
 
     async def _submit_login(self, page: Page) -> None:
+        """Submit the login form: role locator, CSS selectors, JS click, then Enter."""
         # Try role-based locator first (most semantic / reliable)
         try:
             btn = page.get_by_role("button", name="Sign in", exact=True).first
@@ -992,6 +1059,10 @@ class LinkedInFormScraper:
     # ── Blocked detection ──────────────────────────────────────────────────────
 
     async def _check_blocked(self, page: Page) -> None:
+        """Raise LinkedInBlockedError (after a debug screenshot) if the page sits on a gated URL.
+
+        Gated means /login, /checkpoint, /challenge or /authwall.
+        """
         blocked_patterns = ("/login", "/checkpoint", "/challenge", "/authwall")
         for pat in blocked_patterns:
             if pat in page.url:

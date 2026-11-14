@@ -25,6 +25,7 @@ export function fmtAbs(iso) {
   }
 }
 
+/** Locale hour:minute only ("—" when missing; the raw string if formatting throws). */
 export function fmtTime(iso) {
   if (!iso) return "—";
   try {
@@ -51,12 +52,14 @@ export function fmtRel(iso) {
 }
 
 const AVATAR_COLORS = ["#6366F1", "#0EA5E9", "#8B5CF6", "#10B981", "#F43F5E", "#F59E0B", "#14B8A6", "#EC4899"];
+/** Two-letter avatar initials: first letters of the first two words, else the first two chars. */
 export function initials(name, email) {
   const base = (name || email || "?").trim();
   const parts = base.split(/\s+/).filter(Boolean);
   if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
   return base.slice(0, 2).toUpperCase();
 }
+/** Deterministic avatar background picked from AVATAR_COLORS by a char-code sum of `seed`. */
 export function avatarColor(seed) {
   const s = (seed || "?");
   let n = 0;
@@ -67,6 +70,8 @@ export function avatarColor(seed) {
 // Delivery engagement — derived from the send status + latest Mailjet event.
 export function engagement(it) {
   if (it.status === "failed") return { label: "Failed", color: "#B91C1C", dot: "#B91C1C" };
+  // "pending" = the send is claimed but SMTP hasn't finished (or the process died mid-send).
+  if (it.status === "pending") return { label: "Sending", color: "#B45309", dot: "#D97706" };
   switch (it.delivery_status) {
     case "clicked":
       return { label: "Clicked", color: "#0D9488", dot: "#0D9488" };
@@ -102,6 +107,7 @@ export const EVENT_COLOR = {
 // terminal negative (Bounced/Blocked/Spam) or Unsubscribed appended.
 export function deliveryTimeline(it) {
   const steps = [];
+  /** Appends a step once per label, and only when it has a timestamp. */
   const add = (label, at) => { if (at && !steps.some((s) => s.label === label)) steps.push({ label, at }); };
   add("Sent", it.created_at);            // always present
   add("Delivered", it.delivered_at);     // from the 200 (or a 'sent' webhook)
@@ -135,6 +141,10 @@ export const TONE_STYLE = {
   Direct: { color: "#9A3412", bg: "#FFF1E8" },
   "Follow-up": { color: "#92580B", bg: "#FFF6E9" },
 };
+/**
+ * Label + colours for a send's tone pill: a known tone's TONE_STYLE, an unknown tone in
+ * grey, "Follow-up" for an untoned follow-up, else null.
+ */
 export function toneMeta(it) {
   if (it.tone && TONE_STYLE[it.tone]) return { label: it.tone, ...TONE_STYLE[it.tone] };
   if (it.tone) return { label: it.tone, color: "#475569", bg: "#F1F5F9" };
@@ -153,6 +163,7 @@ export const STATUS_META = {
   Opened:       { Icon: MailOpen,          color: "#0E7C5A", bg: "#E7F7F0" },
   Clicked:      { Icon: MousePointerClick, color: "#0D7D74", bg: "#E4F5F3" },
   Sent:         { Icon: Send,              color: "#64748B", bg: "#F1F5F9" },
+  Sending:      { Icon: Send,              color: "#B45309", bg: "#FEF3C7" },
   Failed:       { Icon: Ban,               color: "#DC2626", bg: "#FDECEC" },
   Bounced:      { Icon: CornerUpLeft,      color: "#DC2626", bg: "#FDECEC" },
   Blocked:      { Icon: Ban,               color: "#DC2626", bg: "#FDECEC" },
@@ -167,6 +178,7 @@ export const STATUS_META = {
 // (e.g. Delivered → Opened → Clicked).
 export function engagementLabels(it) {
   if (it.status === "failed") return ["Failed"];
+  if (it.status === "pending") return ["Sending"];
   const ds = it.delivery_status;
   if (ds === "bounced") return ["Bounced"];
   if (ds === "blocked") return ["Blocked"];
@@ -198,12 +210,14 @@ export function EngagementCell({ it }) {
   );
 }
 
+/** Tone pill for a sent mail (see toneMeta); a grey dash when it has none. */
 export function ToneChip({ it }) {
   const t = toneMeta(it);
   if (!t) return <span style={{ color: "#CBD5E1" }}>—</span>;
   return <span style={{ fontSize: 11.5, fontWeight: 700, color: t.color, background: t.bg, borderRadius: 999, padding: "3px 10px", whiteSpace: "nowrap" }}>{t.label}</span>;
 }
 
+/** One delivery-timeline step: coloured dot + label, with the bold time when reached (`on`). */
 export function TimelineStep({ on, label, time, color = "#0E7C5A" }) {
   return (
     <span style={{ display: "inline-flex", alignItems: "center", gap: 6, color: on ? "#334155" : "#94A3B8" }}>
@@ -269,6 +283,7 @@ export function EngagementStack({ it }) {
   // A fixed popover would drift from its trigger on scroll/resize — just close it.
   useEffect(() => {
     if (!pop) return undefined;
+    /** Closes the fixed popover on any scroll/resize so it can't drift from its trigger. */
     const onMove = () => setPop(null);
     window.addEventListener("scroll", onMove, true);
     window.addEventListener("resize", onMove);

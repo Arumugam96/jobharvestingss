@@ -24,7 +24,8 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-harvest_db}
       POSTGRES_USER: ${POSTGRES_USER:-harvest}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-harvest_password}
+      # Required — no well-known fallback. Set it in the repo-root .env.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
@@ -53,7 +54,7 @@ services:
     environment:
       # Overrides the env_file value: inside the Docker network the DB host is
       # the "postgres" service, not localhost.
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-harvest}:${POSTGRES_PASSWORD:-harvest_password}@postgres:5432/${POSTGRES_DB:-harvest_db}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-harvest}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-harvest_db}
     volumes:
       # The ONE data directory (see header). Do not mount ./data — a repo-root
       # data/ dir is NOT used by anything anymore.

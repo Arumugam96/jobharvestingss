@@ -57,7 +57,8 @@ class LeadExcelService:
 
     def export(self, result: "LeadIntelligenceResult", run_id: str) -> str:
         """
-        Write leads to Excel and return the resolved file path.
+        Write leads to Excel and return the resolved file path. Lead values are
+        always stored as text, never as formulas (formula-injection guard).
 
         Requires openpyxl; raises ImportError if not installed.
         """
@@ -123,6 +124,10 @@ class LeadExcelService:
                     value = getattr(lead, field, "")
 
                 cell = ws.cell(row=row, column=col_idx, value=value)
+                # Formula-injection guard: a scraped "=..." stays literal text
+                # (exact value, no "'" prefix; "+91 ..." phones are already text).
+                if cell.data_type == "f":
+                    cell.data_type = "s"
                 cell.fill      = row_fill
                 cell.alignment = normal_align
 
@@ -148,6 +153,11 @@ class LeadExcelService:
         self, ws: object, result: "LeadIntelligenceResult",
         Font: object, PatternFill: object, Alignment: object,
     ) -> None:
+        """Write the merged title banner (row 1) and run-summary label/value rows (rows 2-8).
+
+        The ``Font`` / ``PatternFill`` / ``Alignment`` parameters are unused; the styles are
+        re-imported from openpyxl inside the method.
+        """
         from openpyxl.styles import Font as _Font, PatternFill as _Fill, Alignment as _Align
 
         title_font   = _Font(bold=True, size=13, color="FFFFFF")

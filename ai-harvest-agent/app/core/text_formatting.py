@@ -15,16 +15,30 @@ from html import escape as _escape
 from typing import Any
 
 from bs4 import BeautifulSoup, Comment, NavigableString, Tag
-
+_GLYPHS = "•‣▪●○◦"
 _BULLET_PREFIX = re.compile(r"^(?:[•‣▪●○◦*·]|-|\d{1,2}[.)]|\([a-zA-Z0-9]\))\s+")
 # LinkedIn/board scrapes sometimes glue bullet items into one run of text
 # with no line breaks (e.g. "• Item one• Item two") — force each glyph onto
 # its own line before splitting into lines.
-_INLINE_BULLET_GLYPH = re.compile(r"\s*([•‣▪●○◦])\s*")
+_INLINE_BULLET_GLYPH = re.compile(rf"\s*([{re.escape(_GLYPHS)}])\s*")
 # Short "Responsibilities:" / "Requirements:" style section headers — get a
 # blank line before them for visual separation.
 _SECTION_HEADER = re.compile(r"^[A-Za-z][A-Za-z0-9 /&()'\-]{2,60}:$")
 
+# Block-level tags that end a line in html_description_to_text.
+_TEXT_BLOCK_TAGS = [
+    "p", "div", "ul", "ol", "li", "h1", "h2", "h3", "h4", "h5", "h6", "tr",
+    "table", "section", "article", "header", "footer", "aside", "nav", "main",
+    "blockquote", "pre", "hr", "dl", "dt", "dd", "address", "figure",
+    "figcaption", "center", "form", "fieldset",
+]
+_STRUCTURE_BLOCK_TAGS = frozenset(_TEXT_BLOCK_TAGS) | {"thead", "tbody", "tfoot", "td", "th", "li"}
+_EMPHASIS_TAGS = frozenset({"strong", "b", "u", "h1", "h2", "h3", "h4", "h5", "h6"})
+_WRAPPER_TAGS = frozenset({"p", "div", "span", "font"})
+_RAW_TEXT_PARENTS = frozenset({"pre", "code", "script", "style", "textarea"})
+_LINE_BULLET_RE = re.compile(r"^\s*(?:[•‣▪●○◦*·]|-)\s+")
+_NEWLINE_SEP_RE = re.compile(r"(\s*\n\s*)")
+_HEADING_MAX_CHARS = 80
 
 def format_job_description(text: str) -> str:
     """Normalize raw job-description text into clean paragraphs and bullets.
@@ -74,23 +88,17 @@ def format_job_description(text: str) -> str:
 
 # ── HTML sanitization (job-description rich rendering) ─────────────────────────
 
-# Structural/formatting tags kept for display. Everything else is unwrapped
-# (text preserved, tag dropped) or, for dangerous containers, decomposed.
-# Deliberately broad: the LLM fallback is prompted to reproduce LinkedIn's
-# on-page rendering of the description as faithfully as possible (any layout
-# tags), so generic containers, all heading levels, tables, quotes and
-# separators must survive sanitization. Safety comes from what is DROPPED
-# (scripts/styles/iframes/etc. below) and from stripping every attribute
-# except a[href] — not from a minimal tag set. DOMPurify re-sanitizes in the
-# frontend as defense-in-depth.
 _ALLOWED_HTML_TAGS = {
     "p", "br", "ul", "ol", "li", "strong", "b", "em", "i", "u",
     "h1", "h2", "h3", "h4", "h5", "h6", "span", "a",
     "div", "section", "article", "table", "thead", "tbody", "tfoot", "tr",
     "th", "td", "blockquote", "pre", "code", "hr", "sub", "sup", "small",
-    "dl", "dt", "dd",
+    "dl", "dt", "dd"
 }
-_ALLOWED_HTML_ATTRS: dict[str, set[str]] = {"a": {"href", "target", "rel"}}
+_ALLOWED_HTML_ATTRS: dict[str, set[str]] = {"a": {"href", "target", "rel"},
+                                             "font": {"color", "size", "face",
+                                                },
+                                            }
 _DROP_HTML_CONTAINERS = [
     "script", "style", "noscript", "iframe", "svg", "img",
     "button", "input", "form", "link", "meta",
@@ -162,11 +170,13 @@ def description_text_to_html(text: str) -> str:
     bullets: list[str] = []
 
     def _flush_para() -> None:
+        """Emit pending paragraph lines as one escaped <p>, joined by <br>."""
         if para:
             out.append("<p>" + "<br>".join(_escape(l) for l in para) + "</p>")
             para.clear()
 
     def _flush_bullets() -> None:
+        """Emit pending bullet items as one escaped <ul> list."""
         if bullets:
             out.append("<ul>" + "".join(f"<li>{_escape(b)}</li>" for b in bullets) + "</ul>")
             bullets.clear()
@@ -245,29 +255,12 @@ def html_description_to_text(html: str) -> str:
     return format_job_description(soup.get_text())
 
 
-# Block-level tags that end a line in html_description_to_text.
-_TEXT_BLOCK_TAGS = [
-    "p", "div", "ul", "ol", "li", "h1", "h2", "h3", "h4", "h5", "h6", "tr",
-    "table", "section", "article", "header", "footer", "aside", "nav", "main",
-    "blockquote", "pre", "hr", "dl", "dt", "dd", "address", "figure",
-    "figcaption", "center", "form", "fieldset",
-]
 
 
-# ── Structure repair for authored description HTML (Naukri) ─────────────────────
 
-_STRUCTURE_BLOCK_TAGS = frozenset(_TEXT_BLOCK_TAGS) | {"thead", "tbody", "tfoot", "td", "th", "li"}
-_EMPHASIS_TAGS = frozenset({"strong", "b", "u", "h1", "h2", "h3", "h4", "h5", "h6"})
-_WRAPPER_TAGS = frozenset({"p", "div", "span", "font"})
-_RAW_TEXT_PARENTS = frozenset({"pre", "code", "script", "style", "textarea"})
-_LINE_BULLET_RE = re.compile(r"^\s*(?:[•‣▪●○◦*·]|-)\s+")
-_GLYPHS = "•‣▪●○◦"
-_GLYPH_SPLIT_RE = re.compile(rf"\s*([{_GLYPHS}])\s*")
-_NEWLINE_SEP_RE = re.compile(r"(\s*\n\s*)")
-_HEADING_MAX_CHARS = 80
-
-
+# ── Structure repair for authored description HTML (Naukri) ────────────────────
 def _seg_text(nodes: list) -> str:
+    """Visible text of a node segment with all whitespace runs collapsed to one space."""
     raw = "".join(n.get_text() if isinstance(n, Tag) else str(n) for n in nodes)
     return " ".join(raw.split())
 
@@ -301,6 +294,7 @@ def _is_heading_segment(nodes: list) -> bool:
 
 
 def _is_bullet_segment(nodes: list) -> bool:
+    """True when the segment's text starts with a typed bullet marker ("- ", "• ", ...)."""
     return bool(_LINE_BULLET_RE.match(_seg_text(nodes)))
 
 
@@ -336,13 +330,13 @@ def _newlines_to_br(root: Tag, soup: BeautifulSoup) -> None:
             continue
         text = str(node)
         if sum(text.count(g) for g in _GLYPHS) >= 2:
-            text = _GLYPH_SPLIT_RE.sub(r"\n\1 ", text)
+            text = _INLINE_BULLET_GLYPH.sub(r"\n\1 ", text)
         if "\n" not in text:
             continue
         tokens = _NEWLINE_SEP_RE.split(text)       # odd indices = separators
         new: list = []
         for idx, tok in enumerate(tokens):
-            if idx % 2 == 0:
+            if not idx & 1:                     # even index = text token
                 if tok:
                     new.append(NavigableString(tok))
                 continue
@@ -380,7 +374,7 @@ def _split_list_items(lst: Tag, soup: BeautifulSoup) -> None:
     for li in lst.find_all("li", recursive=False):
         _unwrap_single_wrapper(li)
     if not any(isinstance(c, Tag) and c.name == "br"
-               for li in lst.find_all("li", recursive=False) for c in li.contents):
+        for li in lst.find_all("li", recursive=False) for c in li.contents):
         return
 
     blocks: list[tuple[str, Any]] = []
@@ -474,6 +468,7 @@ def _rebuild_line_run(nodes: list, soup: BeautifulSoup) -> list[Tag] | None:
 
 
 def _has_block_child(tag: Tag) -> bool:
+    """True if any direct child is a block-level tag (so the tag isn't a flat line run)."""
     return any(isinstance(c, Tag) and c.name in _STRUCTURE_BLOCK_TAGS for c in tag.children)
 
 
@@ -490,6 +485,10 @@ def _split_paragraph_lines(root: Tag, soup: BeautifulSoup) -> None:
     run: list = []
 
     def _flush() -> None:
+        """Rebuild the pending inline run in place if it contains a <br>, then reset it.
+
+        The rebuilt nodes are inserted before the run and the original nodes detached.
+        """
         if run and any(isinstance(n, Tag) and n.name == "br" for n in run):
             rebuilt = _rebuild_line_run(list(run), soup)
             if rebuilt:

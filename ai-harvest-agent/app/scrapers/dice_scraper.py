@@ -217,12 +217,14 @@ _WHITESPACE   = re.compile(r"[ \t]{2,}")
 
 
 def _clean(text: str) -> str:
+    """Replace zero-width/soft-hyphen junk, collapse runs of spaces and newlines, and strip."""
     text = _UNICODE_JUNK.sub(" ", text)
     text = _WHITESPACE.sub(" ", text)
     return re.sub(r"\n+", " ", text).strip()
 
 
 def _infer_work_mode(text: str) -> str:
+    """Map free text to remote / hybrid / onsite by keyword, else "not_specified"."""
     t = (text or "").lower()
     if "remote" in t:
         return "remote"
@@ -233,28 +235,73 @@ def _infer_work_mode(text: str) -> str:
     return "not_specified"
 
 
+_POSTED_REL_RE = re.compile(
+    r"\b(\d+|an?|one)\s*\+?\s*(minute|min|hour|hr|day|week|month|year|yr)s?\b", re.I,
+)
+_POSTED_REL_DAYS = {"day": 1, "week": 7, "month": 30, "year": 365, "yr": 365}
+_POSTED_ABS_RES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
+    # "Oct 12, 2026" / "October 12 2026" / "Sept. 3, 2026"
+    (re.compile(r"\b([a-z]{3,9})\.?\s+(\d{1,2}),?\s+(\d{4})\b"), ("%b %d %Y", "%B %d %Y")),
+    # "12 Oct 2026" / "12 October, 2026"
+    (re.compile(r"\b(\d{1,2})\s+([a-z]{3,9})\.?,?\s+(\d{4})\b"), ("%d %b %Y", "%d %B %Y")),
+    # "10/12/2026" (US month/day/year — Dice is a US board)
+    (re.compile(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b"), ("%m %d %Y",)),
+)
+
+
 def _format_posted(raw: str) -> str:
-    if not raw:
-        return datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    r = raw.strip().lower()
-    today = datetime.now(timezone.utc)
-    if not r or "today" in r or "just now" in r or "hour" in r or "minute" in r:
-        return today.strftime("%Y-%m-%d")
-    if "yesterday" in r:
-        return (today - timedelta(days=1)).strftime("%Y-%m-%d")
-    m = re.search(r"(\d+)\s*day", r)
+    """Turn a Dice "posted" label into a YYYY-MM-DD date (UTC), or "" when unresolved.
+
+    Handles ISO dates, absolute dates ("Oct 12, 2026", "12 Oct 2026", "10/12/2026"), today /
+    just now / N minutes or hours, yesterday, and "N[+] days / weeks / months / years ago"
+    (also "a/an/one ..."; weeks = 7, months = 30, years = 365 days). An empty, unknown or
+    junk label returns "" — never a guessed "today".
+    """
+    r = re.sub(r"\bsept\b", "sep", (raw or "").strip().lower())
+    if not r:
+        return ""
+    now = datetime.now(timezone.utc)
+    m = re.search(r"\d{4}-\d{2}-\d{2}", r)
     if m:
-        return (today - timedelta(days=int(m.group(1)))).strftime("%Y-%m-%d")
-    if re.match(r"\d{4}-\d{2}-\d{2}", r):
-        return r[:10]
-    return today.strftime("%Y-%m-%d")
+        return m.group(0)
+    for pattern, formats in _POSTED_ABS_RES:
+        m = pattern.search(r)
+        if not m:
+            continue
+        text = " ".join(m.groups())
+        for fmt in formats:
+            try:
+                return datetime.strptime(text, fmt).strftime("%Y-%m-%d")
+            except ValueError:
+                continue
+    if "today" in r or "just now" in r or "moments ago" in r:
+        return now.strftime("%Y-%m-%d")
+    if "yesterday" in r:
+        return (now - timedelta(days=1)).strftime("%Y-%m-%d")
+    m = _POSTED_REL_RE.search(r)
+    if m:
+        n = int(m.group(1)) if m.group(1).isdigit() else 1
+        unit = m.group(2)
+        if unit in ("minute", "min"):
+            return (now - timedelta(minutes=n)).strftime("%Y-%m-%d")
+        if unit in ("hour", "hr"):
+            return (now - timedelta(hours=n)).strftime("%Y-%m-%d")
+        return (now - timedelta(days=n * _POSTED_REL_DAYS[unit])).strftime("%Y-%m-%d")
+    if "hour" in r or "minute" in r:
+        return now.strftime("%Y-%m-%d")   # "few hours ago" / "a few minutes ago"
+    return ""
 
 
 async def _delay(page: Page, lo: int, hi: int) -> None:
+    """Wait a random lo-hi milliseconds on the page (human-like pacing)."""
     await page.wait_for_timeout(random.randint(lo, hi))
 
 
 async def _first_text(root: "Page | ElementHandle", selectors: list[str]) -> str:
+    """Inner text of the first selector that matches with non-blank text, else "".
+
+    Selector errors are ignored and the next selector tried.
+    """
     for sel in selectors:
         try:
             el = await root.query_selector(sel)
@@ -268,6 +315,7 @@ async def _first_text(root: "Page | ElementHandle", selectors: list[str]) -> str
 
 
 async def _first_attr(root: "Page | ElementHandle", selectors: list[str], attr: str) -> str:
+    """Stripped `attr` value of the first selector that matches with a non-empty value, else ""."""
     for sel in selectors:
         try:
             el = await root.query_selector(sel)
@@ -281,6 +329,7 @@ async def _first_attr(root: "Page | ElementHandle", selectors: list[str], attr: 
 
 
 async def _all_texts(root: "Page | ElementHandle", selectors: list[str]) -> list[str]:
+    """Non-blank inner texts of every match of the first selector that yields any, else []."""
     for sel in selectors:
         try:
             els = await root.query_selector_all(sel)
@@ -294,11 +343,13 @@ async def _all_texts(root: "Page | ElementHandle", selectors: list[str]) -> list
 
 
 def _ensure_debug_dir() -> Path:
+    """Create (if needed) and return the data/debug/dice directory."""
     _DEBUG_DIR.mkdir(parents=True, exist_ok=True)
     return _DEBUG_DIR
 
 
 async def _screenshot(page: Page, name: str) -> None:
+    """Best-effort viewport screenshot to data/debug/dice/<name>.png; errors are only logged."""
     try:
         d = _ensure_debug_dir()
         await page.screenshot(path=str(d / f"{name}.png"), full_page=False)
@@ -308,6 +359,7 @@ async def _screenshot(page: Page, name: str) -> None:
 
 
 async def _save_html(page: Page, name: str) -> None:
+    """Best-effort dump of the page HTML to data/debug/dice/<name>.html; errors are only logged."""
     try:
         d = _ensure_debug_dir()
         content = await page.content()
@@ -321,6 +373,7 @@ class DiceScraper:
     """Low-level Dice.com browser scraper. Owned by DiceAgent."""
 
     def __init__(self, page: Page, filters: FiltersConfig) -> None:
+        """Bind the scraper to an already-open page and the harvest filters."""
         self._page    = page
         self._filters = filters
 
@@ -546,10 +599,20 @@ class DiceScraper:
         Capped at max_enrich visits to keep run times reasonable.
         Uses regex extraction from page text — more reliable than CSS selectors
         since recruiter info appears inconsistently across Dice job postings.
+        A phone comes only from a tel: link or from page text where a contact cue
+        word ("call", "phone", "mobile", …) sits right before the number.
         """
         import re as _re
 
-        _PHONE_RE   = _re.compile(r'(?:\+?1[\s\-.]?)?\(?[2-9]\d{2}\)?[\s\-.]?\d{3}[\s\-.]?\d{4}')
+        # A phone is taken from page text only when a contact cue word sits right
+        # before it (as naukri_agent._PHONE_IN_TEXT_RE) — never a bare 10-digit run
+        # (job ids, salaries, Dice's own numbers). Group 1 is the number.
+        _PHONE_RE   = _re.compile(
+            r'\b(?:call|contact|mobile|cell|phone|ph|tel|whats\s*app)\s*'
+            r'(?:no\.?|number|#)?\s*[:\-.]?\s*'
+            r'((?:\+?1[\s\-.]?)?\(?[2-9]\d{2}\)?[\s\-.]?\d{3}[\s\-.]?\d{4})\b',
+            _re.I,
+        )
         _LI_RE      = _re.compile(r'https?://(?:www\.)?linkedin\.com/in/([a-zA-Z0-9\-_%]+)/?')
 
         candidates = [j for j in jobs if j.job_url]
@@ -576,7 +639,10 @@ class DiceScraper:
                 email = email_href.replace("mailto:", "").strip() if email_href else None
 
                 phone_href = await _first_attr(self._page, _Sel.DETAIL_PHONE, "href")
-                phone = phone_href.replace("tel:", "").strip() if phone_href else None
+                phone = (
+                    phone_href[4:].strip() or None
+                    if phone_href.lower().startswith("tel:") else None
+                )
 
                 li_href = await _first_attr(self._page, _Sel.DETAIL_LINKEDIN, "href")
                 li_url  = li_href.split("?")[0] if li_href and "/in/" in li_href else None
@@ -598,7 +664,7 @@ class DiceScraper:
                         if not phone:
                             m = _PHONE_RE.search(page_text)
                             if m:
-                                phone = m.group().strip()
+                                phone = m.group(1).strip()
                         if not li_url:
                             m = _LI_RE.search(page_text)
                             if m:
@@ -653,6 +719,10 @@ class DiceScraper:
 
     @staticmethod
     def _build_search_url(f: FiltersConfig, page_num: int = 1) -> str:
+        """Dice search URL for keyword, location, date window, job type, work mode and page.
+
+        Filter values with no Dice mapping are left out of the query string.
+        """
         params: dict[str, str] = {}
         params["q"] = f.keyword if f.keyword else ""
         if f.location:
@@ -669,6 +739,11 @@ class DiceScraper:
         return f"{_DICE_SEARCH_URL}?{qs}" if qs else _DICE_SEARCH_URL
 
     async def _dismiss_overlays(self) -> None:
+        """Clear cookie-consent banners and login/modal overlays that block the results.
+
+        Tries JS clicks, hides the consent overlay via CSS as a fallback, then locator clicks,
+        modal close buttons and Escape. Every step is best-effort and errors are swallowed.
+        """
         # ── Step 1: ConsentManager / cookie consent ────────────────────────────
         # JS-direct click is the most reliable approach (bypasses Playwright
         # viewport/focus/clickability checks that may fail for fixed overlays).
@@ -780,6 +855,10 @@ class DiceScraper:
             pass
 
     async def _scroll_results(self) -> None:
+        """Scroll the results container (or window) to the bottom until its height stops growing.
+
+        Bounded to 6 container / 4 window scroll passes, so lazily rendered cards get loaded.
+        """
         container = None
         for sel in _Sel.CONTAINER:
             try:
@@ -819,6 +898,10 @@ class DiceScraper:
         remaining: int,
         seen_urls: set[str],
     ) -> list[DiceScrapedJob]:
+        """Parse cards into jobs, skipping cards with no URL or a URL already in `seen_urls`.
+
+        Stops once `remaining` jobs are collected. Does not add the new URLs to `seen_urls`.
+        """
         jobs: list[DiceScrapedJob] = []
         for el in raw:
             if len(jobs) >= remaining:
@@ -833,6 +916,11 @@ class DiceScraper:
         return jobs
 
     async def _parse_card(self, el: ElementHandle) -> DiceScrapedJob | None:
+        """Parse one result card into a DiceScrapedJob; None if it has no title or parsing fails.
+
+        Recruiter email/phone are taken only from mailto:/tel: links on the card. Salary and
+        experience are set to "Not Disclosed" / "Not Specified"; skills are capped at 15.
+        """
         try:
             title = _clean(await _first_text(el, _Sel.TITLE))
             if not title:

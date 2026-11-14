@@ -5,7 +5,7 @@ import {
 } from "lucide-react";
 import {
   getHarvestConfig, saveHarvestConfig, runHarvestAgent, getHarvestStatus,
-  getRunHistory, getRunHistoryEntry, getActiveRun, setupLinkedinSession, ApiError,
+  getRunHistory, getRunHistoryEntry, getActiveRun, setupLinkedinSession, ApiError, isTransientError,
   getNaukriRecruiterStatus, startNaukriRecruiterLogin, verifyNaukriRecruiter,
   saveSchedule, getScheduleStatus,
 } from "./api";
@@ -35,6 +35,7 @@ function SourceBadge({ glyph, tint }) {
    local segmented control mirroring the US redesign (hourly/daily/weekly). */
 const FREQUENCIES = ["hourly", "daily", "weekly"];
 
+/** Accessible on/off switch; calls `onChange(!on)` when clicked. */
 function Toggle({ on, onChange, label, disabled }) {
   return (
     <button type="button" role="switch" aria-checked={on} aria-label={label}
@@ -44,6 +45,7 @@ function Toggle({ on, onChange, label, disabled }) {
   );
 }
 
+/** Pressable filter chip; `variant` sets the active colour, `disabled` dims it. */
 function Chip({ active, onClick, children, variant = "green", disabled = false, title }) {
   return (
     <button type="button" className={"rec-chip" + (active ? " is-active rec-chip--" + variant : "")}
@@ -58,6 +60,7 @@ function Chip({ active, onClick, children, variant = "green", disabled = false, 
 // "Others" custom job title/search-term field.
 function TagInput({ tags, onChange, placeholder }) {
   const [text, setText] = useState("");
+  /** Add the trimmed input as a tag (skipping blanks/duplicates) and clear the field. */
   const commit = () => {
     const v = text.trim();
     if (v && !tags.includes(v)) onChange([...tags, v]);
@@ -82,6 +85,7 @@ function TagInput({ tags, onChange, placeholder }) {
   );
 }
 
+/** Styled native <select> over a list of string options; `onChange` gets the value. */
 function Select({ value, onChange, options, ariaLabel }) {
   return (
     <div className="rec-select">
@@ -93,6 +97,10 @@ function Select({ value, onChange, options, ariaLabel }) {
   );
 }
 
+/**
+ * Settings card with title, optional description and required marker; when
+ * `invalid`, it is outlined and shows `error` (default "Select at least one option.").
+ */
 function Card({ title, desc, required, invalid, error, span = false, children }) {
   return (
     <div className={"rec-card" + (span ? " rec-span" : "") + (invalid ? " is-invalid" : "")}>
@@ -122,6 +130,13 @@ const NAUKRI_LOGIN_MAX_MS = 630000; // 600 s login-window timeout + slack
 // Harvest failure reasons that mean "reconnect the Naukri recruiter session".
 const NAUKRI_RECONNECT_RE = /recruiter session expired|recruiter login window is open/i;
 
+/**
+ * State + actions for the Naukri recruiter Connect card (see block comment above).
+ * Loads GET /naukri-recruiter/status on mount (resuming the watch if a login window
+ * is already open) and drives the Live Browser view via `setLiveViewSource`.
+ * @returns {object} status fields plus `connected`, a display `line`, and the
+ *   `connect`, `recheck` and `reopen` actions
+ */
 function useNaukriRecruiter(liveViewSource, setLiveViewSource) {
   const [rec, setRec] = useState({
     status: null, loading: true, error: "", connecting: false, checking: false, message: "",
@@ -132,9 +147,12 @@ function useNaukriRecruiter(liveViewSource, setLiveViewSource) {
   const baseline = useRef(null); // last_check.checked_at when this login started
 
   const patch = (p) => { if (alive.current) setRec((s) => ({ ...s, ...p })); };
+  /** Cancel any pending status poll. */
   const stopPoll = () => { clearTimeout(pollTimer.current); pollTimer.current = null; };
+  /** Close the Live Browser view if it is showing the Naukri login. */
   const closeLive = () => setLiveViewSource((v) => (v === "naukri" ? null : v));
 
+  /** Fetch the recorded recruiter status (no browser); returns it, or null on error. */
   const refresh = async () => {
     try {
       const status = await getNaukriRecruiterStatus();
@@ -146,6 +164,10 @@ function useNaukriRecruiter(liveViewSource, setLiveViewSource) {
     }
   };
 
+  /**
+   * Schedule the next status check; stops (closing the live view) on a fresh
+   * login, on the window closing without one, or at the deadline; else re-polls.
+   */
   const poll = () => {
     stopPoll();
     pollTimer.current = setTimeout(async () => {
@@ -178,6 +200,7 @@ function useNaukriRecruiter(liveViewSource, setLiveViewSource) {
     }, NAUKRI_POLL_MS);
   };
 
+  /** Start following a login window until NAUKRI_LOGIN_MAX_MS from now. */
   const watchLogin = () => {
     deadline.current = Date.now() + NAUKRI_LOGIN_MAX_MS;
     patch({ connecting: true });
@@ -197,6 +220,10 @@ function useNaukriRecruiter(liveViewSource, setLiveViewSource) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  /**
+   * POST /naukri-recruiter/login (600 s window; joins an already-open one), show it
+   * in the Live Browser and poll until the login resolves.
+   */
   const connect = async () => {
     stopPoll();
     baseline.current = rec.status?.last_check?.checked_at ?? null;
@@ -217,6 +244,7 @@ function useNaukriRecruiter(liveViewSource, setLiveViewSource) {
     }
   };
 
+  /** POST /naukri-recruiter/verify (briefly launches a browser), then refresh status. */
   const recheck = async () => {
     patch({ checking: true, message: "Re-checking the recruiter session…" });
     let message = "";
@@ -248,6 +276,7 @@ function useNaukriRecruiter(liveViewSource, setLiveViewSource) {
 
   return {
     ...rec, connected, line, connect, recheck,
+    /** Re-show the Live Browser on the Naukri login window. */
     reopen: () => setLiveViewSource("naukri"),
   };
 }
@@ -266,6 +295,14 @@ const DEFAULT_CONFIG = {
   browser: { headless: false, slow_mo_ms: 0, chrome_profile: "data/chrome_profile" },
 };
 
+/**
+ * Classic Rule Engine page: edit harvest_config (sources, filters, job domain,
+ * company size, hiring entity / GCC, salary, schedule), save it, and run a harvest
+ * with live per-source progress, stall warning and the Live Browser for LinkedIn /
+ * Naukri logins. Adopts a run already in flight on mount. `harvestRunning` /
+ * `setHarvestRunning` are the app-wide single-run mutex; `onRunComplete` refreshes
+ * the shared jobs/run counts.
+ */
 export default function RuleEngineConfig({
   onNavigate = () => {}, jobsCount = 0, runsCount = 0, onRunComplete = () => {},
   harvestRunning = false, setHarvestRunning = () => {},
@@ -372,6 +409,7 @@ export default function RuleEngineConfig({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  /** Load a saved harvest config into every form field and clear the dirty flag. */
   function applyConfig(config) {
     setLoadedConfig(config);
     // Spread only the source toggles — never `linkedin_account` (see the
@@ -427,8 +465,11 @@ export default function RuleEngineConfig({
     gccFlag: !gccMode,
   };
   const hasErrors = Object.values(errors).some(Boolean);
+  /** Whether validation error `k` should show (only after a save/run attempt). */
   const showErr = (k) => attempted && errors[k];
+  /** Flag unsaved edits. */
   const markDirty = () => setDirty(true);
+  /** Toggle one source on/off and mark the form dirty. */
   const setSource = (key, val) => { setSources((s) => ({ ...s, [key]: val })); markDirty(); };
 
   // `base` is the config to merge onto — the server's CURRENT config at save time
@@ -474,6 +515,7 @@ export default function RuleEngineConfig({
     };
   }
 
+  /** Refresh the scheduler's next fire time (errors ignored). */
   function refreshScheduleStatus() {
     getScheduleStatus().then((st) => setNextRun(st?.next_run || null)).catch(() => {});
   }
@@ -531,10 +573,25 @@ export default function RuleEngineConfig({
   // human-readable `message` that changes to a "waiting for login…" prompt
   // if LinkedIn isn't authenticated (see LinkedInAgent._wait_for_manual_login).
   // Falls back to run-history for the final result once status stops "running".
+  // Transient errors (network, 429, 5xx) retry with backoff — 10s doubling to a
+  // 60s cap, reset by any good read — so a blip never marks a live run failed.
   function pollHarvestStatus(jobId, runId) {
+    let retryDelay = 10000;
+    /** Show `msg` and re-run tick after the current backoff delay, then double it (60s cap). */
+    const retryLater = (msg) => {
+      setRunMessage(msg);
+      pollTimer.current = setTimeout(tick, retryDelay);
+      retryDelay = Math.min(retryDelay * 2, 60000);
+    };
+    /**
+     * One status poll: update live progress every 6s while running; on 404 fall
+     * back to run history; retry transient errors with backoff; finish with
+     * success/failed only from a terminal status and release the run mutex.
+     */
     const tick = async () => {
       try {
         const status = await getHarvestStatus(jobId);
+        retryDelay = 10000;
         setSourceStatus(status.sources || null);
         if (status.status === "running") {
           setRunMessage(status.message || "Running…");
@@ -588,16 +645,21 @@ export default function RuleEngineConfig({
               onRunComplete();
             }
           } catch {
-            setRunMessage("Harvest running — no live status available yet; retrying…");
-            pollTimer.current = setTimeout(tick, 10000);
+            retryLater("Harvest running — no live status available yet; retrying…");
             return;
           }
           setHarvestRunning(false);
           return;
         }
+        if (isTransientError(err)) {
+          retryLater("Lost contact with the backend while checking harvest status — the harvest may still be running; retrying…");
+          return;
+        }
+        // Non-transient client error (e.g. 403): stop polling, but the run's real
+        // outcome is unknown — say so rather than claiming it failed.
         setStallWarn("");
         setRunState("failed");
-        setRunMessage(err instanceof ApiError ? err.message : "Lost connection while checking harvest status.");
+        setRunMessage(`Could not check harvest status (${err.message}) — the harvest may still be running; see Run History.`);
         setHarvestRunning(false);
       }
     };
@@ -630,6 +692,10 @@ export default function RuleEngineConfig({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  /**
+   * Run Harvest: refuse if any run is active or the form is invalid, save the
+   * config first (abort if that fails), then POST the run and poll its status.
+   */
   const handleRun = async () => {
     if (runState === "running") return;
     if (harvestRunning) {
@@ -683,14 +749,20 @@ export default function RuleEngineConfig({
   // Naukri recruiter session card (see useNaukriRecruiter above).
   const naukri = useNaukriRecruiter(liveViewSource, setLiveViewSource);
   const naukriCardRef = useRef(null);
+  /** Switch to the Sources tab and scroll the Naukri Connect card into view. */
   const goToNaukriConnect = () => {
     setActiveTab("sources");
     setTimeout(() => naukriCardRef.current?.scrollIntoView({ behavior: "smooth", block: "center" }), 50);
   };
 
+  /** Merge `patch` into one LinkedIn account's setup status. */
   const setAcctStatus = (accountId, patch) =>
     setLinkedinSetup((s) => ({ ...s, [accountId]: { ...s[accountId], ...patch } }));
 
+  /**
+   * Mint a LinkedIn session for `accountId` via /linkedin-setup-session while the
+   * Live Browser shows the login; reports the outcome on that account's row.
+   */
   const handleLinkedinSetup = async (accountId = "1") => {
     setAcctStatus(accountId, { loading: true, message: "Log in below — this is the live browser. Waiting up to 10 minutes…" });
     setLiveViewSource("linkedin");

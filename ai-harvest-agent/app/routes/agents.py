@@ -25,6 +25,7 @@ async def list_agents(
     llm: LLMService = Depends(get_llm_service),
     playwright: PlaywrightService = Depends(get_playwright_service),
 ) -> APIResponse[list[dict]]:
+    """List the agent types the orchestrator can dispatch (from its internal registry)."""
     orchestrator = AgentOrchestrator(llm, playwright)
     return APIResponse(data=orchestrator.list_agents())
 
@@ -40,6 +41,12 @@ async def run_agent(
     llm: LLMService = Depends(get_llm_service),
     playwright: PlaywrightService = Depends(get_playwright_service),
 ) -> APIResponse[AgentRunResponse]:
+    """Run one agent against `url` with `goal` and wait for it to finish.
+
+    Synchronous despite the 202 status: the request blocks until the agent completes. The agent's
+    output is not returned; the response only echoes `job_id` (generated when omitted) with status
+    COMPLETED and a freshly generated `agent_id`. An unknown `config.agent_type` raises ValueError.
+    """
     job_id = payload.job_id or str(uuid.uuid4())
     orchestrator = AgentOrchestrator(llm, playwright)
     await orchestrator.run(

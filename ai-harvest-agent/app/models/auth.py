@@ -89,6 +89,7 @@ class RequestOTPIn(BaseModel):
     @field_validator("email")
     @classmethod
     def _validate_email(cls, v: str) -> str:
+        """Accept only allowed workspace-domain emails; returns the lowercased address."""
         return validate_company_email(v)
 
 
@@ -103,11 +104,13 @@ class VerifyOTPIn(BaseModel):
     @field_validator("email")
     @classmethod
     def _validate_email(cls, v: str) -> str:
+        """Accept only allowed workspace-domain emails; returns the lowercased address."""
         return validate_company_email(v)
 
     @field_validator("otp")
     @classmethod
     def _validate_otp_format(cls, v: str) -> str:
+        """Reject an OTP containing anything but digits (length is not checked here)."""
         if not v.isdigit():
             raise ValueError("OTP must be numeric")
         return v
@@ -115,6 +118,7 @@ class VerifyOTPIn(BaseModel):
     @field_validator("workspace")
     @classmethod
     def _validate_workspace(cls, v: str | None) -> str | None:
+        """Allow None or a known login-page workspace key; raise ValueError otherwise."""
         from app.models.tenant import WORKSPACE_TENANTS  # avoid import cycle
 
         if v is not None and v not in WORKSPACE_TENANTS:
@@ -143,4 +147,5 @@ class AuthenticatedUser(BaseModel):
 
     @property
     def is_admin(self) -> bool:
+        """True when the user's role is the admin role."""
         return self.role == ADMIN_ROLE

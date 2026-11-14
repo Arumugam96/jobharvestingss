@@ -128,6 +128,20 @@ _WORK_MODE_TOKENS: frozenset[str] = frozenset({
     "work from home", "wfh",
 })
 
+# Major Indian cities (lower-cased). A 2-letter token after one of these is an
+# Indian abbreviation ("Chennai, TN" = Tamil Nadu, "Hyderabad, IN" = India), never
+# a US state code. Full US state names are unaffected.
+_INDIAN_CITIES: frozenset[str] = frozenset({
+    "bengaluru", "bangalore", "chennai", "madras", "hyderabad", "secunderabad",
+    "mumbai", "bombay", "navi mumbai", "thane", "pune", "delhi", "new delhi",
+    "gurugram", "gurgaon", "noida", "greater noida", "ghaziabad", "faridabad",
+    "kolkata", "calcutta", "ahmedabad", "gandhinagar", "jaipur", "kochi", "cochin",
+    "thiruvananthapuram", "trivandrum", "coimbatore", "madurai", "mysuru", "mysore",
+    "mangaluru", "mangalore", "visakhapatnam", "vizag", "vijayawada", "indore",
+    "bhopal", "nagpur", "lucknow", "chandigarh", "mohali", "bhubaneswar", "surat",
+    "vadodara", "nashik", "patna", "guwahati", "dehradun",
+})
+
 
 def _canonical_country(token: str) -> str:
     """Return the canonical country name for a location token, or "" if it isn't
@@ -148,7 +162,8 @@ def parse_location(text: str) -> tuple[str, str, str]:
     place-token is a known country (or a US state ⇒ "United States"); otherwise
     it is "". ``state``/``city`` are best-effort (used for display, not
     filtering). All three default to "" for blank / Remote-only / unrecognised
-    input. Never guesses a country.
+    input. Never guesses a country. Tokens are whitespace-stripped; a 2-letter
+    trailing code is not read as a US state after a known Indian city.
     """
     if not text:
         return "", "", ""
@@ -157,7 +172,7 @@ def parse_location(text: str) -> tuple[str, str, str]:
     # "· On-site", "(On-site)".
     geo = re.split(r"[;·(]", text, maxsplit=1)[0]
 
-    tokens = [t for t in geo.split(",") if t.strip()]
+    tokens = [t.strip() for t in geo.split(",") if t.strip()]
     # Drop pure work-mode / "anywhere" tokens ("Chennai, India, Remote").
     tokens = [t for t in tokens if t.lower() not in _WORK_MODE_TOKENS]
     if not tokens:
@@ -169,10 +184,14 @@ def parse_location(text: str) -> tuple[str, str, str]:
 
     last = tokens[-1]
     canon = _canonical_country(last)
+    # A 2-letter code is only a US state outside an Indian context: "Chennai, TN"
+    # is Tamil Nadu and "Hyderabad, IN" is India, not Tennessee / Indiana.
+    indian_context = tokens[0].lower() in _INDIAN_CITIES or any(
+        _canonical_country(t) == "India" for t in tokens)
     if canon:
         country = canon
         rest = tokens[:-1]
-    else:
+    elif not (len(last) == 2 and indian_context):
         us = _us_state(last)
         if us:
             country = "United States"

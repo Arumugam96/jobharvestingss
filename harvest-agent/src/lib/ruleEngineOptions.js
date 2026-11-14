@@ -99,6 +99,7 @@ export const NON_GCC_ENTITIES = ["Direct Client", "Staffing Firm", "Ambiguous"];
 export const normalizeGccMode = (hiringEntity, gccMode) =>
   hiringEntity !== "Any" ? "include_gcc" : (gccMode || "include_gcc");
 
+/** True when a specific hiring entity is chosen, so the GCC-mode control is locked. */
 export const gccLocked = (hiringEntity) => hiringEntity !== "Any";
 
 // A saved config may hold a value outside the curated list (hand-edited JSON,
@@ -125,12 +126,14 @@ export const parseMaxJobs = (input, current) => {
   return Math.min(MAX_JOBS_LIMIT, Math.max(1, Math.floor(x)));
 };
 
+/** Medium date + short time in the browser locale; "—" if empty, raw if unparsable. */
 export const fmtRunDate = (iso) => {
   if (!iso) return "—";
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 };
 
+/** "Today hh:mm AM/PM" for the current local time (12-hour, zero-padded). */
 export const nowLabel = () => {
   const d = new Date();
   let h = d.getHours();

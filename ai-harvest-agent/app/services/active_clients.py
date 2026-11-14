@@ -29,6 +29,7 @@ _WHITESPACE = re.compile(r"\s+")
 
 
 def _normalize(name: str) -> str:
+    """Matching key for a company name: lowercase, legal suffixes and punctuation removed."""
     text = (name or "").lower()
     text = _LEGAL_SUFFIXES.sub("", text)
     text = _PUNCTUATION.sub("", text)
@@ -36,6 +37,11 @@ def _normalize(name: str) -> str:
 
 
 def _load_active_clients() -> frozenset[str]:
+    """Read the active-clients master list as a set of normalized names.
+
+    Accepts either a bare JSON list or ``{"companies": [...]}``. A missing or
+    unreadable file is logged and yields an empty set (every company then counts as new).
+    """
     path = _MASTER_DIR / _ACTIVE_CLIENTS_FILE
     if not path.exists():
         logger.warning("active_clients_file_missing", file=str(path))

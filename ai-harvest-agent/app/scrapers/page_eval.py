@@ -24,6 +24,7 @@ class PageEvaluateTimeout(TimeoutError):
 
 
 def _default_timeout_s() -> float:
+    """Configured page_evaluate_timeout_s, or 30 s if settings can't be loaded."""
     try:
         from app.config import get_settings
 

@@ -37,6 +37,7 @@ OnChange = Callable[[dict[str, dict[str, Any]]], Awaitable[None]]
 
 
 def _now_iso() -> str:
+    """Current UTC time as an ISO-8601 string (the entries' ``updated_at``)."""
     return datetime.now(timezone.utc).isoformat()
 
 
@@ -71,6 +72,8 @@ PROGRESS_PHASES = ("listing", "details", "cooling_down", "waiting_for_human", "d
 
 
 def _entry(state: str = "pending", message: str = "") -> dict[str, Any]:
+    """A new source entry: zero count, empty reason/error, every PROGRESS_KEYS key
+    None ("not reported"), stamped now."""
     entry: dict[str, Any] = {
         "state": state,
         "count": 0,
@@ -174,6 +177,9 @@ class SourceStatusTracker:
         min_interval_s: float = 3.0,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
+        """Track ``sources`` (all start pending). ``on_change`` receives a deep-copied
+        snapshot on each emit; non-forced emits are throttled to one per
+        ``min_interval_s`` (measured with ``clock``, injectable for tests)."""
         self._entries: dict[str, dict[str, Any]] = initial_source_status(sources)
         self._on_change = on_change
         self._min_interval_s = min_interval_s
@@ -191,6 +197,7 @@ class SourceStatusTracker:
 
     @property
     def sources(self) -> list[str]:
+        """The tracked source keys, in the order they were given."""
         return list(self._entries)
 
     def snapshot(self) -> dict[str, dict[str, Any]]:
@@ -198,25 +205,32 @@ class SourceStatusTracker:
         return copy.deepcopy(self._entries)
 
     def state(self, source: str) -> str:
+        """The source's current state; "" for an untracked source."""
         entry = self._entries.get(source)
         return entry["state"] if entry else ""
 
     def count(self, source: str) -> int:
+        """The source's live job count; 0 for an untracked source."""
         entry = self._entries.get(source)
         return int(entry["count"]) if entry else 0
 
     # ── Mutators ─────────────────────────────────────────────────────────────
 
     async def start(self, source: str, message: str = "Starting…") -> None:
+        """Mark the source running and emit immediately (if anything changed)."""
         if self._touch(source, state="running", message=message):
             await self._emit(force=True)
 
-    # async def message(self, source: str, msg: str) -> None:
-    #     """Latest human-readable progress line for ONE source (throttled persist)."""
-    #     if not msg:
-    #         return
-    #     if self._touch(source, message=msg):
-    #         await self._emit(force=False)
+    async def message(self, source: str, msg: str) -> None:
+        """Latest human-readable progress line for ONE source (throttled persist).
+
+        The orchestrator's per-source status callback routes here, and the UI reads
+        ``sources.linkedin.message`` to spot the "log in" prompt — the run-level
+        message is shared by every source and can be overwritten by Naukri/Dice."""
+        if not msg:
+            return
+        if self._touch(source, message=msg):
+            await self._emit(force=False)
 
     async def add_jobs(self, source: str, n: int, message: str | None = None) -> None:
         """A batch of ``n`` freshly-scraped jobs — bumps the live count (persisted
@@ -270,6 +284,9 @@ class SourceStatusTracker:
         await self.progress(source, payload)
 
     async def done(self, source: str, count: int | None = None, message: str | None = None) -> None:
+        """Mark the source done with its final ``count`` (default: the live count) and
+        emit immediately. A progress-reporting source also gets phase "done" and an
+        empty batch meter."""
         entry = self._entries.get(source)
         if entry is None:
             return
@@ -292,6 +309,8 @@ class SourceStatusTracker:
         count: int | None = None,
         message: str | None = None,
     ) -> None:
+        """Mark the source failed: short UI ``reason``, full ``error`` (defaults to
+        the reason), optional final ``count``; emits immediately."""
         entry = self._entries.get(source)
         if entry is None:
             return
@@ -307,6 +326,7 @@ class SourceStatusTracker:
             await self._emit(force=True)
 
     async def skip(self, source: str, reason: str, message: str | None = None) -> None:
+        """Mark the source skipped with a short ``reason`` and emit immediately."""
         if self._touch(
             source, state="skipped", reason=reason,
             message=message if message is not None else f"Skipped — {reason}",
@@ -340,6 +360,9 @@ class SourceStatusTracker:
     # ── Internal ─────────────────────────────────────────────────────────────
 
     def _touch(self, source: str, **fields: Any) -> bool:
+        """Apply ``fields`` to the source's entry; on any real change bump
+        ``updated_at`` and mark dirty. True when something changed (False for an
+        untracked source)."""
         entry = self._entries.get(source)
         if entry is None:
             return False
@@ -354,6 +377,10 @@ class SourceStatusTracker:
         return changed
 
     async def _emit(self, force: bool) -> None:
+        """Send a snapshot to ``on_change``. Non-forced emits inside the throttle
+        window stay dirty and schedule a trailing flush instead. Writes are
+        serialised by a lazily created lock; callback errors are logged, not raised.
+        Without ``on_change`` it just clears the dirty flag."""
         if self._on_change is None:
             self._dirty = False
             return
@@ -382,12 +409,14 @@ class SourceStatusTracker:
                 logger.warning("source_status_emit_failed", error=str(exc))
 
     def _schedule_trailing_flush(self, delay: float) -> None:
+        """Start a timer task that flushes after ``delay`` s, unless one is pending."""
         if self._flush_task is not None and not self._flush_task.done():
             return  # one pending timer is enough — it sends the latest state
         self._flush_sleeping = True
         self._flush_task = asyncio.ensure_future(self._trailing_flush(max(0.0, delay)))
 
     async def _trailing_flush(self, delay: float) -> None:
+        """Sleep ``delay`` s, then emit if a throttled change is still unsent."""
         try:
             await asyncio.sleep(delay)
         finally:

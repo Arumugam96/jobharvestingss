@@ -183,6 +183,7 @@ class LeadIntelligenceResult:
     """Mutable result container built by LeadIntelligenceOrchestrator.run()."""
 
     def __init__(self) -> None:
+        """Initialise every counter, list and path to an empty/zero value."""
         self.run_id:                   str        = ""
         self.executed_at:              str        = ""
         self.keyword:                  str        = ""
@@ -214,6 +215,7 @@ class LeadIntelligenceResult:
 
     @property
     def runtime_minutes(self) -> float:
+        """Run duration in minutes (2 decimals); 0.0 until both start and end are set."""
         if self.started_at and self.completed_at:
             return round(
                 (self.completed_at - self.started_at).total_seconds() / 60, 2
@@ -221,6 +223,7 @@ class LeadIntelligenceResult:
         return 0.0
 
     def to_summary_dict(self) -> dict[str, Any]:
+        """Serialise the run's metadata and counters for API/JSON output."""
         return {
             "run_id":                    self.run_id,
             "executed_at":               self.executed_at,

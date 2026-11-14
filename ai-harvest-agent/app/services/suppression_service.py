@@ -25,6 +25,7 @@ import hmac
 from datetime import datetime, timezone
 from typing import Any
 
+import structlog
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -33,6 +34,9 @@ from app.core.contact_normalize import normalize_email
 from app.models.outreach import EmailOutreachORM
 from app.models.recruiter import RecruiterORM
 from app.models.suppression import EmailSuppressionORM
+
+logger = structlog.get_logger(__name__)
+_warned_fallback_secret = False
 
 
 def _norm(email: str | None) -> str:
@@ -45,14 +49,31 @@ def _norm(email: str | None) -> str:
 # ── Stateless unsubscribe token (HMAC of the email) ─────────────────────────────
 
 def _secret() -> bytes:
-    return (get_settings().jwt_secret_key or "change-me").encode("utf-8")
+    """HMAC key for unsubscribe tokens: the JWT secret, or "change-me" when unset.
+
+    The fallback is kept (existing tokens keep verifying) but logs a warning the
+    first time it is used in this process, since anyone can forge such tokens."""
+    global _warned_fallback_secret
+    secret = get_settings().jwt_secret_key
+    if not secret:
+        if not _warned_fallback_secret:
+            _warned_fallback_secret = True
+            logger.warning(
+                "unsubscribe_secret_fallback",
+                message="JWT_SECRET_KEY is empty — unsubscribe tokens are signed with the "
+                        "public fallback 'change-me'; set JWT_SECRET_KEY",
+            )
+        secret = "change-me"
+    return secret.encode("utf-8")
 
 
 def _b64(raw: bytes) -> str:
+    """URL-safe base64 of ``raw`` with the "=" padding stripped."""
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 
 def _unb64(s: str) -> bytes:
+    """Inverse of _b64: re-pad and decode (raises on malformed input)."""
     return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
 
 

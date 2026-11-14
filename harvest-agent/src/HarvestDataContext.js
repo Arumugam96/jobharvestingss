@@ -9,6 +9,10 @@ import { mapRun } from "./lib/jobsData";
  * read it via useHarvestData() instead of receiving it all as props. */
 const HarvestDataContext = createContext(null);
 
+/**
+ * Shared app data (jobs total, run history, harvestRunning mutex, view caches).
+ * Throws when used outside HarvestDataProvider.
+ */
 export function useHarvestData() {
   const ctx = useContext(HarvestDataContext);
   if (!ctx) throw new Error("useHarvestData must be used within HarvestAgent");
@@ -57,11 +61,22 @@ export function HarvestDataProvider({ children }) {
     }
   }, []);
 
+  // True once any run-history load has succeeded. After that, a failed refetch
+  // (usually the 6s live poll hitting a blip) keeps the last good list — clearing
+  // it would make anyRunning false and stop the live poll for good.
+  const runsLoadedRef = useRef(false);
+
+  /**
+   * Load run history (+ uncapped totals) into context. On failure sets runsError;
+   * the run list is only cleared if no load has ever succeeded, otherwise the
+   * previous runs are kept so the live poll keeps going.
+   */
   const fetchRuns = useCallback(async () => {
     setRunsLoading(true);
     setRunsError("");
     try {
       const res = await getRunHistory();
+      runsLoadedRef.current = true;
       setRuns((res.runs || []).map(mapRun));
       // total_runs is the uncapped count; fall back to the (capped) list length
       // if an older backend didn't send it.
@@ -76,8 +91,10 @@ export function HarvestDataProvider({ children }) {
           ? `Could not load run history: ${err.message}`
           : "Could not reach the harvest backend. Is it running on the configured API URL?"
       );
-      setRuns([]);
-      setRunsTotal(0);
+      if (!runsLoadedRef.current) {
+        setRuns([]);
+        setRunsTotal(0);
+      }
     } finally {
       setRunsLoading(false);
     }
@@ -101,6 +118,7 @@ export function HarvestDataProvider({ children }) {
   useEffect(() => { fetchRuns(); }, [fetchRuns]);
   useEffect(() => {
     syncActiveRun();
+    /** Re-sync the active-run flag whenever the window regains focus. */
     const onFocus = () => syncActiveRun();
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);

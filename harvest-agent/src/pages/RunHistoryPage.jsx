@@ -85,6 +85,7 @@ export default function RunHistoryPage({ runs, runsTotal, runsAggStats, loading,
     });
   }, [runs, filters, startDate, endDate, query, sort, contactMatch]);
 
+  /** Download the filtered, sorted runs as run-history.csv (UTF-8 BOM for Excel). */
   function exportCsv() {
     const header = ["Run ID", "Sources", "Status", "Started", "Completed", "Duration (s)", "Jobs found", "Verified", "Direct clients", "GCC", "Staffing firms", "Ambiguous"];
     const lines = filtered.map((r) =>

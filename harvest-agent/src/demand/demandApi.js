@@ -32,6 +32,8 @@ export function demandUpload(file, batchName) {
   return uploadRequest("/demand/upload", fd);
 }
 
+/** Build a "?k=v" query string, skipping undefined/null/empty values and the "all" filter
+ * sentinel. Returns "" when nothing remains. */
 function qs(params) {
   const usp = new URLSearchParams();
   Object.entries(params || {}).forEach(([k, v]) => {

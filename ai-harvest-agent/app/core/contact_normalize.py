@@ -18,6 +18,7 @@ _PHONE_MIN_DIGITS = 8
 _PHONE_MAX_DIGITS = 15
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_EMAIL_TLD_RE = re.compile(r"\.[A-Za-z]{2,}$")
 # Kept for stripping decorative separators from a phone before digit-counting.
 _PHONE_STRIP_RE = re.compile(r"[\s()\-. ]")
 
@@ -49,14 +50,21 @@ def normalize_phone(raw: str | None) -> str | None:
 def normalize_email(raw: str | None) -> str | None:
     """Return a cleaned email string, or ``None`` if missing/masked/malformed.
 
-    - Rejects masked values (``*`` / ``\\``, e.g. ``m***********p.com``).
-    - Requires a basic ``local@domain.tld`` shape.
+    - Rejects masked values (``*`` / ``\\``, e.g. ``m*****@gmail.com``).
+    - Strips surrounding ``<>``, a leading ``mailto:`` and trailing ``.,;:!?``.
+    - Requires a basic ``local@domain.tld`` shape with a letters-only TLD.
+    A value that was already a clean address is returned exactly as given.
     """
     if raw is None:
         return None
     value = str(raw).strip()
     value = value.strip("<>").strip()
-    if not _EMAIL_RE.match(value):
+    if value[:7].lower() == "mailto:":
+        value = value[7:].strip()
+    value = value.rstrip(".,;:!?").strip("<>").strip()
+    if "*" in value or "\\" in value:
+        return None
+    if not _EMAIL_RE.match(value) or not _EMAIL_TLD_RE.search(value):
         return None
     # Deliberately NOT lower-casing or trimming glued text here:
     # suppression_service keys suppressions and HMACs unsubscribe tokens on

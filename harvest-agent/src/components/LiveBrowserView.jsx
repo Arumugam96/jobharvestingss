@@ -7,6 +7,7 @@ import { X, Loader2, AlertTriangle, RotateCw } from "lucide-react";
 // leave it to the Reconnect button.
 const RECONNECT_DELAYS_MS = [2000, 5000, 10000];
 
+/** Cancels the pending timeout held in a ref (if any) and nulls the ref. */
 function clearTimer(ref) {
   if (ref.current) {
     clearTimeout(ref.current);
@@ -44,6 +45,7 @@ export default function LiveBrowserView({ title, onClose }) {
     rfb.scaleViewport = true;
     rfb.resizeSession = false;
     rfb.viewOnly = false;
+    /** noVNC "connect": marks the session up, re-arms the retry budget and focuses the canvas. */
     const onConnect = () => {
       everConnected = true;
       retriesRef.current = 0; // a good connect re-arms the auto-reconnect budget
@@ -53,6 +55,11 @@ export default function LiveBrowserView({ title, onClose }) {
       // without an extra click; mouse input is captured regardless.
       try { rfb.focus(); } catch { /* not focusable yet */ }
     };
+    /**
+     * noVNC "disconnect": a first attempt that never connected shows "failed" (no retry);
+     * a dropped live session (or failed retry) schedules a reconnect per
+     * RECONNECT_DELAYS_MS, then gives up as "dropped". Ignored during our own teardown.
+     */
     const onDisconnect = (e) => {
       if (disposed) return; // our own teardown (unmount / reconnect)
       // "connect" having fired is the reliable signal: e.detail.clean is false
@@ -111,6 +118,7 @@ export default function LiveBrowserView({ title, onClose }) {
 
   useEffect(() => {
     if (!onClose) return;
+    /** Closes the live view on Escape. */
     const onKeyDown = (e) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);

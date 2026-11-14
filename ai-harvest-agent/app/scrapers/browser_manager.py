@@ -51,11 +51,43 @@ _profile_locks: dict[str, asyncio.Lock] = {}
 
 
 def _get_profile_lock(profile_key: str) -> asyncio.Lock:
+    """Return (creating on first use) the in-process asyncio lock for a Chrome profile key."""
     lock = _profile_locks.get(profile_key)
     if lock is None:
         lock = asyncio.Lock()
         _profile_locks[profile_key] = lock
     return lock
+
+
+def _pid_is_chromium_for_profile(
+    pid: int, profile_dir: Path, proc_root: Path = Path("/proc"),
+) -> bool | None:
+    """Whether ``pid`` is a Chromium process launched with ``profile_dir`` as its
+    --user-data-dir, read from <proc_root>/<pid>/cmdline (proc_root is /proc;
+    overridable for tests).
+
+    Returns None when /proc isn't available (can't verify), False when the
+    process is gone or is anything else, True only on a positive match.
+    """
+    proc = proc_root
+    if not proc.is_dir():
+        return None
+    try:
+        raw = (proc / str(pid) / "cmdline").read_bytes()
+    except OSError:
+        return False
+    args = [a.decode("utf-8", "replace") for a in raw.split(b"\0") if a]
+    # argv[0] is the executable (".../chrome", "chrome-headless-shell", …) — checked
+    # on its own because the profile path itself may contain "chrom".
+    if not args or "chrom" not in args[0].lower():
+        return False
+    wanted = {str(profile_dir), str(profile_dir.resolve())}
+    for arg in args[1:]:
+        if arg.startswith("--user-data-dir="):
+            value = arg.split("=", 1)[1]
+            if value in wanted or str(Path(value).resolve()) in wanted:
+                return True
+    return False
 
 
 async def _reclaim_stale_chrome_lock(profile_dir: Path) -> None:
@@ -69,6 +101,9 @@ async def _reclaim_stale_chrome_lock(profile_dir: Path) -> None:
 
     Never touches a lock written by a different host — that would mean a
     genuinely different machine/container legitimately owns the profile.
+    Only kills the PID when /proc/<pid>/cmdline shows a Chromium launched with
+    this profile's --user-data-dir (a PID reused after a restart is left
+    alone); where /proc isn't available nothing is killed, only logged.
     """
     lock_path = profile_dir / "SingletonLock"
     # Path.exists() follows the symlink and checks whether its TARGET exists
@@ -92,6 +127,22 @@ async def _reclaim_stale_chrome_lock(profile_dir: Path) -> None:
             "chrome_profile_lock_foreign_host",
             lock_host=host, this_host=socket.gethostname(),
             hint="SingletonLock belongs to a different host — leaving it alone.",
+        )
+        return
+
+    # After a restart the recorded PID may have been reused by an unrelated
+    # process — only kill it when it is verifiably a Chromium on THIS profile.
+    owner = _pid_is_chromium_for_profile(pid, profile_dir)
+    if owner is None:
+        logger.warning(
+            "chrome_profile_lock_owner_unverifiable", pid=pid, profile_dir=str(profile_dir),
+            hint="Can't inspect the lock holder (no /proc) — not killing it.",
+        )
+        return
+    if not owner:
+        logger.warning(
+            "chrome_profile_lock_owner_mismatch", pid=pid, profile_dir=str(profile_dir),
+            hint="Lock PID is gone or isn't a Chromium using this profile — not killing it.",
         )
         return
 
@@ -313,6 +364,11 @@ class BrowserManager:
         locale: str = "en-US",
         timezone_id: str = "Europe/London",
     ) -> None:
+        """Store launch settings only; the browser starts in __aenter__.
+
+        `storage_state` is a saved session file (cookies/localStorage) to load into the context;
+        `channel="chromium"` forces the full bundled Chromium instead of chromium-headless-shell.
+        """
         self._headless:      bool               = headless
         self._slow_mo:       int                = slow_mo
         self._storage_state: str | None         = storage_state
@@ -328,6 +384,12 @@ class BrowserManager:
         self._context:       BrowserContext | None = None
 
     async def __aenter__(self) -> "BrowserManager":
+        """Launch Chromium and open a stealth-patched context (jittered viewport, matching UA).
+
+        Loads `storage_state` when given. If the launch fails, the Playwright driver is stopped
+        before the error propagates; if opening or patching the context fails, the context,
+        browser and driver are all closed before re-raising.
+        """
         self._pw = await async_playwright().start()
 
         launch_kwargs: dict = dict(
@@ -357,10 +419,17 @@ class BrowserManager:
         if self._storage_state:
             ctx_kwargs["storage_state"] = self._storage_state
 
-        self._context = await self._browser.new_context(**ctx_kwargs)
+        try:
+            self._context = await self._browser.new_context(**ctx_kwargs)
 
-        for script in _STEALTH_SCRIPTS:
-            await self._context.add_init_script(script)
+            for script in _STEALTH_SCRIPTS:
+                await self._context.add_init_script(script)
+        except Exception:
+            # __aexit__ never runs when __aenter__ raises — close what was opened
+            # (context, Chromium, driver) so nothing leaks.
+            await self.__aexit__(None, None, None)
+            self._context = self._browser = self._pw = None
+            raise
 
         logger.info("browser_started", headless=self._headless, slow_mo=self._slow_mo,
                     channel=self._channel or "default",
@@ -368,6 +437,7 @@ class BrowserManager:
         return self
 
     async def __aexit__(self, *_: Any) -> None:
+        """Close the context, browser and Playwright driver, ignoring errors from each."""
         if self._context:
             try:
                 await self._context.close()
@@ -424,6 +494,7 @@ class PersistentBrowserManager:
         locale:      str  = "en-US",
         timezone_id: str  = "Europe/London",
     ) -> None:
+        """Store launch settings and look up the per-profile lock; nothing is launched yet."""
         self._profile_dir: Path              = Path(profile_dir)
         self._headless:    bool              = headless
         self._slow_mo:     int               = slow_mo
@@ -451,6 +522,13 @@ class PersistentBrowserManager:
         self._tab_lock                        = asyncio.Lock()
 
     async def __aenter__(self) -> "PersistentBrowserManager":
+        """Take the profile lock, clear stale Chrome locks, then launch the persistent context.
+
+        Waits (logging why) if another task in this process holds the same profile. Before launch it
+        kills a dead/orphaned Chromium holding the OS-level lock and removes leftover Singleton*
+        files. On failure the context (if opened) is closed, the driver stopped and the lock
+        released before re-raising.
+        """
         if self._lock.locked():
             logger.info(
                 "chrome_profile_lock_wait",
@@ -553,7 +631,13 @@ class PersistentBrowserManager:
             )
             return self
         except Exception:
-            # Never leak the Playwright driver if the launch itself failed.
+            # Never leak Chromium or the Playwright driver if the launch (or the
+            # stealth patching after it) failed.
+            if self._context:
+                try:
+                    await self._context.close()
+                except Exception:
+                    pass
             if self._pw:
                 try:
                     await self._pw.stop()
@@ -566,6 +650,7 @@ class PersistentBrowserManager:
             raise
 
     async def __aexit__(self, *_: Any) -> None:
+        """Close the persistent context and driver (errors ignored) and release the profile lock."""
         if self._context:
             try:
                 await self._context.close()
@@ -614,6 +699,7 @@ class PersistentBrowserManager:
             page = await self._context.new_page()
 
         def _on_crash(_: Any = None) -> None:
+            """Log that this tab's renderer crashed; other tabs keep running."""
             logger.error("browser_tab_crashed", tab=label or "?",
                          hint="Only this tab's renderer died; other tabs keep running.")
 
@@ -649,6 +735,7 @@ class PersistentBrowserManager:
 
     @property
     def context(self) -> BrowserContext:
+        """The live persistent BrowserContext; RuntimeError when used outside `async with`."""
         if not self._context:
             raise RuntimeError("PersistentBrowserManager must be used as an async context manager")
         return self._context

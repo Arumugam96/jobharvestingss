@@ -83,6 +83,7 @@ class DemandError(Exception):
     is {code, message, **details} (the UI keys its pop-ups/banners on ``code``)."""
 
     def __init__(self, status_code: int, code: str, message: str, **details: Any) -> None:
+        """HTTP ``status_code`` for the route, UI ``code`` and extra ``details`` keys."""
         super().__init__(message)
         self.status_code = status_code
         self.code = code
@@ -90,18 +91,22 @@ class DemandError(Exception):
         self.details = details
 
     def to_detail(self) -> dict:
+        """The HTTPException detail: ``{code, message, **details}``."""
         return {"code": self.code, "message": self.message, **self.details}
 
 
 def make_run_id() -> str:
+    """Run id for a Demand batch: UTC "YYYYmmdd_HHMMSS_demand" (second resolution)."""
     return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S") + "_demand"
 
 
 def _now() -> datetime:
+    """Current time as an aware UTC datetime."""
     return datetime.now(timezone.utc)
 
 
 def _iso(dt: Any) -> str | None:
+    """ISO-8601 string of a datetime, or None."""
     return dt.isoformat() if dt is not None else None
 
 
@@ -119,6 +124,7 @@ async def reuse_lookup(job_urls: list[str]) -> dict[str, dict]:
     since = _now() - timedelta(days=days)
 
     async def _q(db):
+        """Newest matched search with candidates per job URL, newest-first scan."""
         stmt = (
             select(ResdexSearchORM)
             .where(
@@ -196,13 +202,17 @@ def require_resdex_ready() -> None:
 
 async def _harvest_conflict() -> dict | None:
     """Details of a running harvest (in-process first, then the DB backstop) for
-    the "A harvest is running" pop-up, or None."""
+    the "A harvest is running" pop-up, or None.
+
+    Another tenant's run is reported only as busy: its job_id/run_id/source come
+    back as None and no progress/message is added (see run_guard.conflict_details)."""
     conflict = run_guard.active_run() or await run_guard.db_conflict()
     if conflict is None:
         return None
-    info = {"job_id": conflict.get("job_id"), "run_id": conflict.get("run_id"),
-            "source": conflict.get("source")}
-    job_id = conflict.get("job_id")
+    details = run_guard.conflict_details(conflict)
+    info = {"job_id": details.get("job_id"), "run_id": details.get("run_id"),
+            "source": details.get("source")}
+    job_id = info["job_id"]
     if job_id:
         run = await db_read(lambda db: HarvestRunService(db).get_by_job_id(job_id))
         if run is not None:
@@ -229,6 +239,11 @@ async def _claim(job_id: str | None, run_id: str) -> None:
 # ── Snapshot helpers ──────────────────────────────────────────────────────────
 
 def _snapshot(preview: dict, *, batch_name: str, uploaded_by: str) -> dict:
+    """Initial batch snapshot (stored on the harvest run) built from a validated preview.
+
+    Every valid row starts ROW_QUEUED with no job id; the batch name defaults to the
+    filename without its extension.
+    """
     return {
         "kind": "demand",
         "source_kind": preview.get("source_kind") or SOURCE_FILE,
@@ -349,7 +364,9 @@ async def start_batch(preview: dict, *, batch_name: str, uploaded_by: str) -> di
 # ── Background batch ──────────────────────────────────────────────────────────
 
 async def _load_run(run_pk: str) -> HarvestRunORM | None:
+    """The harvest run row (jobs relationship not loaded), or None if missing/read failed."""
     async def _q(db):
+        """Select the run by primary key."""
         stmt = select(HarvestRunORM).options(noload(HarvestRunORM.jobs)).where(
             HarvestRunORM.id == run_pk,
         )
@@ -378,9 +395,14 @@ async def _target(job_id: str | None, row: dict) -> dict | None:
 
 
 async def _search_ids(norm: str) -> set[str]:
+    """Ids of every Resdex search stored for this job URL in the current tenant.
+
+    Taken before a search so _apply_outcome can tell which row is new; empty set on error.
+    """
     tenant_id = get_current_tenant_id()
 
     async def _q(db):
+        """Select the search ids for (tenant, job_url)."""
         stmt = select(ResdexSearchORM.id).where(
             ResdexSearchORM.tenant_id == tenant_id, ResdexSearchORM.job_url == norm,
         )
@@ -395,6 +417,7 @@ async def _apply_outcome(row: dict, norm: str, before: set[str], out: dict) -> N
     tenant_id = get_current_tenant_id()
 
     async def _q(db):
+        """All searches for (tenant, job_url), newest first."""
         stmt = (
             select(ResdexSearchORM)
             .where(ResdexSearchORM.tenant_id == tenant_id, ResdexSearchORM.job_url == norm)
@@ -489,6 +512,7 @@ async def _search_row(run_id: str, run_pk: str, snap: dict, row: dict, *, reuse:
     before = await _search_ids(norm)
 
     async def _stage(stage: str) -> None:
+        """Progress callback: record the search's current sub-step and save the snapshot."""
         row["sub_step"] = stage
         await _save(run_pk, snap)
 
@@ -512,6 +536,14 @@ async def _run_batch(job_id: str, run_id: str, run_pk: str) -> None:
 
 
 async def _run_batch_impl(job_id: str, run_id: str, run_pk: str) -> None:
+    """Process every row of a batch in order, saving the snapshot as it goes.
+
+    Honors the shared stop signal (remaining rows → stopped), stops non-reuse rows once
+    the daily Resdex cap is hit, paces gaps between rows that used real searches, and
+    switches the rest of the batch to queries-only if the recruiter session expires.
+    Ends with the run marked success / stopped, or failed (active rows → error) on an
+    unexpected exception, which is logged rather than raised.
+    """
     log = logger.bind(job_id=job_id, run_id=run_id, source=DEMAND_SOURCE)
     run = await _load_run(run_pk)
     if run is None or not isinstance(run.filters_snapshot, dict):
@@ -602,6 +634,7 @@ async def _demand_job_and_run(job_id: str):
     """(ScrapedJobORM, HarvestRunORM) of a Demand job visible to this tenant, or
     (None, None)."""
     async def _q(db):
+        """Load the job (must be a Demand job) and its harvest run in one session."""
         job = await HarvestRunService(db).get_scraped_job_by_id(job_id)
         if job is None or (job.source or "").lower() != DEMAND_SOURCE.lower():
             return None, None
@@ -613,6 +646,7 @@ async def _demand_job_and_run(job_id: str):
 
 
 def _row_for(snap: dict, job_id: str) -> dict | None:
+    """The snapshot row (same dict object, for in-place updates) for ``job_id``, or None."""
     return next((r for r in (snap.get("rows") or []) if r.get("job_id") == job_id), None)
 
 
@@ -645,6 +679,10 @@ async def rerun_job(job_id: str) -> dict:
 
 
 async def _rerun_background(run_id: str, run_pk: str, job_id: str) -> None:
+    """Detached task for rerun_job: a fresh (reuse off) search for one row.
+
+    A search failure marks the row as error. Always releases the single-flight guard.
+    """
     try:
         run = await _load_run(run_pk)
         snap = copy.deepcopy(run.filters_snapshot) if run is not None else None
@@ -665,9 +703,13 @@ async def _rerun_background(run_id: str, run_pk: str, job_id: str) -> None:
 
 def stop_batch(run_id: str) -> dict:
     """Cooperative stop of the running batch ``run_id`` (the shared stop signal —
-    finishes the current row; finished rows are kept, the rest end as stopped)."""
+    finishes the current row; finished rows are kept, the rest end as stopped).
+
+    Another tenant's batch is treated as not running, so a caller can neither stop
+    it nor learn that it exists (the all-access internal tenant may stop any)."""
     active = run_guard.active_run()
-    if not active or active.get("run_id") != run_id or active.get("source") != DEMAND_SOURCE:
+    if not active or active.get("run_id") != run_id or active.get("source") != DEMAND_SOURCE \
+            or not run_guard.visible_to_tenant(active, get_current_tenant_id()):
         return {"status": "idle", "message": "This batch is not running."}
     run_guard.request_stop()
     if active.get("job_id"):
@@ -700,6 +742,8 @@ def source_kind(snap: dict) -> str:
 
 
 def batch_header(run: HarvestRunORM) -> dict:
+    """Summary dict for one batch (list and detail views): run state, snapshot metadata
+    and row-status counts computed from the live rows."""
     snap = run.filters_snapshot if isinstance(run.filters_snapshot, dict) else {}
     rows = _live_rows(run)
     counts = summarize_rows(rows)
@@ -727,7 +771,12 @@ def batch_header(run: HarvestRunORM) -> dict:
 
 
 async def list_batches(limit: int = 100) -> list[dict]:
+    """Newest Demand batches of this tenant as headers (without the ``invalid`` list).
+
+    Raises DemandError 503 when the database read fails.
+    """
     async def _q(db):
+        """Newest ``limit`` Demand runs, tenant-scoped."""
         stmt = (
             select(HarvestRunORM)
             .options(noload(HarvestRunORM.jobs))
@@ -753,6 +802,7 @@ BATCH_STATUS_ALIASES = {"completed": "success"}
 
 
 def _aware(dt: Any) -> datetime | None:
+    """Treat a naive datetime as UTC; None passes through."""
     if dt is None:
         return None
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
@@ -761,6 +811,7 @@ def _aware(dt: Any) -> datetime | None:
 async def _demand_runs(status: str | None = None) -> list[HarvestRunORM]:
     """Every Demand batch of this tenant (optionally one run status), newest first."""
     async def _q(db):
+        """All Demand runs (optionally of one status), tenant-scoped, newest first."""
         stmt = (
             select(HarvestRunORM)
             .options(noload(HarvestRunORM.jobs))
@@ -798,6 +849,7 @@ def _run_in_filters(run: HarvestRunORM, *, source: str | None, date_from: Any,
 
 
 def _uploaded_on(run: HarvestRunORM) -> str:
+    """Batch upload date as "YYYY-mm-dd" (created_at, else started_at), or ""."""
     created = run.created_at or run.started_at
     return created.strftime("%Y-%m-%d") if created else ""
 
@@ -882,7 +934,9 @@ async def list_jobs(*, q: str = "", status: str = "", source: str = "", date_fro
 
 
 async def _get_run(run_id: str) -> HarvestRunORM | None:
+    """This tenant's Demand run with ``run_id`` (newest if duplicated), or None."""
     async def _q(db):
+        """Select the Demand run by run_id, tenant-scoped."""
         stmt = (
             select(HarvestRunORM)
             .options(noload(HarvestRunORM.jobs))
@@ -936,6 +990,7 @@ async def latest_search_view(norm: str, view_fn) -> dict | None:
     tenant_id = get_current_tenant_id()
 
     async def _q(db):
+        """Render the newest search inside the session (view_fn may touch relationships)."""
         stmt = (
             select(ResdexSearchORM)
             .where(ResdexSearchORM.tenant_id == tenant_id, ResdexSearchORM.job_url == norm)

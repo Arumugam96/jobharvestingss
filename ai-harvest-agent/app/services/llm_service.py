@@ -56,6 +56,7 @@ _retry_attempts: ContextVar[int] = ContextVar("llm_retry_attempts", default=0)
 
 
 def _track_attempt(retry_state: Any) -> None:
+    """Tenacity ``after`` hook: record the attempt number in the per-task ContextVar."""
     _retry_attempts.set(retry_state.attempt_number)
 
 
@@ -70,9 +71,11 @@ class _ProviderUsage:
 
     @property
     def total_tokens(self) -> int:
+        """Input plus output tokens."""
         return self.input_tokens + self.output_tokens
 
     def as_dict(self) -> dict[str, int]:
+        """Counters (calls, input/output/total tokens) as a plain dict."""
         return {
             "calls":         self.calls,
             "input_tokens":  self.input_tokens,
@@ -201,14 +204,20 @@ class LLMMessage:
 
     @staticmethod
     def user(content: str) -> dict[str, Any]:
+        """Build a user-role message with plain-text content."""
         return {"role": "user", "content": content}
 
     @staticmethod
     def assistant(content: str) -> dict[str, Any]:
+        """Build an assistant-role message with plain-text content."""
         return {"role": "assistant", "content": content}
 
     @staticmethod
     def tool_result(tool_use_id: str, content: str) -> dict[str, Any]:
+        """Build the user-role message that returns a tool's output to Claude.
+
+        ``tool_use_id`` must match the id of the tool_use block being answered.
+        """
         return {
             "role": "user",
             "content": [
@@ -225,6 +234,10 @@ class LLMService:
     """Anthropic Claude/openrouter/LocalLLM client with retry logic and tool-use support."""
 
     def __init__(self, settings: Settings) -> None:
+        """Copy provider settings (Claude, local Ollama, OpenRouter) and zero usage counters.
+
+        Creates the AsyncAnthropic client eagerly; no network call is made here.
+        """
         self._anthropic_api_key = settings.anthropic_api_key
         self.anthropic_client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
         self.anthropic_model = settings.anthropic_model
@@ -253,6 +266,7 @@ class LLMService:
         return list(self._call_log)
 
     def _record_usage(self, provider: str, input_tokens: int, output_tokens: int) -> None:
+        """Add one call and its token counts to the provider's cumulative usage bucket."""
         bucket = self._usage.setdefault(provider, _ProviderUsage())
         bucket.calls += 1
         bucket.input_tokens += input_tokens or 0
@@ -382,14 +396,14 @@ class LLMService:
 
           ""                          -> Claude, using the default anthropic_model
           "claude"                    -> Claude, using the default anthropic_model
-          "claude-*"                  -> Claude, using that specific model id
           "ollama"                    -> local LLM at local_llm_url, model = local_llm_model
           "openrouter"                -> OpenRouter, model = openrouter_model
-          "openrouter/<model-id>"     -> OpenRouter, using that model id directly
-                                          (OpenRouter model ids themselves contain
-                                          slashes, e.g. "google/gemma-3-27b-it:free")
           anything else               -> local LLM at local_llm_url, using that value
                                           as the model name
+
+        Matching is case-insensitive. There is no inline model-id form: a specific
+        Claude / OpenRouter model is chosen via ANTHROPIC_MODEL / OPENROUTER_MODEL,
+        so values like "claude-opus-4-8" or "openrouter/<id>" are local model names.
         """
         raw = (raw or "").strip()
         lowered = raw.lower()
@@ -527,6 +541,7 @@ class LLMService:
         )
 
     def _local_llm_unavailable_msg(self, model: str, url: str, reason: str) -> str:
+        """User-facing error text for a down local LLM (``url`` is accepted but unused)."""
         name = self._local_llm_model or model
         return (
             f"SightSpectrum's Local LLM '{name}' is unavailable ({reason}) — the server "
@@ -758,12 +773,22 @@ class LLMService:
         # triggers failover to the next provider (e.g. Claude) instead of killing
         # the extraction — a reachable-but-garbage response is no longer terminal.
         def _clean_and_parse(raw: str) -> dict[str, Any]:
+            """Strip a leading markdown code fence and parse the reply as a JSON object.
+
+            On a decode error, falls back to json_repair and returns the repair only if it is a
+            non-empty dict; otherwise the JSONDecodeError is re-raised so failover moves on.
+            A reply that parses to a non-object (array / scalar) raises ValueError, which
+            the failover loop treats as an invalid response.
+            """
             cleaned = (raw or "").strip()
             logger.debug(f"raw response from the LLM before cleaning = {cleaned}")
             if cleaned.startswith("```"):
-                cleaned = cleaned.split("\n", 1)[1].rsplit("```", 1)[0]
+                # "```json\n{...}\n```" -> drop the fence line; a fence with no
+                # newline ("```{...}```") -> drop just the backticks.
+                body = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned[3:]
+                cleaned = body.rsplit("```", 1)[0]
             try:
-                return json.loads(cleaned)
+                parsed = json.loads(cleaned)
             except json.JSONDecodeError as exc:
                 repaired = repair_json(cleaned, return_objects=True)
                 if isinstance(repaired, dict) and repaired:
@@ -773,6 +798,9 @@ class LLMService:
                     )
                     return repaired
                 raise
+            if not isinstance(parsed, dict):
+                raise ValueError(f"expected a JSON object, got {type(parsed).__name__}")
+            return parsed
 
         # Provider failover + per-attempt call-log recording live in the shared
         # helper. Only LLMUnavailableError (every provider down OR every provider

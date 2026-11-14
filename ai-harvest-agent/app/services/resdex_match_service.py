@@ -123,6 +123,8 @@ def resdex_llm_settings(settings: Any) -> Any:
 
 
 def _default_llm(settings: Any) -> Any | None:
+    """An LLMService on the Resdex model, or None when no LLM is configured or
+    construction fails (logged) — callers then use the no-LLM fallback."""
     llm_settings = resdex_llm_settings(settings)
     try:
         if not llm_configured(llm_settings):
@@ -242,6 +244,8 @@ async def _default_batch_runner(
         main_loop = asyncio.get_running_loop()
 
         async def reserve_on_main_loop() -> bool:
+            """Run try_reserve_search on the main loop (owner of the DB engine) and
+            await its result from the proactor thread."""
             fut = asyncio.run_coroutine_threadsafe(try_reserve_search(), main_loop)
             return await asyncio.wrap_future(fut)
 
@@ -257,6 +261,8 @@ async def _default_batch_runner(
 
 
 def _accepts_kwarg(fn: Callable, name: str) -> bool:
+    """True when ``fn``'s signature has a parameter called ``name``; False when it
+    doesn't or the signature can't be inspected."""
     try:
         return name in inspect.signature(fn).parameters
     except (TypeError, ValueError):
@@ -317,6 +323,8 @@ async def _default_login_waiter(since: datetime) -> bool:
 # ── Persistence ───────────────────────────────────────────────────────────────
 
 def _candidate_dict(orm: ResdexCandidateORM) -> dict:
+    """Plain dict of a candidate row: its CANDIDATE_FIELDS plus ids, rank and match
+    metadata — safe to use after the session that owns the ORM object closes."""
     d = {k: getattr(orm, k) for k in CANDIDATE_FIELDS}
     d.update(
         id=orm.id, search_id=orm.search_id, job_url=orm.job_url, rank=orm.rank,
@@ -327,7 +335,12 @@ def _candidate_dict(orm: ResdexCandidateORM) -> dict:
 
 
 async def _persist(search: ResdexSearchORM, cands: list[ResdexCandidateORM]) -> bool:
+    """Insert the search row and its candidate rows in one db_write transaction.
+
+    False when the write failed — db_write logs and swallows the error.
+    """
     async def _write(db):
+        """Add the search, flush it, then add the candidates that reference it."""
         db.add(search)
         await db.flush()                     # parent row before FK children
         for c in cands:
@@ -402,6 +415,8 @@ async def _recent_matches(tenant_id: str, job_urls: list[str], reuse_days: int
     since = datetime.now(timezone.utc) - timedelta(days=reuse_days)
 
     async def _q(db):
+        """Newest-first MATCHED searches in the window; keep the first per job_url
+        that has candidates."""
         stmt = (
             select(ResdexSearchORM)
             .where(
@@ -481,6 +496,7 @@ async def _select(targets: list[dict], settings: Any, skip_check: SkipCheck | No
     dropped: dict[str, int] = {}
 
     def _drop(reason: str) -> None:
+        """Count one dropped target under ``reason``."""
         dropped[reason] = dropped.get(reason, 0) + 1
 
     for t in targets or []:
@@ -520,6 +536,12 @@ async def _prepare(
     batch_runner: BatchRunner | None, llm: Any, login_waiter: LoginWaiter | None = None,
     reuse: bool = True, on_stage: StageHook | None = None, queries_only: bool = False,
 ) -> dict[str, list[dict]]:
+    """The body of prepare_resdex_candidates (which wraps it and swallows errors).
+
+    Pipeline: select targets → record SKIPPED_NO_JD → reuse recent matches →
+    LLM requirements → build tiers → either store QUERIES_ONLY searches (logged out)
+    or run the browser batch via _search_and_record. Returns {} when Resdex is off.
+    """
     settings = get_settings()
     if not settings.resdex_enabled:
         return {}
@@ -536,6 +558,7 @@ async def _prepare(
     out: dict[str, list[dict]] = {}
 
     def _assign(norm: str, cands: list[dict]) -> None:
+        """Map every original target URL grouped under ``norm`` to ``cands`` (if any)."""
         if cands:
             for t in selected[norm]:
                 out[t["job_url"]] = cands
@@ -570,6 +593,7 @@ async def _prepare(
     sem = asyncio.Semaphore(_LLM_CONCURRENCY)
 
     async def _req(norm: str, view: dict) -> tuple[str, dict]:
+        """(norm, requirements) for one job, throttled by the LLM semaphore."""
         async with sem:
             return norm, await _extract_requirements(llm, view, norm, timeout_s)
 
@@ -661,6 +685,8 @@ async def _search_and_record(
     # Profile extraction (LLM-bound) runs concurrently across jobs; the budget
     # reservation + DB write below then go job by job, in batch order.
     async def _picks(job: ResdexJobQuery):
+        """Picked candidates for one job's batch result; None when the runner
+        returned no ResdexBatchResult for it."""
         result = results.get(job.job_url)
         if not isinstance(result, ResdexBatchResult):
             return None
@@ -895,6 +921,8 @@ def _scrub(text: str, cand: dict) -> str:
 
 
 def _truncate(text: str, limit: int = _ROLE_MAX) -> str:
+    """``text`` cut to ``limit`` chars at a word boundary with "…" appended;
+    unchanged when it already fits."""
     if len(text) <= limit:
         return text
     cut = text[:limit].rsplit(" ", 1)[0].rstrip(" ,-|·")
@@ -902,6 +930,8 @@ def _truncate(text: str, limit: int = _ROLE_MAX) -> str:
 
 
 def _years(cand: dict) -> str:
+    """Experience as "7 yrs" / "1 yr" from a numeric ``experience_years``, else the
+    raw ``experience_text`` (stripped; "" when neither is present)."""
     y = cand.get("experience_years")
     if isinstance(y, (int, float)) and not isinstance(y, bool) and y >= 0:
         y = round(float(y), 1)
@@ -933,6 +963,8 @@ def _display_name(cand: dict) -> str:
 
 
 def _initials(name: str) -> str:
+    """Upper-case initials (first + last word that start with a letter) for the card
+    avatar; "" when no such word exists."""
     words = [w for w in name.split() if w[:1].isalpha()]
     if not words:
         return ""
@@ -992,6 +1024,7 @@ _LABEL_WIDTH = len("Matched skills")
 
 
 def _shortlist_line(job_title: str) -> str:
+    """The "Shortlisted for your <title> requirement" subtitle; "" without a title."""
     title = " ".join((job_title or "").split())
     return f"Shortlisted for your {title} requirement" if title else ""
 
@@ -1069,6 +1102,8 @@ _C_VALUE = f"font-size:13px;color:{_C_NAVY};font-weight:600;line-height:1.4;"
 
 
 def _chip(skill: str, matched: bool) -> str:
+    """One HTML-escaped skill pill with inline styles — violet for a JD-matched
+    skill, grey otherwise."""
     look = (
         "background:#ece6f8;color:#4b2f8f;border:1px solid #d6c9f0;font-weight:600;"
         if matched else "background:#f4f4f7;color:#5c5a70;border:1px solid #e4e3ea;"
@@ -1093,6 +1128,12 @@ def _verified_badge_html() -> str:
 
 
 def _card_html(v: dict, index: int) -> str:
+    """One email-safe HTML profile card for a _candidate_view ``v`` (1-based ``index``).
+
+    Header: initials avatar (or "C<index>"), name/role, and the Naukri Verified badge
+    when enabled; then a details row of facts (tinted left column) and skill pills,
+    either alone taking full width, omitted entirely when both are empty.
+    """
     esc = html_lib.escape
     title = v["name"] or v["role"] or f"Candidate {index}"
     subtitle = v["role"] if v["name"] else ""
@@ -1299,6 +1340,7 @@ async def latest_match_counts(job_urls: list[str]) -> dict[str, int]:
         since = datetime.now(timezone.utc) - timedelta(days=reuse_days if reuse_days > 0 else 1)
 
         async def _q(db):
+            """{normalized job_url: result_count} of the newest countable search."""
             stmt = (
                 select(ResdexSearchORM.job_url, ResdexSearchORM.result_count)
                 .where(
@@ -1335,6 +1377,8 @@ async def mark_candidates_sent(candidate_ids: list[str], outreach_id: str) -> No
         return
 
     async def _stamp(db):
+        """Set outreach_id on still-unstamped candidates, then add any missing
+        resdex_candidate_emails link rows (tenant taken from each candidate)."""
         await db.execute(
             update(ResdexCandidateORM)
             .where(ResdexCandidateORM.id.in_(ids), ResdexCandidateORM.outreach_id.is_(None))

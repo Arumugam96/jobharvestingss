@@ -173,6 +173,7 @@ async def detect_challenge(page: Any) -> str | None:
 
 
 def _on_login_page(page: Any) -> bool:
+    """True if the page's current URL is a Naukri recruiter login/landing page."""
     from app.agents.naukri_recruiter_agent import is_login_url
 
     return is_login_url(str(getattr(page, "url", "") or ""))
@@ -181,6 +182,7 @@ def _on_login_page(page: Any) -> bool:
 # ── Pure parsing (unit-tested against a probe fixture) ───────────────────────
 
 def _split_csv(value: Any) -> list[str]:
+    """Split a comma-separated value into non-blank trimmed parts, deduped case-insensitively."""
     seen: list[str] = []
     for part in str(value or "").split(","):
         p = part.strip()
@@ -190,6 +192,10 @@ def _split_csv(value: Any) -> list[str]:
 
 
 def _role(entry: Any) -> dict[str, str] | None:
+    """Normalise one Resdex employment entry to designation/organization/start/end strings.
+
+    Returns None for non-dict input or an entry with neither designation nor organization.
+    """
     if not isinstance(entry, dict):
         return None
     role = {
@@ -224,6 +230,10 @@ def _education(edu: Any) -> str:
 
 
 def _ctc(info: Any) -> str:
+    """Format a Resdex ctcInfo dict as e.g. "INR 12 Lacs 50 Thousand" ("" when absent).
+
+    Zero parts are omitted; if nothing remains the text is "<currency> 0 Lacs".
+    """
     if not isinstance(info, dict):
         return ""
     lacs, thousands = str(info.get("lacs") or "").strip(), str(info.get("thousands") or "").strip()
@@ -319,7 +329,13 @@ class ResdexCandidateAgent:
     """One Resdex advanced search on an already-open recruiter-profile page."""
 
     def __init__(self, page: Any) -> None:
+        """Wrap an already-open, logged-in recruiter-profile page; this class never logs in.
+
+        ``search_submitted`` is True once the current search() clicked Search (the
+        advSearch POST went out) — a retry after that is a new, billable search.
+        """
         self._page = page
+        self.search_submitted = False
 
     async def _click(self, element: Any) -> None:
         """Gradual pointer move + click (human_click); plain click fallback."""
@@ -337,6 +353,12 @@ class ResdexCandidateAgent:
             raise ResdexChallenge(reason)
 
     async def _open_form(self) -> None:
+        """Navigate to the Resdex advanced-search form and wait for the keyword box.
+
+        Raises ResdexSessionExpired / ResdexChallenge via _guard() on a login page or bot
+        wall, before or after the wait; otherwise re-raises the wait timeout. Ends with a
+        short random human-like pause.
+        """
         page = self._page
         await page.goto(RESDEX_SEARCH_URL, wait_until="domcontentloaded", timeout=60_000)
         await self._guard()
@@ -348,6 +370,10 @@ class ResdexCandidateAgent:
         await page.wait_for_timeout(random.randint(1_200, 2_500))
 
     async def _boolean_on(self) -> bool:
+        """Switch the form's Boolean-search toggle on if needed; return whether it ends up on.
+
+        False when the toggle is not on the page.
+        """
         page = self._page
         switch = page.locator(_BOOLEAN_SWITCH)
         if not await switch.count():
@@ -358,6 +384,10 @@ class ResdexCandidateAgent:
         return await switch.first.is_checked()
 
     async def _fill(self, selector: str, value: str) -> bool:
+        """Click the field matching selector and human-type value into it.
+
+        Returns False (nothing typed) when the selector matches no element.
+        """
         from app.scrapers.human import human_type
 
         box = self._page.locator(selector)
@@ -436,9 +466,13 @@ class ResdexCandidateAgent:
 
     async def search(self, tier: ResdexTier) -> tuple[list[ResdexCard], int, dict[str, Any]]:
         """Run one search. Returns (cards, total_results, applied) where `applied`
-        records which filters actually made it into the form."""
+        records which filters actually made it into the form. Sets
+        ``search_submitted`` once the Search button was clicked (the advSearch POST
+        went out), so a caller retrying after a ResdexChallenge knows whether the
+        retry is a second submitted search."""
         from app.config import get_settings
 
+        self.search_submitted = False
         page = self._page
         f = tier.filters or {}
         await self._open_form()
@@ -476,6 +510,7 @@ class ResdexCandidateAgent:
                 lambda r: _SEARCH_API in r.url and r.request.method == "POST", timeout=60_000,
             ) as resp_info:
                 await self._click(page.locator(_SEARCH_BTN).first)
+                self.search_submitted = True
             resp = await resp_info.value
         except Exception:
             await self._guard()   # a wall / login instead of the results call
@@ -539,6 +574,7 @@ class _BatchAbort(Exception):
     remaining job get `status` / `message`."""
 
     def __init__(self, status: str, message: str) -> None:
+        """Keep the status every remaining job gets and the message used as its error text."""
         super().__init__(message)
         self.status = status
         self.message = message
@@ -581,6 +617,7 @@ async def run_resdex_batch(
     results: dict[str, ResdexBatchResult] = {}
 
     def _rest(status: str, error: str | None = None) -> None:
+        """Give every job that has no result yet a ResdexBatchResult with this status/error."""
         for j in jobs:
             results.setdefault(j.job_url, ResdexBatchResult(status=status, error=error))
 
@@ -664,7 +701,12 @@ async def run_resdex_batch(
 
     async def _search_tier(agent: ResdexCandidateAgent, page: Any, tier: ResdexTier):
         """agent.search with the challenge / login handling; a human-cleared
-        challenge retries the same search (same budget reservation)."""
+        challenge retries the same search. A challenge raised BEFORE Search was
+        clicked reuses the current budget reservation; one raised AFTER the advSearch
+        POST went out makes the retry a second submitted search, so it reserves again
+        first (counted in `used` / `searches_done`) and aborts the batch as
+        cap_reached when that reservation is refused."""
+        nonlocal used, searches_done
         challenges = 0
         while True:
             try:
@@ -677,7 +719,15 @@ async def run_resdex_batch(
                 if challenges > _MAX_CHALLENGE_RETRIES:
                     raise _BatchAbort(ResdexSearchStatus.ERROR,
                                       "Resdex challenge keeps reappearing") from None
+                submitted = bool(getattr(agent, "search_submitted", False))
                 await _await_human(page, str(exc))
+                if submitted:
+                    # The previous attempt already spent a Resdex search.
+                    if not await reserve():
+                        raise _BatchAbort(ResdexSearchStatus.CAP_REACHED,
+                                          "daily Resdex search cap reached") from None
+                    used += 1
+                    searches_done += 1
 
     try:
         async with recruiter_harvest_browser(headless=headless) as pbm:

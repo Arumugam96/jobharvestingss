@@ -33,6 +33,7 @@ export default function useCountUp(target, durationMs = 600) {
     }
 
     let start = 0;
+    /** One animation frame: ease (cubic out) from `from` to `to`, re-queue until done. */
     const step = (ts) => {
       if (!start) start = ts;
       const t = Math.min(1, (ts - start) / durationMs);

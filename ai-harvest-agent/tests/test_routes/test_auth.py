@@ -7,6 +7,16 @@ from httpx import AsyncClient
 VALID_EMAIL = "jane.doe@sightspectrum.com"
 
 
+@pytest.fixture(autouse=True)
+def _auth_enforced(monkeypatch):
+    """These tests exercise real login enforcement. A developer .env with
+    AUTH_ENABLED=false would make get_current_user return the dev user, so force
+    it on for the cached settings instance the app's dependencies read."""
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "auth_enabled", True)
+
+
 @pytest.mark.asyncio
 async def test_request_otp_rejects_wrong_domain(client: AsyncClient) -> None:
     resp = await client.post("/auth/request-otp", json={"email": "jane@gmail.com"})

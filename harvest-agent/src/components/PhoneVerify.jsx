@@ -52,6 +52,7 @@ const OUTCOMES = {
     { v: "voicemail", l: "Voicemail / IVR only", tone: "info", panel: "retry", rem: true, proof: "from2", preset: "Tomorrow 10 AM" },
   ],
 };
+/** The OUTCOMES entry for a call's status + outcome, or null when either is unset/unknown. */
 const outcomeOf = (call) => (call?.status && call?.outcome ? OUTCOMES[call.status]?.find((o) => o.v === call.outcome) : null);
 
 const REASONS = ["Not hiring contract roles right now", "Requirement already closed", "Rate / budget mismatch",
@@ -65,20 +66,31 @@ const PROOF_TYPES = ["Call log screenshot", "Dialler / CRM", "Truecaller", "What
 
 /* ---------- dates: <input type=date/time> use local "YYYY-MM-DD" / "HH:MM" ---------- */
 const pad = (n) => String(n).padStart(2, "0");
+/** Splits a Date into local ["YYYY-MM-DD", "HH:MM"] for the date/time inputs. */
 const toParts = (d) => [`${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`, `${pad(d.getHours())}:${pad(d.getMinutes())}`];
+/** ["YYYY-MM-DD", time] for the local date `days` days from today. */
 const daysFromNow = (days, time) => {
   const d = new Date();
   d.setDate(d.getDate() + days);
   return [toParts(d)[0], time];
 };
 const RETRY_PRESETS = {
+  /** 30 minutes from now. */
   "In 30 min": () => toParts(new Date(Date.now() + 30 * 60e3)),
+  /** 2 hours from now. */
   "In 2 hours": () => toParts(new Date(Date.now() + 120 * 60e3)),
+  /** Tomorrow at 10:00. */
   "Tomorrow 10 AM": () => daysFromNow(1, "10:00"),
+  /** The coming Monday at 10:00 (a week out when today is Monday). */
   "Next Monday": () => daysFromNow(((8 - new Date().getDay()) % 7) || 7, "10:00"),
 };
+/**
+ * Suggested reminder [date, time] for an outcome: its retry preset, else its `when`
+ * [days, time], else tomorrow 10:00.
+ */
 const suggestedWhen = (c) => (c?.preset ? RETRY_PRESETS[c.preset]() : c?.when ? daysFromNow(...c.when) : daysFromNow(1, "10:00"));
 
+/** Short locale day, month and time (no year); "" if formatting throws. */
 const fmtTime = (iso) => {
   try { return new Date(iso).toLocaleString(undefined, { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }); } catch { return ""; }
 };
@@ -303,6 +315,7 @@ export function PhoneVerifyButton({ onClick, verified = false }) {
 // What logged calls established about the number itself (server `flags`):
 // do-not-call wins over invalid, which wins over warm.
 export const phoneBlocked = (flags) => !!(flags && (flags.dnc || flags.invalid));
+/** DNC / Invalid / Warm tag for a number's call-derived `flags` (first that applies). */
 export function PhoneFlagTag({ flags }) {
   if (!flags) return null;
   if (flags.dnc) return <span className="pvm-flag bad" title="Asked not to be contacted again — suppressed for calls, email and WhatsApp">DNC</span>;
@@ -327,7 +340,9 @@ export function PhoneVerifyBadge({ result, onEdit, mark = false }) {
   const btnRef = useRef(null);
   const popRef = useRef(null);
   const hideTimer = useRef(null);
+  /** Opens the popover and cancels any pending hide. */
   const show = () => { clearTimeout(hideTimer.current); setOpen(true); };
+  /** Hides the popover after 150ms so the pointer can cross into it. */
   const hideSoon = () => { clearTimeout(hideTimer.current); hideTimer.current = setTimeout(() => setOpen(false), 150); };
   useEffect(() => () => clearTimeout(hideTimer.current), []);
 
@@ -343,11 +358,14 @@ export function PhoneVerifyBadge({ result, onEdit, mark = false }) {
 
   useEffect(() => {
     if (!open) return;
+    /** Closes the popover. */
     const close = () => setOpen(false);
+    /** Closes on a mousedown outside both the badge and the popover. */
     const onDown = (e) => {
       if (popRef.current?.contains(e.target) || btnRef.current?.contains(e.target)) return;
       close();
     };
+    /** Closes the popover on Escape. */
     const onKey = (e) => { if (e.key === "Escape") close(); };
     document.addEventListener("mousedown", onDown);
     window.addEventListener("keydown", onKey);
@@ -412,7 +430,9 @@ export function PhoneVerifyBadge({ result, onEdit, mark = false }) {
 /* ---------- small controls ---------- */
 function Chips({ options, value, onChange, multi = false }) {
   const sel = multi ? value || [] : value;
+  /** Whether option `o` is selected. */
   const isOn = (o) => (multi ? sel.includes(o) : sel === o);
+  /** Toggles `o` in the selection (multi), or selects/clears it (single). */
   const toggle = (o) => {
     if (multi) onChange(isOn(o) ? sel.filter((x) => x !== o) : [...sel, o]);
     else onChange(isOn(o) ? "" : o);
@@ -422,6 +442,7 @@ function Chips({ options, value, onChange, multi = false }) {
   ));
 }
 
+/** Checkbox-styled toggle button; `danger` styles it red. Calls onChange(!on) on click. */
 function CheckRow({ on, danger, onChange, children }) {
   return (
     <button type="button" role="checkbox" aria-checked={!!on} className={"pvm-check" + (on ? " on" : "") + (danger ? " danger" : "")}
@@ -431,6 +452,7 @@ function CheckRow({ on, danger, onChange, children }) {
   );
 }
 
+/** Red required-field asterisk. */
 const Req = () => <span className="pvm-req">*</span>;
 
 /* Outcome-specific fields — at most two rows each. `d` is the details object. */
@@ -538,6 +560,7 @@ function OutcomePanel({ c, d, set, ctx, onPreset }) {
   }
 }
 
+/** Image thumbnail for a proof file with an inline `src`, else a paperclip placeholder. */
 function ProofThumb({ file, className }) {
   return file.src
     ? <img className={className} src={file.src} alt="" />
@@ -622,10 +645,17 @@ export default function PhoneVerifyModal({ jobId, phone, pocName, pocTitle, comp
 
   const c = status && outcome ? OUTCOMES[status].find((o) => o.v === outcome) : null;
   const proofNeeded = !!c && (c.proof === "required" || (c.proof === "from2" && attemptNo >= 2));
+  /** Merges `patch` into the outcome-specific details object. */
   const set = (patch) => setDetails((prev) => ({ ...prev, ...patch }));
 
+  /** Clears outcome details, proof files and the reminder. */
   const resetOutcome = () => { setDetails({}); setFiles([]); setRemState({ on: false, date: "", time: "" }); };
+  /** Picks Answered/Unanswered and resets the outcome and everything that depends on it. */
   const setStatus = (s) => { setStatusRaw(s); setOutcomeRaw(null); resetOutcome(); };
+  /**
+   * Picks an outcome: seeds its retry preset into details, clears proof, and turns the
+   * reminder on at the outcome's suggested time (or off if the outcome has none).
+   */
   const setOutcome = (v) => {
     setOutcomeRaw(v || null);
     const oc = v ? OUTCOMES[status].find((o) => o.v === v) : null;
@@ -644,8 +674,14 @@ export default function PhoneVerifyModal({ jobId, phone, pocName, pocTitle, comp
       return { on: true, date, time };
     });
   };
+  /** Turns the reminder on at a retry preset's [date, time]. */
   const applyPreset = ([date, time]) => setRemState({ on: true, date, time });
 
+  /**
+   * Adds proof files up to MAX_FILES (default type "Call log screenshot"). Images up to
+   * 300 KB are read inline as data URLs; others keep only their name/size.
+   * @param {FileList|File[]} list
+   */
   const addFiles = (list) => {
     const incoming = [...list].slice(0, MAX_FILES - files.length);
     incoming.forEach((f) => {
@@ -664,6 +700,7 @@ export default function PhoneVerifyModal({ jobId, phone, pocName, pocTitle, comp
   // Paste a screenshot straight into the proof list once an outcome is picked.
   useEffect(() => {
     if (!c) return;
+    /** Adds pasted clipboard images as proof. */
     const onPaste = (ev) => {
       const imgs = [...(ev.clipboardData?.items || [])].filter((i) => i.type.startsWith("image/")).map((i) => i.getAsFile());
       if (imgs.length) { ev.preventDefault(); addFiles(imgs); }
@@ -673,6 +710,7 @@ export default function PhoneVerifyModal({ jobId, phone, pocName, pocTitle, comp
   });
 
   useEffect(() => {
+    /** Escape closes the image zoom, then the history sheet, then the modal (unless saving). */
     const onKey = (e) => {
       if (e.key !== "Escape") return;
       if (zoom) setZoom(null);
@@ -695,6 +733,10 @@ export default function PhoneVerifyModal({ jobId, phone, pocName, pocTitle, comp
   else if (proofNeeded && !files.length) why = "Attach proof of the call to save";
   else { ok = true; why = `Saving as “${c.l}” · attempt ${attemptNo}`; }
 
+  /**
+   * Builds the call payload (status, outcome, details, comments, proof, reminder_at ISO)
+   * and awaits onSave; closes on success, otherwise shows the error and stays open.
+   */
   const save = async () => {
     if (!ok || busy) return;
     const reminderAt = rem.on && rem.date ? new Date(`${rem.date}T${rem.time || "10:00"}`) : null;

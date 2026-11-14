@@ -45,6 +45,23 @@ def _outreach_sender_override_off(monkeypatch):
     monkeypatch.setattr(outreach_prompts, "ACTIVE_SENDER_EMAIL", "")
 
 
+@pytest.fixture(autouse=True)
+def _otp_ip_throttles_reset():
+    """The per-IP OTP throttles are process-wide in-memory state; every test client
+    shares one IP ("testclient"), so reset them around each test to keep tests
+    independent. No-op (and no import) when auth_service was never loaded."""
+    import sys
+
+    def _reset() -> None:
+        mod = sys.modules.get("app.services.auth_service")
+        if mod is not None:
+            mod.reset_otp_ip_throttles()
+
+    _reset()
+    yield
+    _reset()
+
+
 # ── In-memory SQLite for tests ────────────────────────────────────────────────
 
 TEST_DB_URL = "sqlite+aiosqlite:///:memory:"

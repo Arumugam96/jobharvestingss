@@ -18,6 +18,17 @@ const BUCKET_LABELS = {
   ambiguous: "Needs review",
 };
 
+/**
+ * Detail page for one harvest run: run header and summary from GET /run-history/{runId},
+ * classification stat cards that filter by bucket (verified / direct / GCC / staffing /
+ * ambiguous), and the run's jobs in the shared JobsTable (all pages of GET /jobs?run_id=…, with
+ * a best-effort contact=resdex lookup that marks rows `hasResdex`). Exports the visible rows
+ * as CSV.
+ * @param {object} props
+ * @param {string} props.runId - harvest run id.
+ * @param {Function} props.onBack - return to Run History.
+ * @param {Function} props.onView - open a job's detail view.
+ */
 export default function RunDetailView({ runId, onBack, onView }) {
   const [entry, setEntry] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -108,6 +119,7 @@ export default function RunDetailView({ runId, onBack, onView }) {
     };
   }, [filteredRows]);
 
+  /** Download the currently filtered rows as jobs_{runId}.csv (UTF-8 BOM for Excel). */
   function exportCsv() {
     const header = ["Job title", "Company", "Source", "POC", "POC type", "Posted date", "Email", "Email source", "Mobile", "Mobile source", "Job description"];
     const lines = filteredRows.map((j) => {

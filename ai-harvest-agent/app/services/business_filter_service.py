@@ -47,6 +47,11 @@ _MASTER_DIR = Path(__file__).resolve().parents[2] / "data" / "master"
 # ── Master-list loader ────────────────────────────────────────────────────────
 
 def _load_json(filename: str, key: str | None = None) -> Any:
+    """Load a master-list JSON file from data/master, optionally returning ``data[key]``.
+
+    A missing or unreadable file (or missing key) is logged and yields [] when a key
+    was requested, else {}.
+    """
     path = _MASTER_DIR / filename
     if not path.exists():
         logger.warning("master_file_missing", file=str(path))
@@ -60,6 +65,7 @@ def _load_json(filename: str, key: str | None = None) -> Any:
 
 
 def _load_set(filename: str, key: str = "companies") -> frozenset[str]:
+    """A master list's string entries, lower-cased and stripped (non-strings dropped)."""
     items = _load_json(filename, key)
     return frozenset(s.lower().strip() for s in items if isinstance(s, str))
 
@@ -93,6 +99,7 @@ class _PhraseMatcher:
     __slots__ = ("_phrases", "_max_len")
 
     def __init__(self, entries: Iterable[str]) -> None:
+        """Tokenize each entry into a word tuple; remember the longest for the scan bound."""
         phrases = {tuple(w) for e in entries if isinstance(e, str) and (w := _words(e))}
         self._phrases: frozenset[tuple[str, ...]] = frozenset(phrases)
         self._max_len = max((len(p) for p in phrases), default=0)
@@ -279,9 +286,11 @@ class BusinessFilterService:
     # LinkedInAgent's in-scrape early-stop) so the two can't drift.
 
     def _infer_domain(self, j: UnifiedJob) -> str:
+        """Classify the job's tech domain from title, description, skills and source hint."""
         return _infer_domain_shared(j.job_title, j.job_description, j.skills, j.domain_hint)
 
     def _passes_domain(self, j: UnifiedJob, cfg: FiltersConfig) -> bool:
+        """True when the job's inferred domain satisfies the configured domain filter."""
         return _domain_matches(j.domain, cfg.domain)
 
     # ── Hiring entity ──────────────────────────────────────────────────────────
@@ -290,7 +299,9 @@ class BusinessFilterService:
                              track_ambiguous: bool = True) -> tuple[bool, str]:
         """Returns (is_gcc, hiring_entity_label).
 
-        All master-list matching is whole-word (see _PhraseMatcher)."""
+        All master-list matching is whole-word (see _PhraseMatcher). A GCC
+        phrase found only in the description counts only when there is no
+        staffing-brand hit and no "staffing" hiring_hint."""
         c_words = _words(j.company)
         c_set   = set(c_words)
         gcc_hit      = _GCC_MATCHER.longest(c_words)
@@ -306,9 +317,15 @@ class BusinessFilterService:
         if gcc_hit and len(gcc_hit) >= max(len(staffing_hit), len(direct_hit)):
             return True, "GCC"
 
+        hint = (getattr(j, "hiring_hint", "") or "").lower()
+
         # ── GCC: phrase match in company name or description ──────────────────
-        if (_GCC_PHRASE_MATCHER.longest(c_words)
-                or _GCC_PHRASE_MATCHER.longest(_words(j.job_description))):
+        # A GCC phrase in the JD body (e.g. a client blurb a consultant pasted)
+        # must not override a known staffing brand or Naukri's consultant hint.
+        if _GCC_PHRASE_MATCHER.longest(c_words):
+            return True, "GCC"
+        if (not staffing_hit and hint != "staffing"
+                and _GCC_PHRASE_MATCHER.longest(_words(j.job_description))):
             return True, "GCC"
 
         # ── GCC: abbreviation token match ─────────────────────────────────────
@@ -316,8 +333,8 @@ class BusinessFilterService:
             return True, "GCC"
 
         # ── Staffing: the board itself says a consultant posted it ────────────
-        # (Naukri consultant=true). Strong signal, but GCC detection above wins.
-        hint = (getattr(j, "hiring_hint", "") or "").lower()
+        # (Naukri consultant=true). Strong signal, but GCC detection by company
+        # name above wins.
         if hint == "staffing":
             return False, "Staffing Firm"
 
@@ -348,6 +365,7 @@ class BusinessFilterService:
         return False, "Ambiguous"
 
     def _passes_hiring_entity(self, j: UnifiedJob, cfg: FiltersConfig) -> bool:
+        """"Any" passes everything; otherwise the job's entity label must match exactly."""
         if cfg.hiring_entity == "Any":
             return True
         return j.hiring_entity == cfg.hiring_entity
@@ -355,6 +373,7 @@ class BusinessFilterService:
     # ── GCC mode ───────────────────────────────────────────────────────────────
 
     def _passes_gcc(self, j: UnifiedJob, cfg: FiltersConfig) -> bool:
+        """Apply gcc_mode: include_gcc keeps all, gcc_only keeps GCCs, else GCCs are dropped."""
         if cfg.gcc_mode == "include_gcc":
             return True
         if cfg.gcc_mode == "gcc_only":
@@ -364,6 +383,10 @@ class BusinessFilterService:
     # ── Work mode ──────────────────────────────────────────────────────────────
 
     def _passes_work_mode(self, j: UnifiedJob, cfg: FiltersConfig) -> bool:
+        """Work-mode filter: case-insensitive match, and "not_specified" always passes.
+
+        Sources whose search already enforced this work mode pass without re-checking.
+        """
         if cfg.work_mode == "Any":
             return True
         # Trust the source's own search-time f_WT/wfhType filter (see
@@ -381,12 +404,25 @@ class BusinessFilterService:
         "permanent":  ["permanent", "regular", "full-time", "fulltime", "full time"],
         "full-time":  ["permanent", "regular", "full-time", "fulltime", "full time"],
     }
+    # Whole-word versions of _JT_KEYWORDS: "temp" must not match "template",
+    # "gig" not "gigabit", "regular" not "irregular".
+    _JT_PATTERNS: dict[str, re.Pattern[str]] = {
+        jt: re.compile(r"\b(?:" + "|".join(re.escape(k) for k in kws) + r")\b")
+        for jt, kws in _JT_KEYWORDS.items()
+    }
 
     # "Permanent" (Naukri's term) and "Full-time" (LinkedIn's term) are the
     # same employment type under two different platform vocabularies.
     _JT_ALIASES: dict[str, str] = {"full-time": "permanent"}
 
     def _infer_job_type(self, j: UnifiedJob) -> str:
+        """Infer contract / freelance / part-time / permanent / full-time by keyword.
+
+        Naukri's own employmentType is judged first, then the stored native
+        job_type label on its own; only then are title + description scanned,
+        as whole words (_JT_PATTERNS; first matching type in _JT_KEYWORDS order
+        wins). Returns "not_specified" when nothing matches.
+        """
         # Naukri: the job's own employmentType ("Full Time, Permanent",
         # "Full Time, Temporary/Contractual", …) is authoritative — Naukri can't
         # filter job type at search time, so this per-job label is the only
@@ -400,13 +436,22 @@ class BusinessFilterService:
         # "Full-time"/"Contract", scraped verbatim from the job page) — that
         # authoritative hint is checked before falling back to scanning the
         # free-text title/description.
-        text = f"{j.job_type} {j.job_title} {j.job_description}".lower()
-        for job_type, keywords in self._JT_KEYWORDS.items():
-            if any(kw in text for kw in keywords):
+        native = (j.job_type or "").lower()
+        if native:
+            for job_type, pattern in self._JT_PATTERNS.items():
+                if pattern.search(native):
+                    return job_type
+        text = f"{j.job_title} {j.job_description}".lower()
+        for job_type, pattern in self._JT_PATTERNS.items():
+            if pattern.search(text):
                 return job_type
         return "not_specified"
 
     def _passes_job_type(self, j: UnifiedJob, cfg: FiltersConfig) -> bool:
+        """Job-type filter with Full-time/Permanent treated as the same; unknown passes.
+
+        Sources whose search already enforced this job type pass without re-checking.
+        """
         if cfg.job_type == "Any":
             return True
         # Trust the source's own search-time f_JT/jobType filter (see
@@ -420,6 +465,11 @@ class BusinessFilterService:
     # ── Salary ─────────────────────────────────────────────────────────────────
 
     def _passes_salary(self, j: UnifiedJob, cfg: FiltersConfig) -> bool:
+        """Compare the midpoint of the job's LPA salary with the configured INR min/max.
+
+        Config bounds are rupees (divided by 100,000 to LPA). An unparseable or
+        undisclosed salary passes only when include_undisclosed_salary is set.
+        """
         if not cfg.salary_min and not cfg.salary_max:
             return True
         parsed = _parse_salary_lpa(j.salary)
@@ -476,12 +526,17 @@ def _deduplicate(jobs: list[UnifiedJob]) -> list[UnifiedJob]:
 
 # ── Salary parser ──────────────────────────────────────────────────────────────
 
-_LPA_RANGE_RE  = re.compile(r"([\d.]+)\s*[-–to]+\s*([\d.]+)\s*(?:lpa|lacs?|lakhs?|l\b)", re.I)
+_LPA_RANGE_RE  = re.compile(
+    r"([\d.]+)\s*(?:-|–|to)\s*([\d.]+)\s*(?:lpa|lacs?|lakhs?|l\b)", re.I)
 _LPA_SINGLE_RE = re.compile(r"([\d.]+)\s*(?:lpa|lacs?|lakhs?|l\b)", re.I)
 _NOT_DISCLOSED = {"not disclosed", "not specified", "n/a", "na", ""}
 
 
 def _parse_salary_lpa(raw: str) -> tuple[float, float] | None:
+    """Parse "8-12 LPA" / "10 lakhs" style text to (low, high) in LPA.
+
+    A single value gives (v, v). None for undisclosed text or no LPA/lakh figure.
+    """
     if not raw or raw.strip().lower() in _NOT_DISCLOSED:
         return None
     m = _LPA_RANGE_RE.search(raw)

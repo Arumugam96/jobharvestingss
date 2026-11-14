@@ -75,6 +75,7 @@ _PHONE_STATUS_COLORS = {
 # ── Summary Sheet rows ────────────────────────────────────────────────────────
 
 def _compute_summary(results: list[ProspectResult]) -> list[tuple[str, int]]:
+    """(metric label, count) rows for the Summary sheet, tallied from email/phone statuses."""
     return [
         ("Total Recruiters Processed",           len(results)),
         ("Verified Emails Found",                 sum(1 for r in results if r.email_status == "VERIFIED")),
@@ -93,6 +94,7 @@ def _compute_summary(results: list[ProspectResult]) -> list[tuple[str, int]]:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _sanitize(val: Any) -> Any:
+    """Strip XML-illegal characters from strings and cap them at 2000 chars; others pass through."""
     if isinstance(val, str):
         val = _ILLEGAL_XML.sub("", val)
         if len(val) > 2000:
@@ -101,10 +103,12 @@ def _sanitize(val: Any) -> Any:
 
 
 def _to_row(result: ProspectResult) -> list[Any]:
+    """One sanitized worksheet row for a prospect, in ``_COLUMNS`` order (missing -> "")."""
     return [_sanitize(getattr(result, field, "") or "") for field, _ in _COLUMNS]
 
 
 def _apply_header_style(ws: Any) -> None:
+    """Style row 1 as the dark-blue header; styling errors are silently ignored."""
     try:
         from openpyxl.styles import Font, PatternFill, Alignment
         fill  = PatternFill("solid", fgColor="1F4E79")
@@ -147,6 +151,7 @@ def _color_status_columns(ws: Any) -> None:
 
 
 def _autofit(ws: Any, max_width: int = 55) -> None:
+    """Size each column to its longest value + 3, capped at ``max_width``; errors ignored."""
     try:
         from openpyxl.utils import get_column_letter
         for col_idx, col_cells in enumerate(ws.columns, 1):
@@ -156,10 +161,27 @@ def _autofit(ws: Any, max_width: int = 55) -> None:
         pass
 
 
+def _force_text(cells: Any) -> None:
+    """Formula-injection guard: keep every written value as plain text.
+
+    openpyxl binds any string starting with "=" as a FORMULA ("===== About ====="
+    corrupts the workbook, "=HYPERLINK(...)" would run). Re-typing such a cell as
+    a string stores the exact text (no "'" prefix), so nothing a user sees
+    changes. Values starting with + - @ / tab / CR (e.g. phones "+91 98...") are
+    already written as inline strings, which Excel never evaluates — left as is.
+    """
+    for cell in cells:
+        if cell.data_type == "f":
+            cell.data_type = "s"
+
+
 def _write_data_sheet(ws: Any, results: list[ProspectResult]) -> None:
+    """Write the header and one row per prospect (values kept as text, see
+    _force_text), then style, colour, autofit and freeze row 1."""
     ws.append([label for _, label in _COLUMNS])
     for r in results:
         ws.append(_to_row(r))
+        _force_text(ws[ws.max_row])
     _apply_header_style(ws)
     _color_status_columns(ws)
     _autofit(ws)
@@ -167,6 +189,10 @@ def _write_data_sheet(ws: Any, results: list[ProspectResult]) -> None:
 
 
 def _write_summary_sheet(ws: Any, results: list[ProspectResult]) -> None:
+    """Write the Metric/Count summary table and style it.
+
+    Any error is logged and swallowed, so a partly written sheet is possible.
+    """
     try:
         from openpyxl.styles import Font, PatternFill, Alignment
 
@@ -210,6 +236,11 @@ class ProspectExcelService:
         run_id: str,
         report_title: str = "Lead Intelligence Report",
     ) -> str:
+        """Write the prospect workbook (data sheet + Summary) to the output dir.
+
+        Returns the absolute file path, or "" when openpyxl is not installed. Overwrites
+        an existing file for the same ``run_id``.
+        """
         try:
             import openpyxl
         except ImportError:

@@ -10,6 +10,14 @@ import { isActiveRow, subStepLabel } from "./demandUi";
 
 const POLL_MS = 4000;
 
+/**
+ * Progress screen for a just-started Demand batch: progress bar, current row/sub-step and
+ * outcome counts, with Stop (POST /demand/batches/{run_id}/stop) and "View jobs now".
+ * Polls GET /demand/batches/{runId} every 4s and calls onDone() once nothing is active.
+ * @param {object} props
+ * @param {string} props.runId - batch run id.
+ * @param {Function} props.onDone - opens the jobs table (on completion or "View jobs now").
+ */
 export default function DemandProcessing({ runId, onDone }) {
   const [batch, setBatch] = useState(null);
   const [error, setError] = useState("");
@@ -20,6 +28,7 @@ export default function DemandProcessing({ runId, onDone }) {
   useEffect(() => {
     let alive = true;
     let timer = null;
+    /** One poll: refresh the batch; call onDone when finished, else schedule the next poll. */
     const tick = async () => {
       try {
         const res = await getDemandBatch(runId);
@@ -38,6 +47,7 @@ export default function DemandProcessing({ runId, onDone }) {
     return () => { alive = false; if (timer) clearTimeout(timer); };
   }, [runId]);
 
+  /** Ask the backend to stop the batch after the current row; errors re-enable the button. */
   const stop = async () => {
     setStopping(true);
     try {

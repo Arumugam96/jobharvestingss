@@ -291,6 +291,7 @@ class Settings(BaseSettings):
 
     @property
     def resdex_source_list(self) -> list[str]:
+        """RESDEX_SOURCES split on commas, stripped, with empty entries dropped."""
         return [s.strip() for s in self.resdex_sources.split(",") if s.strip()]
     # Per-job detail pass (description HTML, employment type, work mode, industry,
     # company website, recruiter contact when Naukri shows one). Off ⇒ listing-only.
@@ -346,6 +347,11 @@ class Settings(BaseSettings):
     otp_expiry_seconds: int = 300
     otp_max_attempts: int = 5
     otp_resend_cooldown_seconds: int = 60
+    # Per-client-IP OTP throttles (in-process memory, sliding window), on top of the
+    # per-email limits above. 0 disables a throttle. See app/services/auth_service.py.
+    otp_ip_window_seconds: int = 900
+    otp_request_ip_max: int = 30           # OTP requests per IP per window
+    otp_verify_ip_max_failures: int = 30   # failed OTP verifications per IP per window
 
     # ── JWT ──────────────────────────────────────────────────────────────────────
     jwt_secret_key: str = "change-me-in-production"
@@ -379,12 +385,17 @@ class Settings(BaseSettings):
     outreach_deck_url: str = ""
 
     # ── Mailjet (transactional email transport — replaces the SMTP send path) ─────
-    # mailjet_api_key: str = Field(default="", validation_alias=AliasChoices("MJ_APIKEY_PUBLIC", "MAILJET_API_KEY"))
-    # mailjet_secret_key: str = Field(default="", validation_alias=AliasChoices("MJ_APIKEY_PRIVATE", "MAILJET_SECRET_KEY"))
-    # mailjet_timeout_seconds: int = 30
+    mailjet_api_key: str = Field(
+        default="", validation_alias=AliasChoices("MJ_APIKEY_PUBLIC", "MAILJET_API_KEY")
+    )
+    mailjet_secret_key: str = Field(
+        default="", validation_alias=AliasChoices("MJ_APIKEY_PRIVATE", "MAILJET_SECRET_KEY")
+    )
+    mailjet_timeout_seconds: int = 30
     mailjet_max_attempts: int = 2
     mailjet_retry_backoff_seconds: float = 0.5
-    # mailjet_webhook_token: str = ""
+    # Shared secret for POST /outreach/mailjet-events; empty → that webhook is unauthenticated.
+    mailjet_webhook_token: str = ""
     brevo_webhook_token: str = ""
     # Shared secret guarding the Brevo INBOUND-parse webhook (prospect replies), in the
     # URL query like the event webhooks. Falls back to brevo_webhook_token when unset.
@@ -444,7 +455,11 @@ class Settings(BaseSettings):
     
     @property
     def cors_origins_list(self) -> list[str]:
-        return [o for o in self.cors_origins.split(",") if o.strip()]
+        """Allowed CORS origins from the comma-separated CORS_ORIGINS.
+
+        Each entry is stripped of surrounding spaces; blank entries are dropped.
+        """
+        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
 
     @property
     def outreach_extra_reply_to_recipients(self) -> list[str]:
@@ -500,10 +515,12 @@ class Settings(BaseSettings):
 
     @property
     def is_production(self) -> bool:
+        """True when APP_ENV is exactly "production"."""
         return self.app_env == "production"
 
     @property
     def is_development(self) -> bool:
+        """True when APP_ENV is exactly "development"."""
         return self.app_env == "development"
 
 

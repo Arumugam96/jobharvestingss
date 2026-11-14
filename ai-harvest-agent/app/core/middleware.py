@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import time
-from collections import defaultdict
 from typing import Callable
 
 import structlog
 from fastapi import Request, Response, status
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
+
+from app.core.security import SlidingWindowCounter, client_ip
 
 logger = structlog.get_logger(__name__)
 
@@ -21,6 +22,7 @@ _NOISY_PATH_PREFIXES = ("/harvest-status", "/health", "/run-history")
 
 
 def _is_noisy(path: str) -> bool:
+    """True for paths the frontend polls, which are logged at DEBUG instead of INFO."""
     return path.startswith(_NOISY_PATH_PREFIXES)
 
 
@@ -28,6 +30,11 @@ class LoggingMiddleware(BaseHTTPMiddleware):
     """Structured request/response logging."""
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+        """Time the request and add an ``X-Process-Time`` header to the response.
+
+        The start/finish log lines are currently commented out; only unhandled
+        exceptions are logged (``request_error``) before being re-raised.
+        """
         start = time.perf_counter()
         log = logger.bind(
             method=request.method,
@@ -54,24 +61,31 @@ class LoggingMiddleware(BaseHTTPMiddleware):
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
-    """Simple in-process sliding-window rate limiter (per IP)."""
+    """Simple in-process sliding-window rate limiter (per real client IP)."""
+
+    # Not counted: /auth/me is nginx's auth_request check for every /vnc/ (live
+    # browser) request, so a noVNC session would otherwise trip the limit and nginx
+    # would turn the 429 into a 500; /health is polled by the UI's health badge.
+    EXEMPT_PATHS = frozenset({"/auth/me", "/health"})
 
     def __init__(self, app: Callable, requests_per_minute: int = 60) -> None:
+        """Wrap ``app`` with a per-client-IP limit of ``requests_per_minute``."""
         super().__init__(app)
         self.rpm = requests_per_minute
-        self._counters: dict[str, list[float]] = defaultdict(list)
+        self._counter = SlidingWindowCounter(60.0)
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
-        ip = request.client.host if request.client else "unknown"
-        now = time.time()
-        window = now - 60.0
+        """Return 429 RATE_LIMITED once the client IP exceeds the limit in a 60 s window.
 
-        hits = self._counters[ip]
-        # Remove timestamps older than 1 minute
-        self._counters[ip] = [t for t in hits if t > window]
-        self._counters[ip].append(now)
-
-        if len(self._counters[ip]) > self.rpm:
+        The IP is the real client behind nginx (security.client_ip: X-Real-IP /
+        X-Forwarded-For, trusted only from a loopback/private peer). State is
+        in-process memory only (not shared across workers); idle IPs are evicted.
+        Rejected requests are still recorded, so a client that keeps hammering stays
+        limited. EXEMPT_PATHS are passed through without counting.
+        """
+        if request.url.path in self.EXEMPT_PATHS:
+            return await call_next(request)
+        if self._counter.add(client_ip(request)) > self.rpm:
             return JSONResponse(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 content={"error": {"code": "RATE_LIMITED", "message": "Too many requests"}},

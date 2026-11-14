@@ -22,6 +22,7 @@ class DiceStorageService:
     """Save and retrieve Dice harvest run results."""
 
     def save_results(self, data: dict[str, Any]) -> str:
+        """Write ``data`` as a new UTC-timestamped JSON file; returns its absolute path."""
         _BASE_PATH.mkdir(parents=True, exist_ok=True)
         ts        = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         filename  = f"{ts}_dice.json"
@@ -31,6 +32,7 @@ class DiceStorageService:
         return str(file_path.resolve())
 
     def list_results(self) -> list[dict]:
+        """Summaries of saved runs, newest file first; unreadable files are skipped."""
         if not _BASE_PATH.exists():
             return []
         results: list[dict] = []
@@ -51,6 +53,7 @@ class DiceStorageService:
         return results
 
     def get_result(self, run_id: str) -> dict | None:
+        """Full saved payload whose ``run_id`` matches (linear file scan), or None."""
         if not _BASE_PATH.exists():
             return None
         for p in _BASE_PATH.glob("*_dice.json"):

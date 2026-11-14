@@ -31,6 +31,7 @@ class BaseAgent(ABC):
         playwright_service: PlaywrightService,
         config: AgentConfig | None = None,
     ) -> None:
+        """Store the shared LLM and Playwright services; agent state is created per run()."""
         self._llm = llm_service
         self._playwright = playwright_service
         self._config = config or AgentConfig()
@@ -73,6 +74,7 @@ class BaseAgent(ABC):
 
     @property
     def state(self) -> AgentState | None:
+        """Current run state, or None before run() has been called."""
         return self._state
 
     # ── Abstract Methods ─────────────────────────────────────────────────────────
@@ -101,6 +103,10 @@ class BaseAgent(ABC):
         action_input: dict[str, Any],
         observation: str = "",
     ) -> None:
+        """Append an AgentStep to the run state and bump the iteration counter.
+
+        No-op when called outside a run (state is None).
+        """
         if self._state is None:
             return
         step = AgentStep(
@@ -113,6 +119,7 @@ class BaseAgent(ABC):
         self._state.iteration += 1
 
     def _visited(self, url: str) -> None:
+        """Record url as the current page and add it to pages_visited once (no-op outside a run)."""
         if self._state:
             self._state.current_url = url
             if url not in self._state.pages_visited:

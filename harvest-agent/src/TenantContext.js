@@ -41,6 +41,11 @@ export function TenantProvider({ tenant, role = "user", authBypass = false, chil
   return <TenantContext.Provider value={value}>{children}</TenantContext.Provider>;
 }
 
+/**
+ * Read the tenant slip with derived helpers: `features`, `theme`, `isClient`,
+ * `isAdmin`, `authBypass` and `hasFeature(key)` (clients need an explicit true;
+ * internal tenants see a feature unless it is explicitly false).
+ */
 export function useTenant() {
   const { tenant, role, authBypass = false } = useContext(TenantContext);
   const features = tenant.features || {};

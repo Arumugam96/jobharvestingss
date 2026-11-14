@@ -56,14 +56,18 @@ _token_cache: dict[str, Any] = {"value": "", "expires_at": datetime(1970, 1, 1, 
 # ── On-disk received-time high-water state ────────────────────────────────────
 
 def _state_path(settings: Settings) -> str:
+    """Path of the poller's state file under STORAGE_LOCAL_DIR (default ./data/results)."""
     base = settings.storage_local_dir or "./data/results"
     return os.path.join(base, _STATE_FILENAME)
 
 
 def _load_last_received(settings: Settings) -> datetime | None:
+    """The stored received-time high-water mark (aware UTC), or None if absent/unreadable
+    (including valid JSON that isn't an object)."""
     try:
         with open(_state_path(settings), "r", encoding="utf-8") as fh:
-            raw = json.load(fh).get("last_received")
+            data = json.load(fh)
+        raw = data.get("last_received") if isinstance(data, dict) else None
         if not raw:
             return None
         dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
@@ -73,6 +77,7 @@ def _load_last_received(settings: Settings) -> datetime | None:
 
 
 def _save_last_received(settings: Settings, dt: datetime) -> None:
+    """Persist the high-water mark atomically (temp file + os.replace); errors propagate."""
     path = _state_path(settings)
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     tmp = f"{path}.tmp"
@@ -201,6 +206,7 @@ async def _filter_already_stored(db, items: list[dict[str, Any]]) -> list[dict[s
 
 
 def _max_received(messages: list[dict[str, Any]]) -> datetime | None:
+    """Latest ``receivedDateTime`` among Graph messages; unparseable ones ignored, None if none."""
     best: datetime | None = None
     for m in messages:
         raw = m.get("receivedDateTime")
@@ -220,8 +226,10 @@ def _max_received(messages: list[dict[str, Any]]) -> datetime | None:
 async def poll_once(now: datetime | None = None) -> dict[str, int]:
     """One poll cycle: pull new messages from the M365 mailbox via Graph, record them
     through the shared reply pipeline, and advance the received-time high-water mark.
-    Best-effort — any failure is logged and swallowed so an outage never breaks the
-    scheduler. Returns {received, stored, matched, forwarded}."""
+    With NO saved mark (first run, or the state file was deleted) nothing is fetched:
+    the mark is initialised to ``now`` so the existing mailbox history is never
+    ingested. Best-effort — any failure is logged and swallowed so an outage never
+    breaks the scheduler. Returns {received, stored, matched, forwarded}."""
     settings = get_settings()
     now = now or datetime.now(timezone.utc)
     empty = {"received": 0, "stored": 0, "matched": 0, "forwarded": 0}
@@ -235,9 +243,18 @@ async def poll_once(now: datetime | None = None) -> dict[str, int]:
         logger.warning("graph_poll_skipped", reason="no_mailbox")
         return empty
 
+    since = _load_last_received(settings)
+    if since is None:
+        # No saved cursor: start from now instead of ingesting the mailbox history.
+        try:
+            _save_last_received(settings, now)
+            logger.info("graph_cursor_initialised", last_received=now.isoformat())
+        except Exception as exc:
+            logger.warning("graph_cursor_init_failed", error=str(exc))
+        return empty
+
     try:
         token = await _get_token(settings, now)
-        since = _load_last_received(settings)
         messages = await _fetch_new_messages(settings, token, since)
     except httpx.HTTPStatusError as exc:
         body = exc.response.text[:400] if exc.response is not None else ""

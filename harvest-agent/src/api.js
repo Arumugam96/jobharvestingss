@@ -5,6 +5,11 @@ import { getDevTenant } from "./devTenant";
 const API_BASE = process.env.REACT_APP_API_BASE_URL ?? "http://localhost:8000";
 
 class ApiError extends Error {
+  /**
+   * @param {string} message human-readable error (from the response body when present)
+   * @param {number} status HTTP status code
+   * @param {*} body parsed JSON response body, or null
+   */
   constructor(message, status, body) {
     super(message);
     this.status = status;
@@ -12,12 +17,39 @@ class ApiError extends Error {
   }
 }
 
+/**
+ * Whether an error from request() looks transient — worth retrying rather than
+ * treating as a real outcome: a network failure (fetch rejected, so not an
+ * ApiError), a request timeout (408), rate limiting (429) or any 5xx, including
+ * the 502/504 nginx returns when it gives up on a slow upstream.
+ * @param {*} err the caught error
+ * @returns {boolean}
+ */
+export function isTransientError(err) {
+  if (!(err instanceof ApiError)) return true;
+  return err.status === 408 || err.status === 429 || err.status >= 500;
+}
+
+/**
+ * fetch() wrapper used by every API call: prefixes API_BASE, sends the session
+ * cookie and the X-Dev-Tenant header, and parses the JSON body.
+ * A caller's `options.headers` are merged over the defaults (Content-Type,
+ * X-Dev-Tenant) rather than replacing them.
+ * A 401 outside /auth/* also dispatches the window "auth:logout" event.
+ * @param {string} path API path (appended to API_BASE)
+ * @param {RequestInit} [options] fetch options; `headers` are merged, not replaced
+ * @returns {Promise<*>} the parsed JSON body (null when the response had none)
+ * @throws {ApiError} on any non-2xx response
+ */
 async function request(path, options = {}) {
+  const { headers, ...rest } = options;
   const res = await fetch(`${API_BASE}${path}`, {
     // Send the HttpOnly session cookie on every call — this is how the browser
     // authenticates now (no bearer token is stored in JS). Required for the
     // cross-origin dev setup (localhost:3000 → :8000) to include credentials.
     credentials: "include",
+    ...rest,
+    // Merged last so a caller passing options.headers can't wipe the defaults.
     headers: {
       "Content-Type": "application/json",
       // Which tenant to impersonate under the backend's auth bypass (see
@@ -25,9 +57,8 @@ async function request(path, options = {}) {
       // because the backend only reads it when it runs with AUTH_ENABLED=false;
       // with auth on it's ignored, so it's inert in a normal deployment.
       "X-Dev-Tenant": getDevTenant(),
-      ...(options.headers || {}),
+      ...(headers || {}),
     },
-    ...options,
   });
   let body = null;
   try {

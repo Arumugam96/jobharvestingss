@@ -27,7 +27,12 @@ Security contract (same as all agents)
 • DO NOT implement or call any login / OTP / MFA flow.
 • DO NOT fabricate email or phone numbers.
 • Only data scraped from an actual Naukri profile page is stored.
-• email_status / phone_status: VERIFIED (company domain match) | PUBLIC | NOT_FOUND.
+• A profile is accepted only when its URL is a real Naukri profile URL AND the name on
+  the page matches the recruiter searched for (first + last tokens). Email/phone are read
+  only from the profile's contact section — never from a whole-page regex.
+• DO NOT click "View Contact" / "Get Contact" — those reveals spend Resdex credits.
+• email_status / phone_status: PUBLIC (found on the profile) | NOT_FOUND. A company-name
+  heuristic is never enough to claim VERIFIED.
 """
 from __future__ import annotations
 
@@ -49,6 +54,58 @@ _EMAIL_RE = re.compile(
 _PHONE_RE = re.compile(
     r'(?:(?:\+91|0091|91)?[\s\-]?[6-9]\d{9}|(?:\+[1-9]\d{6,14}))'
 )
+
+# Path fragments that are never a person's profile (login, the logged-in account's own
+# homepage, job/company listings, search pages).
+_NON_PROFILE_PATH_PARTS = (
+    "login", "nlogin", "/homepage", "/jobs", "/job-listings", "/company", "searchcv",
+)
+
+
+def _name_tokens(name: str) -> list[str]:
+    """Lower-case a person name and split it into alphabetic tokens (punctuation dropped)."""
+    return re.sub(r"[^a-z\s]", " ", (name or "").lower()).split()
+
+
+def _names_match(found: str, expected: str) -> bool:
+    """True when ``found`` names the same person as ``expected``.
+
+    Both names are normalised (lower-case, punctuation removed) and must share the same
+    first AND last token. An empty name on either side never matches.
+    """
+    f, e = _name_tokens(found), _name_tokens(expected)
+    if not f or not e:
+        return False
+    return f[0] == e[0] and f[-1] == e[-1]
+
+
+def _is_profile_url(url: str) -> bool:
+    """True only for a URL that points at an individual Naukri profile page.
+
+    Accepts http(s) URLs on naukri.com (or a subdomain) whose path is a recruiter page
+    (``/recruiter(s)/<slug>``), a ``/profile/<id>`` page, or a ``/profile`` page carrying a
+    non-empty ``id``/``altresid`` query (a bare ``/mnjuser/profile`` is the logged-in
+    account's OWN profile). Rejects the homepage, login, job and company pages.
+    """
+    try:
+        p = urllib.parse.urlparse(url or "")
+    except ValueError:
+        return False
+    host = (p.hostname or "").lower()
+    if p.scheme not in ("http", "https"):
+        return False
+    if host != "naukri.com" and not host.endswith(".naukri.com"):
+        return False
+    path = p.path.lower().rstrip("/")
+    if not path or any(part in path for part in _NON_PROFILE_PATH_PARTS):
+        return False
+    if re.search(r"/recruiters?/[^/]+", path) or re.search(r"/profile/[^/]+", path):
+        return True
+    if path.endswith("/profile"):
+        query = urllib.parse.parse_qs(p.query)
+        return any(v.strip() for k in ("id", "altresid") for v in query.get(k, []))
+    return False
+
 
 # ── Naukri profile extraction JS (robust multi-selector) ─────────────────────
 
@@ -88,7 +145,23 @@ _NAUKRI_PROFILE_JS = """() => {
         '.candidateLocation', '.profileLocation',
     ]);
 
-    // Email — Naukri premium shows email in contact section or modal
+    // Contact details are read ONLY inside the profile's contact section — never from
+    // the whole page (header/footer/sidebar hold the logged-in account's and Naukri's
+    // own addresses). No contact section -> no email/phone.
+    const contactRoots = Array.from(document.querySelectorAll(
+        '.contact-details, .contactDetails, .contact-section, .contact-info, ' +
+        '.contactInfo, [class*="contactDetail"], [class*="contact-detail"], ' +
+        '[class*="contactInfo"], [class*="contact-info"], [class*="contactSection"]'
+    ));
+    function inContact(sel) {
+        const out = [];
+        for (const root of contactRoots) {
+            for (const el of root.querySelectorAll(sel)) out.push(el);
+        }
+        return out;
+    }
+
+    // Email — Naukri premium shows email in the contact section
     let email = '';
     const emailSelectors = [
         '.email-value', '.mail-id', '[data-label="Email"]',
@@ -98,7 +171,7 @@ _NAUKRI_PROFILE_JS = """() => {
         'span[id*="email"]', 'div[id*="email"]',
     ];
     for (const sel of emailSelectors) {
-        const els = document.querySelectorAll(sel);
+        const els = inContact(sel);
         for (const el of els) {
             const val = el.textContent.trim() || el.getAttribute('href')?.replace('mailto:', '') || '';
             if (val && /[^@\\s]+@[^@\\s]+\\.[^@\\s]+/.test(val)) { email = val.trim(); break; }
@@ -106,7 +179,7 @@ _NAUKRI_PROFILE_JS = """() => {
         if (email) break;
     }
 
-    // Phone — Naukri premium shows phone in contact section or modal
+    // Phone — Naukri premium shows phone in the contact section
     let phone = '';
     const phoneSelectors = [
         '.phone-value', '.mobile-no', '[data-label="Mobile"]',
@@ -115,7 +188,7 @@ _NAUKRI_PROFILE_JS = """() => {
         'span[id*="phone"]', 'div[id*="mobile"]',
     ];
     for (const sel of phoneSelectors) {
-        const els = document.querySelectorAll(sel);
+        const els = inContact(sel);
         for (const el of els) {
             const val = el.textContent.trim().replace(/[\\s\\-\\(\\)]/g, '');
             if (val && /^(?:\\+91|0091|91)?[6-9]\\d{9}$/.test(val)) {
@@ -169,6 +242,10 @@ class PremiumNaukriAgent:
     """
 
     def __init__(self, max_profiles: int = 3) -> None:
+        """Store max_profiles (currently unused here) and an empty session-check cache.
+
+        The Naukri session check result is cached per instance so it runs only once.
+        """
         self._max_profiles = max_profiles
         self._session_ok: bool | None = None  # cached per-agent-instance to avoid re-verifying
 
@@ -310,25 +387,23 @@ class PremiumNaukriAgent:
         return None
 
     async def _extract_naukri_link_from_ddg(self, page: Any) -> str:
-        """Extract the first Naukri profile URL from DuckDuckGo results."""
+        """Return the first DuckDuckGo result that is a real Naukri profile URL, else "".
+
+        Only URLs passing ``_is_profile_url`` qualify — a bare naukri.com page (homepage,
+        login, job or company listing) is never accepted.
+        """
         try:
             links = await page_evaluate(page, """() => {
                 const results = document.querySelectorAll(
                     'a[data-testid="result-title-a"], .result__a, article a, h2 a'
                 );
                 return Array.from(results)
-                    .map(a => a.href || a.getAttribute('href') || '')
-                    .filter(h =>
-                        h.includes('naukri.com/mnjuser') ||
-                        h.includes('naukri.com/recruiter') ||
-                        h.includes('naukri.com/profile') ||
-                        (h.includes('naukri.com/') &&
-                         !h.includes('naukri.com/jobs') &&
-                         !h.includes('naukri.com/job-listings') &&
-                         !h.includes('naukri.com/company'))
-                    );
+                    .map(a => a.href || a.getAttribute('href') || '');
             }""")
-            return links[0] if links else ""
+            for href in links or []:
+                if _is_profile_url(href):
+                    return href
+            return ""
         except Exception:
             return ""
 
@@ -343,6 +418,11 @@ class PremiumNaukriAgent:
         """
         Search Naukri for a recruiter profile using the authenticated session.
         Tries recruit.naukri.com dashboard search, then mnjuser resdex fallback.
+
+        Only result links whose text contains the recruiter's first name AND whose URL is a
+        real profile URL are opened — there is no "first link on the page" fallback (that
+        could be the logged-in account's own profile). ``_extract_profile`` then requires
+        the full name to match.
         """
         _LOGIN_PATHS = ("/login", "/nlogin", "accounts.naukri.com")
         search_query = urllib.parse.quote_plus(f"{name} {company}".strip())
@@ -367,8 +447,8 @@ class PremiumNaukriAgent:
                     logger.debug("premium_naukri_search_redirected_to_login", url=page.url)
                     continue
 
-                # Find the first matching profile link
-                profile_url = await page_evaluate(page, """(searchName) => {
+                # Links whose text contains the first name — no links[0] fallback
+                hrefs = await page_evaluate(page, """(searchName) => {
                     const links = document.querySelectorAll(
                         'a[href*="/mnjuser/"], a[href*="/profile"], ' +
                         '.profile-card a, .candidate-name a, ' +
@@ -376,17 +456,22 @@ class PremiumNaukriAgent:
                         '[class*="profileName"] a'
                     );
                     const firstName = searchName.toLowerCase().split(' ')[0];
+                    const out = [];
+                    if (!firstName) return out;
                     for (const a of links) {
                         const t = (a.textContent || '').toLowerCase();
                         if (t.includes(firstName)) {
-                            return a.href || a.getAttribute('href') || '';
+                            out.push(a.href || a.getAttribute('href') || '');
                         }
                     }
-                    return links[0]?.href || links[0]?.getAttribute('href') || '';
+                    return out;
                 }""", name)
 
-                if profile_url and "naukri.com" in profile_url:
-                    return await self._extract_profile(page, profile_url, name)
+                profile_url = next((h for h in hrefs or [] if _is_profile_url(h)), "")
+                if profile_url:
+                    profile = await self._extract_profile(page, profile_url, name)
+                    if profile:
+                        return profile
 
             except Exception as exc:
                 logger.debug(
@@ -404,78 +489,73 @@ class PremiumNaukriAgent:
         profile_url: str,
         expected_name: str,
     ) -> NaukriProfile | None:
-        """Navigate to profile_url and extract recruiter data."""
+        """Navigate to profile_url and extract recruiter data.
+
+        Returns None unless ``profile_url`` (and the URL actually landed on) is a real
+        Naukri profile URL AND the name shown on the page matches ``expected_name`` (first
+        and last tokens) — otherwise the contact would belong to someone else.
+
+        Email/phone come only from the profile's contact section as already rendered; no
+        whole-page regex fallback. "View Contact" / "Get Contact" reveal buttons are NOT
+        clicked, because each reveal spends Resdex credits outside any budget check.
+        """
+        if not _is_profile_url(profile_url):
+            logger.debug("premium_naukri_not_profile_url", url=profile_url)
+            return None
         try:
             await page.goto(profile_url, wait_until="domcontentloaded", timeout=25_000)
             await page.wait_for_timeout(2_000)
 
-            # Naukri Premium hides contact details behind a "View Contact" button.
-            # Click it first so email/phone appear in the DOM before extraction.
-            _REVEAL_SELECTORS = [
-                'button:has-text("View Contact")',
-                'button:has-text("Get Contact")',
-                'button:has-text("View Phone")',
-                'button:has-text("Contact Candidate")',
-                '[data-ga-category="get_contact"]',
-                '[class*="viewContact"]',
-                '[class*="getContact"]',
-                '.view-contact-btn',
-                '.getContactBtn',
-            ]
-            for sel in _REVEAL_SELECTORS:
-                try:
-                    btn = page.locator(sel).first
-                    if await btn.count() > 0:
-                        await btn.click(timeout=5_000)
-                        await page.wait_for_timeout(2_000)
-                        logger.info("naukri_contact_reveal_clicked", selector=sel)
-                        break
-                except Exception:
-                    continue
+            if not _is_profile_url(page.url):
+                logger.debug(
+                    "premium_naukri_redirected_off_profile", url=profile_url, landed=page.url,
+                )
+                return None
 
-            data = await page_evaluate(page, _NAUKRI_PROFILE_JS)
+            data = await page_evaluate(page, _NAUKRI_PROFILE_JS) or {}
 
-            found_name = data.get("recruiter_name", "").strip()
-            email      = data.get("email", "").strip()
-            phone      = data.get("phone", "").strip()
+            found_name = (data.get("recruiter_name") or "").strip()
+            email      = (data.get("email") or "").strip()
+            phone      = (data.get("phone") or "").strip()
 
-            # Fallback: scan full page text for email / phone if extraction JS missed them
-            if not email or not phone:
-                page_text = await page_evaluate(page, "() => document.body.innerText || ''")
-                if not email:
-                    m = _EMAIL_RE.search(page_text)
-                    email = m.group(0) if m else ""
-                if not phone:
-                    m = _PHONE_RE.search(page_text)
-                    if m:
-                        phone = re.sub(r"[\s\-]", "", m.group(0))
+            if not _names_match(found_name, expected_name):
+                logger.info(
+                    "premium_naukri_name_mismatch",
+                    url      = profile_url,
+                    expected = expected_name,
+                    found    = found_name,
+                )
+                return None
+
+            if email and not _EMAIL_RE.fullmatch(email):
+                email = ""
 
             if email:
                 logger.info(
                     "email_found",
                     source     = "Premium Naukri",
-                    recruiter  = found_name or expected_name,
+                    recruiter  = found_name,
                     email      = email,
                 )
             if phone:
                 logger.info(
                     "phone_found",
                     source     = "Premium Naukri",
-                    recruiter  = found_name or expected_name,
+                    recruiter  = found_name,
                     phone      = phone,
                 )
 
-            if email or phone or found_name:
+            if found_name:
                 logger.info(
                     "premium_profile_found",
                     url        = profile_url,
-                    recruiter  = found_name or expected_name,
+                    recruiter  = found_name,
                     has_email  = bool(email),
                     has_phone  = bool(phone),
                 )
                 return NaukriProfile(
                     profile_url       = profile_url,
-                    recruiter_name    = found_name or expected_name,
+                    recruiter_name    = found_name,
                     designation       = data.get("designation", ""),
                     current_company   = data.get("current_company", ""),
                     location          = data.get("location", ""),
@@ -499,17 +579,13 @@ class PremiumNaukriAgent:
     @staticmethod
     def _classify_email(email: str, company: str) -> str:
         """
-        Classify email status.
-        VERIFIED if email domain matches company name (heuristic).
-        PUBLIC if the email was found on the profile but domain doesn't match.
+        Classify email status: PUBLIC if an email was found on the profile, else NOT_FOUND.
+
+        Never returns VERIFIED — a company name appearing in the email domain is a
+        heuristic, not verification. ``company`` is accepted for signature compatibility.
         """
         if not email:
             return "NOT_FOUND"
-        domain = email.split("@", 1)[-1].lower()
-        company_slug = re.sub(r"[^a-z0-9]", "", company.lower())
-        # Check if company name appears in email domain (e.g. infosys in infosys.com)
-        if len(company_slug) > 3 and company_slug[:6] in domain:
-            return "VERIFIED"
         return "PUBLIC"
 
     @staticmethod

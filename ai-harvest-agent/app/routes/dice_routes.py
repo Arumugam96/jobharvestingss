@@ -45,12 +45,14 @@ _storage_svc = DiceStorageService()
 
 
 def _make_run_id(keyword: str, location: str) -> str:
+    """Build a run id: UTC timestamp + "_dice_" + a 30-char keyword/location slug."""
     ts   = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     slug = re.sub(r"[^a-z0-9]+", "_", f"{keyword} {location}".lower()).strip("_")
     return f"{ts}_dice_{slug[:30]}"
 
 
 def _err(msg: str, reason: str = "") -> JSONResponse:
+    """Failure body `{"status": "failed", "message", "reason"?}` returned with HTTP 200."""
     body: dict[str, Any] = {"status": "failed", "message": msg}
     if reason:
         body["reason"] = reason
@@ -58,6 +60,7 @@ def _err(msg: str, reason: str = "") -> JSONResponse:
 
 
 def _to_dice_job(j: DiceScrapedJob) -> DiceJob:
+    """Map a scraped Dice job onto the API response model (source fixed to "Dice")."""
     return DiceJob(
         job_title       = j.job_title,
         company         = j.company,
@@ -138,6 +141,9 @@ async def run_dice_agent() -> Any:
     Trigger a Dice.com harvest run using the current harvest_config.json settings.
     Edit search filters via PUT /harvest-config or the Rule Engine UI.
     Returns: run_id, status, source, total_found, saved_to, jobs.
+
+    A harvest failure is not "0 results": it returns status "failed" and records the
+    run in harvest_runs as "failed" with the error.
     """
     config = _config_svc.load()
     f      = config.filters
@@ -149,12 +155,32 @@ async def run_dice_agent() -> Any:
     log.info("dice_search_started", max_jobs=f.max_jobs)
 
     async def _do_harvest() -> list[DiceScrapedJob]:
+        """Run the Dice scrape with the configured filters and browser settings."""
         agent = DiceAgent()
         return await agent.harvest(
             filters  = f,
             headless = config.browser.resolved_headless,
             slow_mo  = config.browser.slow_mo_ms,
         )
+
+    async def _record_failed_run(error: str) -> None:
+        """Best-effort: write this run as a terminal "failed" row (no jobs) with the error."""
+        run_pk = await db_write(lambda db: HarvestRunService(db).create_run(
+            run_id           = run_id,
+            source           = "Dice",
+            sources          = ["Dice"],
+            filters_snapshot = f.model_dump(),
+            started_at       = datetime.now(timezone.utc),
+        ))
+        if not run_pk:
+            return
+        await db_write(lambda db: HarvestRunService(db).update_run(
+            run_pk,
+            status         = "failed",
+            completed_at   = datetime.now(timezone.utc),
+            error          = error,
+            combined_count = 0,
+        ))
 
     # Single-flight: reject if a harvest is already running (raises 409).
     async with run_guard.single_flight(run_id, "Dice"):
@@ -166,14 +192,23 @@ async def run_dice_agent() -> Any:
                 scraped = await _do_harvest()
 
         except Exception as exc:
+            # Browser launch failure, "Dice navigation failed" on page 1, … — not 0 results.
             log.exception("dice_harvest_error", error=str(exc))
-            return _err("Dice harvest failed", str(exc) or "Unexpected error during scraping")
+            reason = str(exc) or "Unexpected error during scraping"
+            await _record_failed_run(reason)
+            return _err("Dice harvest failed", reason)
 
     log.info("dice_jobs_extracted", total=len(scraped))
 
     jobs = [_to_dice_job(j) for j in scraped]
 
     async def _mirror_run_to_db(response: DiceRunResponse) -> None:
+        """Best-effort mirror of this run and its jobs into harvest_runs / scraped_jobs.
+
+        Creates the run row, stamps its final status and count, then bulk-inserts the jobs. Each
+        step goes through db_write, so DB errors are logged and swallowed; nothing more is written
+        if the run row could not be created.
+        """
         run_pk = await db_write(lambda db: HarvestRunService(db).create_run(
             run_id           = run_id,
             source           = "Dice",

@@ -65,6 +65,24 @@ const CLIENT_LABELS = {
   unknown: { label: "Unknown company", cls: "ecm-badge-unknown" },
 };
 
+/**
+ * Modal that drafts and sends a recruiter outreach email (initial or follow-up).
+ * Drafts via POST /outreach/generate-email or /outreach/generate-followup, checks the
+ * recipient against GET /outreach/suppressed (debounced), shows the previously sent
+ * thread (GET /outreach/history) for manual follow-ups, and sends via
+ * POST /outreach/send-email — with a "Send anyway" confirm when the backend reports
+ * a duplicate initial send.
+ * @param {object} props
+ * @param {object} props.job Harvested job row (id, email/emailScraped/emailRecruiter,
+ *   posterContact).
+ * @param {boolean} [props.followup] Draft a follow-up threaded onto a prior send.
+ * @param {string|null} [props.parentOutreachId] Prior outreach to thread onto; resolved
+ *   server-side when omitted.
+ * @param {boolean} [props.autoDraft] Follow-up drafts immediately (no history gate).
+ * @param {() => void} [props.onClose]
+ * @param {() => void} [props.onSent] Called after a successful send so the caller can
+ *   refresh its outreach-state icons.
+ */
 export default function EmailComposeModal({
   job = {},
   followup = false,
@@ -108,6 +126,10 @@ export default function EmailComposeModal({
   // never clobbers an address the user already typed.
   const toTouched = useRef(false);
   const fromTouched = useRef(false);
+  // Pending "close 0.9s after a successful send" timer — cleared on unmount so it
+  // can't call onClose for a modal that's already gone.
+  const closeTimer = useRef(null);
+  useEffect(() => () => clearTimeout(closeTimer.current), []);
 
   // Manual follow-up mode shows the previously sent email(s) first and only drafts
   // a new follow-up once the user clicks "Generate follow-up" (draftStarted).
@@ -157,6 +179,13 @@ export default function EmailComposeModal({
     return opts;
   }, [job]);
 
+  /**
+   * Fetches an LLM draft (follow-up or initial) in the given tone and fills
+   * subject/body/client type/deck/job link; seeds From/To only on the first
+   * successful draft and only for fields the user hasn't edited.
+   * @param {string} nextTone "Formal" | "Friendly" | "Direct" (sent as `mode`).
+   * @param {boolean} regenerate Ask the backend for a fresh draft.
+   */
   const generate = useCallback(async (nextTone, regenerate) => {
     setGenerating(true);
     setError("");
@@ -222,23 +251,33 @@ export default function EmailComposeModal({
 
   // Escape closes the modal.
   useEffect(() => {
+    /** Closes the modal on Escape. */
     const onKey = (e) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
+  /** Switches tone and regenerates the draft; ignored for the current tone or mid-generation. */
   const pickTone = (t) => {
     if (t === tone || generating) return;
     setTone(t);
     generate(t, false);
   };
 
+  /** Copies subject + body to the clipboard and flashes the "copied" state for 1.6s. */
   const copyAll = () => {
     navigator.clipboard?.writeText(`${subject}\n\n${body}`);
     setCopied(true);
     setTimeout(() => setCopied(false), 1600);
   };
 
+  /**
+   * Sends the edited email via POST /outreach/send-email. On "sent" calls onSent and
+   * closes after 0.9s; "duplicate" shows the re-send confirm; "suppressed" disables
+   * sending; anything else shows the error.
+   * @param {boolean} [force] Re-send despite an existing initial email (the
+   *   "Send anyway" button).
+   */
   const handleSend = async (force = false) => {
     setSending(true);
     setError("");
@@ -259,7 +298,7 @@ export default function EmailComposeModal({
       if (res.status === "sent") {
         setSent(true);
         onSent();                 // let the caller refresh the DB-backed icon state
-        setTimeout(onClose, 900);
+        closeTimer.current = setTimeout(onClose, 900);
       } else if (res.status === "duplicate") {
         // An initial email was already sent to this recruiter/job — ask to confirm.
         setDuplicate(res.existing || {});

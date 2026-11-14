@@ -118,6 +118,7 @@ class GeminiService:
     """
 
     def __init__(self, api_key: str, model_name: str = "claude-sonnet-4-6") -> None:
+        """Bind to the module-cached Anthropic client for ``api_key`` and a model name."""
         self._api_key    = api_key
         self._model_name = model_name
         self._client     = _get_or_create_client(api_key)
@@ -274,6 +275,7 @@ def _safe_enum(enum_cls: type, value: Any, default: Any) -> Any:
 
 
 def _safe_int(value: Any) -> int | None:
+    """``int(value)``, or None when the value is None or not convertible."""
     try:
         return int(value) if value is not None else None
     except (TypeError, ValueError):

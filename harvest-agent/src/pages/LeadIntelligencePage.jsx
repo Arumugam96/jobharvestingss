@@ -35,6 +35,8 @@ export default function LeadIntelligencePage() {
   }, []);
   useEffect(() => { loadPiResults(); }, [loadPiResults]);
 
+  /** Run Prospect Intelligence on the input file (POST /run-prospect-intelligence); shows the
+   * summary or error and reloads the past-runs list on success. */
   const handleRunProspect = async () => {
     setPiRunning(true);
     setPiError("");
@@ -50,6 +52,7 @@ export default function LeadIntelligencePage() {
     }
   };
 
+  /** Load one past prospect run (GET /prospect-results/{runId}) into the inline JSON viewer. */
   const handleViewProspectRun = async (runId) => {
     setPiViewing({ runId, loading: true });
     try {
@@ -60,6 +63,8 @@ export default function LeadIntelligencePage() {
     }
   };
 
+  /** Run recruiter contact discovery over harvested runs with the form's source filter, run IDs,
+   * max files and concurrency; "failed"/"no_data" results show as an error. */
   const handleRunRecruiterDiscovery = async () => {
     setRdRunning(true);
     setRdError("");

@@ -41,6 +41,7 @@ _SIZE_RE = re.compile(
 
 
 def _to_int(raw: str) -> int:
+    """Parse a regex-captured headcount number, dropping thousands commas."""
     return int(raw.replace(",", ""))
 
 

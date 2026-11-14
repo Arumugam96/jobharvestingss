@@ -8,7 +8,7 @@ from bs4 import BeautifulSoup
 
 from app.agents.base_agent import BaseAgent
 from app.models.agent import AgentType
-from app.prompts.extraction_prompts import EXTRACTION_SYSTEM_PROMPT, build_extraction_prompt
+from app.prompts.extraction_prompts import build_extraction_prompt, extraction_system_prompt
 from app.services.llm_service import LLMService
 from app.services.playwright_service import PlaywrightService
 
@@ -42,7 +42,7 @@ class ScraperAgent(BaseAgent):
                 "Return a JSON object with keys being field names and values being "
                 "CSS selectors that extract each field from the page HTML."
             ),
-            system=EXTRACTION_SYSTEM_PROMPT,
+            system=extraction_system_prompt(),
         )
         return {"selectors": selectors, "snapshot": snapshot, "url": url}
 

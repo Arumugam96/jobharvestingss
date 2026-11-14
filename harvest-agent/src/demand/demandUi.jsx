@@ -37,11 +37,13 @@ export const ROW_META = {
 };
 export const ATTENTION = ["cap_reached", "session_expired", "error"];
 export const ACTIVE = ["queued", "in_progress"];
+/** True while a batch row is still queued or in progress. */
 export const isActiveRow = (r) => ACTIVE.includes(r?.status);
 
 const SUB_STEP = {
   extracting: "Extracting JD details", requirements: "Extracting requirements", searching: "Searching Resdex",
 };
+/** Human label for an in-progress row's sub_step (falls back to "In progress"). */
 export const subStepLabel = (r) => SUB_STEP[r?.sub_step] || "In progress";
 
 const TONES = {
@@ -92,18 +94,24 @@ export function SourceKindChip({ kind }) {
 
 // ── Formatting ───────────────────────────────────────────────────────────────
 
+/** Locale date + time ("medium"/"short") for an ISO timestamp; "—" when empty, the raw input
+ * when unparseable. */
 export function fmtWhen(iso) {
   if (!iso) return "—";
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 }
 
+/** Locale date only (e.g. "13 Nov 2026") for an ISO timestamp; "" when empty, the raw input
+ * when unparseable. */
 export function fmtDay(iso) {
   if (!iso) return "";
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
 }
 
+/** Relative age of an ISO timestamp: "just now", "N min ago", "N h ago" (under 48 h) or
+ * "N days ago"; "" when empty or unparseable. */
 export function fmtAgo(iso) {
   if (!iso) return "";
   const t = new Date(iso).getTime();
@@ -119,10 +127,12 @@ export function fmtAgo(iso) {
 /** "45 min – 2 h 10 min" for n rows at 1–3 min each ("" for none). */
 export function fmtDuration(n) {
   if (!n) return "";
+  /** Format a minute count as "M min" or "H h M min". */
   const part = (m) => (m < 60 ? `${m} min` : `${Math.floor(m / 60)} h${m % 60 ? ` ${m % 60} min` : ""}`);
   return `${part(n)} – ${part(n * 3)}`;
 }
 
+/** Fraction (0–1) → rounded whole percent; null for non-numbers. */
 export const pct = (v) => (typeof v === "number" ? Math.round(v * 100) : null);
 
 // ── Recruiter session + quota ─────────────────────────────────────────────────
@@ -155,6 +165,7 @@ export function useDemandUsage() {
     }
   }, []);
 
+  /** Cancel the pending login-watch poll, if any. */
   const stopWatch = () => { if (timer.current) { clearTimeout(timer.current); timer.current = null; } };
 
   const seenOpen = useRef(false);
@@ -213,6 +224,7 @@ export function sessionState(usage) {
   return { key: "none", label: "Not connected", pill: TONES.neutral, dot: "off" };
 }
 
+/** "Resdex today: used/cap searches" pill text from /demand/resdex-usage ("∞" when no cap). */
 export function quotaText(usage) {
   const u = usage?.usage || {};
   if (u.searches == null) return "Resdex today: —";
@@ -249,6 +261,7 @@ export function HarvestRunningModal({ info, onClose }) {
   useEffect(() => {
     const prev = document.activeElement;
     okRef.current?.focus();
+    /** Escape closes the modal; Tab is trapped on the OK button. */
     const onKey = (e) => {
       if (e.key === "Escape") { e.preventDefault(); onClose(); }
       if (e.key === "Tab") { e.preventDefault(); okRef.current?.focus(); }
@@ -281,6 +294,8 @@ export function HarvestRunningModal({ info, onClose }) {
   );
 }
 
+/** Accessible role="switch" toggle button with a track/thumb and a text label (children);
+ * onChange receives the new boolean. */
 export function Switch({ checked, onChange, children }) {
   return (
     <button type="button" role="switch" aria-checked={checked} className="dm-switch" onClick={() => onChange(!checked)}>
@@ -290,6 +305,7 @@ export function Switch({ checked, onChange, children }) {
   );
 }
 
+/** Inline callout box with an optional icon; tone is "info" (default), "warn" or "bad". */
 export function Note({ tone = "info", icon: Icon, children }) {
   return (
     <div className={`dm-note dm-note-${tone}`}>

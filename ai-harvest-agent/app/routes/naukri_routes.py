@@ -10,15 +10,18 @@ Visible endpoints (Swagger)
 """
 from __future__ import annotations
 
+import asyncio
 import re
 from datetime import datetime, timezone
 from typing import Any
 
 import structlog
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import JSONResponse
 
 from app.agents.naukri_agent import NaukriAgent, NaukriScrapedJob
+from app.agents.naukri_recruiter_agent import NaukriRecruiterSessionError
+from app.core.dependencies import require_admin
 from app.core.proactor import needs_proactor, run_in_proactor
 from app.services import run_guard
 
@@ -47,12 +50,14 @@ _storage_svc = NaukriStorageService()
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _make_run_id(keyword: str, location: str) -> str:
+    """Build a run id: UTC timestamp + "_naukri_" + a 30-char keyword/location slug."""
     ts   = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     slug = re.sub(r"[^a-z0-9]+", "_", f"{keyword} {location}".lower()).strip("_")
     return f"{ts}_naukri_{slug[:30]}"
 
 
 def _err(msg: str, reason: str = "") -> JSONResponse:
+    """Failure body `{"status": "failed", "message", "reason"?}` returned with HTTP 200."""
     body: dict[str, Any] = {"status": "failed", "message": msg}
     if reason:
         body["reason"] = reason
@@ -60,6 +65,7 @@ def _err(msg: str, reason: str = "") -> JSONResponse:
 
 
 def _to_naukri_job(j: NaukriScrapedJob) -> NaukriJob:
+    """Map a scraped Naukri job onto the API response model (source fixed to "Naukri")."""
     return NaukriJob(
         job_title       = j.job_title,
         company         = j.company,
@@ -144,6 +150,11 @@ async def run_naukri_agent() -> Any:
     Trigger a Naukri.com harvest run using the current harvest_config.json settings.
     Edit search filters via PUT /harvest-config or the Rule Engine UI.
     Returns: run_id, status, source, total_found, saved_to, jobs.
+
+    A harvest failure is not "0 results": it returns status "failed" (message "Naukri
+    recruiter login required" for an invalid recruiter session / open login window,
+    else "Naukri harvest failed") and records the run in harvest_runs as
+    "login_required" or "failed" with the error.
     """
     config = _config_svc.load()
     f      = config.filters
@@ -156,12 +167,32 @@ async def run_naukri_agent() -> Any:
 
     # ── Playwright scrape via proactor thread on Windows --reload ─────────────
     async def _do_harvest() -> list[NaukriScrapedJob]:
+        """Run the Naukri scrape with the configured filters and browser settings."""
         agent = NaukriAgent()
         return await agent.harvest(
             filters  = f,
             headless = config.browser.resolved_headless,
             slow_mo  = config.browser.slow_mo_ms,
         )
+
+    async def _record_failed_run(run_status: str, error: str) -> None:
+        """Best-effort: write this run as a terminal failed / login_required row (no jobs)."""
+        run_pk = await db_write(lambda db: HarvestRunService(db).create_run(
+            run_id           = run_id,
+            source           = "Naukri",
+            sources          = ["Naukri"],
+            filters_snapshot = f.model_dump(),
+            started_at       = datetime.now(timezone.utc),
+        ))
+        if not run_pk:
+            return
+        await db_write(lambda db: HarvestRunService(db).update_run(
+            run_pk,
+            status         = run_status,
+            completed_at   = datetime.now(timezone.utc),
+            error          = error,
+            combined_count = 0,
+        ))
 
     # Single-flight: reject if a harvest is already running (raises 409).
     async with run_guard.single_flight(run_id, "Naukri"):
@@ -172,23 +203,30 @@ async def run_naukri_agent() -> Any:
             else:
                 scraped = await _do_harvest()
 
-        except RuntimeError as exc:
-            err_lower = str(exc).lower()
-            if "login" in err_lower or "failed" in err_lower:
-                log.error("naukri_login_failed", error=str(exc))
-                return _err("Naukri login failed", "naukri_login_failed")
-            log.exception("naukri_harvest_error", error=str(exc))
-            return _err("Naukri harvest failed", str(exc))
+        except NaukriRecruiterSessionError as exc:
+            # Recruiter mode: session expired / login window open — not "0 results".
+            log.error("naukri_login_required", error=str(exc))
+            await _record_failed_run("login_required", str(exc))
+            return _err("Naukri recruiter login required", str(exc))
 
         except Exception as exc:
+            # NaukriStoppedEarly, SearchFilterNotAppliedException, browser launch, …
             log.exception("naukri_harvest_error", error=str(exc))
-            return _err("Naukri harvest failed", str(exc) or "Unexpected error during scraping")
+            reason = str(exc) or type(exc).__name__
+            await _record_failed_run("failed", reason)
+            return _err("Naukri harvest failed", reason)
 
     log.info("naukri_jobs_extracted", total=len(scraped))
 
     jobs = [_to_naukri_job(j) for j in scraped]
 
     async def _mirror_run_to_db(response: NaukriRunResponse) -> None:
+        """Best-effort mirror of this run and its jobs into harvest_runs / scraped_jobs.
+
+        Creates the run row, stamps its final status and count, then bulk-inserts the jobs. Each
+        step goes through db_write, so DB errors are logged and swallowed; nothing more is written
+        if the run row could not be created.
+        """
         run_pk = await db_write(lambda db: HarvestRunService(db).create_run(
             run_id           = run_id,
             source           = "Naukri",
@@ -246,10 +284,15 @@ async def run_naukri_agent() -> Any:
 # POST /naukri-setup-session
 # ══════════════════════════════════════════════════════════════════════════════
 
-@router.post("/naukri-setup-session", status_code=status.HTTP_200_OK)
+@router.post(
+    "/naukri-setup-session",
+    status_code=status.HTTP_200_OK,
+    dependencies=[Depends(require_admin)],
+)
 async def setup_naukri_session() -> Any:
     """
-    Connect the Naukri RECRUITER session (the one recruiter-mode harvests run in).
+    Connect the Naukri RECRUITER session (the one recruiter-mode harvests run in). Admin only:
+    it drives the shared recruiter browser profile.
 
     Delegates to the recruiter session flow (app/agents/naukri_recruiter_agent.py,
     same as POST /naukri-recruiter/login): opens a HEADED window on
@@ -308,29 +351,52 @@ async def setup_naukri_session() -> Any:
 # POST /naukri-extract-session
 # ══════════════════════════════════════════════════════════════════════════════
 
-@router.post("/naukri-start-cdp-browser", status_code=status.HTTP_200_OK)
+@router.post(
+    "/naukri-start-cdp-browser",
+    status_code=status.HTTP_200_OK,
+    dependencies=[Depends(require_admin)],
+)
 async def naukri_start_cdp_browser() -> Any:
     """
-    Step 1 of Naukri session capture:
+    Step 1 of Naukri session capture (admin only):
     Kills any existing Chrome and starts a fresh Chrome with --remote-debugging-port=9222.
+
+    Refused ("busy") while a harvest is running or the recruiter login window is open,
+    because the chrome.exe kill would also take down their browser. The blocking
+    start (subprocess + up to ~30 s of polling) runs in a worker thread so the event
+    loop keeps serving other requests.
 
     After this returns, click "Open in Browser" in the Naukri Recruiter Launcher.
     The Launcher's auto-login URL will open as a new tab in this CDP-enabled Chrome.
     Wait ~5 seconds, then call POST /naukri-extract-session to capture the session.
     """
+    from app.agents.naukri_recruiter_agent import login_window_open
+
+    busy = await run_guard.check_conflict()
+    if busy is not None or login_window_open():
+        logger.warning("naukri_start_cdp_browser_refused", active_run=busy)
+        return {
+            "status":  "busy",
+            "message": "A harvest or recruiter login window is running — starting the CDP "
+                       "Chrome would kill its browser. Retry once it has finished.",
+        }
     try:
         from app.services.chrome_session_extractor import start_cdp_chrome
-        result = start_cdp_chrome()
+        result = await asyncio.to_thread(start_cdp_chrome)
         return result
     except Exception as exc:
         logger.error("naukri_start_cdp_browser_failed", error=str(exc))
         return {"status": "failed", "message": str(exc)}
 
 
-@router.post("/naukri-extract-session", status_code=status.HTTP_200_OK)
+@router.post(
+    "/naukri-extract-session",
+    status_code=status.HTTP_200_OK,
+    dependencies=[Depends(require_admin)],
+)
 async def naukri_extract_session() -> Any:
     """
-    Extract Naukri authentication cookies from the user's Chrome browser via CDP.
+    Extract Naukri authentication cookies from the user's Chrome browser via CDP (admin only).
 
     How it works:
     - If Chrome is running with --remote-debugging-port=9222: connects and extracts cookies.
@@ -346,6 +412,7 @@ async def naukri_extract_session() -> Any:
     from app.core.proactor import needs_proactor, run_in_proactor
 
     async def _extract() -> dict:
+        """Run the CDP cookie extraction for the Naukri session."""
         return await extract_naukri_session()
 
     try:

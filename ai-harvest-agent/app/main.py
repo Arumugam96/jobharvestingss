@@ -1,15 +1,23 @@
 """FastAPI application factory and lifespan."""
 from __future__ import annotations
 import asyncio
+import hashlib
 import io
 import sys
 import structlog
 
 # Force UTF-8 on Windows: prevents charmap encode errors when job titles/descriptions
-# contain characters outside cp1252 (e.g. ‑ non-breaking hyphen).
-if sys.platform == "win32" and hasattr(sys.stdout, "buffer"):
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+# contain characters outside cp1252 (e.g. ‑ non-breaking hyphen). Reconfigure the
+# EXISTING streams in place — wrapping their .buffer in a new TextIOWrapper made two
+# wrappers share one buffer, and when the extra wrapper was garbage-collected it
+# closed that buffer (under pytest: its capture tmpfile → "I/O operation on closed
+# file" before any test ran).
+if sys.platform == "win32":
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, io.UnsupportedOperation):
+            pass  # not a reconfigurable text stream (e.g. replaced/redirected) — leave it
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 from fastapi import Depends, FastAPI
@@ -576,6 +584,38 @@ def _ensure_tenants_seeded(sync_conn) -> None:
         logger.info("tenant_seeded", tenant=t["id"])
 
 
+_RLS_PREDICATE = (
+    "current_setting('app.tenant_id', true) IS NULL "
+    "OR current_setting('app.tenant_id', true) = '' "
+    "OR current_setting('app.tenant_id', true) = '__all__' "
+    "OR tenant_id = current_setting('app.tenant_id', true)"
+)
+# Stamped on each policy (COMMENT ON POLICY) so a later boot can tell the installed
+# policy already has this exact definition — pg_policies.qual holds Postgres's
+# re-deparsed form, which never matches the source text verbatim.
+_RLS_POLICY_MARKER = (
+    "tenant_isolation v:" + hashlib.sha256(_RLS_PREDICATE.encode()).hexdigest()[:16]
+)
+
+
+def _rls_tables_already_current(sync_conn) -> set[str]:
+    """Content tables whose RLS is already fully in place: ENABLE + FORCE flags set
+    (pg_class.relrowsecurity / relforcerowsecurity) and a ``tenant_isolation``
+    policy (pg_policy) stamped with the current _RLS_POLICY_MARKER."""
+    rows = sync_conn.execute(sa_text(
+        "SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity, "
+        "       obj_description(p.oid, 'pg_policy') AS note "
+        "FROM pg_class c "
+        "JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = current_schema() "
+        "JOIN pg_policy p ON p.polrelid = c.oid AND p.polname = 'tenant_isolation' "
+        "WHERE c.relkind IN ('r', 'p')"
+    )).all()
+    return {
+        name for name, rls_on, rls_forced, note in rows
+        if rls_on and rls_forced and note == _RLS_POLICY_MARKER
+    }
+
+
 def _ensure_rls_policies(sync_conn) -> None:
     """PostgreSQL-only: enable Row-Level Security on every content table so the DB
     itself refuses cross-tenant rows. The policy is PERMISSIVE when app.tenant_id
@@ -583,33 +623,80 @@ def _ensure_rls_policies(sync_conn) -> None:
     the '__all__' sentinel as full access (internal/admin). Once a per-tenant
     value is bound in get_db_session, reads/writes are auto-scoped.
 
+    Idempotent and cheap on re-boot: a table whose flags are already set and whose
+    policy carries the current definition marker is skipped, so the ALTER TABLE /
+    DROP+CREATE POLICY (ACCESS EXCLUSIVE locks) only run when something changed.
+
     NOTE: FORCE makes the table *owner* subject to policies, but a PostgreSQL
     *superuser* still bypasses RLS entirely. If the app connects as the default
     (superuser) `harvest` role, RLS stays dormant and the app-level scoping helper
     is the effective guard; point the app at a non-superuser role to activate it."""
     if sync_conn.dialect.name != "postgresql":
         return
-    predicate = (
-        "current_setting('app.tenant_id', true) IS NULL "
-        "OR current_setting('app.tenant_id', true) = '' "
-        "OR current_setting('app.tenant_id', true) = '__all__' "
-        "OR tenant_id = current_setting('app.tenant_id', true)"
-    )
+    current = _rls_tables_already_current(sync_conn)
+    changed = 0
     for table in _TENANT_CONTENT_TABLES:
+        if table in current:
+            continue
         sync_conn.execute(sa_text(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY"))
         sync_conn.execute(sa_text(f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY"))
         sync_conn.execute(sa_text(f"DROP POLICY IF EXISTS tenant_isolation ON {table}"))
         sync_conn.execute(sa_text(
             f"CREATE POLICY tenant_isolation ON {table} "
-            f"USING ({predicate}) WITH CHECK ({predicate})"
+            f"USING ({_RLS_PREDICATE}) WITH CHECK ({_RLS_PREDICATE})"
         ))
-    logger.info("rls_policies_ensured", tables=len(_TENANT_CONTENT_TABLES))
+        sync_conn.execute(sa_text(
+            f"COMMENT ON POLICY tenant_isolation ON {table} IS '{_RLS_POLICY_MARKER}'"
+        ))
+        changed += 1
+    logger.info("rls_policies_ensured", tables=len(_TENANT_CONTENT_TABLES), changed=changed)
+
+
+# Secrets still at their code defaults / webhook tokens left empty. Startup only
+# WARNS about these (by decision) — it never refuses to boot.
+_DEFAULT_SECRET_FIELDS = ("jwt_secret_key", "app_secret_key", "api_key")
+_REQUIRED_WEBHOOK_TOKENS = (
+    "brevo_webhook_token", "brevo_inbound_token", "apollo_webhook_token",
+    "mailjet_webhook_token",
+)
+
+
+def _warn_insecure_settings(cfg) -> list[str]:
+    """Log one loud warning per insecure setting and return the offending names.
+
+    Flags JWT_SECRET_KEY / APP_SECRET_KEY / API_KEY still equal to their code
+    defaults (only while auth is enabled) and empty webhook tokens (those webhooks
+    then accept unauthenticated calls). Never raises — startup must not fail here."""
+    flagged: list[str] = []
+    fields = type(cfg).model_fields
+    if cfg.auth_enabled:
+        for name in _DEFAULT_SECRET_FIELDS:
+            if getattr(cfg, name, None) == fields[name].default:
+                flagged.append(name)
+                logger.warning(
+                    "insecure_default_secret",
+                    setting=name.upper(),
+                    message=f"{name.upper()} is still the built-in default — set a "
+                            "strong random value in .env",
+                )
+    for name in _REQUIRED_WEBHOOK_TOKENS:
+        if not (getattr(cfg, name, "") or "").strip():
+            flagged.append(name)
+            message = (f"{name.upper()} is empty — its webhook endpoint accepts "
+                       "unauthenticated requests")
+            if name == "brevo_inbound_token" and (cfg.brevo_webhook_token or "").strip():
+                message = ("BREVO_INBOUND_TOKEN is empty — /outreach/inbound-reply falls "
+                           "back to BREVO_WEBHOOK_TOKEN; set its own token")
+            logger.warning("webhook_token_empty", setting=name.upper(), message=message)
+    return flagged
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """Startup: launch browser pool + scheduler. Shutdown: clean up both."""
+    """Startup: warn about insecure settings, launch browser pool + scheduler.
+    Shutdown: clean up both."""
     logger.info("startup", env=settings.app_env, model=settings.extraction_llm_model)
+    _warn_insecure_settings(settings)  # warn-only by decision; never blocks startup
 
     # Restore any in-flight job states from the previous process
     JobTracker.load_from_disk()
@@ -706,6 +793,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     loop = asyncio.get_event_loop()
     if sys.platform == "win32":
         def _suppress_not_impl(loop, context):
+            """Swallow NotImplementedError task noise; forward everything else to default."""
             if isinstance(context.get("exception"), NotImplementedError):
                 return
             loop.default_exception_handler(context)
@@ -838,6 +926,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 
 def create_app() -> FastAPI:
+    """Build the FastAPI app: middleware, exception handlers and every router.
+
+    Internal ``/api/v1/*`` routers are hidden from Swagger. Public routers require a
+    logged-in user via ``get_current_user``, except auth and the provider webhooks
+    (Mailjet events, Apollo phone delivery), which are guarded by URL tokens instead.
+    Rate limiting is only added in production. Startup work lives in ``lifespan``.
+    """
     app = FastAPI(
         title        = "AI Harvest Agent — Enterprise Job Intelligence Platform",
         version      = "1.0.0",

@@ -58,6 +58,7 @@ _ORG_CAP_MSG = "Daily enrichment credit limit reached — try again tomorrow."
 
 
 def _now():
+    """Current time as a timezone-aware UTC datetime."""
     return datetime.now(timezone.utc)
 
 
@@ -75,6 +76,7 @@ def _reveal_flags(reveal: str) -> tuple[bool, bool, int]:
 
 
 def _confidence(email_status: str, has_email: bool, has_phone: bool) -> str:
+    """High for a verified/valid email, Medium for any email or phone, else Low."""
     if (email_status or "").lower() in ("verified", "valid"):
         return "High"
     if has_email or has_phone:
@@ -83,6 +85,9 @@ def _confidence(email_status: str, has_email: bool, has_phone: bool) -> str:
 
 
 def _recruiter_email_status(outcome: dict) -> str:
+    """Email status stored on `recruiters`: VERIFIED for a verified/valid email, PUBLIC for
+    any other email, NOT_FOUND when there is none.
+    """
     if not outcome.get("email"):
         return "NOT_FOUND"
     return "VERIFIED" if (outcome.get("email_status") or "").lower() in ("verified", "valid") else "PUBLIC"
@@ -98,10 +103,12 @@ def _recruiter_phone_status(outcome: dict) -> str:
 
 
 def _log_phone_status(outcome: dict) -> str:
+    """Phone status for the reveal log: the outcome's own status, else PUBLIC/NOT_FOUND."""
     return outcome.get("phone_status") or ("PUBLIC" if outcome.get("phone") else "NOT_FOUND")
 
 
 def _blank_outcome(status: str, **extra) -> dict:
+    """Outcome dict with ``status`` and every contact field empty; ``extra`` overrides keys."""
     out = {
         "status": status, "contact_name": "", "contact_title": "", "email": "",
         "email_status": "", "phone": "", "phone_status": "", "confidence": "", "company_domain": "",
@@ -115,6 +122,12 @@ def _completed_outcome(
     match, person, org, *, want_email: bool = True, phone_status: str = "", phone_ref: str = "",
 ) -> dict:
     # A phone-only reveal never surfaces (or bills) an email Apollo may have returned anyway.
+    """Build the ``completed`` outcome dict from an Apollo match plus person/org context.
+
+    The email (and secondary email) is dropped unless ``want_email``, so a phone-only
+    reveal never surfaces or bills one. ``email_charged`` is True when an email is kept.
+    Also carries the internal ``phone_ref`` and the richer fields used by the reveal log.
+    """
     email = (match.email or "") if (match and want_email) else ""
     phone = (match.phone or "") if match else ""
     email_status = (match.email_status or "") if (match and email) else ""
@@ -168,6 +181,7 @@ class _PhoneCtx:
         self, *, want_email: bool, want_phone: bool, tenant: str, cap: int | None,
         requested_by: str | None = None, job_id: str | None = None,
     ) -> None:
+        """Capture the reveal choice, tenant/cap and owner; reads whether phones are enabled."""
         self.want_email = want_email
         self.want_phone = want_phone
         self.tenant = tenant
@@ -179,16 +193,22 @@ class _PhoneCtx:
 
     @property
     def phone_only_unavailable(self) -> bool:
+        """True for a phone-only reveal when phone delivery (the webhook) isn't configured."""
         return self.want_phone and not self.want_email and not self.enabled
 
     async def begin(self, *, person_id: str | None = None, item_id: str | None = None) -> tuple[str, str]:
         """(ref, phone_status). An empty ref means "request no phone"; phone_status says
-        why ('' = not asked, UNAVAILABLE = no webhook, BUDGET_EXCEEDED = can't afford)."""
+        why ('' = not asked, UNAVAILABLE = no webhook, BUDGET_EXCEEDED = can't afford).
+        Affordability covers the tenant's Finder budget AND the global Apollo cap. Every
+        caller has already reserved the reveal's email credit on the tenant budget, so it
+        only counts against the global headroom (reserved there at call time)."""
         if not self.want_phone:
             return "", ""
         if not self.enabled:
             return "", apollo_phone_service.PS_UNAVAILABLE
-        if not await apollo_phone_service.can_afford_phone(self.tenant, self.cap, extra_cost=self.email_cost):
+        if not await apollo_phone_service.can_afford_phone(
+            self.tenant, self.cap, extra_cost=0, global_extra_cost=self.email_cost,
+        ):
             return "", apollo_phone_service.PS_BUDGET_EXCEEDED
         ref = await apollo_phone_service.begin_request(
             tenant_id=self.tenant, apollo_person_id=person_id, requested_by=self.requested_by,
@@ -199,12 +219,18 @@ class _PhoneCtx:
         return ref, apollo_phone_service.PS_PENDING
 
     async def settle(self, ref: str, result) -> str:
+        """Settle the pending phone request from Apollo's synchronous reply; returns the
+        phone status ("" when no request was made).
+        """
         if not ref:
             return ""
         ps = await db_write(lambda db: apollo_phone_service.settle_request(db, ref, result))
         return ps or apollo_phone_service.status_after_call(result)
 
     async def cancel(self, ref: str) -> None:
+        """Cancel the pending phone request (no-op without a ref), e.g. when the email
+        credit could not be reserved.
+        """
         if ref:
             await db_write(lambda db: apollo_phone_service.cancel_request(db, ref))
 
@@ -242,6 +268,7 @@ def _reveal_state(status: str, email: str, phone: str, phone_status: str) -> str
 
 
 def _with_reveal_state(r: dict) -> dict:
+    """Add the UI ``reveal_state`` to a result dict in place and return it."""
     r["reveal_state"] = _reveal_state(
         r.get("status", ""), r.get("email", ""), r.get("phone", ""), r.get("phone_status", ""))
     return r
@@ -258,16 +285,20 @@ def _is_hit(match, want_email: bool, ref: str) -> bool:
 # ── Apollo lookups ────────────────────────────────────────────────────────────
 
 async def _person_lookup(client: ApolloClient, item: dict, pctx: _PhoneCtx) -> dict:
-    """Enrich a KNOWN person (by LinkedIn URL, else name + company)."""
+    """Enrich a KNOWN person (by LinkedIn URL, else name + company). ``over_budget``
+    when a phone-only reveal can't be afforded or the global Apollo cap refused the
+    call (nothing was looked up, so it is never reported as not_found)."""
     want_email = pctx.want_email
     if item["linkedin_url"]:
         async def call(reveal_phone, kw):
+            """Enrich by LinkedIn URL (name/company/domain as match hints)."""
             return await client.enrich_person_by_linkedin(
                 item["linkedin_url"], reveal_email=want_email, reveal_phone=reveal_phone,
                 name=item["person_name"], company=item["company"], domain=item["domain"], **kw,
             )
     else:
         async def call(reveal_phone, kw):
+            """Bulk-enrich a single name + company record; first result or None."""
             results = await client.bulk_enrich_people(
                 [{"name": item["person_name"], "organization_name": item["company"], "domain": item["domain"]}],
                 reveal_email=want_email, reveal_phone=reveal_phone, **kw,
@@ -276,6 +307,9 @@ async def _person_lookup(client: ApolloClient, item: dict, pctx: _PhoneCtx) -> d
     person, ref, ps = await _reveal(pctx, call, item_id=item.get("id"))
     if person is None and not ref and ps == apollo_phone_service.PS_BUDGET_EXCEEDED:
         return _blank_outcome("over_budget", error=_PHONE_BUDGET_MSG, phone_status=ps)
+    if getattr(person, "budget_denied", False):
+        # The global Apollo cap refused the call — nobody was looked up; not a miss.
+        return _blank_outcome("over_budget", error=_ORG_CAP_MSG, phone_status=ps)
     if person is None or not person.matched:
         return _blank_outcome("not_found", phone_status=ps)
     if _is_hit(person, want_email, ref):
@@ -295,11 +329,12 @@ async def _company_lookup(
     role's titles and reveal candidates until ONE yields a contact, then stop — so we
     return the highest-priority role that had a hit. Total reveal attempts across ALL roles
     are bounded by ``reveal_cap`` so a company with many empty roles can't balloon Apollo
-    usage."""
+    usage. When the global Apollo cap refuses the org resolve or a reveal, returns
+    ``over_budget`` (the bulk worker defers the row) instead of a miss."""
     company, domain, location = item["company"], item["domain"], item["location"]
     res = await resolve_apollo_org(get_settings(), company_name=company, domain=domain, client=client)
     if res.cap_reached:
-        return _blank_outcome("failed", error=_ORG_CAP_MSG)
+        return _blank_outcome("over_budget", error=_ORG_CAP_MSG)
     org = res.org
     if org is None or not org.id:
         return _blank_outcome("not_found")
@@ -337,6 +372,8 @@ async def _company_lookup(
                 continue
             if match is None:  # phone-only and today's budget can't cover another phone
                 return _blank_outcome("over_budget", error=_PHONE_BUDGET_MSG, company_domain=domain_out)
+            if getattr(match, "budget_denied", False):  # global Apollo cap reached
+                return _blank_outcome("over_budget", error=_ORG_CAP_MSG, company_domain=domain_out)
             if _is_hit(match, pctx.want_email, ref):
                 return _completed_outcome(match, person, org, want_email=pctx.want_email,
                                           phone_status=ps, phone_ref=ref)
@@ -347,15 +384,16 @@ async def _company_lookup(
 
 async def _company_lookup_many(
     client: ApolloClient, item: dict, titles: list[str], pctx: _PhoneCtx,
-    want_count: int, reveal_cap: int, reserve,
+    want_count: int, reveal_cap: int, reserve, release,
 ) -> tuple[list[dict], str, bool]:
     """Single-search multi-reveal: find up to ``want_count`` DISTINCT persona contacts
-    AT a company. Walks the candidate list, revealing one at a time, and reserves the
-    email credit via ``reserve()`` ONLY for each contact that delivered an email (so a
-    miss costs nothing; a phone is charged later, on webhook delivery). Stops at
-    ``want_count`` successes, when candidates run out, or when the budget is exhausted
-    mid-run. Returns (results, fallback_status, budget_exhausted); ``fallback_status``
-    is only meaningful when ``results`` is empty."""
+    AT a company. Walks the candidate list, revealing one at a time. When an email is
+    wanted, its credit is reserved via ``reserve()`` BEFORE each reveal (Apollo bills as
+    soon as it reveals) and given back via ``release()`` unless that reveal produced an
+    email — so a miss costs nothing; a phone is charged later, on webhook delivery.
+    Stops at ``want_count`` successes, when candidates run out, or when the tenant budget
+    or the global Apollo cap is exhausted mid-run. Returns (results, fallback_status,
+    budget_exhausted); ``fallback_status`` is only meaningful when ``results`` is empty."""
     company, domain, location = item["company"], item["domain"], item["location"]
     res = await resolve_apollo_org(get_settings(), company_name=company, domain=domain, client=client)
     if res.cap_reached:
@@ -384,28 +422,35 @@ async def _company_lookup_many(
         if not pid or pid in seen:
             continue
         seen.add(pid)
+        if pctx.want_email and not await reserve():  # tenant budget spent — keep what we have
+            budget_exhausted = True
+            break
+        charged = False
         try:
-            match, ref, ps = await _reveal(
-                pctx,
-                lambda rp, kw, pid=pid: client.match_person_by_id(
-                    pid, reveal_email=pctx.want_email, reveal_phone=rp, **kw),
-                person_id=pid,
-            )
-        except ApolloAPIError:
-            continue
-        if match is None:  # phone-only and today's budget can't cover another phone
-            budget_exhausted = True
-            break
-        if not _is_hit(match, pctx.want_email, ref):
-            continue
-        out = _completed_outcome(match, person, org, want_email=pctx.want_email,
-                                 phone_status=ps, phone_ref=ref)
-        if out["email_charged"] and not await reserve():  # out of per-tenant budget — keep what we have
-            await pctx.cancel(ref)
-            budget_exhausted = True
-            break
-        out["company_domain"] = out["company_domain"] or domain_out
-        results.append(out)
+            try:
+                match, ref, ps = await _reveal(
+                    pctx,
+                    lambda rp, kw, pid=pid: client.match_person_by_id(
+                        pid, reveal_email=pctx.want_email, reveal_phone=rp, **kw),
+                    person_id=pid,
+                )
+            except ApolloAPIError:
+                continue
+            if match is None or getattr(match, "budget_denied", False):
+                # Phone-only and today's budget can't cover another phone, or the global
+                # Apollo cap refused the call.
+                budget_exhausted = True
+                break
+            if not _is_hit(match, pctx.want_email, ref):
+                continue
+            out = _completed_outcome(match, person, org, want_email=pctx.want_email,
+                                     phone_status=ps, phone_ref=ref)
+            charged = out["email_charged"]
+            out["company_domain"] = out["company_domain"] or domain_out
+            results.append(out)
+        finally:
+            if pctx.want_email and not charged:
+                await release()  # no email revealed — the held credit goes back
     # Candidates existed but none yielded a revealable contact → ambiguous (needs review).
     return results, ("ambiguous" if not results else "completed"), budget_exhausted
 
@@ -431,6 +476,9 @@ async def _enrich_item(
 # ── Job + item persistence (small, mirror HarvestRunService.update_run) ──────────
 
 async def _load_job_dict(db: AsyncSession, job_id: str) -> dict | None:
+    """Snapshot of the job fields the worker needs (personas split from newline-joined
+    storage), or None if the job is gone.
+    """
     job = await db.get(RecruiterFinderJobORM, job_id)
     if job is None:
         return None
@@ -442,6 +490,7 @@ async def _load_job_dict(db: AsyncSession, job_id: str) -> dict | None:
 
 
 async def _mark_job_running(db: AsyncSession, job_id: str) -> None:
+    """Set the job to running with a start time and an initial message."""
     job = await db.get(RecruiterFinderJobORM, job_id)
     if job is not None:
         job.status = "running"
@@ -451,6 +500,7 @@ async def _mark_job_running(db: AsyncSession, job_id: str) -> None:
 
 
 async def _set_job_message(db: AsyncSession, job_id: str, message: str) -> None:
+    """Update the job's progress message shown in the UI."""
     job = await db.get(RecruiterFinderJobORM, job_id)
     if job is not None:
         job.message = message
@@ -458,6 +508,7 @@ async def _set_job_message(db: AsyncSession, job_id: str, message: str) -> None:
 
 
 async def _next_pending_item(db: AsyncSession, job_id: str) -> dict | None:
+    """Lowest-row-index pending item of the job as a plain dict, or None when drained."""
     stmt = (
         select(RecruiterFinderItemORM)
         .where(RecruiterFinderItemORM.job_id == job_id, RecruiterFinderItemORM.status == "pending")
@@ -471,15 +522,24 @@ async def _next_pending_item(db: AsyncSession, job_id: str) -> dict | None:
             ("id", "company", "person_name", "linkedin_url", "domain", "location", "title")}
 
 
-async def _mark_item_processing(db: AsyncSession, item_id: str) -> None:
-    item = await db.get(RecruiterFinderItemORM, item_id)
-    if item is not None:
-        item.status = "processing"
-        item.last_attempt_at = _now()
-        await db.flush()
+async def _mark_item_processing(db: AsyncSession, item_id: str) -> bool:
+    """Atomically claim a pending item: ``UPDATE ... SET status='processing' WHERE
+    status='pending'`` (stamping the attempt time). Its row-count is the gate, so two
+    workers on the same job can never both take an item. True when this caller won."""
+    Item = RecruiterFinderItemORM
+    now = _now()
+    result = await db.execute(
+        update(Item).where(Item.id == item_id, Item.status == "pending")
+        .values(status="processing", last_attempt_at=now, updated_at=now)
+        .execution_options(synchronize_session=False)
+    )
+    return (result.rowcount or 0) > 0
 
 
 async def _apply_item_result(db: AsyncSession, item_id: str, outcome: dict, recruiter_id: str | None) -> None:
+    """Copy an outcome onto the item row, link the recruiter if one was saved, and bump
+    its attempt count. No-op if the item no longer exists.
+    """
     item = await db.get(RecruiterFinderItemORM, item_id)
     if item is None:
         return
@@ -524,6 +584,12 @@ async def _requeue_item(db: AsyncSession, item_id: str) -> None:
 
 
 async def _bump_counters(db: AsyncSession, job_id: str, status: str, cost: int) -> None:
+    """Count one processed item under its status and add ``cost`` to credits_spent.
+
+    ``cost`` is the email credit the item actually consumed (0 for a miss — the bulk
+    worker refunds the credit it reserved before the lookup). Progress excludes
+    budget-queued items from the denominator.
+    """
     job = await db.get(RecruiterFinderJobORM, job_id)
     if job is None:
         return
@@ -537,6 +603,9 @@ async def _bump_counters(db: AsyncSession, job_id: str, status: str, cost: int) 
 
 
 async def _queue_remaining(db: AsyncSession, job_id: str) -> int:
+    """Move all still-pending items to ``queued`` (deferred by the budget) and add them to
+    the job's queued count. Returns the number moved.
+    """
     result = await db.execute(
         update(RecruiterFinderItemORM)
         .where(RecruiterFinderItemORM.job_id == job_id, RecruiterFinderItemORM.status == "pending")
@@ -551,6 +620,9 @@ async def _queue_remaining(db: AsyncSession, job_id: str) -> int:
 
 
 async def _finalize_job(db: AsyncSession, job_id: str) -> None:
+    """Set the job's final status: ``partial`` if any items were queued, ``failed`` if
+    every processed item failed, else ``completed``; stamp completion and progress.
+    """
     job = await db.get(RecruiterFinderJobORM, job_id)
     if job is None:
         return
@@ -571,6 +643,11 @@ async def _fail_job_unconfigured(
     db: AsyncSession, job_id: str, *, error: str = "Contact enrichment isn't configured",
     message: str = "Contact enrichment isn't configured. Contact your administrator.",
 ) -> None:
+    """Fail the whole job up front (no Apollo key / phone reveal unavailable).
+
+    Marks every pending item failed with ``error`` and sets the job to failed at 100%
+    with ``message`` for the UI.
+    """
     await db.execute(
         update(RecruiterFinderItemORM)
         .where(RecruiterFinderItemORM.job_id == job_id, RecruiterFinderItemORM.status == "pending")
@@ -588,6 +665,7 @@ async def _fail_job_unconfigured(
 
 
 async def _recount_job(db: AsyncSession, job: RecruiterFinderJobORM) -> None:
+    """Recompute the job's status counters and progress from its items (caller flushes)."""
     rows = await db.execute(
         select(RecruiterFinderItemORM.status, func.count())
         .where(RecruiterFinderItemORM.job_id == job.id)
@@ -665,6 +743,17 @@ def launch_job(job_id: str) -> None:
 
 
 async def _run_enrichment_background(job_id: str) -> None:
+    """Detached worker that drains a bulk job's pending items through Apollo.
+
+    Binds the job's tenant, then per item: atomically claims it (pending → processing,
+    so a second worker on the same job skips it), reserves the email credit (or,
+    phone-only, checks the phone budget), enriches, refunds the email credit unless
+    the item produced an email, upserts a hit into `recruiters`, and records the
+    result. When the tenant budget or the global Apollo cap runs out, the current and
+    remaining items are queued (retryable), never marked not_found. The job is always
+    finalized, even on error. Spends Apollo credits; failures are logged by the
+    best-effort db helpers rather than raised.
+    """
     settings = get_settings()
     jobd = await db_read(lambda db: _load_job_dict(db, job_id))
     if not jobd:
@@ -706,24 +795,37 @@ async def _run_enrichment_background(job_id: str) -> None:
             item = await db_read(lambda db: _next_pending_item(db, job_id))
             if not item:
                 break
-            # Email: reserve its credit up front (as before). Phone-only: nothing is
-            # charged now (phones bill on webhook delivery) — just check today's budget
-            # still covers one more phone on top of the outstanding requests.
+            # Claim the item atomically BEFORE spending anything, so a second worker on
+            # this job (e.g. a double-clicked Retry) can never process it too.
+            claimed = await db_write(lambda db, iid=item["id"]: _mark_item_processing(db, iid))
+            if claimed is None:  # DB write failed — stop rather than spin on the same row
+                logger.warning("recruiter_finder_claim_failed", job_id=job_id, item_id=item["id"])
+                break
+            if not claimed:
+                continue  # another worker took it
+            # Email: reserve its credit up front (refunded below on a miss). Phone-only:
+            # nothing is charged now (phones bill on webhook delivery) — just check
+            # today's budgets still cover one more phone on top of the outstanding ones.
             if want_email:
                 affordable = await recruiter_finder_budget.try_consume(email_cost, tenant, cap=cap)
             else:
                 affordable = await apollo_phone_service.can_afford_phone(tenant, cap)
             if not affordable:
+                await db_write(lambda db, iid=item["id"]: _requeue_item(db, iid))
                 await db_write(lambda db: _queue_remaining(db, job_id))
                 logger.info("recruiter_finder_budget_exhausted", job_id=job_id, tenant_id=tenant)
                 break
-            await db_write(lambda db, iid=item["id"]: _mark_item_processing(db, iid))
             label = item["person_name"] or item["company"] or "contact"
             await db_write(lambda db, m=f"Enriching {label}…": _set_job_message(db, job_id, m))
 
             outcome = await _enrich_item(client, item, title_groups, pctx, reveal_cap)
+            # Only an email hit consumes the reserved credit — refund it otherwise.
+            spent = email_cost if outcome.get("email_charged") else 0
+            if email_cost and not spent:
+                await recruiter_finder_budget.release(email_cost, tenant)
             if outcome["status"] == "over_budget":
-                # Phone-only row whose phone the budget can no longer cover — defer it.
+                # A phone the budget can no longer cover, or the global Apollo cap was
+                # reached — defer this row and the rest (retryable), don't mark a miss.
                 await db_write(lambda db, iid=item["id"]: _requeue_item(db, iid))
                 await db_write(lambda db: _queue_remaining(db, job_id))
                 logger.info("recruiter_finder_budget_exhausted", job_id=job_id, tenant_id=tenant)
@@ -749,7 +851,8 @@ async def _run_enrichment_background(job_id: str) -> None:
                 ))
             await db_write(lambda db, iid=item["id"], o=outcome, rid=recruiter_id:
                            _finish_item(db, job_id, iid, o, rid))
-            await db_write(lambda db, st=outcome["status"]: _bump_counters(db, job_id, st, email_cost))
+            await db_write(lambda db, st=outcome["status"], c=spent:
+                           _bump_counters(db, job_id, st, c))
     finally:
         await db_write(lambda db: _finalize_job(db, job_id))
     logger.info("recruiter_finder_job_done", job_id=job_id)
@@ -767,6 +870,9 @@ async def _persist_completed(
     log_id = str(uuid.uuid4())
 
     async def _work(db, o=outcome, it=item):
+        """Upsert the recruiter, add the reveal-log row and link any pending phone request,
+        in one transaction. Returns the recruiter id.
+        """
         recruiter_id = await save_finder_contact(
             db,
             person_name=o["contact_name"] or it["person_name"] or "",
@@ -816,9 +922,10 @@ async def run_single(
 ) -> dict:
     """Synchronous single lookup. A known person (name+company or LinkedIn) enriches
     exactly ONE contact; a company lookup reveals up to ``count`` DISTINCT persona
-    contacts. A per-tenant credit is reserved for each contact ACTUALLY revealed (a
-    miss costs nothing), bounded by the workspace's remaining daily budget. Every hit
-    is upserted into `recruiters`. Runs in the request context (tenant already bound).
+    contacts. A per-tenant email credit is reserved BEFORE each reveal and refunded
+    unless that reveal produced an email (a miss costs nothing), bounded by the
+    workspace's remaining daily budget. Every hit is upserted into `recruiters`. Runs
+    in the request context (tenant already bound).
 
     Returns ``{status, requested, revealed, in_progress, credits_spent, budget_exhausted,
     company_domain, message, phones_pending, phone_credit_cost,
@@ -830,6 +937,9 @@ async def run_single(
     want_email, want_phone, email_cost = _reveal_flags(reveal)
 
     def _resp(status, *, results=None, requested=1, budget_exhausted=False, message="", domain_out=""):
+        """Shape the run_single response: strip internal ``phone_ref``, add ``reveal_state``,
+        and derive the revealed/in-progress/credit/phone-pending totals.
+        """
         results = [_with_reveal_state({k: v for k, v in r.items() if k != "phone_ref"})
                    for r in (results or [])]
         return {
@@ -870,7 +980,12 @@ async def run_single(
         want_count = min(want_count, remaining // need)
 
     async def reserve():
+        """Reserve one contact's email credit against the tenant's daily Finder cap."""
         return await recruiter_finder_budget.try_consume(email_cost, tenant, cap=cap)
+
+    async def release():
+        """Give back a reserved email credit the reveal didn't consume (no email)."""
+        await recruiter_finder_budget.release(email_cost, tenant)
 
     client = ApolloClient(settings, purpose="finder")
     item = {
@@ -880,6 +995,13 @@ async def run_single(
     titles = titles_for_persona(persona)
 
     if is_person:
+        # Hold the email credit BEFORE the reveal (Apollo bills as soon as it reveals),
+        # and give it back below unless an email actually came back.
+        if email_cost and not await reserve():
+            return _resp(
+                "over_budget", requested=1,
+                message="Daily enrichment budget reached for this workspace — try again tomorrow."
+            )
         try:
             outcome = await _person_lookup(client, item, pctx)
         except ApolloAPIError as exc:
@@ -887,16 +1009,14 @@ async def run_single(
         except Exception as exc:  # defensive — mirror _enrich_item
             logger.warning("recruiter_finder_single_error", error=str(exc))
             outcome = _blank_outcome("failed", error=str(exc))
+        if email_cost and not outcome.get("email_charged"):
+            await release()
         if outcome["status"] != "completed":
             message = outcome.get("error", "")
             if not message and outcome.get("phone_status") == apollo_phone_service.PS_UNAVAILABLE:
                 message = _PHONE_REJECTED_MSG
             return _resp(outcome["status"], requested=1, message=message,
                          domain_out=outcome.get("company_domain", ""))
-        if outcome["email_charged"] and not await reserve():
-            await pctx.cancel(outcome.get("phone_ref", ""))
-            return _resp("over_budget", requested=1,
-                         message="Daily enrichment budget reached for this workspace — try again tomorrow.")
         outcome["recruiter_id"] = await _persist_completed(
             outcome, item, requested_by, tenant, reveal_type=reveal, source="person", cost=email_cost)
         return _resp("completed", results=[outcome], requested=1,
@@ -904,7 +1024,7 @@ async def run_single(
 
     results, fallback, budget_exhausted = await _company_lookup_many(
         client, item, titles, pctx, want_count,
-        settings.company_contact_reveal_cap, reserve,
+        settings.company_contact_reveal_cap, reserve, release,
     )
     for o in results:
         o["recruiter_id"] = await _persist_completed(
@@ -996,9 +1116,10 @@ async def reveal_candidates(
     *, selections: list[dict], reveal: str = "email", requested_by: str | None = None,
 ) -> dict:
     """Reveal the emails/phones of hand-picked candidates (by Apollo person id) and
-    upsert each hit into `recruiters`. The email credit is reserved for each contact
-    that ACTUALLY yields an email (a miss costs nothing), bounded by the workspace's
-    remaining daily budget; a requested phone comes back PENDING and is charged only when
+    upsert each hit into `recruiters`. The email credit is reserved BEFORE each reveal
+    and refunded unless that contact yields an email (a miss costs nothing), bounded by
+    the workspace's remaining daily budget; the global Apollo cap stops the run like the
+    tenant budget does. A requested phone comes back PENDING and is charged only when
     Apollo's webhook delivers it. Returns ``{status, requested, revealed, in_progress,
     credits_spent, budget_exhausted, phones_pending, phone_credit_cost, results:
     [{person_id, status, reveal_state, email, email_status, phone, phone_status,
@@ -1010,6 +1131,9 @@ async def reveal_candidates(
     requested = len([s for s in selections if s.get("person_id")])
 
     def _resp(status, *, results=None, budget_exhausted=False, message=""):
+        """Shape the reveal_candidates response: add ``reveal_state`` and derive the
+        revealed/in-progress/credit/phone-pending totals.
+        """
         results = [_with_reveal_state(r) for r in (results or [])]
         # Only contacts with a delivered email/phone count as revealed; a contact whose
         # phone is still on its way is in_progress.
@@ -1025,6 +1149,7 @@ async def reveal_candidates(
                 "message": message, "results": results}
 
     def _miss(pid, status, *, error="", phone_status=""):
+        """Result row for a selection that produced no contact (not_found / failed)."""
         return {"person_id": pid, "status": status, "email": "", "email_status": "",
                 "phone": "", "phone_status": phone_status, "confidence": "", "recruiter_id": None,
                 "error": error}
@@ -1052,6 +1177,13 @@ async def reveal_candidates(
         pid = sel.get("person_id")
         if not pid:
             continue
+        # Hold the email credit BEFORE the reveal (Apollo bills as soon as it reveals);
+        # it is given back unless the reveal produced an email.
+        if want_email and not await recruiter_finder_budget.try_consume(
+            email_cost, tenant, cap=cap,
+        ):
+            budget_exhausted = True
+            break
         try:
             match, ref, ps = await _reveal(
                 pctx,
@@ -1060,19 +1192,20 @@ async def reveal_candidates(
                 person_id=pid,
             )
         except ApolloAPIError as exc:
+            if want_email:
+                await recruiter_finder_budget.release(email_cost, tenant)
             results.append(_miss(pid, "failed", error=str(exc)))
             continue
-        if match is None:  # phone-only and today's budget can't cover another phone
+        if want_email and not (match is not None and match.email):
+            await recruiter_finder_budget.release(email_cost, tenant)  # no email — refund
+        if match is None or getattr(match, "budget_denied", False):
+            # Phone-only and today's budget can't cover another phone, or the global
+            # Apollo cap refused the call.
             budget_exhausted = True
             break
         if not _is_hit(match, want_email, ref):
             results.append(_miss(pid, "not_found", phone_status=ps))
             continue
-        email_hit = bool(want_email and match.email)
-        if email_hit and not await recruiter_finder_budget.try_consume(email_cost, tenant, cap=cap):
-            await pctx.cancel(ref)
-            budget_exhausted = True
-            break
         # Build the outcome from the reveal + the selection's company/domain context.
         item = {
             "id": None, "company": sel.get("company", "") or "", "person_name": sel.get("name", "") or "",
@@ -1105,6 +1238,7 @@ async def reveal_candidates(
 # ── Reads for the routes (tenant-scoped via apply_tenant) ───────────────────────
 
 async def get_job(db: AsyncSession, job_id: str) -> RecruiterFinderJobORM | None:
+    """The bulk job by id within the current tenant, or None."""
     stmt = apply_tenant(
         select(RecruiterFinderJobORM).where(RecruiterFinderJobORM.id == job_id),
         RecruiterFinderJobORM.tenant_id,
@@ -1115,6 +1249,9 @@ async def get_job(db: AsyncSession, job_id: str) -> RecruiterFinderJobORM | None
 async def list_items(
     db: AsyncSession, job_id: str, *, statuses: list[str] | None = None, limit: int = 25, offset: int = 0
 ) -> tuple[list[RecruiterFinderItemORM], int]:
+    """One page of a job's items (tenant-scoped, optional status filter) in row order,
+    plus the total matching count.
+    """
     base = select(RecruiterFinderItemORM).where(RecruiterFinderItemORM.job_id == job_id)
     base = apply_tenant(base, RecruiterFinderItemORM.tenant_id)
     if statuses:
@@ -1128,6 +1265,7 @@ async def list_items(
 
 
 async def list_jobs(db: AsyncSession, *, limit: int = 50) -> list[RecruiterFinderJobORM]:
+    """The tenant's most recent bulk jobs, newest first."""
     stmt = apply_tenant(
         select(RecruiterFinderJobORM).order_by(RecruiterFinderJobORM.created_at.desc()).limit(limit),
         RecruiterFinderJobORM.tenant_id,
@@ -1150,6 +1288,7 @@ async def list_recent_contacts(db: AsyncSession, *, limit: int = 12) -> list:
 
 
 def _reveal_log_dict(r) -> dict:
+    """Serialise a reveal-log row for the History tab (adds a joined location string)."""
     loc = ", ".join(x for x in (r.city, r.state, r.country) if x)
     return {
         "id": r.id, "person_id": r.person_id,
@@ -1177,6 +1316,7 @@ async def history_log(
     L = RecruiterFinderRevealLogORM
 
     def scoped(stmt):
+        """Restrict a reveal-log query to the current tenant."""
         return apply_tenant(stmt, L.tenant_id)
 
     # KPIs (tenant-wide, unfiltered)
@@ -1237,13 +1377,31 @@ async def history_log(
     }
 
 
+class FinderJobBusyError(Exception):
+    """Raised by ``retry_job`` when the job is still queued/running (a worker owns it)."""
+
+
+_ACTIVE_JOB_STATUSES = ("queued", "running")
+
+
 async def retry_job(db: AsyncSession, job_id: str) -> bool:
     """Reset this job's unsuccessful + budget-deferred rows (failed/not_found/queued)
     back to pending and re-queue the job — successes/ambiguous are left untouched, so
-    a retry never re-spends on records that already resolved."""
+    a retry never re-spends on records that already resolved. Returns False when the
+    job isn't in the tenant. Raises ``FinderJobBusyError`` while the job is queued or
+    running: the job row is flipped to queued by a conditional UPDATE whose row-count
+    is the gate, so two concurrent retries can't both launch a worker."""
     job = await get_job(db, job_id)
     if job is None:
         return False
+    J = RecruiterFinderJobORM
+    claimed = await db.execute(
+        update(J).where(J.id == job_id, J.status.notin_(_ACTIVE_JOB_STATUSES))
+        .values(status="queued", updated_at=_now())
+        .execution_options(synchronize_session=False)
+    )
+    if not (claimed.rowcount or 0):
+        raise FinderJobBusyError(job_id)
     await db.execute(
         update(RecruiterFinderItemORM)
         .where(
@@ -1265,6 +1423,9 @@ async def fail_stale_jobs() -> int:
     survive a restart, so mark orphaned running/queued jobs failed and their in-flight
     items failed so a retry can pick them up. Mirrors HarvestRunService.fail_stale_running."""
     async def _reap(db: AsyncSession) -> int:
+        """Fail in-flight items of running/queued jobs, then fail those jobs; returns the
+        number of jobs reaped.
+        """
         await db.execute(
             update(RecruiterFinderItemORM)
             .where(

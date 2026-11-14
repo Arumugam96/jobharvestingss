@@ -24,9 +24,17 @@ import structlog
 from fastapi import APIRouter, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 
 from app.agents.recruiter_contact_agent import RecruiterContactAgent
 from app.core.proactor import needs_proactor, run_in_proactor
+from app.core.tenant_context import (
+    apply_tenant,
+    get_current_tenant_id,
+    is_all_access,
+    set_current_tenant,
+)
+from app.models.harvest_run import HarvestRunORM
 from app.services.harvest_run_service import data_source_mode, db_read, resolve_read
 from app.services.recruiter_service import get_discovery_run, list_discovery_runs
 
@@ -76,6 +84,19 @@ class RecruiterDiscoveryRequest(BaseModel):
 # POST /run-recruiter-discovery
 # ═══════════════════════════════════════════════════════════════════════════════
 
+async def _tenant_harvest_run_ids(limit: int) -> list[str]:
+    """The current tenant's newest harvest run ids (human-readable ``run_id``), up to
+    ``limit``. Used to confine a client tenant's discovery to its own harvests;
+    [] when the DB is unavailable."""
+    async def _q(db):
+        """Select the tenant-scoped run ids, newest first."""
+        stmt = apply_tenant(select(HarvestRunORM.run_id), HarvestRunORM.tenant_id)
+        stmt = stmt.order_by(HarvestRunORM.created_at.desc()).limit(limit)
+        return [r for r in (await db.execute(stmt)).scalars() if r]
+
+    return await db_read(_q) or []
+
+
 @router.post("/run-recruiter-discovery", status_code=status.HTTP_200_OK)
 async def run_recruiter_discovery(
     body: RecruiterDiscoveryRequest = RecruiterDiscoveryRequest(),
@@ -106,13 +127,34 @@ async def run_recruiter_discovery(
 
     **Important:** Contact details are NEVER fabricated, predicted, or guessed.
     Only emails and phones actually scraped from public sources are stored.
+
+    **Tenancy:** a client tenant only processes its OWN harvest runs — the run ids
+    are restricted to the tenant's runs (``no_data`` when it has none); the
+    internal tenant keeps processing every run.
     """
     agent = RecruiterContactAgent(concurrency=body.concurrency)
+    tenant = get_current_tenant_id()
+    run_ids = body.run_ids or None
+    if not is_all_access(tenant):
+        own = await _tenant_harvest_run_ids(limit=body.max_files * 3)
+        run_ids = [r for r in (body.run_ids or own) if r in set(own)]
+        if not run_ids:
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "status":  "no_data",
+                    "message": "No harvest runs found for this workspace.",
+                    "hint": "Run a harvest first (POST /run-harvest-agent).",
+                },
+            )
 
     async def _run():
+        """Run the recruiter-contact agent with the request's filter, run ids and file cap,
+        re-binding the caller's tenant (a proactor worker thread does not inherit it)."""
+        set_current_tenant(tenant)
         return await agent.run(
             source_filter = body.source_filter,
-            run_ids       = body.run_ids or None,
+            run_ids       = run_ids,
             max_files     = body.max_files,
         )
 
@@ -177,6 +219,14 @@ async def run_recruiter_discovery(
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _list_recruiter_results_from_json() -> list[dict[str, Any]]:
+    """Summaries of past discovery runs from the rcd_*_recruiter_contacts.json files, newest first.
+
+    Creates the output directory if missing. An unreadable file yields a `{"file", "error"}`
+    entry instead of being skipped. The files are shared (not tenant-tagged), so only
+    an all-access (internal) tenant may list them; any other tenant gets [].
+    """
+    if not is_all_access(get_current_tenant_id()):
+        return []
     _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     files = sorted(
         _OUTPUT_DIR.glob("rcd_*_recruiter_contacts.json"),
@@ -247,6 +297,10 @@ async def get_recruiter_result(run_id: str) -> Any:
     (see its docstring), so this still reads the JSON file either way; DB
     mode just uses the DB's stored path instead of guessing the legacy
     filename pattern, and skips the JSON path entirely under DATA_SOURCE=database.
+
+    The legacy filename fallback reads shared, untagged files, so only an
+    all-access (internal) tenant may use it; other tenants get 404 unless their own
+    tenant-scoped DB row points at the file.
     """
     mode = data_source_mode()
     path: Path | None = None
@@ -262,6 +316,11 @@ async def get_recruiter_result(run_id: str) -> Any:
             )
 
     if path is None:
+        if not is_all_access(get_current_tenant_id()):
+            return JSONResponse(
+                status_code=404,
+                content={"detail": f"No result found for run_id '{run_id}'"},
+            )
         _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         path = _OUTPUT_DIR / f"{run_id}_recruiter_contacts.json"
 

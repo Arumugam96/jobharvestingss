@@ -16,6 +16,7 @@ from app.models.tenant import EMAIL_DOMAIN_TENANTS
 
 @lru_cache
 def _allowed_pattern(labels: tuple[str, ...]) -> re.Pattern[str]:
+    """Compile (and cache) the email regex for the given allowed domain labels."""
     # Accept any allowed workspace second-level label (internal + each onboarded
     # client, see EMAIL_DOMAIN_TENANTS) under ANY single-label TLD — .com / .in /
     # .io …. Restricting the TLD to a single dotless label ([a-z]{2,}) still

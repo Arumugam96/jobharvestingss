@@ -55,6 +55,7 @@ class RunHistoryService:
         return list(reversed(self._load_raw()))
 
     def get(self, run_id: str) -> dict | None:
+        """The first history entry with this ``run_id``, or None."""
         for entry in self._load_raw():
             if entry.get("run_id") == run_id:
                 return entry
@@ -63,6 +64,8 @@ class RunHistoryService:
     # ── Helpers ───────────────────────────────────────────────────────────────
 
     def _load_raw(self) -> list[dict]:
+        """All entries in the history file (oldest first); [] when the file is missing or
+        unreadable (the error is logged, not raised)."""
         if not _HISTORY_FILE.exists():
             return []
         try:
@@ -86,6 +89,8 @@ class RunHistoryService:
         ambiguous:       int = 0,
         error:           str | None = None,
     ) -> dict[str, Any]:
+        """Build one run-summary entry in the module's schema (timestamps as ISO
+        strings), ready for append()."""
         return {
             "run_id":         run_id,
             "sources":        sources,

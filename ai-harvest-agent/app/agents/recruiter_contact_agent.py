@@ -27,7 +27,7 @@ Job titles posted by each recruiter are aggregated either way.
 
 Enrichment pipeline (per recruiter)
 ─────────────────────────────────────
-Step 1 — Company website scraping          → VERIFIED email / phone
+Step 1 — Company website scraping          → VERIFIED email (confirmed domain only)
 Step 2 — LinkedIn profile visit            → PUBLIC (click Contact Info modal)
 Step 3 — Naukri cross-source validation    → PUBLIC
 Step 4 — Hierarchy discovery               → DuckDuckGo
@@ -56,7 +56,9 @@ import structlog
 from sqlalchemy import func, select
 
 from app.config import get_settings
+from app.core.company_domain import known_company_domain
 from app.core.dependencies import get_session_factory
+from app.core.tenant_context import apply_tenant, get_current_tenant_id, is_all_access
 from app.models.harvest_run import HarvestRunORM, ScrapedJobORM
 from app.models.prospect_models import ProspectResult
 from app.models.recruiter import RecruiterORM
@@ -163,6 +165,7 @@ class RecruiterDiscoveryResult:
     results: list[ProspectResult] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialise the run summary to a plain dict (per-recruiter results are not included)."""
         return {
             "run_id":            self.run_id,
             "started_at":        self.started_at,
@@ -190,6 +193,7 @@ class RecruiterDiscoveryResult:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _clean_name(raw: str) -> str:
+    """Drop characters that cannot be UTF-8 encoded and collapse whitespace ("" for empty)."""
     if not raw:
         return ""
     cleaned = raw.encode("utf-8", errors="ignore").decode("utf-8", errors="ignore")
@@ -208,7 +212,15 @@ def _load_recruiters_from_harvest(
     ─────────────
     1. linkedin_profile_url (if non-null) → unique key
     2. lower(name) + "|" + lower(company)
+
+    Tenant scoping: the result files carry no tenant and are shared by every
+    tenant, so a client tenant (not all-access) gets [] — only internal /
+    all-access contexts may read them.
     """
+    if not is_all_access(get_current_tenant_id()):
+        logger.info("recruiters_from_harvest_skipped", reason="tenant_scoped")
+        return []
+
     dirs_to_scan = (
         ["combined", "linkedin", "naukri", "dice"] if source_filter == "all"
         else [source_filter] if source_filter in _SOURCE_DIRS
@@ -312,6 +324,9 @@ async def _load_recruiters_from_db(
     max_files approximates the old "latest N files per source dir" cap by
     scoping to the N most recent harvest runs (x3 when source_filter="all",
     to roughly cover 3 real sources) rather than N files per source dir.
+
+    Both queries are tenant-scoped with apply_tenant (the current context's
+    tenant; all-access sees every tenant's runs and jobs).
     """
     try:
         session_factory = get_session_factory(get_settings())
@@ -319,7 +334,8 @@ async def _load_recruiters_from_db(
             run_limit = max_files if source_filter != "all" else max_files * 3
             recent_run_pks = (
                 await db.execute(
-                    select(HarvestRunORM.id).order_by(HarvestRunORM.created_at.desc()).limit(run_limit)
+                    apply_tenant(select(HarvestRunORM.id), HarvestRunORM.tenant_id)
+                    .order_by(HarvestRunORM.created_at.desc()).limit(run_limit)
                 )
             ).scalars().all()
 
@@ -329,6 +345,7 @@ async def _load_recruiters_from_db(
                 .join(HarvestRunORM, HarvestRunORM.id == ScrapedJobORM.run_id)
                 .where(ScrapedJobORM.run_id.in_(recent_run_pks))
             )
+            stmt = apply_tenant(stmt, ScrapedJobORM.tenant_id)
             if source_filter != "all" and source_filter in _SOURCE_DIRS:
                 stmt = stmt.where(func.lower(ScrapedJobORM.source) == source_filter.lower())
             if run_ids:
@@ -373,8 +390,13 @@ async def _persist_enrichment(rec: RecruiterRecord, result: ProspectResult) -> N
     rec.recruiter_id is empty for JSON-sourced records (DATA_SOURCE="json"
     or DB-fallback), so those resolve/create the row by identity first —
     meaning even a JSON-mode run still warms the DB cache for next time.
+    A row created here is owned by the current context's tenant.
     """
     async def _write(db):
+        """Resolve or create the recruiter row if needed, then save the enrichment fields onto it.
+
+        Silently does nothing when no recruiter row can be resolved.
+        """
         recruiter_id = rec.recruiter_id
         if not recruiter_id:
             recruiter = await upsert_recruiter(
@@ -384,6 +406,7 @@ async def _persist_enrichment(rec: RecruiterRecord, result: ProspectResult) -> N
                 designation=rec.designation,
                 linkedin_profile_url=rec.existing_linkedin or None,
                 harvest_source=rec.harvest_source,
+                tenant_id=get_current_tenant_id(),
             )
             recruiter_id = recruiter.id if recruiter else None
         if not recruiter_id:
@@ -436,6 +459,7 @@ class RecruiterContactAgent:
     """
 
     def __init__(self, concurrency: int = _DEFAULT_CONCURRENCY) -> None:
+        """Clamp concurrency to 1-5 parallel profile tabs; the LLM service is built lazily."""
         self._concurrency = max(1, min(concurrency, 5))
         self._llm_service: Any = None
 
@@ -455,6 +479,15 @@ class RecruiterContactAgent:
         run_ids: list[str] | None = None,
         max_files: int = 10,
     ) -> RecruiterDiscoveryResult:
+        """Enrich every recruiter found in recent harvests with publicly scraped contact details.
+
+        Recruiters are loaded from the DB or harvest JSON files (per DATA_SOURCE), then
+        enriched in batches inside the persistent Chrome profile, each result cached onto its
+        RecruiterORM row. Intermediate JSON is saved per batch; at the end the JSON, debug
+        JSON, Excel report and summary file are written and the run summary is saved to the
+        DB (best effort). Returns an empty summary (no files written) when no recruiters
+        are found. Per-recruiter failures become Low-confidence NOT_FOUND results.
+        """
         started_at = datetime.now(timezone.utc)
         run_id     = "rcd_" + started_at.strftime("%Y%m%d_%H%M%S")
 
@@ -488,6 +521,10 @@ class RecruiterContactAgent:
         sem    = asyncio.Semaphore(self._concurrency)
 
         async def _enrich_one(rec: RecruiterRecord) -> ProspectResult:
+            """Enrich one recruiter in a fresh tab and persist the result; the tab is always closed.
+
+            Errors are logged and turned into a Low-confidence NOT_FOUND result, never raised.
+            """
             async with sem:
                 page = await pbm.new_page()
                 try:
@@ -645,7 +682,8 @@ class RecruiterContactAgent:
         """
         Scraped contact discovery for one recruiter.
 
-        Step 1 — Company website (VERIFIED)
+        Step 1 — Company website (VERIFIED email; only for a confirmed, curated
+                 domain — never a name-heuristic guess; never a page phone)
         Step 2 — LinkedIn profile — click Contact Info modal (PUBLIC)
         Step 3 — Naukri cross-validation (PUBLIC)
         Step 4 — Hierarchy discovery
@@ -675,7 +713,11 @@ class RecruiterContactAgent:
         # ══════════════════════════════════════════════════════════════════════
         # Step 1 — Company website (VERIFIED)
         # ══════════════════════════════════════════════════════════════════════
-        if website:
+        # Only on a CONFIRMED domain: a heuristic "<name>.com" guess may be some
+        # other organisation's site, whose people must never become VERIFIED.
+        if not (website and domain and domain == known_company_domain(rec.company_name)):
+            audit.append(f"S1 skipped — domain is only a guess (domain:{domain or 'none'})")
+        else:
             try:
                 contact = await _scrape_company_website_contacts(
                     page, website, rec.person_name, domain
@@ -878,6 +920,10 @@ class RecruiterContactAgent:
         return result
 
     def _save_json(self, results: list[ProspectResult], run_id: str, source_filter: str) -> str:
+        """Write confidence/contact counts plus every result to <run_id>_recruiter_contacts.json.
+
+        Returns the absolute path of the written file.
+        """
         _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         path    = _OUTPUT_DIR / f"{run_id}_recruiter_contacts.json"
         payload = {

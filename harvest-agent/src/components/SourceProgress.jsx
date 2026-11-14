@@ -81,6 +81,10 @@ export function sourceEntries(sources) {
   return Object.entries(sources).filter(([, v]) => v && typeof v === "object");
 }
 
+/**
+ * One source's row: glyph, name, state badge (plus pause badge and live cool-down /
+ * CAPTCHA countdown text), latest message, failure detail, and an animated job count.
+ */
 function SourceRow({ srcKey, entry }) {
   const meta = SOURCE_META[srcKey] || { name: srcKey, glyph: (srcKey || "?").slice(0, 1).toUpperCase(), tint: "#64748B" };
   const st = STATE_META[entry.state] || STATE_META.pending;
@@ -126,6 +130,14 @@ function SourceRow({ srcKey, entry }) {
   );
 }
 
+/**
+ * Compact per-source progress card ("N of M done" header + one SourceRow per source)
+ * from the GET /harvest-status `sources` map. Renders nothing when there are no entries.
+ * @param {object} props
+ * @param {object} props.sources The `sources` map keyed by source.
+ * @param {boolean} [props.bare] Drop the card chrome (for use inside another card/modal).
+ * @param {string} [props.title] Header text.
+ */
 export default function SourceProgress({ sources, bare = false, title = "Sources" }) {
   const entries = sourceEntries(sources);
   if (entries.length === 0) return null;

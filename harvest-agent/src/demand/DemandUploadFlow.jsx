@@ -24,6 +24,7 @@ const CHECK_CHIP = {
   short_jd: ["fail", "JD too short"], duplicate: ["fail", "Duplicate"],
 };
 
+/** "Demand Search / New batch" page header with a step-specific subtitle. */
 function PageHead({ sub }) {
   return (
     <div className="ha-pagehead">
@@ -35,10 +36,22 @@ function PageHead({ sub }) {
   );
 }
 
+/** "1 row" / "3 rows": count plus singular or plural noun (default plural is one + "s"). */
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many || `${one}s`}`;
 
 // ── Step 2: validation ────────────────────────────────────────────────────────
 
+/**
+ * Step 2 for an uploaded file: runs POST /demand/validate (unless `initial` is already known)
+ * and shows the file error state or the ValidationSummary, with a hidden input to replace the
+ * file.
+ * @param {object} props
+ * @param {File} props.file - the chosen spreadsheet / document.
+ * @param {object} [props.initial] - cached validation result (skips the request).
+ * @param {Function} props.onReplace - called with a newly chosen File.
+ * @param {Function} props.onCancel - abandon the upload.
+ * @param {Function} props.onContinue - called with the validation preview.
+ */
 export function ValidationStep({ file, initial, onReplace, onCancel, onContinue }) {
   const [preview, setPreview] = useState(initial || null);
   const [fileError, setFileError] = useState(null);
@@ -64,6 +77,7 @@ export function ValidationStep({ file, initial, onReplace, onCancel, onContinue 
     <input ref={replaceRef} type="file" accept=".xlsx,.xls,.csv,.docx" style={{ display: "none" }}
       onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) onReplace(f); }} />
   );
+  /** Open the hidden "replace file" picker. */
   const pickAnother = () => replaceRef.current?.click();
 
   let body;
@@ -162,6 +176,8 @@ export function ManualReviewStep({ payload, initial, onEdit, onContinue }) {
   );
 }
 
+/** Callout for a rejected file (422 from /demand/validate): title, message, and for a missing
+ * column the headers found and which required fields were mapped; offers "Choose another file". */
 function FileErrorState({ file, err, onChoose }) {
   const headers = err.headers_found || [];
   const mapping = err.mapping || {};
@@ -195,6 +211,14 @@ function FileErrorState({ file, err, onChoose }) {
   );
 }
 
+/**
+ * Validation result for a file or manual batch: source chip, valid / invalid / reuse counts,
+ * detected column mapping (files only), skipped rows, reuse note, preview table and the
+ * Cancel / Continue footer.
+ * @param {object} props
+ * @param {object} props.preview - response of /demand/validate or /demand/validate-json.
+ * @param {boolean} [props.manual] - word things as "jobs" instead of file "rows".
+ */
 function ValidationSummary({ preview, onReplace, onCancel, onContinue, manual = false }) {
   const p = preview;
   const mapping = p.mapping || {};
@@ -360,6 +384,8 @@ export function PreflightStep({ file, preview, sess, onBack, onStarted, onStart,
   const leftMin = [sLeft, cLeft].filter((v) => v != null);
   const tight = leftMin.length > 0 && need > Math.min(...leftMin);
 
+  /** Start the batch (onStart or POST /demand/upload) and hand the result to onStarted;
+   * harvest_running opens the modal, session errors re-check the recruiter session. */
   const start = async () => {
     setStarting(true);
     setError("");

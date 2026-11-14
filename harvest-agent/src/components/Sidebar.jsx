@@ -53,6 +53,7 @@ function hexToRgbArr(hex) {
   const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex || "");
   return m ? [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16)] : null;
 }
+/** Linear blend of colour channel `c` toward `t` by fraction `k` (0..1), rounded. */
 const mix = (c, t, k) => Math.round(c * (1 - k) + t * k);
 
 // Per-tenant sidebar tint, derived from the tenant slip's accent: a brighter
@@ -74,6 +75,18 @@ function sidebarVars(accent, isClient) {
 // full-page job/run detail view — while a reload or refresh always starts collapsed.
 let committedThisLoad = false;
 
+/**
+ * The left navigation rail (see the file header): collapsed icon rail that peeks open
+ * on hover/focus and stays open once a nav item is clicked, tenant-tinted, with nav
+ * items gated by tenant features and admin-only Phone logs / User roles.
+ * @param {object} props
+ * @param {string} props.activePage Key of the current page, highlighted in the nav.
+ * @param {(key: string) => void} [props.onNavigate] Called with the clicked nav key.
+ * @param {number} [props.jobsCount] Badge on Harvested Jobs.
+ * @param {number} [props.runsCount] Badge on Run History.
+ * @param {() => void} [props.onLogout] Shows the Sign out button when given.
+ * @param {boolean} [props.railCollapsed] Keep the rail collapsed (peek only) on this page.
+ */
 export default function Sidebar({ activePage, onNavigate = () => {}, jobsCount, runsCount, onLogout, railCollapsed = false }) {
   const { tenant, theme, isClient, hasFeature, isAdmin, authBypass } = useTenant();
 
@@ -81,6 +94,7 @@ export default function Sidebar({ activePage, onNavigate = () => {}, jobsCount, 
   // nav option (or the open button), OFF by the close button — so navigating keeps
   // the rail open, while a plain hover does NOT latch it. Resets on reload.
   const [committed, setCommittedState] = useState(committedThisLoad);
+  /** Sets the "keep open" latch in state and in the module-level per-page-load flag. */
   const setCommitted = (value) => { committedThisLoad = value; setCommittedState(value); };
 
   // `peeking` = transient hover/focus peek. The rail is open when either is set; a

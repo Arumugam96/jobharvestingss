@@ -108,12 +108,14 @@ class NaukriRecruiterSessionError(RuntimeError):
 
 
 def recruiter_profile_dir() -> Path:
+    """Resolve the recruiter Chrome profile dir from settings (relative paths -> project root)."""
     from app.config import get_settings
     raw = Path(get_settings().naukri_recruiter_profile_dir)
     return raw if raw.is_absolute() else _PROJECT_ROOT / raw
 
 
 def is_login_url(url: str) -> bool:
+    """True if the URL contains any known Naukri login/landing-page marker (case-insensitive)."""
     u = (url or "").lower()
     return any(m in u for m in _LOGIN_MARKERS)
 
@@ -177,6 +179,7 @@ def summarize_cookies(cookies: list[dict]) -> dict[str, Any]:
     expiries = [c["expires"] for c in nk if isinstance(c.get("expires"), (int, float)) and c["expires"] > 0]
 
     def _iso(ts: float | None) -> str | None:
+        """Convert an epoch-seconds cookie expiry to an ISO UTC string (None for 0/None)."""
         return datetime.fromtimestamp(ts, timezone.utc).isoformat() if ts else None
 
     return {
@@ -189,10 +192,16 @@ def summarize_cookies(cookies: list[dict]) -> dict[str, Any]:
 
 
 def _now() -> str:
+    """Current UTC time as an ISO-8601 string (status-file timestamps)."""
     return datetime.now(timezone.utc).isoformat()
 
 
 def _write_status(data: dict[str, Any]) -> dict[str, Any]:
+    """Persist a session-check result to STATUS_PATH and return it unchanged.
+
+    A logged-in result also clears any pending "Naukri recruiter login needed" request.
+    Write and clear failures are logged and swallowed.
+    """
     try:
         STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
         STATUS_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -252,6 +261,11 @@ async def _import_legacy_cookies(context: Any) -> int:
 
 
 async def _check_page(page: Any, url: str = RECRUITER_HOME) -> tuple[bool, str, str]:
+    """Load url (recruit.naukri.com by default) and report (logged_in, landed_url, title).
+
+    Waits 3s after DOM load before reading the landed URL. Navigation errors
+    propagate to the caller.
+    """
     await page.goto(url, wait_until="domcontentloaded", timeout=40_000)
     await page.wait_for_timeout(3_000)
     landed = page.url
@@ -293,6 +307,7 @@ class NaukriRecruiterAgent:
     """Verify / capture a recruiter session in the dedicated recruiter profile."""
 
     def __init__(self, headless: bool = True) -> None:
+        """Choose whether the recruiter-profile browser opens headless."""
         self._headless = headless
 
     async def verify(self, import_legacy: bool = True) -> dict[str, Any]:
@@ -374,11 +389,16 @@ def start_login_window(timeout_s: int = 600) -> bool:
         return False
 
     async def _run() -> None:
+        """Run the login (Launcher or headed web window) and record a failure in the status file.
+
+        Uses a Proactor loop on a worker thread when the current loop cannot spawn the browser.
+        """
         from app.core.proactor import needs_proactor, run_in_proactor
 
         from app.services.naukri_launcher import launcher_login, use_launcher
 
         def _factory():
+            """Return the login coroutine: Launcher login if enabled, else the headed web login."""
             if use_launcher():
                 return launcher_login(timeout_s=timeout_s)
             return NaukriRecruiterAgent(headless=False).interactive_login(timeout_s=timeout_s)

@@ -67,6 +67,7 @@ def build_excel_report_bytes(job_dicts: list[dict[str, Any]]) -> bytes:
 
 
 def _has(value: Any) -> bool:
+    """True when ``value`` is non-empty after stripping whitespace (None/"" → False)."""
     return bool(value and str(value).strip())
 
 
@@ -133,9 +134,10 @@ def compute_harvest_insights(jobs: list[ScrapedJobORM]) -> dict[str, Any]:
         the local LLM) vs paid Apollo enrichments (recruiter.enrichment_source
         == "apollo")
 
-    Counts are over DISTINCT postings (distinct_postings): the same posting found
-    on two sources counts once. ``total`` is that distinct count, ``total_rows`` the
-    raw row count and ``cross_source_duplicates`` the postings seen on 2+ sources.
+    Counts are over every ROW: ``total`` is the raw row count and a posting found
+    on two sources counts once per source (the distinct_postings collapse — and its
+    ``total_rows`` / ``cross_source_duplicates`` keys — was dropped on purpose by
+    the "harvest total count bug fix"). Phones are still counted once per number.
     ``apollo_enriched`` counts postings whose contact came from an Apollo-sourced
     recruiter — NOT credits spent (see apollo_budget.credits_between)."""
     # total_rows = len(jobs)

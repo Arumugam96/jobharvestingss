@@ -116,6 +116,7 @@ _SOURCE_EMAIL_FIELD = {"job": "email_id", "contact": "email_id", "company": "com
 
 
 def _now() -> datetime:
+    """Current time as a timezone-aware UTC datetime."""
     return datetime.now(timezone.utc)
 
 
@@ -127,15 +128,20 @@ def _aware(dt: datetime | None) -> datetime | None:
 
 
 def _iso(dt: datetime | None) -> str | None:
+    """ISO-8601 string for ``dt`` (naive values treated as UTC), or None."""
     dt = _aware(dt)
     return dt.isoformat() if dt else None
 
 
 def _same_user(email: str | None, user: AuthenticatedUser) -> bool:
+    """Case-insensitive match of ``email`` against the user; False if email is empty."""
     return bool(email) and email.lower() == (user.email or "").lower()
 
 
 def _loads(raw: str | None, default):
+    """Decode a JSON text column, returning ``default`` when it is empty, invalid, or
+    decodes to a different type than ``default``.
+    """
     try:
         value = json.loads(raw) if raw else default
     except ValueError:
@@ -220,6 +226,7 @@ def call_view(row: PhoneCallLogORM, *, proof_src: bool = True) -> dict[str, Any]
 
 
 def _close_open_followups_stmt(job_id: str, phone: str, now: datetime):
+    """Tenant-scoped UPDATE marking all open follow-ups for this job+phone done at ``now``."""
     return apply_tenant(
         update(PhoneCallLogORM)
         .where(
@@ -360,6 +367,7 @@ async def _upsert_flag(
 
 
 async def _job_recruiter(db: AsyncSession, job: ScrapedJobORM) -> RecruiterORM | None:
+    """The job's linked recruiter row, or None when it has none (or it no longer exists)."""
     if not job.recruiter_id:
         return None
     return (await db.execute(
@@ -578,6 +586,9 @@ async def list_logs(
         ))))
 
     def scoped(stmt, *extra):
+        """Apply the call-log -> job outer join, the shared filters plus ``extra`` conditions,
+        and tenant scoping to ``stmt``.
+        """
         return apply_tenant(
             stmt.select_from(PhoneCallLogORM)
             .outerjoin(ScrapedJobORM, ScrapedJobORM.id == PhoneCallLogORM.job_id)
@@ -646,6 +657,9 @@ async def relink_job_ids(db: AsyncSession, mapping: dict[str, str]) -> None:
 
 
 def _due_conditions(user: AuthenticatedUser, now: datetime) -> list:
+    """Filters for ``user``'s follow-ups that are due by ``now``: scheduled, not done and
+    not cleared.
+    """
     return [
         func.lower(PhoneCallLogORM.called_by_email) == (user.email or "").lower(),
         PhoneCallLogORM.follow_up_due_at.is_not(None),

@@ -44,6 +44,7 @@ def _utc(value: datetime | None) -> datetime | None:
 
 
 def _parse_dt(value: object) -> datetime | None:
+    """Parse an ISO-8601 string (``Z`` allowed) to aware UTC; None if absent or unparseable."""
     if not isinstance(value, str) or not value:
         return None
     try:
@@ -114,6 +115,7 @@ def credits_between(base: dict | None, now: dict | None) -> int | None:
 
 
 def _row_to_reading(row) -> dict:
+    """Snapshot row as the reading shape ``credits_between`` compares (no left_over)."""
     return {"consumed": row.consumed, "limit": row.credit_limit, "cycle_start": row.cycle_start}
 
 
@@ -156,6 +158,7 @@ async def snapshot_job() -> None:
 
 
 async def _latest_at_or_before(db, when: datetime) -> dict | None:
+    """Most recent stored snapshot taken at or before ``when``, or None if there is none."""
     from app.models.harvest_run import ApolloCreditSnapshotORM as S
 
     row = (await db.execute(
@@ -165,6 +168,7 @@ async def _latest_at_or_before(db, when: datetime) -> dict | None:
 
 
 async def _earliest_after(db, when: datetime) -> dict | None:
+    """First stored snapshot taken strictly after ``when``, or None if there is none."""
     from app.models.harvest_run import ApolloCreditSnapshotORM as S
 
     row = (await db.execute(

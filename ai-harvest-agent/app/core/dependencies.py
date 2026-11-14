@@ -30,6 +30,11 @@ _session_factory = None
 
 
 def get_engine(settings: Settings = Depends(get_settings)):
+    """Return the process-wide async SQLAlchemy engine, creating it on first call.
+
+    The engine is cached in a module global, so later calls ignore ``settings``. Pool
+    sizing comes from the DB_* settings and pre-ping is on to drop dead connections.
+    """
     global _engine
     if _engine is None:
         _engine = create_async_engine(
@@ -45,6 +50,10 @@ def get_engine(settings: Settings = Depends(get_settings)):
 
 
 def get_session_factory(settings: Settings = Depends(get_settings)):
+    """Return the cached ``async_sessionmaker`` bound to the shared engine.
+
+    Sessions use ``expire_on_commit=False`` so ORM objects stay readable after commit.
+    """
     global _session_factory
     if _session_factory is None:
         engine = get_engine(settings)
@@ -69,6 +78,7 @@ async def get_db_session(
 
 
 def get_llm_service(settings: Settings = Depends(get_settings)) -> LLMService:
+    """FastAPI factory: a fresh LLMService per request (not cached)."""
     return LLMService(settings)
 
 
@@ -85,6 +95,7 @@ def get_playwright_service(request: Request) -> PlaywrightService:
 
 
 def get_email_sender(settings: Settings = Depends(get_settings)) -> EmailSender:
+    """FastAPI factory: a fresh EmailSender (used for OTP login emails)."""
     return EmailSender(settings)
 
 

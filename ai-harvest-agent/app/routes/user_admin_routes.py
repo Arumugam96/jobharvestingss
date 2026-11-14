@@ -32,6 +32,7 @@ class SetRoleRequest(BaseModel):
 
 
 def _user_view(u: UserORM) -> dict[str, Any]:
+    """Serialise a user row for the User roles page (no secrets; ISO `created_at` or None)."""
     return {
         "id": u.id,
         "email": u.email,
@@ -47,6 +48,11 @@ async def list_users(
     current_user: AuthenticatedUser = Depends(require_admin),
     db: AsyncSession = Depends(get_db_session),
 ) -> dict:
+    """List users who have signed in, admins first then by email.
+
+    Scoped to the caller's tenant (internal admins see every tenant). Requires the admin role.
+    Returns `{"items": [...]}` with id, email, tenant_id, role, is_active and created_at.
+    """
     stmt = apply_tenant(
         select(UserORM).order_by(case((UserORM.role == ADMIN_ROLE, 0), else_=1), UserORM.email),
         UserORM.tenant_id,
@@ -61,6 +67,11 @@ async def set_user_role(
     current_user: AuthenticatedUser = Depends(require_admin),
     db: AsyncSession = Depends(get_db_session),
 ) -> dict:
+    """Set a user's role to "user" or "admin" and return the updated user.
+
+    Requires the admin role. 404 if the user is not visible in the caller's tenant scope; 400 if the
+    admin tries to change their own role (prevents a tenant losing its last admin by accident).
+    """
     user = (await db.execute(apply_tenant(
         select(UserORM).where(UserORM.id == user_id), UserORM.tenant_id,
     ))).scalar_one_or_none()

@@ -61,6 +61,7 @@ RESDEX_REQUIREMENTS_SCHEMA = (
 
 
 def _skills_text(skills: Any) -> str:
+    """Render a skills list (or a plain string) as one comma-separated line; "" if empty."""
     if isinstance(skills, (list, tuple)):
         return ", ".join(str(s).strip() for s in skills if str(s or "").strip())
     return str(skills or "").strip()
@@ -102,11 +103,19 @@ def humanize_key(key: str) -> str:
 
 
 def _metadata_lines(meta: Any) -> str:
+    """Render a Demand job's ``metadata`` dict as "Label: value" lines, one per entry.
+
+    Non-string values are stringified (``30`` → "30", a list → its items joined with
+    ", "); None and blank values are skipped; whitespace is collapsed. Returns "" when
+    ``meta`` is not a dict.
+    """
     if not isinstance(meta, dict):
         return ""
     lines = []
     for k, v in meta.items():
-        value = " ".join(str(v or "").split()) if isinstance(v, str) else ""
+        if isinstance(v, (list, tuple)):
+            v = ", ".join(str(x) for x in v if x is not None)
+        value = " ".join(str(v).split()) if v is not None else ""
         label = humanize_key(k)
         if value and label:
             lines.append(f"{label}: {value}\n")
@@ -114,6 +123,7 @@ def _metadata_lines(meta: Any) -> str:
 
 
 def _job_matcher(job: dict) -> TextMatcher:
+    """Matcher over the job's title, skills, description and location (the grounding text)."""
     return TextMatcher(
         job.get("job_title") or "", job.get("skills") or [],
         job.get("job_description") or "", job.get("location") or "",
@@ -121,6 +131,11 @@ def _job_matcher(job: dict) -> TextMatcher:
 
 
 def _str(v: Any, max_len: int = 120) -> str:
+    """Coerce a scalar LLM value to a whitespace-collapsed string.
+
+    Returns "" for non-scalars, booleans, and strings longer than ``max_len`` (an
+    over-long value is rejected outright, not truncated).
+    """
     if not isinstance(v, (str, int, float)) or isinstance(v, bool):
         return ""
     s = " ".join(str(v).split())
@@ -128,6 +143,7 @@ def _str(v: Any, max_len: int = 120) -> str:
 
 
 def _str_list(v: Any) -> list[str]:
+    """Coerce a string or list to a list of non-empty ``_str`` values; [] otherwise."""
     if isinstance(v, str):
         v = [v]
     if not isinstance(v, list):
@@ -136,6 +152,11 @@ def _str_list(v: Any) -> list[str]:
 
 
 def _int_or_none(v: Any, lo: int, hi: int) -> int | None:
+    """Parse ``v`` as an int (via float) clamped to ``lo..hi``.
+
+    Returns None for None, booleans and unparseable values; out-of-range numbers are
+    clamped rather than rejected.
+    """
     if isinstance(v, bool) or v is None:
         return None
     try:
@@ -182,6 +203,7 @@ def _ground_skills(raw: Any, matcher: TextMatcher, seen: set[str], limit: int,
 
 
 def _ground_exp(req: dict) -> tuple[int | None, int | None]:
+    """Clamp the LLM's min/max experience years to 0..MAX_EXP_YEARS, swapping if inverted."""
     lo = _int_or_none(req.get("min_exp"), 0, MAX_EXP_YEARS)
     hi = _int_or_none(req.get("max_exp"), 0, MAX_EXP_YEARS)
     if lo is not None and hi is not None and lo > hi:
@@ -197,7 +219,9 @@ def ground_requirements(req: dict, job: dict) -> dict:
     job's title / skills / description / location; anything else is dropped. The
     posted title is always ``job_titles[0]``; other titles and skill variants are
     kept only as OR-alternatives of a grounded term (de-duplicated, ≤4 each).
-    Experience is clamped to 0..40 with min ≤ max; exclusions must be short."""
+    Placeholder locations ("Not Specified", "N/A", …) are dropped even when the job
+    text contains them. Experience is clamped to 0..40 with min ≤ max; exclusions
+    must be short."""
     req = req if isinstance(req, dict) else {}
     job = job or {}
     matcher = _job_matcher(job)
@@ -226,6 +250,8 @@ def ground_requirements(req: dict, job: dict) -> dict:
     loc_keys: set[str] = set()
     for loc in _str_list(req.get("locations")):
         k = term_key(loc)
+        if is_placeholder_location(loc):
+            continue                       # "Not Specified" etc. is no place to filter on
         if k and k not in loc_keys and matcher.contains(loc):
             loc_keys.add(k)
             locations.append(loc)
@@ -277,10 +303,25 @@ def parse_experience_range(text: str | None) -> tuple[int | None, int | None]:
     return None, None
 
 
+_PLACEHOLDER_LOCATIONS = frozenset({
+    "unknown", "unknown location", "location unknown", "not specified", "not mentioned",
+    "not stated", "not available", "not disclosed", "unspecified", "n/a", "na", "nil",
+    "none", "null", "tbd", "any", "anywhere", "-", "--",
+})
+
+
+def is_placeholder_location(text: str | None) -> bool:
+    """True for a filler location value ("Unknown Location", "Not Specified", "N/A", …)
+    that names no real place — it must never become a Resdex location filter."""
+    t = " ".join((text or "").lower().split()).strip(" .")
+    return t in _PLACEHOLDER_LOCATIONS
+
+
 def fallback_requirements(job: dict) -> dict:
     """No-LLM requirements from the posting's own fields: the first 4 listed skills
     are mandatory (priority by order), the next 4 optional, the posted title, the
-    experience range when the posting states one, and the location's city."""
+    experience range when the posting states one, and the location's city (none when
+    the location is a placeholder such as "Unknown Location" / "Not Specified" / "N/A")."""
     job = job or {}
     raw_skills = job.get("skills") or []
     if isinstance(raw_skills, str):
@@ -296,6 +337,8 @@ def fallback_requirements(job: dict) -> dict:
     title = _str(job.get("job_title"), 200)
     min_exp, max_exp = parse_experience_range(job.get("experience"))
     city = (job.get("location") or "").split(",")[0].strip()
+    if is_placeholder_location(city):
+        city = ""
     return {
         "mandatory_skills": [
             {"name": n, "variants": [], "priority": i} for i, n in enumerate(skills[:4], start=1)
@@ -347,6 +390,10 @@ _PROFILE_STR_FIELDS = tuple(
 
 
 def build_profile_content(card_text: str) -> str:
+    """extract_json content for one Resdex search-result card.
+
+    Interpolates the card text, stripped and cut to CARD_MAX_CHARS.
+    """
     text = (card_text or "").strip()
     if len(text) > CARD_MAX_CHARS:
         text = text[:CARD_MAX_CHARS]
@@ -373,6 +420,7 @@ def parse_experience_years(text: str | None) -> float | None:
 
 
 def _ground_value(v: Any, matcher: TextMatcher, max_len: int = 500) -> str:
+    """Return the cleaned value only if it appears in the card text, else ""."""
     s = _str(v, max_len)
     return s if s and matcher.contains(s) else ""
 

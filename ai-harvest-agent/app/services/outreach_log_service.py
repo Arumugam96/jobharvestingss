@@ -13,10 +13,11 @@ the UI can show delivery outcomes.
 """
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -147,6 +148,7 @@ BREVO_EVENT_MAP = {
 
 
 def _event_time(raw: Any) -> datetime:
+    """Webhook unix timestamp as a UTC datetime; falls back to now if missing/invalid."""
     try:
         return datetime.fromtimestamp(int(raw), tz=timezone.utc)
     except (TypeError, ValueError):
@@ -530,9 +532,11 @@ async def outreach_list_stats(
     )
 
     async def _count(stmt) -> int:
+        """Row count of the given filtered select."""
         return (await db.execute(select(func.count()).select_from(stmt.subquery()))).scalar_one()
 
     async def _status(value: str) -> int:
+        """Count of filtered rows whose headline delivery_status equals ``value``."""
         return await _count(base.where(EmailOutreachORM.delivery_status == value))
 
     return {
@@ -669,9 +673,161 @@ async def companies_replied_since(db: AsyncSession, since: datetime) -> set[str]
 
 
 async def get_by_id(db: AsyncSession, outreach_id: str) -> EmailOutreachORM | None:
+    """Fetch one outreach send row by id, or None.
+
+    Not tenant-scoped (unlike the list/stat queries here): webhook handlers use it to
+    match provider events, which arrive without a tenant context. User-facing paths
+    must use get_by_id_for_tenant instead.
+    """
     return (
         await db.execute(select(EmailOutreachORM).where(EmailOutreachORM.id == outreach_id))
     ).scalar_one_or_none()
+
+
+async def get_by_id_for_tenant(db: AsyncSession, outreach_id: str) -> EmailOutreachORM | None:
+    """Fetch one outreach send row by id within the current tenant (apply_tenant), or
+    None — the lookup for user-facing paths, so a client tenant can't read or follow up
+    another tenant's send by guessing its id."""
+    stmt = apply_tenant(select(EmailOutreachORM), EmailOutreachORM.tenant_id).where(
+        EmailOutreachORM.id == outreach_id
+    )
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
+# ── Send claim (duplicate-initial-send guard) ───────────────────────────────────
+# Both send paths (the manual route and auto-outreach) write the send-log row as
+# status "pending" BEFORE the SMTP hand-off, re-checking for an existing initial
+# send in the same transaction, then flip it to "sent"/"failed" afterwards. A
+# concurrent second attempt sees the pending row and backs off. On Postgres the
+# re-check is serialized with a transaction-scoped advisory lock per job and per
+# recipient (released at commit); SQLite serializes writers on its own. Every
+# "has this been sent?" read here filters status == "sent", so a pending row is
+# never shown or counted as sent.
+PENDING_STATUS = "pending"
+
+
+def _lock_key(name: str) -> int:
+    """Stable signed 64-bit advisory-lock key for ``name``."""
+    return int.from_bytes(hashlib.sha1(name.encode("utf-8")).digest()[:8], "big", signed=True)
+
+
+async def _lock_send_keys(db: AsyncSession, row: EmailOutreachORM) -> None:
+    """Take Postgres transaction-scoped advisory locks on the send's job and recipient
+    (sorted, so two claimers never deadlock). No-op on other dialects."""
+    if db.get_bind().dialect.name != "postgresql":
+        return
+    keys = set()
+    if row.job_id:
+        keys.add(_lock_key(f"outreach-initial:job:{row.job_id}"))
+    if row.recruiter_id:
+        keys.add(_lock_key(f"outreach-initial:recruiter:{row.recruiter_id}"))
+    if row.to_email:
+        keys.add(_lock_key(f"outreach-initial:to:{row.to_email.strip().lower()}"))
+    for key in sorted(keys):
+        await db.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": key})
+
+
+async def _existing_initial_claim(
+    db: AsyncSession, row: EmailOutreachORM, recipient_since: datetime | None
+) -> EmailOutreachORM | None:
+    """An initial email (sent OR pending) that makes ``row`` a duplicate: same job/
+    recruiter as initial_email_sent matches (tenant-scoped the same way), or — when
+    ``recipient_since`` is given — any tenant's initial send to the same address since
+    then (mirrors recipient_emailed_since)."""
+    live = EmailOutreachORM.status.in_(("sent", PENDING_STATUS))
+    if row.job_id or row.recruiter_id:
+        stmt = apply_tenant(select(EmailOutreachORM), EmailOutreachORM.tenant_id).where(
+            EmailOutreachORM.channel == "email",
+            EmailOutreachORM.outreach_kind == "initial",
+            EmailOutreachORM.id != row.id,
+            live,
+        )
+        if row.job_id:
+            stmt = stmt.where(EmailOutreachORM.job_id == row.job_id)
+        if row.recruiter_id:
+            stmt = stmt.where(EmailOutreachORM.recruiter_id == row.recruiter_id)
+        hit = (
+            await db.execute(stmt.order_by(EmailOutreachORM.created_at.asc()).limit(1))
+        ).scalar_one_or_none()
+        if hit is not None:
+            return hit
+    addr = (row.to_email or "").strip().lower()
+    if recipient_since is not None and addr:
+        stmt = select(EmailOutreachORM).where(
+            EmailOutreachORM.channel == "email",
+            EmailOutreachORM.outreach_kind == "initial",
+            EmailOutreachORM.id != row.id,
+            live,
+            func.lower(EmailOutreachORM.to_email) == addr,
+            func.coalesce(EmailOutreachORM.sent_at, EmailOutreachORM.created_at)
+            >= _utc(recipient_since),
+        ).limit(1)
+        return (await db.execute(stmt)).scalar_one_or_none()
+    return None
+
+
+async def claim_initial_send(
+    db: AsyncSession,
+    row: EmailOutreachORM,
+    *,
+    check: bool = True,
+    recipient_since: datetime | None = None,
+) -> EmailOutreachORM | None:
+    """Claim a send by adding ``row`` (built with status "pending") to the session.
+
+    With ``check`` (initial sends without a user-confirmed re-send) it first locks the
+    job/recipient (Postgres) and re-checks for an existing sent-or-pending initial
+    email (see _existing_initial_claim); if one exists it is returned and ``row`` is
+    NOT added. Returns None when the claim succeeded. The caller must COMMIT before the
+    SMTP hand-off so concurrent claimers see the pending row, then record the outcome
+    with apply_send_outcome / finalize_send."""
+    if check:
+        await _lock_send_keys(db, row)
+        existing = await _existing_initial_claim(db, row, recipient_since)
+        if existing is not None:
+            return existing
+    db.add(row)
+    await db.flush()
+    return None
+
+
+def apply_send_outcome(
+    row: EmailOutreachORM,
+    *,
+    status: str,
+    provider_message_id: str | None,
+    error_message: str | None,
+) -> None:
+    """Record the SMTP outcome on a claimed (pending) row: the transport status, the
+    Message-ID and error, and — on success — the same optimistic delivered seed
+    build_email_outreach_row applies (delivery_status "delivered", delivered_at = the
+    send-attempt time)."""
+    row.status = status
+    row.provider_message_id = provider_message_id
+    row.error_message = error_message
+    if status == "sent":
+        row.delivery_status = "delivered"
+        row.delivered_at = row.sent_at or datetime.now(timezone.utc)
+
+
+async def finalize_send(
+    db: AsyncSession,
+    outreach_id: str,
+    *,
+    status: str,
+    provider_message_id: str | None,
+    error_message: str | None,
+) -> bool:
+    """Load a claimed row by id (unscoped — it was just written by this process) and
+    apply_send_outcome to it. Returns False when the row is gone."""
+    row = await get_by_id(db, outreach_id)
+    if row is None:
+        return False
+    apply_send_outcome(
+        row, status=status, provider_message_id=provider_message_id,
+        error_message=error_message,
+    )
+    return True
 
 
 def build_email_outreach_row(
@@ -707,7 +863,8 @@ def build_email_outreach_row(
     raises otherwise) counts as delivered immediately, so the row shows "Delivered"
     without waiting on a webhook; the event webhook only advances it further
     (opened/clicked) or to a terminal negative (bounced/blocked/spam). A failed send
-    leaves the delivery fields NULL."""
+    leaves the delivery fields NULL, as does a "pending" claim (claim_initial_send),
+    whose outcome is applied later by apply_send_outcome / finalize_send."""
     delivered = status == "sent"
     when = sent_at or datetime.now(timezone.utc)
     return EmailOutreachORM(

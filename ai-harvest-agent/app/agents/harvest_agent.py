@@ -8,7 +8,7 @@ import structlog
 
 from app.agents.base_agent import BaseAgent
 from app.models.agent import AgentConfig, AgentType
-from app.prompts.harvest_prompts import HARVEST_SYSTEM_PROMPT, build_harvest_user_prompt
+from app.prompts.harvest_prompts import build_harvest_user_prompt, harvest_system_prompt
 from app.services.llm_service import HARVEST_TOOLS, LLMMessage, LLMService
 from app.services.playwright_service import PageSnapshot, PlaywrightService
 
@@ -34,6 +34,7 @@ class HarvestAgent(BaseAgent):
         playwright_service: PlaywrightService,
         config: AgentConfig | None = None,
     ) -> None:
+        """Set up the base agent plus the current page snapshot and the extract_data accumulator."""
         super().__init__(llm_service, playwright_service, config)
         self._current_snapshot: PageSnapshot | None = None
         self._collected: list[dict[str, Any]] = []
@@ -49,7 +50,7 @@ class HarvestAgent(BaseAgent):
             f"Briefly describe your strategy: which pages to visit, "
             f"what signals to look for, and how you will extract the data."
         )
-        strategy = await self._llm.complete_text(prompt, system=HARVEST_SYSTEM_PROMPT)
+        strategy = await self._llm.complete_text(prompt, system=harvest_system_prompt())
         return {"strategy": strategy, "start_url": url, "goal": goal}
 
     async def execute(
@@ -64,7 +65,7 @@ class HarvestAgent(BaseAgent):
         for iteration in range(self._config.max_iterations):
             response = await self._llm.complete(
                 messages=messages,
-                system=HARVEST_SYSTEM_PROMPT,
+                system=harvest_system_prompt(),
                 tools=HARVEST_TOOLS,
             )
 
@@ -121,6 +122,13 @@ class HarvestAgent(BaseAgent):
     async def _dispatch_tool(
         self, tool_name: str, tool_input: dict[str, Any]
     ) -> str:
+        """Execute one Claude tool call against the browser and return the observation text.
+
+        navigate/click/scroll/fill_form update the current snapshot via PlaywrightService;
+        extract_data runs an LLM JSON extraction over the page text and appends it to the
+        collected results. Never raises: unknown tools, a missing page and any exception
+        come back as an error string so the agent loop can continue.
+        """
         try:
             if tool_name == "navigate":
                 url = tool_input["url"]
@@ -179,6 +187,7 @@ class HarvestAgent(BaseAgent):
 
     @staticmethod
     def _snapshot_summary(snap: PageSnapshot) -> str:
+        """Render a short text summary of a page (URL, title, text preview, 5 links, form count)."""
         links_preview = "; ".join(
             f"{l['text'][:30]} → {l['href'][:60]}" for l in snap.links[:5]
         )

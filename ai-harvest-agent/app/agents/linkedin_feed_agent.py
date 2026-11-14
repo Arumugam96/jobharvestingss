@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 import structlog
 
 from app.config import Settings, get_settings
+from app.core.contact_grounding import ground_email, ground_phone
 from app.core.contact_normalize import normalize_email, normalize_phone
 from app.core.dependencies import get_llm_service
 from app.core.exceptions import LLMUnavailableError
@@ -45,7 +46,7 @@ from app.agents.linkedin_agent import (
     _resolve_posted_date,
     _wait_for_page_text_stable,
 )
-from app.agents.linkedin_lead_agent import _HIRING_KEYWORDS
+from app.agents.linkedin_lead_agent import _HIRING_KEYWORDS, _clean_mailto
 from app.agents.prospect_intelligence_agent import _HIRING_DOMAIN_MAP, _classify_hiring_domain
 
 if TYPE_CHECKING:
@@ -273,9 +274,12 @@ _COLLECT_POSTS_JS = r"""() => {
             const headerTxt = header ? (header.textContent || '').toLowerCase() : '';
             const isRepost = headerTxt.includes('repost') || headerTxt.includes('reshare');
 
-            // Public email typed as a mailto link.
+            // Public email typed as a mailto link — address only: drop any
+            // ?subject=/&body= query and URL-decode (%40 etc.).
             const mailto = el.querySelector('a[href^="mailto:"]');
-            const mailtoEmail = mailto ? (mailto.href || '').replace('mailto:', '').trim() : '';
+            var mailtoEmail = mailto
+                ? (mailto.href || '').replace(/^mailto:/i, '').split('?')[0].trim() : '';
+            try { mailtoEmail = decodeURIComponent(mailtoEmail).trim(); } catch (e) { /* raw */ }
 
             out.push({
                 urn: urn,
@@ -311,6 +315,11 @@ class LinkedInFeedAgent:
         settings: Settings | None = None,
         llm_service: "LLMService | None" = None,
     ) -> None:
+        """Read the feed scroll/stop limits, LLM call cap and confidence gate from settings.
+
+        The harvest start time is fixed here so every relative post date in the run resolves
+        against the same reference point.
+        """
         self._settings = settings or get_settings()
         self._llm_service = llm_service or get_llm_service(self._settings)
         self._llm_calls_made = 0
@@ -329,12 +338,14 @@ class LinkedInFeedAgent:
         self._min_confidence   = float(s.linkedin_feed_min_confidence)
 
     def get_token_usage(self) -> dict:
+        """LLM token-usage summary for this agent's calls (an empty summary when no LLM service)."""
         if self._llm_service is None:
             from app.services.llm_service import empty_usage_summary
             return empty_usage_summary()
         return self._llm_service.get_usage_summary()
 
     def get_llm_call_log(self) -> list[dict]:
+        """Per-call LLM log from the service ([] when no LLM service is configured)."""
         if self._llm_service is None:
             return []
         return self._llm_service.get_call_log()
@@ -394,6 +405,11 @@ class LinkedInFeedAgent:
     # ── Open + auth-gate the feed ───────────────────────────────────────────────
 
     async def _open_feed(self, page: "Page") -> None:
+        """Open the LinkedIn Home Feed, dismiss overlays and verify the session is logged in.
+
+        Raises FeedAuthError if navigation fails, if there is no li_at cookie, or if LinkedIn
+        redirected to a gated (login/checkpoint) path.
+        """
         try:
             await page.goto(FEED_URL, wait_until="domcontentloaded", timeout=30_000)
             await page.wait_for_timeout(3_000)
@@ -418,6 +434,7 @@ class LinkedInFeedAgent:
         logger.info("linkedin_feed_ready", url=page.url[:80])
 
     async def _dismiss_overlays(self, page: "Page") -> None:
+        """Close any visible dismiss/close popups (e.g. messaging bubbles); failures are ignored."""
         for sel in (
             "button[aria-label='Dismiss']",
             "button.msg-overlay-bubble-header__control--close",
@@ -570,6 +587,14 @@ class LinkedInFeedAgent:
         on_status: StatusCallback | None = None,
         on_batch: BatchCallback | None = None,
     ) -> list[FeedLead]:
+        """Turn collected feed posts into IT-hiring leads via filter -> LLM classify -> LLM extract.
+
+        A cheap keyword filter runs first, so only candidate posts cost LLM calls. Stops early
+        on a user stop request, when the per-run LLM call cap is reached, or when the LLM
+        provider is unavailable (leads found so far are kept). A failure on one post is logged
+        and skipped. Leads are handed to on_batch every _PERSIST_BATCH and at the end, and a
+        per-post diagnostic file (feed_diag.json) is written.
+        """
         leads: list[FeedLead] = []
         pending: list[FeedLead] = []
         diag: list[dict] = []            # per-post trace → feed_diag.json
@@ -718,6 +743,10 @@ class LinkedInFeedAgent:
         on_status: StatusCallback | None,
         total: int,
     ) -> None:
+        """Hand a copy of the pending leads to on_batch and report the running saved count.
+
+        Persistence errors are logged and swallowed so the harvest keeps going.
+        """
         try:
             await on_batch(list(pending))
             if on_status:
@@ -741,6 +770,11 @@ class LinkedInFeedAgent:
     # ── Stage 2: classification ─────────────────────────────────────────────────
 
     async def _classify(self, text: str, raw: dict) -> dict:
+        """Ask the LLM whether a post is a genuine, current IT hiring post (one LLM call).
+
+        Returns the classifier dict (is_it_hiring, it_relevance, category, confidence,
+        reason) or {} when the LLM returns nothing. Counts toward the per-run call cap.
+        """
         headline = _clean(raw.get("author_headline", ""))
         content = (
             f"---AUTHOR HEADLINE---\n{headline or '(none)'}\n\n"
@@ -787,10 +821,18 @@ class LinkedInFeedAgent:
     # ── Stage 3: extraction (verbatim-only, no fabrication) ─────────────────────
 
     async def _extract(self, text: str, raw: dict) -> dict:
+        """Ask the LLM to extract job and recruiter fields from a confirmed hiring post.
+
+        The posting date is resolved in Python first and passed in (stored back on the result
+        as "_resolved_date"); the prompt forbids invented companies/emails/phones. Counts
+        toward the per-run LLM call cap. Returns {} plus "_resolved_date" on an empty reply.
+        The exact content sent to the LLM is stored as "_source_text" so _finalize can
+        ground the returned email/phone against it.
+        """
         headline = _clean(raw.get("author_headline", ""))
         author_name = _clean(raw.get("author_name", ""))
         profile_url = (raw.get("author_profile_url") or "").strip()
-        mailto = (raw.get("mailto") or "").strip()
+        mailto = _clean_mailto(raw.get("mailto"))
 
         # Pre-resolve the posting date in Python (never ask the LLM to do date math).
         resolved_date = _resolve_posted_date(
@@ -839,6 +881,7 @@ class LinkedInFeedAgent:
         )
         result = result or {}
         result["_resolved_date"] = resolved_date
+        result["_source_text"] = content
         return result
 
     # ── Validate + confidence ───────────────────────────────────────────────────
@@ -847,7 +890,11 @@ class LinkedInFeedAgent:
         self, raw: dict, text: str, classification: dict, extracted: dict,
     ) -> FeedLead | None:
         """Build a validated FeedLead. Returns None if the extraction has no
-        usable job title (can't be a job lead without one)."""
+        usable job title (can't be a job lead without one).
+
+        The LLM's recruiter email/phone is kept only when grounded in the content it
+        was sent (extracted["_source_text"], else the post text + mailto); a DOM
+        mailto address (query string dropped, URL-decoded) is the email fallback."""
         job_title = str(extracted.get("job_title") or "").strip()
         if not job_title:
             logger.info("linkedin_feed_lead_dropped_no_title", urn=raw.get("urn", "")[:40])
@@ -860,11 +907,16 @@ class LinkedInFeedAgent:
         if profile_url and "/in/" not in profile_url.lower():
             profile_url = ""  # company/school link, not a recruiter profile
 
-        email = normalize_email(extracted.get("recruiter_email")) or ""
-        phone = normalize_phone(extracted.get("recruiter_phone")) or ""
+        # Grounding: an LLM-returned contact must be written in what it was given.
+        mailto = _clean_mailto(raw.get("mailto"))
+        sources = [extracted.get("_source_text") or text, mailto]
+        email = ground_email(normalize_email(extracted.get("recruiter_email")), sources)[0]
+        phone = ground_phone(normalize_phone(extracted.get("recruiter_phone")), sources)[0]
+        email = normalize_email(email) or ""
+        phone = normalize_phone(phone) or ""
         # A mailto: link scraped straight from the DOM is authoritative too.
-        if not email and raw.get("mailto"):
-            email = normalize_email(raw.get("mailto")) or ""
+        if not email and mailto:
+            email = normalize_email(mailto) or ""
 
         company = str(extracted.get("company") or "").strip()
         location = str(extracted.get("location") or "").strip()
@@ -933,6 +985,7 @@ class LinkedInFeedAgent:
 
     @staticmethod
     def _permalink(urn: str) -> str:
+        """Build the post URL from an activity URN ("" for any other URN shape)."""
         urn = (urn or "").strip()
         if urn.startswith("urn:li:activity"):
             return f"https://www.linkedin.com/feed/update/{urn}/"

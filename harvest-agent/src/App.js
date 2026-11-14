@@ -18,6 +18,12 @@ const isAuthRejection = (err) =>
 // Backoff for transient /auth/me failures on startup (~30s total).
 const SESSION_RETRY_DELAYS_MS = [1000, 2000, 4000, 8000, 15000];
 
+/**
+ * Root component: restores the cookie session via GET /auth/me (retrying transient
+ * failures with backoff), then renders LoginPage, a "restoring / unreachable"
+ * screen, or the routed HarvestAgent shell inside TenantProvider. With frontend
+ * auth disabled it skips straight to the app plus the dev tenant switcher.
+ */
 function App() {
   // "checking" while we validate the session cookie on startup, then "authed"
   // or "anon"; "unreachable" when the backend couldn't be reached to decide.
@@ -47,6 +53,7 @@ function App() {
   // while the session cookie is still valid. (/auth/* 401s don't re-fire it.)
   useEffect(() => {
     let checking = false;
+    /** Re-check /auth/me (one at a time); only a 401/403 drops the user to login. */
     const onLogout = async () => {
       if (checking) return;
       checking = true;
@@ -86,6 +93,10 @@ function App() {
     let cancelled = false;
     let timer = null;
     setStatus("checking");
+    /**
+     * Restore attempt `i`: success → "authed"; 401/403 → "anon"; any other error
+     * schedules attempt i+1 after SESSION_RETRY_DELAYS_MS[i], then "unreachable".
+     */
     const attempt = (i) => {
       getMe()
         .then((me) => {

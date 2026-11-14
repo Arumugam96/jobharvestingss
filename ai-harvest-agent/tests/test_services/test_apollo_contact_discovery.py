@@ -453,7 +453,7 @@ async def test_reservation_is_settled_to_actual_consumption(
     async def _fake_request(path, *, params=None, json=None):
         return response
 
-    async def _settle(endpoint, r, c):
+    async def _settle(endpoint, r, c, day=None):
         settled.append((endpoint, r, c))
 
     monkeypatch.setattr(client, "_reserve_credit", _allowed)
@@ -485,7 +485,7 @@ async def test_failed_call_releases_its_reservation(monkeypatch) -> None:
     async def _boom(path, *, params=None, json=None):
         raise ApolloAPIError("down")
 
-    async def _settle(endpoint, r, c):
+    async def _settle(endpoint, r, c, day=None):
         settled.append((endpoint, r, c))
 
     monkeypatch.setattr(client, "_reserve_credit", _allowed)

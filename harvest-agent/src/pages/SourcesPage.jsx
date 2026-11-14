@@ -3,7 +3,7 @@ import { Eye, Loader2, Play, AlertTriangle } from "lucide-react";
 import StopHarvestButton from "../components/StopHarvestModal";
 import { makeStallWatch, STALL_WARN_MS, STALL_WARN_MSG } from "../stallWatch";
 import {
-  getHarvestStatus, ApiError,
+  getHarvestStatus, getActiveRun, ApiError,
   runLinkedinAgent, getLinkedinResults, getLinkedinResult,
   runNaukriAgent, getNaukriResults, getNaukriResult,
   runDiceAgent, getDiceResults, getDiceResult,
@@ -22,6 +22,17 @@ const SOURCE_TABS = [
   { key: "feed",     label: "LinkedIn Feed", run: runLinkedinFeedAgent, list: getLinkedinFeedResults, one: getLinkedinFeedResult, async: true },
 ];
 
+/**
+ * Source Runs page: tabs per source (LinkedIn, Naukri, Dice, LinkedIn Feed) to trigger a
+ * single-source harvest and browse that source's saved runs and their jobs.
+ * Job-board runs await one long synchronous request (with a one-shot stall notice); if that
+ * request is cut off (proxy 502/504 or a dropped connection) the run may still be going, so the
+ * controls stay locked while GET /active-run reports a run. The Feed run is async (202) and is
+ * polled via GET /harvest-status with a stall watchdog.
+ * @param {object} props
+ * @param {boolean} props.harvestRunning - app-wide single-flight flag; locks the Run button.
+ * @param {Function} props.setHarvestRunning - setter for that flag.
+ */
 export default function SourceRunsPage({ harvestRunning, setHarvestRunning }) {
   const [tab, setTab] = useState("linkedin");
   const [results, setResults] = useState([]);
@@ -34,8 +45,11 @@ export default function SourceRunsPage({ harvestRunning, setHarvestRunning }) {
   const pollTimer = useRef(null); // async feed run: recursive setTimeout handle
   const stallWatch = useRef(makeStallWatch());
   const syncStallTimer = useRef(null); // synchronous single-source run: one-shot stall notice
+  const activeRunTimer = useRef(null); // dropped synchronous run: GET /active-run watch
 
   const current = SOURCE_TABS.find((t) => t.key === tab);
+  const currentRef = useRef(current); // latest tab, for the active-run watch's results reload
+  currentRef.current = current;
 
   const fetchResults = useCallback(async (t) => {
     setLoading(true);
@@ -52,11 +66,35 @@ export default function SourceRunsPage({ harvestRunning, setHarvestRunning }) {
   }, []);
 
   useEffect(() => { clearTimeout(pollTimer.current); clearTimeout(syncStallTimer.current); setStallWarn(""); setViewing(null); fetchResults(current); }, [tab]); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => () => { clearTimeout(pollTimer.current); clearTimeout(syncStallTimer.current); }, []); // clear timers on unmount
+  useEffect(() => () => { clearTimeout(pollTimer.current); clearTimeout(syncStallTimer.current); clearTimeout(activeRunTimer.current); }, []); // clear timers on unmount
+
+  /** After a synchronous run request was cut off, poll GET /active-run every 15s and keep the
+   * Run controls locked while the backend reports a run in progress; once it reports none,
+   * unlock and reload the shown tab's results. Errors (backend still unreachable) just retry. */
+  const watchActiveRun = (runTab) => {
+    clearTimeout(activeRunTimer.current);
+    /** One /active-run check: reschedule while active (or on error), otherwise release the lock. */
+    const tick = async () => {
+      try {
+        const res = await getActiveRun();
+        if (!res?.active) {
+          setRunMessage(`The ${runTab.label} harvest is no longer running — check its saved runs below for the outcome.`);
+          setRunning(false);
+          setHarvestRunning(false);
+          fetchResults(currentRef.current);
+          return;
+        }
+      } catch { /* backend unreachable — keep the lock and retry */ }
+      activeRunTimer.current = setTimeout(tick, 15000);
+    };
+    tick();
+  };
 
   // Poll a background feed run to completion (reuses GET /harvest-status; the run
   // carries a job_id). action_required = LinkedIn session not authenticated.
   const pollFeed = (jobId, feedTab) => {
+    /** One status poll: reschedule every 6s while running, otherwise report the outcome,
+     * reload results on success and release the run lock. */
     const tick = async () => {
       try {
         const st = await getHarvestStatus(jobId);
@@ -88,6 +126,10 @@ export default function SourceRunsPage({ harvestRunning, setHarvestRunning }) {
     tick();
   };
 
+  /** Start a harvest for the current tab (refused while another harvest runs); async runs
+   * hand off to pollFeed, sync runs report the result and reload the list. A 409 keeps the
+   * controls locked; a sync request cut off by a 502/504 or a dropped connection reports that
+   * the run may still be going and hands off to watchActiveRun instead of claiming failure. */
   const handleRun = async () => {
     if (harvestRunning) {
       setRunMessage("Another harvest is already running (Rule Engine or another source tab) — wait for it to finish. Running two at once collides on the shared browser profile and both fail.");
@@ -134,6 +176,15 @@ export default function SourceRunsPage({ harvestRunning, setHarvestRunning }) {
       setRunning(false);
       setHarvestRunning(false);
     } catch (err) {
+      // The synchronous request outlived the proxy (nginx 502/504) or the connection
+      // dropped — the harvest itself is likely still running server-side. Keep the
+      // controls locked until GET /active-run says it's done.
+      const dropped = !(err instanceof ApiError) || err.status === 502 || err.status === 504;
+      if (!isAsync && dropped) {
+        setRunMessage(`Lost the connection while the ${current.label} harvest was running — it may still be running on the server. Run stays disabled until the backend reports it has finished.`);
+        watchActiveRun(current);
+        return;
+      }
       // 409 = a harvest is already running — keep controls frozen.
       const conflict = err instanceof ApiError && err.status === 409;
       setRunMessage(err instanceof ApiError ? `Failed: ${err.message}` : "Could not reach the harvest backend.");
@@ -145,6 +196,7 @@ export default function SourceRunsPage({ harvestRunning, setHarvestRunning }) {
     }
   };
 
+  /** Load one saved run's jobs for the current source into the inline viewer. */
   const handleView = async (runId) => {
     setViewing({ runId, jobs: null, loading: true });
     try {

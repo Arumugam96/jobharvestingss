@@ -39,7 +39,7 @@ from typing import Any
 from uuid import uuid4
 
 import structlog
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -47,6 +47,7 @@ from app.agents.orchestrator_agent import OrchestratorAgent, OrchestratorResult
 from app.config import get_settings
 from app.core.exceptions import DailyJobLimitExceededError, JobAlreadyRunningError, LLMUnavailableError
 from app.core.proactor import needs_proactor, run_in_proactor
+from app.core.tenant_context import get_current_tenant_id
 from app.models.harvest_run import HarvestRunORM
 from app.services.config_service import ConfigService
 from app.services.email_service import EmailSender
@@ -95,10 +96,12 @@ class HarvestAgentRequest(BaseModel):
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _make_run_id() -> str:
+    """Build a unified-harvest run id: the UTC timestamp (YYYYmmdd_HHMMSS)."""
     return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
 
 def _err(msg: str, reason: str = "") -> JSONResponse:
+    """Failure body `{"status": "failed", "message", "reason"?}` returned with HTTP 200."""
     body: dict[str, Any] = {"status": "failed", "message": msg}
     if reason:
         body["reason"] = reason
@@ -106,6 +109,7 @@ def _err(msg: str, reason: str = "") -> JSONResponse:
 
 
 def _filters_snapshot(cfg) -> dict:
+    """Snapshot of the config's search filters, stored as the run row's `filters_snapshot`."""
     f = cfg.filters
     return {
         "keyword":                  f.keyword,
@@ -257,6 +261,7 @@ async def _recruiter_preflight() -> None:
             return
 
         def _factory():
+            """Build the headless recruiter verify coroutine (no legacy session import)."""
             return NaukriRecruiterAgent(headless=True).verify(import_legacy=False)
 
         result = await run_in_proactor(_factory) if needs_proactor() else await _factory()
@@ -289,6 +294,22 @@ def _start_recruiter_preflight(enabled: list[str]) -> asyncio.Task | None:
 # Background harvest task
 # ══════════════════════════════════════════════════════════════════════════════
 
+# Strong refs so a fire-and-forget harvest task isn't garbage-collected mid-run.
+_harvest_tasks: set[asyncio.Task] = set()
+
+
+def _on_harvest_task_done(task: asyncio.Task) -> None:
+    """Done-callback for a background harvest task: drop its strong ref and log
+    an exception (or cancellation) it ended with, so a failure is never silent."""
+    _harvest_tasks.discard(task)
+    if task.cancelled():
+        logger.warning("harvest_task_cancelled", task=task.get_name())
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error("harvest_task_failed", task=task.get_name(), error=str(exc), exc_info=exc)
+
+
 async def _run_harvest_background(
     job_id:   str,
     run_id:   str,
@@ -299,11 +320,72 @@ async def _run_harvest_background(
     wait_for_login: bool = True,
 ) -> None:
     """Background entry point — releases the single-flight guard no matter how
-    the run ends (success, LLM outage, or unexpected failure)."""
+    the run ends (success, LLM outage, or unexpected failure).
+
+    An exception escaping the pipeline (e.g. in post-scrape reporting) is logged
+    with its stack trace and NOT re-raised; the run is first driven to a terminal
+    status by _finalize_unfinished_run, so a row stuck at 'running' can't make
+    run_guard.db_conflict reject every later run until a restart."""
+    state: dict[str, Any] = {}
     try:
-        await _run_harvest_background_impl(job_id, run_id, config, now_iso, enabled, run_pk, wait_for_login)
+        await _run_harvest_background_impl(
+            job_id, run_id, config, now_iso, enabled, run_pk, wait_for_login, state=state,
+        )
+    except Exception as exc:
+        logger.exception(
+            "harvest_background_unhandled", job_id=job_id, run_id=run_id, error=str(exc),
+        )
+        await _finalize_unfinished_run(job_id, run_pk, state, exc)
     finally:
         run_guard.end()
+
+
+async def _finalize_unfinished_run(
+    job_id: str, run_pk: str | None, state: dict[str, Any], exc: Exception,
+) -> None:
+    """Write a terminal status for a run whose pipeline raised. Never raises.
+
+    No-op once the pipeline already wrote its terminal status (state["terminal"]).
+    If the scrape finished and its jobs were saved (state["result"] + state["saved"])
+    the run keeps its scrape outcome (stopped / success / no_results) with an error
+    note naming the failed post-scrape step; otherwise it is marked failed."""
+    if state.get("terminal"):
+        return
+    try:
+        err = f"{type(exc).__name__}: {exc}"
+        result: OrchestratorResult | None = state.get("result")
+        snap = (state.get("latest_sources") or {}).get("snap") or {}
+        fields: dict[str, Any] = {}
+        if result is not None and state.get("saved"):
+            stopped = run_guard.is_stop_requested()
+            status_str = "stopped" if stopped else (
+                "success" if result.total_jobs > 0 else "no_results"
+            )
+            error = f"Post-harvest step failed: {err}"
+            message = (
+                f"Harvest finished — {result.total_jobs} jobs saved (post-harvest step failed)"
+            )
+            snap = result.source_status or snap
+            fields = {
+                "combined_count":      result.total_jobs,
+                "scrape_completed_at": result.completed_at,
+                "report_pending":      stopped and result.total_jobs > 0,
+            }
+        else:
+            status_str, error, message = "failed", err, f"Harvest failed: {exc}"
+        now = datetime.now(timezone.utc)
+        final_sources = finalize_source_status(snap, status_str, error)
+        JobTracker.update(
+            job_id, status=status_str, progress=100, message=message, error=error,
+            completed_at=now.isoformat(), sources=final_sources,
+        )
+        if run_pk:
+            await db_write(lambda db: HarvestRunService(db).update_run(
+                run_pk, status=status_str, progress=100, message=message, error=error,
+                completed_at=now, source_status=final_sources, **fields,
+            ))
+    except Exception as fin_exc:
+        logger.exception("harvest_finalize_failed", job_id=job_id, error=str(fin_exc))
 
 
 async def _run_harvest_background_impl(
@@ -314,8 +396,15 @@ async def _run_harvest_background_impl(
     enabled:  list[str],
     run_pk:   str | None = None,
     wait_for_login: bool = True,
+    state:    dict[str, Any] | None = None,
 ) -> None:
-    """Runs the full harvest in a background asyncio task, updating JobTracker."""
+    """Runs the full harvest in a background asyncio task, updating JobTracker.
+
+    `state` (optional, filled in place) records progress for the caller's
+    failure handling: "latest_sources" (live per-source snapshot holder),
+    "result" (once the scrape returned), "saved" (once its jobs were persisted)
+    and "terminal" (once a terminal run status was written)."""
+    state = {} if state is None else state
     log = logger.bind(job_id=job_id, run_id=run_id, sources=enabled)
     log.info("harvest_background_start")
 
@@ -333,6 +422,7 @@ async def _run_harvest_background_impl(
     # source's own state/count/message via _on_source_status below. `latest`
     # keeps the newest snapshot so the failure paths can finalize it.
     latest_sources: dict[str, dict] = {"snap": initial_source_status(enabled)}
+    state["latest_sources"] = latest_sources
     JobTracker.update(job_id, sources=latest_sources["snap"])
     if run_pk:
         await db_write(lambda db: HarvestRunService(db).update_run(
@@ -377,6 +467,7 @@ async def _run_harvest_background_impl(
     orch = OrchestratorAgent(config, already_harvested=already_harvested)
 
     async def _on_status(msg: str) -> None:
+        """Mirror an orchestrator status message onto the JobTracker entry and the log."""
         # Surfaces live progress (e.g. "waiting for LinkedIn login…") to
         # GET /harvest-status/{job_id} while the run is still in flight.
         JobTracker.update(job_id, message=msg)
@@ -396,6 +487,9 @@ async def _run_harvest_background_impl(
     saved_counter = {"n": 0}
 
     async def _do_write(coro):
+        """Await a DB write coroutine, marshalled onto the main loop when the scrape runs on the
+        proactor worker thread (the asyncpg pool belongs to the main loop).
+        """
         # On Windows --reload, run_all runs on a proactor worker thread; the
         # asyncpg pool is bound to the main loop, so marshal DB writes back to it.
         # On Linux/EC2 (needs_proactor False) run_all is on the main loop already.
@@ -404,12 +498,18 @@ async def _run_harvest_background_impl(
         return await coro
 
     async def _persist(unified: list) -> None:
+        """Persist a batch of raw scraped jobs as soon as they are scraped and bump the live count.
+
+        Only rows that actually landed are counted. Never raises: the end-of-run reconcile rewrites
+        the final job set anyway. No-op without a run row or with an empty batch.
+        """
         if not run_pk or not unified:
             return
         try:
             dicts = [j.to_dict() for j in unified]
 
             async def _insert(db) -> bool:
+                """Bulk-insert the batch; True tells success apart from a swallowed error."""
                 await HarvestRunService(db).bulk_insert_scraped_jobs(run_pk, dicts)
                 return True
 
@@ -430,6 +530,11 @@ async def _run_harvest_background_impl(
             log.warning("harvest_incremental_persist_failed", error=str(exc))
 
     async def _on_source_status(snapshot: dict) -> None:
+        """Record the orchestrator's per-source state/count snapshot in JobTracker and the run row.
+
+        Also mirrors the per-source counts onto the legacy linkedin/naukri/dice count fields. The DB
+        write is best-effort.
+        """
         # Per-source state/count/message from the orchestrator's tracker — already
         # throttled there (state/count changes immediately, message-only changes
         # at most every few seconds). Mirrors the live per-source counts onto the
@@ -508,17 +613,20 @@ async def _run_harvest_background_impl(
             await _persist_reenrich_queue(run_pk, partial.reenrich_queue, log)
 
         partial_count = partial.total_jobs if partial is not None else 0
-        _history_svc.append(
-            RunHistoryService.make_entry(
-                run_id       = run_id,
-                sources      = enabled,
-                started_at   = datetime.now(timezone.utc),
-                completed_at = datetime.now(timezone.utc),
-                status       = "failed",
-                jobs_found   = partial_count,
-                error        = err_msg,
+        try:
+            _history_svc.append(
+                RunHistoryService.make_entry(
+                    run_id       = run_id,
+                    sources      = enabled,
+                    started_at   = datetime.now(timezone.utc),
+                    completed_at = datetime.now(timezone.utc),
+                    status       = "failed",
+                    jobs_found   = partial_count,
+                    error        = err_msg,
+                )
             )
-        )
+        except Exception as hist_exc:
+            log.warning("history_save_failed", error=str(hist_exc))
         JobTracker.update(
             job_id,
             status       = "failed",
@@ -540,6 +648,7 @@ async def _run_harvest_background_impl(
                 completed_at   = datetime.now(timezone.utc),
                 source_status  = final_sources,
             ))
+        state["terminal"] = True
 
         await send_harvest_report(
             EmailSender(get_settings()),
@@ -554,17 +663,20 @@ async def _run_harvest_background_impl(
     except Exception as exc:
         log.exception("harvest_background_error", error=str(exc))
         failed_sources = finalize_source_status(latest_sources["snap"], "failed", str(exc))
-        _history_svc.append(
-            RunHistoryService.make_entry(
-                run_id       = run_id,
-                sources      = enabled,
-                started_at   = datetime.now(timezone.utc),
-                completed_at = datetime.now(timezone.utc),
-                status       = "failed",
-                jobs_found   = 0,
-                error        = str(exc),
+        try:
+            _history_svc.append(
+                RunHistoryService.make_entry(
+                    run_id       = run_id,
+                    sources      = enabled,
+                    started_at   = datetime.now(timezone.utc),
+                    completed_at = datetime.now(timezone.utc),
+                    status       = "failed",
+                    jobs_found   = 0,
+                    error        = str(exc),
+                )
             )
-        )
+        except Exception as hist_exc:
+            log.warning("history_save_failed", error=str(hist_exc))
         JobTracker.update(
             job_id,
             status       = "failed",
@@ -584,6 +696,7 @@ async def _run_harvest_background_impl(
                 completed_at  = datetime.now(timezone.utc),
                 source_status = failed_sources,
             ))
+        state["terminal"] = True
 
         # ── Alert configured recipients that the run failed (best-effort) ────────
         await send_harvest_report(
@@ -597,6 +710,7 @@ async def _run_harvest_background_impl(
         )
         return
 
+    state["result"] = result
     # Final per-source status (counts already aligned with jobs_by_source by
     # run_all). Falls back to the last live snapshot if the result carries none.
     result_sources = result.source_status or latest_sources["snap"]
@@ -657,6 +771,7 @@ async def _run_harvest_background_impl(
     if run_pk:
         await db_write(lambda db: HarvestRunService(db).bulk_insert_llm_calls(run_pk, result.llm_calls))
         await _persist_reenrich_queue(run_pk, result.reenrich_queue, log)
+    state["saved"] = True
 
     # A cooperative user-stop lets run_all() return normally with the jobs
     # gathered so far (the scrape loops break and return early — see
@@ -689,11 +804,14 @@ async def _run_harvest_background_impl(
     run_rows: list = []
     report_dicts: list[dict] = []
     if run_pk and persisted:
-        run_rows = list(
-            await db_read(lambda db: HarvestRunService(db).list_jobs_for_run(run_pk)) or []
-        )
-        if run_rows:
-            report_dicts = merged_job_dicts(run_rows)
+        try:
+            run_rows = list(
+                await db_read(lambda db: HarvestRunService(db).list_jobs_for_run(run_pk)) or []
+            )
+            if run_rows:
+                report_dicts = merged_job_dicts(run_rows)
+        except Exception as exc:
+            log.exception("harvest_report_rows_failed", error=str(exc))
     if not report_dicts:
         report_dicts = [j.to_dict() for j in result.all_jobs]
 
@@ -706,16 +824,23 @@ async def _run_harvest_background_impl(
     pending_rows: list = []
     pending_dicts: list[dict] = []
     if not stopped and config.notifications.enabled:
-        pending = await db_read(lambda db: HarvestRunService(db).list_pending_report_runs()) or []
-        for pend in pending:
-            if pend.id == run_pk:
-                continue
-            pend_rows = await db_read(
-                lambda db, pend_pk=pend.id: HarvestRunService(db).list_jobs_for_run(pend_pk)
+        try:
+            pending = await db_read(
+                lambda db: HarvestRunService(db).list_pending_report_runs()
             ) or []
-            pending_runs.append(pend)
-            pending_rows.extend(pend_rows)
-            pending_dicts.extend(merged_job_dicts(pend_rows))
+            for pend in pending:
+                if pend.id == run_pk:
+                    continue
+                pend_rows = await db_read(
+                    lambda db, pend_pk=pend.id: HarvestRunService(db).list_jobs_for_run(pend_pk)
+                ) or []
+                pending_runs.append(pend)
+                pending_rows.extend(pend_rows)
+                pending_dicts.extend(merged_job_dicts(pend_rows))
+        except Exception as exc:
+            # Leave those runs report_pending — the next run retries the merge.
+            log.exception("harvest_pending_reports_merge_failed", error=str(exc))
+            pending_runs, pending_rows, pending_dicts = [], [], []
 
     # ── Post-harvest phase: Resdex search + outreach, Apollo Resdex sweep ─────
     # The run stays "running" (scrape_completed_at marks the scrape end) until
@@ -845,6 +970,7 @@ async def _run_harvest_background_impl(
             # zero jobs has nothing to defer.
             report_pending      = stopped and result.total_jobs > 0,
         ))
+    state["terminal"] = True
 
     # A user-stopped run defers its report: jobs are saved and flagged
     # report_pending above, and the email goes out with the next successful run.
@@ -1042,14 +1168,15 @@ async def run_harvest_agent(body: HarvestAgentRequest = HarvestAgentRequest()) -
     # check_conflict()+begin() pair awaited the DB read between check and set,
     # leaving that race open (both could start and drive the same Chrome
     # profile at once — exactly what this guard exists to prevent).
+    # The 409's details hide another tenant's run (run_guard.conflict_details).
     db_conflict = await run_guard.db_conflict()
     if db_conflict is not None:
-        raise JobAlreadyRunningError(db_conflict.get("job_id") or "", details=db_conflict)
+        raise JobAlreadyRunningError("", details=run_guard.conflict_details(db_conflict))
 
     job_id = uuid4().hex
     conflict = run_guard.try_begin(job_id, run_id, None)
     if conflict is not None:
-        raise JobAlreadyRunningError(conflict.get("job_id") or "", details=conflict)
+        raise JobAlreadyRunningError("", details=run_guard.conflict_details(conflict))
 
     # The slot is now claimed. Anything that fails before the background task is
     # scheduled must release it, or the lock would stick until the next restart.
@@ -1074,10 +1201,12 @@ async def run_harvest_agent(body: HarvestAgentRequest = HarvestAgentRequest()) -
             config_id = body.config_id,
         )
 
-        asyncio.create_task(
+        task = asyncio.create_task(
             _run_harvest_background(job_id, run_id, config, now_iso, enabled, run_pk),
             name = f"harvest-{job_id}",
         )
+        _harvest_tasks.add(task)
+        task.add_done_callback(_on_harvest_task_done)
     except Exception:
         # Background task never started → its finally: run_guard.end() will
         # never fire, so release the slot here. end() is idempotent.
@@ -1109,17 +1238,24 @@ async def stop_harvest_agent() -> Any:
     into the next successful run's report. This never hard-kills the browser, so
     the persistent Chrome profile closes cleanly (no lock corruption).
 
-    Safe to call when nothing is running (returns status 'idle').
+    Safe to call when nothing is running (returns status 'idle'). Only the
+    run's own tenant, or the all-access internal tenant, may stop it; another
+    tenant gets 403 (the run itself stays global: the browser profile is shared).
     """
     active = run_guard.active_run()
     if active is None:
         return {"status": "idle", "message": "No harvest is currently running."}
+    if not run_guard.visible_to_tenant(active, get_current_tenant_id()):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="The running harvest belongs to another workspace and can't be stopped here.",
+        )
 
     run_guard.request_stop()
     job_id = active.get("job_id")
     if job_id:
         JobTracker.update(job_id, message="Stop requested — finishing current step and saving jobs…")
-    logger.info("harvest_stop_requested", **active)
+    logger.info("harvest_stop_requested", requested_by_tenant=get_current_tenant_id(), **active)
     return {
         "status":  "stopping",
         "job_id":  job_id,
@@ -1137,8 +1273,15 @@ async def get_active_run() -> Any:
     """Whether a harvest is currently running (any source). The frontend calls
     this on load and after a run ends to freeze/unfreeze its Run controls, so a
     second browser tab reflects a run started elsewhere. Cheap: no polling loop
-    needed, single indexed lookup."""
+    needed, single indexed lookup.
+
+    `active` stays global for every tenant (all runs share one Chrome profile, so
+    a second start must be blocked), but another tenant's run is reported as a
+    generic busy state: job_id/run_id/source are null unless the caller's tenant
+    owns the run or is the all-access internal tenant."""
     conflict = await run_guard.check_conflict()
+    if conflict is not None and not run_guard.visible_to_tenant(conflict, get_current_tenant_id()):
+        conflict = {}  # busy, details hidden
     return {
         "active": conflict is not None,
         "job_id": (conflict or {}).get("job_id"),

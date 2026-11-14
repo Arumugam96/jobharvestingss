@@ -50,9 +50,21 @@ function threadHref(n) {
 // One list shape for both sources. `key` is namespaced because reply ids are
 // uuids and follow-up ids are ints — they share the seen-set and toast ids.
 const asReply = (n) => ({ ...n, type: "reply", key: `reply:${n.id}`, sortAt: n.received_at });
+/** Normalizes a due follow-up call into the shared notification shape (sorted by due time). */
 const asFollowUp = (f) => ({ ...f, type: "call_followup", key: `fu:${f.id}`, sortAt: f.follow_up_due_at });
+/** Epoch ms for an ISO string; 0 when missing or unparseable. */
 const ts = (iso) => { const t = new Date(iso || 0).getTime(); return Number.isNaN(t) ? 0 : t; };
 
+/**
+ * Bottom-right notification bell + dropdown + toasts for unread inbound replies
+ * (GET /outreach/notifications, only when `repliesEnabled`) and the user's due
+ * follow-up calls (GET /phone-verifications/follow-ups), both polled every 30s.
+ * Opening a reply marks it read and navigates to its /mail thread; opening a
+ * follow-up marks it done and navigates to the job. Items new since the first poll
+ * also pop a toast (max 3, auto-dismissed after 8s).
+ * @param {object} props
+ * @param {boolean} [props.repliesEnabled] Tenant has the outreach feature.
+ */
 export default function NotificationBell({ repliesEnabled = true }) {
   const navigate = useNavigate();
   const location = useLocation();
@@ -135,15 +147,25 @@ export default function NotificationBell({ repliesEnabled = true }) {
       }, TOAST_MS);
     });
   }, [toasts]);
+  // Cancel any pending toast auto-dismiss timers on unmount.
+  useEffect(() => {
+    const timers = toastTimers; // the map object is mutated in place, so read it at cleanup time
+    return () => {
+      Object.values(timers.current).forEach(clearTimeout);
+      timers.current = {};
+    };
+  }, []);
 
   // Close the dropdown on an outside click.
   useEffect(() => {
     if (!open) return undefined;
+    /** Closes the dropdown on a mousedown outside the bell panel. */
     const onDown = (e) => { if (panelRef.current && !panelRef.current.contains(e.target)) setOpen(false); };
     window.addEventListener("mousedown", onDown);
     return () => window.removeEventListener("mousedown", onDown);
   }, [open]);
 
+  /** Removes a toast and cancels its auto-dismiss timer. */
   const dismissToast = (key) => {
     setToasts((cur) => cur.filter((x) => x.key !== key));
     clearTimeout(toastTimers.current[key]);
@@ -169,15 +191,23 @@ export default function NotificationBell({ repliesEnabled = true }) {
     navigate(threadHref(n));
   }, [navigate, location.pathname, location.search]);
 
+  /**
+   * "Mark all read": clears both lists locally, then calls POST /outreach/replies/read-all
+   * (if replies are enabled) and POST /phone-verifications/follow-ups/done-all. read-all only
+   * marks the caller's own tenant, so the badge takes the `unread` count it returns (an
+   * internal user can still have other tenants' unread replies).
+   */
   const clearAll = async () => {
     setReplies([]);
     setRepliesUnread(0);
     setFollowUps([]);
     setFollowUpsDue(0);
-    await Promise.allSettled([
+    const [repliesRes] = await Promise.allSettled([
       repliesEnabled ? markAllRepliesRead() : Promise.resolve(),
       markAllFollowUpsDone(),
     ]);
+    const left = repliesRes.status === "fulfilled" ? repliesRes.value?.unread : undefined;
+    if (typeof left === "number" && left > 0) setRepliesUnread(left);
   };
 
   const label = unread > 0 ? `${unread} notification${unread === 1 ? "" : "s"}` : "Notifications";

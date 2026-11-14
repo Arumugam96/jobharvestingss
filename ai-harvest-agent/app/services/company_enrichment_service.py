@@ -106,8 +106,11 @@ async def resolve_apollo_org(
     domain the cache is bypassed (two companies whose names normalize alike) and the
     fresh result is not written over the other company's id. ``guess_domain`` lets
     the enrich lookup use a domain inferred from the name when none is known — never
-    used for that conflict check. Raises ApolloAPIError like the client, so callers
-    keep their existing error handling."""
+    used for that conflict check, and an org found on a GUESSED domain is only
+    accepted (and cached) when its name matches ``company_name`` after
+    normalize_company_key; otherwise it is discarded and the name search runs.
+    Raises ApolloAPIError like the client, so callers keep their existing error
+    handling."""
     from app.services import apollo_budget
     from app.services.company_service import (
         apollo_org_resolve_due,
@@ -139,6 +142,7 @@ async def resolve_apollo_org(
     purpose = getattr(client, "purpose", "enrichment")
 
     async def _budget_left() -> bool:
+        """True if the client's purpose budget has headroom (None = unlimited / DB error)."""
         remaining = await apollo_budget.remaining_today(purpose=purpose)
         return remaining is None or remaining > 0
 
@@ -147,6 +151,12 @@ async def resolve_apollo_org(
 
     lookup_dom = dom or (infer_company_domain(company_name)[0] if guess_domain else "")
     org = await client.enrich_organization(lookup_dom) if lookup_dom else None
+    if org is not None and org.id and not dom and not _org_name_matches(org.name, company_name):
+        # A name-guessed domain can belong to another company — never trust or
+        # cache that hit unless Apollo's org name is this company's name.
+        logger.info("apollo_org_guessed_domain_mismatch", company=company_name,
+                    domain=lookup_dom, org_name=org.name)
+        org = None
     if org is None or not org.id:
         org = await client.search_organization(company_name, domain=lookup_dom)
     if org is None or not org.id:
@@ -176,6 +186,16 @@ async def resolve_apollo_org(
     return OrgResolution(org=org, attempted=True, size_band=size_band)
 
 
+def _org_name_matches(org_name: str | None, company_name: str) -> bool:
+    """True when an Apollo org's name is the same company as ``company_name``:
+    equal normalize_company_key values, compared with and without spaces."""
+    from app.services.company_service import normalize_company_key
+
+    a = normalize_company_key(org_name or "")
+    b = normalize_company_key(company_name or "")
+    return bool(a and b) and (a == b or a.replace(" ", "") == b.replace(" ", ""))
+
+
 async def run_company_waterfall(
     settings: Any,
     *,
@@ -194,13 +214,16 @@ async def run_company_waterfall(
 
     `seed_size` is a size already scraped from a job, kept so a company that only
     needs its HQ location doesn't lose it. Returns {company_size, company_country,
-    company_state, company_industry, domain, apollo_attempted}."""
+    company_state, company_industry, domain, apollo_attempted}; ``domain`` is the
+    website's or Apollo's domain, never the name-inferred guess (the cached domain
+    is later trusted as KNOWN by resolve_apollo_org)."""
     out = {"company_size": seed_size or "", "company_country": "", "company_state": "",
            "company_industry": "", "domain": "", "apollo_attempted": False}
 
     site_domain = domain_from_website(company_url)
-    out["domain"] = site_domain or infer_company_domain(company_name)[0]
-    if settings.apollo_enrich_company and settings.apollo_api_key and out["domain"]:
+    out["domain"] = site_domain
+    lookup_domain = site_domain or infer_company_domain(company_name)[0]
+    if settings.apollo_enrich_company and settings.apollo_api_key and lookup_domain:
         try:
             # Shared, cached org resolve — a company already resolved by any feature
             # costs nothing here.
@@ -219,7 +242,7 @@ async def run_company_waterfall(
                 if org.domain:
                     out["domain"] = org.domain
         except Exception as exc:
-            logger.debug("company_apollo_failed", domain=out["domain"], error=str(exc))
+            logger.debug("company_apollo_failed", domain=lookup_domain, error=str(exc))
 
     if fallback is not None and company_url and (not out["company_size"] or not out["company_country"]):
         try:

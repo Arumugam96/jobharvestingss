@@ -43,21 +43,25 @@ NO_HANDOFF_MSG = "Login not completed in the Naukri Launcher within the time lim
 
 
 def _resolve(raw: str) -> Path:
+    """Resolve a settings path; relative paths are taken from the project root."""
     p = Path(raw)
     return p if p.is_absolute() else _PROJECT_ROOT / p
 
 
 def appimage_path() -> Path:
+    """Configured location of the Naukri Launcher AppImage."""
     from app.config import get_settings
     return _resolve(get_settings().naukri_launcher_appimage)
 
 
 def install_dir() -> Path:
+    """Directory the AppImage's squashfs is unpacked into."""
     from app.config import get_settings
     return _resolve(get_settings().naukri_launcher_install_dir)
 
 
 def config_dir() -> Path:
+    """Launcher config dir (XDG_CONFIG_HOME), kept under data/ to survive rebuilds."""
     from app.config import get_settings
     return _resolve(get_settings().naukri_launcher_config_dir)
 
@@ -68,6 +72,11 @@ def launcher_available() -> bool:
 
 
 def use_launcher() -> bool:
+    """True when recruiter login should go through the Launcher.
+
+    ``naukri_recruiter_login_mode``: "auto" uses it whenever it can run here,
+    "launcher" forces it, any other mode never uses it.
+    """
     from app.config import get_settings
     mode = get_settings().naukri_recruiter_login_mode
     if mode == "auto":
@@ -121,6 +130,7 @@ def new_handoff_urls(lines: list[str], seen: int) -> list[str]:
 
 
 def _read_handoff() -> list[str]:
+    """Lines the xdg-open shim has written to the hand-off file; [] if none yet."""
     try:
         return HANDOFF_PATH.read_text(encoding="utf-8").splitlines()
     except FileNotFoundError:
@@ -128,6 +138,7 @@ def _read_handoff() -> list[str]:
 
 
 def _clear_handoff() -> None:
+    """Delete the hand-off file so stale URLs from a previous login are not reused."""
     try:
         HANDOFF_PATH.unlink()
     except FileNotFoundError:
@@ -170,6 +181,12 @@ def _find_electron_binary(app_dir: Path) -> Path:
 
 
 async def _start(app_dir: Path) -> asyncio.subprocess.Process:
+    """Start the Launcher's Electron binary on the Live Browser display.
+
+    Points its config dir and hand-off path at data/, disables D-Bus, logs
+    stdout/stderr to launcher.log beside the AppImage, and runs it in its own process
+    group so ``_stop`` can kill the whole tree.
+    """
     cfg = config_dir()
     cfg.mkdir(parents=True, exist_ok=True)
     log_path = appimage_path().parent / "launcher.log"
@@ -200,6 +217,10 @@ async def _start(app_dir: Path) -> asyncio.subprocess.Process:
 
 
 async def _stop(proc: asyncio.subprocess.Process) -> None:
+    """Terminate the Launcher's process group: SIGTERM, then SIGKILL, waiting 5s after each.
+
+    No-op if it has already exited.
+    """
     if proc.returncode is not None:
         return
     for sig, wait_s in ((signal.SIGTERM, 5), (signal.SIGKILL, 5)):

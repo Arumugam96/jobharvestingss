@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import timedelta
 import sys
 import pytest
 
@@ -116,10 +117,14 @@ class FakeDetailPage:
 
 
 def _settings(extraction_llm_model: str) -> Settings:
+    # _env_file=None + an explicit empty fallback keep the developer's .env (e.g.
+    # EXTRACTION_FALLBACK_MODEL=openrouter) from adding an unmocked provider.
     return Settings(
+        _env_file=None,
         anthropic_api_key="test-anthropic-key",
         anthropic_model="claude-sonnet-4-6",
         extraction_llm_model=extraction_llm_model,
+        extraction_fallback_model="",
         local_llm_url="http://localhost:11434",
         local_llm_model="llama3.1:8b",
     )
@@ -137,8 +142,8 @@ def _fake_page() -> FakeDetailPage:
     return FakeDetailPage(SAMPLE_DETAIL_HTML, SAMPLE_DETAIL_LINKS, SAMPLE_COMPANY_LINKS)
 
 
-async def _run_fallback(llm_service: LLMService) -> dict:
-    agent = LinkedInAgent(llm_service=llm_service)
+async def _run_fallback(llm_service: LLMService, agent: LinkedInAgent | None = None) -> dict:
+    agent = agent or LinkedInAgent(llm_service=llm_service)
     return await agent._llm_fallback_extract(
         _fake_page(), idx=0, url="https://www.linkedin.com/jobs/view/123456/",
         card_text=SAMPLE_CARD_TEXT, card_links=SAMPLE_CARD_LINKS,
@@ -151,7 +156,9 @@ async def test_llm_fallback_claude_extracts_description_and_recruiter(httpx_mock
         method="POST", url=ANTHROPIC_MESSAGES_URL,
         json=_anthropic_response(json.dumps(EXPECTED_EXTRACTION)),
     )
-    result = await _run_fallback(LLMService(_settings("claude")))
+    llm = LLMService(_settings("claude"))
+    agent = LinkedInAgent(llm_service=llm)
+    result = await _run_fallback(llm, agent)
 
     assert result["title"] == "Senior Data Engineer"
     assert result["company"] == "Acme Analytics"
@@ -164,7 +171,10 @@ async def test_llm_fallback_claude_extracts_description_and_recruiter(httpx_mock
     assert result["recruiter_url"] == "https://www.linkedin.com/in/janedoe-recruiter"
     assert result["recruiter_email"] == "jane.doe@acmeanalytics.com"
     assert "recruiter_phone" not in result  # null -> omitted, never fabricated
-    assert "posted" not in result  # null -> omitted
+    # The posting date is resolved in Python from the card's "2 days ago" (not
+    # asked of the LLM, whose "posted": null is ignored) against the run start.
+    expected_posted = (agent._harvest_started_at - timedelta(days=2)).strftime("%Y-%m-%d")
+    assert result["posted"] == expected_posted
 
     # The card's own text/links, and the detail page's stripped text, were
     # forwarded into the prompt sent to the LLM — but never its raw markup.

@@ -38,6 +38,7 @@ class LoginTarget(BaseModel):
 
 
 def _find(source: str, account: str | None, kind: str | None) -> dict | None:
+    """Return the first pending flag for `source` (and `account`/`kind` when given), or None."""
     for e in lr.current():
         if e.get("source") != source:
             continue
@@ -51,6 +52,11 @@ def _find(source: str, account: str | None, kind: str | None) -> dict | None:
 
 @router.get("", status_code=status.HTTP_200_OK)
 async def list_login_required() -> Any:
+    """List pending "login needed" flags for the app-wide banner.
+
+    Reads a small JSON state file and never launches a browser, so it is cheap to poll. Returns
+    `{"items", "now", "login_wait_s"}`; expired flags are dropped as a side effect.
+    """
     return {
         "items": lr.current(),
         "now": lr._iso(lr._now()),
@@ -59,10 +65,12 @@ async def list_login_required() -> Any:
 
 
 def _live_browser(message: str) -> dict:
+    """Response telling the UI to just open the Live Browser view with `message`."""
     return {"status": "live_browser", "open_live_browser": True, "message": message}
 
 
 async def _open_naukri_recruiter() -> dict:
+    """Start the Naukri recruiter login window (Launcher or browser), or report it already open."""
     from app.agents.naukri_recruiter_agent import login_window_open, start_login_window
     from app.services.naukri_launcher import use_launcher
 
@@ -78,6 +86,11 @@ async def _open_naukri_recruiter() -> dict:
 
 
 async def _open_linkedin_setup(account: str) -> dict:
+    """Start /linkedin-setup-session for `account` as a background task from the banner.
+
+    Single-flight per account. Returns "busy" without starting anything while a harvest run holds
+    the LinkedIn Chrome profile.
+    """
     from app.services import run_guard
 
     task = _linkedin_setup_tasks.get(account)
@@ -91,6 +104,7 @@ async def _open_linkedin_setup(account: str) -> dict:
                            "when it asks in the Live Browser, or after it finishes."}
 
     async def _run() -> None:
+        """Run the LinkedIn setup flow and log its outcome; errors are logged, never raised."""
         from app.routes.linkedin_routes import SetupSessionRequest, setup_linkedin_session
         try:
             res = await setup_linkedin_session(SetupSessionRequest(account=account))
@@ -107,6 +121,13 @@ async def _open_linkedin_setup(account: str) -> dict:
 
 @router.post("/open", status_code=status.HTTP_200_OK)
 async def open_login(body: LoginTarget) -> Any:
+    """Start the login flow that a pending "login needed" flag asks for.
+
+    Picks the action from the matching flag (or the source's default): tell the UI to open the Live
+    Browser when a run's own browser is already waiting, start the Naukri recruiter login window, or
+    start the LinkedIn setup-session flow for account "1"/"2". Returns a dict with `status`
+    ("started", "busy", "live_browser" or "failed") and `open_live_browser`; always HTTP 200.
+    """
     entry = _find(body.source, body.account, body.kind)
     kind = (entry or {}).get("kind") or body.kind or lr.KIND_LOGIN
     action = (entry or {}).get("action") or lr.default_action(body.source, body.account, kind)
@@ -129,5 +150,9 @@ async def open_login(body: LoginTarget) -> Any:
 
 @router.post("/dismiss", status_code=status.HTTP_200_OK)
 async def dismiss_login(body: LoginTarget) -> Any:
+    """Hide matching login flags; they reappear if a run raises them again.
+
+    Omitted `account`/`kind` match every account/kind of the source. Returns the number removed.
+    """
     removed = lr.clear(body.source, body.account, kind=body.kind)
     return {"status": "ok", "removed": removed}
