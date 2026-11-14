@@ -43,10 +43,12 @@ _LOGIN_PATHS = ("/recruit/login", "/nlogin/", "accounts.naukri.com")
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _find_chrome_exe() -> Path | None:
+    """First existing chrome.exe among the standard Windows install paths, else None."""
     return next((p for p in _CHROME_EXE_PATHS if p.exists()), None)
 
 
 def _chrome_is_running() -> bool:
+    """True if Windows ``tasklist`` shows a chrome.exe process; False on any error."""
     try:
         out = subprocess.run(
             ["tasklist", "/FI", "IMAGENAME eq chrome.exe", "/NH", "/FO", "CSV"],
@@ -58,6 +60,7 @@ def _chrome_is_running() -> bool:
 
 
 def _cdp_is_available(port: int = _CDP_PORT) -> bool:
+    """True if a Chrome DevTools endpoint answers on localhost:``port`` within 2 s."""
     try:
         urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=2)
         return True
@@ -143,6 +146,8 @@ def _build_diagnostics(
     cookies_found: int = 0,
     method: str = "",
 ) -> dict[str, Any]:
+    """Diagnostics dict for an extraction response: Chrome/profile paths, CDP and process
+    state, session-file presence, plus the caller's login outcome."""
     chrome_exe = _find_chrome_exe()
     return {
         "chrome_executable":   str(chrome_exe) if chrome_exe else "NOT FOUND",
@@ -423,6 +428,7 @@ def session_diagnostics(user_data_dir: Path | str | None = None) -> dict[str, An
 # ── Internal helper ───────────────────────────────────────────────────────────
 
 def _log_diagnostics(logged_in: bool, current_url: str, method: str) -> None:
+    """Log a ``chrome_session_diagnostics`` line describing the extraction attempt."""
     chrome_exe = _find_chrome_exe()
     logger.info(
         "chrome_session_diagnostics",

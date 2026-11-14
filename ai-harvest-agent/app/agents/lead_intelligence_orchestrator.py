@@ -68,6 +68,7 @@ _OUTPUT_DIR = Path("data/results/lead_intelligence")
 
 
 def _make_run_id() -> str:
+    """Build a run id of the form "li_YYYYMMDD_HHMMSS" from the current UTC time."""
     return "li_" + datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
 
@@ -98,6 +99,7 @@ class LeadIntelligenceOrchestrator:
     """
 
     def __init__(self) -> None:
+        """Create the lead-config service, merge agent and confidence validator used by run()."""
         self._config_svc  = LeadConfigService()
         self._merger      = LeadMergeAgent()
         self._validator   = ConfidenceValidator()
@@ -419,6 +421,10 @@ class LeadIntelligenceOrchestrator:
     # ── Persistence ────────────────────────────────────────────────────────────
 
     def _save_json(self, result: LeadIntelligenceResult, run_id: str) -> str:
+        """Write the run summary and all leads to a timestamped JSON file under _OUTPUT_DIR.
+
+        Creates the output directory if needed and returns the file's absolute path.
+        """
         _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         ts   = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         path = _OUTPUT_DIR / f"{run_id}_{ts}_leads.json"

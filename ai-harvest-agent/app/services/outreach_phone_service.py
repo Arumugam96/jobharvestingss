@@ -52,11 +52,19 @@ _background: set[asyncio.Task] = set()
 
 
 def _clean(v: Any) -> str:
+    """``str(v)`` stripped; None/falsy become ""."""
     return str(v or "").strip()
 
 
 async def _context(recruiter_id: str | None, job_id: str | None) -> dict | None:
+    """Gather what the phone request needs about the recruiter and/or job (read-only DB).
+
+    LinkedIn URL and phone prefer the recruiter row, falling back to the job. Also
+    reports whether a pending/found Apollo phone request already exists for this
+    recruiter, Apollo person or job. Returns None when neither row exists.
+    """
     async def _q(db) -> dict | None:
+        """DB-session body for ``_context``; runs inside ``db_read``."""
         rec = await db.get(RecruiterORM, recruiter_id) if recruiter_id else None
         job = await db.get(ScrapedJobORM, job_id) if job_id else None
         if rec is None and job is None:
@@ -105,6 +113,7 @@ async def _context(recruiter_id: str | None, job_id: str | None) -> dict | None:
 
 
 def _skip(reason: str, **kw) -> str:
+    """Log a skipped phone request with its reason and return the reason code."""
     logger.info("apollo_outreach_phone_skipped", reason=reason, **kw)
     return reason
 
@@ -128,6 +137,15 @@ async def _request(
     *, recruiter_id: str | None, job_id: str | None, to_email: str,
     client: Any,
 ) -> str:
+    """Core of ``request_phone_after_outreach``; may raise (the wrapper catches it).
+
+    Skips when phone reveal or the webhook is disabled, there is no LinkedIn URL, a
+    phone is already known or requested, or the enrichment budget (minus credits held
+    by pending requests) can't cover one phone. Otherwise writes a pending request
+    row, waits ``_APOLLO_REQUEST_DELAY`` seconds, and asks Apollo to reveal the phone
+    (consumes Apollo credits; the number arrives later via the phone webhook). Returns
+    REQUESTED, a skip reason, a lowercased settle status, or ERROR.
+    """
     settings = get_settings()
     log = {"recruiter_id": recruiter_id, "job_id": job_id}
     if not settings.apollo_reveal_phone or not settings.apollo_api_key:
@@ -186,6 +204,9 @@ async def _request(
         return ERROR
 
     async def _settle(db) -> str:
+        """Settle the request row from Apollo's response; if Apollo matched a person,
+        backfill the recruiter's missing ``apollo_person_id``. Returns the phone status.
+        """
         ps = await apollo_phone_service.settle_request(db, ref, res)
         pid = _clean(getattr(res, "id", "")) if getattr(res, "matched", False) else ""
         if pid and recruiter_id:

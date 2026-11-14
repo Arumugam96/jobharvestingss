@@ -706,6 +706,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     loop = asyncio.get_event_loop()
     if sys.platform == "win32":
         def _suppress_not_impl(loop, context):
+            """Swallow NotImplementedError task noise; forward everything else to default."""
             if isinstance(context.get("exception"), NotImplementedError):
                 return
             loop.default_exception_handler(context)
@@ -838,6 +839,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 
 def create_app() -> FastAPI:
+    """Build the FastAPI app: middleware, exception handlers and every router.
+
+    Internal ``/api/v1/*`` routers are hidden from Swagger. Public routers require a
+    logged-in user via ``get_current_user``, except auth and the provider webhooks
+    (Mailjet events, Apollo phone delivery), which are guarded by URL tokens instead.
+    Rate limiting is only added in production. Startup work lives in ``lifespan``.
+    """
     app = FastAPI(
         title        = "AI Harvest Agent — Enterprise Job Intelligence Platform",
         version      = "1.0.0",

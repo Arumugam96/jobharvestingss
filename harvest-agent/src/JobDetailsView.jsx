@@ -38,12 +38,14 @@ import {
   Loader2,
 } from "lucide-react";
 
+/** Inline WhatsApp glyph (lucide has none); inherits currentColor. */
 const WhatsAppIcon = ({ size = 16 }) => (
   <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
     <path d="M12.04 2C6.58 2 2.13 6.45 2.13 11.91c0 1.75.46 3.45 1.32 4.95L2 22l5.25-1.38a9.9 9.9 0 0 0 4.79 1.22h.01c5.46 0 9.91-4.45 9.91-9.91 0-2.65-1.03-5.14-2.9-7.01A9.82 9.82 0 0 0 12.04 2Zm0 18.13h-.01a8.2 8.2 0 0 1-4.18-1.15l-.3-.18-3.11.82.83-3.04-.2-.31a8.18 8.18 0 0 1-1.26-4.36c0-4.54 3.7-8.24 8.24-8.24a8.2 8.2 0 0 1 8.23 8.25c0 4.54-3.7 8.24-8.24 8.24Zm4.52-6.16c-.25-.12-1.47-.72-1.69-.81-.23-.08-.39-.12-.56.13-.16.25-.64.81-.79.97-.14.17-.29.19-.54.06-.25-.12-1.05-.39-2-1.23-.74-.66-1.23-1.47-1.38-1.72-.14-.25-.01-.38.11-.51.11-.11.25-.29.37-.43.13-.15.17-.25.25-.41.08-.17.04-.31-.02-.43-.06-.12-.56-1.34-.76-1.84-.2-.48-.4-.42-.56-.43h-.48c-.17 0-.43.06-.66.31-.22.25-.86.85-.86 2.07 0 1.22.89 2.4 1.01 2.56.12.17 1.75 2.67 4.23 3.74.59.26 1.05.41 1.41.52.59.19 1.13.16 1.56.1.48-.07 1.47-.6 1.68-1.18.21-.58.21-1.07.14-1.18-.06-.1-.22-.16-.47-.28Z" />
   </svg>
 );
 
+/** Inline LinkedIn glyph; inherits currentColor. */
 const LinkedInIcon = ({ size = 16 }) => (
   <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
     <path d="M20.45 20.45h-3.56v-5.57c0-1.33-.02-3.04-1.85-3.04-1.85 0-2.14 1.45-2.14 2.94v5.67H9.35V9h3.41v1.56h.05c.48-.9 1.64-1.85 3.37-1.85 3.6 0 4.27 2.37 4.27 5.45v6.29ZM5.34 7.43a2.06 2.06 0 1 1 0-4.13 2.06 2.06 0 0 1 0 4.13ZM7.12 20.45H3.55V9h3.57v11.45ZM22.22 0H1.77C.79 0 0 .77 0 1.73v20.54C0 23.22.79 24 1.77 24h20.45c.98 0 1.78-.78 1.78-1.73V1.73C24 .77 23.2 0 22.22 0Z" />
@@ -113,6 +115,10 @@ function CompanySizeBadge({ band, tier }) {
   );
 }
 
+/**
+ * Round contact-action icon: a button when `onClick` is given (green when `sent`),
+ * else a link to `href` (new tab unless `newTab` is false), else a disabled icon.
+ */
 function ContactAction({ glyph: Glyph, href, onClick, title, variant, newTab = true, sent = false }) {
   // A click handler (opens the LLM composer) takes precedence over a plain href
   // (mailto / profile link fallback); with neither, the action is disabled.
@@ -158,6 +164,7 @@ const fmtWhen = (iso) => {
     : d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 };
 
+/** Short day + month ("5 Mar") in the browser locale; "" if empty or unparsable. */
 const fmtDay = (iso) => {
   if (!iso) return "";
   const d = new Date(iso);
@@ -208,7 +215,9 @@ function resdexRunError(err) {
 }
 const RUN_NEEDS_LOGIN = new Set(["recruiter_logged_out", "session_busy"]);
 
+/** Normalize to an array: arrays as-is, null/"" → [], anything else wrapped. */
 const asList = (v) => (Array.isArray(v) ? v : v == null || v === "" ? [] : [v]);
+/** Lower-cased string of `s` (null/undefined → ""), for case-insensitive compares. */
 const lc = (s) => String(s || "").toLowerCase();
 
 // Filters are built by the match service; render the known keys readably and any
@@ -220,6 +229,7 @@ function filterRows(filters) {
   if (!f.active_in && f.applied?.active_in) f.active_in = f.applied.active_in;
   delete f.applied;
   const rows = [];
+  /** First non-empty value among alias `keys`; removes all of them from `f` either way. */
   const take = (...keys) => {
     for (const k of keys) {
       if (f[k] !== undefined && f[k] !== null && f[k] !== "") {
@@ -261,8 +271,13 @@ function QueryText({ query }) {
     i % 2 ? <span key={i} className="ha-rx-op">{part}</span> : part);
 }
 
+/**
+ * "Copy query" button with a live status line. Falls back to selecting the text in
+ * `targetRef` for a manual Ctrl+C when the clipboard is refused.
+ */
 function CopyQueryButton({ text, targetRef }) {
   const [msg, setMsg] = useState("");
+  /** Copy `text`; on failure select the query element and prompt for Ctrl+C. */
   const onCopy = async () => {
     if (await copyText(text)) {
       setMsg("Copied");
@@ -290,6 +305,7 @@ function CopyQueryButton({ text, targetRef }) {
   );
 }
 
+/** Mandatory skills of a requirements object as `{ name, ... }` objects (no blanks). */
 const normMust = (req) => asList(req?.mandatory_skills)
   .map((m) => (typeof m === "string" ? { name: m } : m))
   .filter((m) => m && m.name);
@@ -303,6 +319,11 @@ function displayName(raw) {
     .map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w)).join("");
 }
 
+/**
+ * One Resdex candidate card: name/initials + rank, role, Naukri Verified / "In email"
+ * tags, must-have coverage bar (`must` = mandatory skills), facts, skills (matched
+ * first, missing must-haves flagged) and a profile or Resdex-results link.
+ */
 function CandidateCard({ c, must }) {
   const matched = new Set(asList(c.matched_skills).map(lc));
   const realName = displayName(c.candidate_name);
@@ -434,6 +455,11 @@ function TierQueryRow({ t }) {
   );
 }
 
+/**
+ * "Search used" panel: the Boolean query and filters that ran, the extracted
+ * requirements (must-have / nice-to-have / titles) and every ladder tier's query.
+ * Renders nothing when there is no query, must-have skill or filter.
+ */
 function ResdexSearchPanel({ resdex }) {
   const queryRef = useRef(null);
   const req = resdex.requirements || {};
@@ -638,6 +664,7 @@ function ResdexCandidatesSection({ resdex, onLogin, onRun, running = false, runE
   );
 }
 
+/** One delivery-step pill (Sent / Delivered / Opened / …) styled by `tone`. */
 function EmailStep({ tone, children }) {
   return <span className={`ha-em-step ha-em-${tone}`}>{children}</span>;
 }
@@ -664,6 +691,7 @@ function OutreachEmailStrip({ emails, onCompose }) {
   const failed = e.status === "failed";
   const q = e.job_id ? `?job=${encodeURIComponent(e.job_id)}`
     : e.recruiter_id ? `?recruiter=${encodeURIComponent(e.recruiter_id)}` : "";
+  /** Open the /mail/:id thread page for the newest email in a new tab. */
   const openMail = () => window.open(`/mail/${encodeURIComponent(e.id)}${q}`, "_blank", "noopener");
   const kinds = list.some((m) => m.outreach_kind === "followup") ? "initial + follow-up" : "initial";
   return (
@@ -692,6 +720,16 @@ function OutreachEmailStrip({ emails, onCompose }) {
   );
 }
 
+/**
+ * Full-page, view-only job detail (from mapJobToDetail): job info, point of contact
+ * and inferred company contact with outreach actions, the outreach email strip and
+ * the Resdex candidates section (GET /jobs/{id}/outreach-detail, polled while a
+ * search runs). Jobs assigned to someone else are locked; Demand jobs are display-only.
+ * @param {object} props
+ * @param {object} props.job detail-shaped job
+ * @param {Function} props.onBack Back handler
+ * @param {Function} [props.onEdit] shows an Edit button when given
+ */
 function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
   // Same LLM outreach composers the jobs-table rows use. They need the DB-backed
   // job.id (carried through by mapJobToDetail) plus job.email / job.company.
@@ -718,6 +756,7 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
   // action as the app-wide banner (POST /login-required/open + Live Browser).
   const [liveLogin, setLiveLogin] = useState(null);   // title | null
   const [loginNote, setLoginNote] = useState("");
+  /** Raise the Naukri recruiter login request; opens the Live Browser when asked to. */
   const openRecruiterLogin = async () => {
     setLoginNote("");
     try {
@@ -744,6 +783,7 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
   const [rxStarting, setRxStarting] = useState(false);
   const [rxError, setRxError] = useState(null);
   const rxRunning = rxStarting || !!detail?.resdex_running;
+  /** Start this job's background Resdex search, then reload the detail (which polls). */
   const runResdexSearch = async () => {
     if (!job.id || rxRunning) return;
     setRxStarting(true);
@@ -802,6 +842,7 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
     ? `Inferred · ${CC_SOURCE_DISPLAY[cc.source.toLowerCase()] || `${cc.source.charAt(0).toUpperCase()}${cc.source.slice(1)}`}`
     : "Inferred";
 
+  /** External link to `url` (text `label` or the URL), or a muted dash when empty. */
   const linkOrDash = (url, label) =>
     url ? (
       <a className="ha-link" href={url} target="_blank" rel="noreferrer">

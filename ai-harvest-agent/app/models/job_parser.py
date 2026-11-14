@@ -69,6 +69,7 @@ class SalaryRange(BaseModel):
     @field_validator("currency", mode="before")
     @classmethod
     def normalise_currency(cls, v: str) -> str:
+        """Uppercase and trim the currency code, defaulting a falsy value to USD."""
         return (v or "USD").upper().strip()
 
     @model_validator(mode="after")

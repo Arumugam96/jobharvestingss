@@ -110,6 +110,7 @@ async def run_recruiter_discovery(
     agent = RecruiterContactAgent(concurrency=body.concurrency)
 
     async def _run():
+        """Run the recruiter-contact agent with the request's filter, run ids and file cap."""
         return await agent.run(
             source_filter = body.source_filter,
             run_ids       = body.run_ids or None,
@@ -177,6 +178,11 @@ async def run_recruiter_discovery(
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _list_recruiter_results_from_json() -> list[dict[str, Any]]:
+    """Summaries of past discovery runs from the rcd_*_recruiter_contacts.json files, newest first.
+
+    Creates the output directory if missing. An unreadable file yields a `{"file", "error"}`
+    entry instead of being skipped.
+    """
     _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     files = sorted(
         _OUTPUT_DIR.glob("rcd_*_recruiter_contacts.json"),

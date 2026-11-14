@@ -20,10 +20,12 @@ _current_tenant: ContextVar[str] = ContextVar("current_tenant", default=INTERNAL
 
 
 def set_current_tenant(tenant_id: str | None) -> None:
+    """Set the tenant for the current request/task context; falsy means internal."""
     _current_tenant.set(tenant_id or INTERNAL_TENANT_ID)
 
 
 def get_current_tenant_id() -> str:
+    """The current context's tenant id (``internal`` when never set)."""
     return _current_tenant.get()
 
 

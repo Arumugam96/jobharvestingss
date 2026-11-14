@@ -176,6 +176,11 @@ def _merge_token_usage(a: dict, b: dict) -> dict:
 
 
 def _naukri_to_unified(j: "NaukriScrapedJob") -> UnifiedJob:  # type: ignore[name-defined]
+    """Convert a NaukriScrapedJob to the cross-source UnifiedJob shape (scraped_at = now).
+
+    Naukri's consultant flag becomes hiring_hint: True -> "staffing", False -> "direct",
+    unknown -> "" (no hint for the business filter).
+    """
     # Naukri's own consultant flag is the strongest Staffing-vs-Direct signal
     # there is (see BusinessFilterService._infer_hiring_entity): True => posted by
     # a recruitment consultant, False => posted by the company itself, None =>
@@ -212,6 +217,7 @@ def _naukri_to_unified(j: "NaukriScrapedJob") -> UnifiedJob:  # type: ignore[nam
 
 
 def _linkedin_to_unified(j: LinkedInScrapedJob) -> UnifiedJob:
+    """Convert a LinkedInScrapedJob to UnifiedJob, mapping job_poster_* to contact fields."""
     return UnifiedJob(
         job_title               = j.job_title,
         company                 = j.company,
@@ -241,6 +247,7 @@ def _linkedin_to_unified(j: LinkedInScrapedJob) -> UnifiedJob:
 
 
 def _dice_to_unified(j: "DiceScrapedJob") -> UnifiedJob:  # type: ignore[name-defined]
+    """Convert a DiceScrapedJob to UnifiedJob (no description HTML, company size or domain hint)."""
     return UnifiedJob(
         job_title               = j.job_title,
         company                 = j.company,
@@ -300,26 +307,32 @@ class OrchestratorResult:
 
     @property
     def total_jobs(self) -> int:
+        """Number of jobs across all sources."""
         return len(self.all_jobs)
 
     @property
     def verified_jobs(self) -> int:
+        """Number of jobs whose career-page verification_status is "verified"."""
         return sum(1 for j in self.all_jobs if j.verification_status == "verified")
 
     @property
     def direct_clients(self) -> int:
+        """Number of jobs classified as hiring_entity "Direct Client"."""
         return sum(1 for j in self.all_jobs if j.hiring_entity == "Direct Client")
 
     @property
     def gcc(self) -> int:
+        """Number of jobs classified as hiring_entity "GCC"."""
         return sum(1 for j in self.all_jobs if j.hiring_entity == "GCC")
 
     @property
     def staffing_firms(self) -> int:
+        """Number of jobs classified as hiring_entity "Staffing Firm"."""
         return sum(1 for j in self.all_jobs if j.hiring_entity == "Staffing Firm")
 
     @property
     def ambiguous(self) -> int:
+        """Number of jobs classified as hiring_entity "Ambiguous"."""
         return sum(1 for j in self.all_jobs if j.hiring_entity == "Ambiguous")
 
 
@@ -345,6 +358,7 @@ class OrchestratorAgent:
     """
 
     def __init__(self, config: HarvestConfig, already_harvested: set[str] | None = None) -> None:
+        """Keep the harvest config and the job URLs to skip at the source (cross-run dedup)."""
         self._config = config
         # Normalized job_urls to skip at the source (LinkedIn + Naukri) — loaded from
         # the DB by the route for cross-run dedup, so a posting harvested within
@@ -753,7 +767,9 @@ class OrchestratorAgent:
         # batch counts land in ITS tracker entry (no cross-source overwrite);
         # the run-level on_status still receives every message (latest overall).
         def _status_for(src: str) -> Callable[[str], Awaitable[None]]:
+            """Build a status callback for src that also forwards messages to on_status."""
             async def _cb(msg: str) -> None:
+                """Send msg to the tracker (if supported) and on_status; never raises."""
                 # Best-effort: a status-sink failure must never fail the scrape
                 # (e.g. LinkedIn's wait-for-login message). SourceStatusTracker
                 # .message is currently commented out in source_status.py, hence
@@ -775,7 +791,9 @@ class OrchestratorAgent:
         window_hours = getattr(config.filters, "search_window_hours", None)
 
         def _progress_for(src: str) -> Callable[[dict], Awaitable[None]]:
+            """Build a progress callback that records src's live progress on the tracker."""
             async def _cb(payload: dict) -> None:
+                """Record src progress (adding the run's window_hours); never raises."""
                 try:
                     data = dict(payload or {})
                     if data.get("window_hours") is None and window_hours is not None:
@@ -786,6 +804,7 @@ class OrchestratorAgent:
             return _cb
 
         async def _start(src: str) -> None:
+            """Mark src as started on the tracker and seed its listing window (best effort)."""
             await tracker.start(src)
             if window_hours is not None:
                 try:
@@ -794,10 +813,12 @@ class OrchestratorAgent:
                     logger.debug("orchestrator_progress_failed", source=src, error=str(exc))
 
         async def _finish(src: str, n: int) -> None:
+            """Mark src done with n jobs, noting "Stopped by user" when a stop was requested."""
             msg = f"Stopped by user — {n} jobs scraped" if run_guard.is_stop_requested() else None
             await tracker.done(src, n, message=msg)
 
         async def _skip_if_stopped(src: str) -> bool:
+            """If a stop was requested before src began, mark it skipped and return True."""
             # A stop requested before this source even began (e.g. during the
             # browser launch) — don't start it at all.
             if run_guard.is_stop_requested():
@@ -874,6 +895,15 @@ class OrchestratorAgent:
                 # outcome (done / failed + reason) on the tracker.
 
                 async def _harvest_naukri(page: Any) -> tuple[str, list[UnifiedJob]]:
+                    """Run the Naukri harvest; return ("Naukri", jobs). Never raises.
+
+                    Uses the shared tab, a fresh guest browser (isolated mode, page is
+                    None) or the recruiter-profile browser (recruiter mode, after a
+                    session check; a dead session or an open login window fails Naukri
+                    as login_required, with no guest fallback). Jobs are persisted in
+                    batches as scraped. On failure the outcome is recorded on the
+                    tracker and the jobs already persisted are still returned.
+                    """
                     from app.agents.naukri_agent import (
                         STOP_BLOCKED,
                         NaukriAgent,
@@ -915,6 +945,7 @@ class OrchestratorAgent:
                         # per-source status, then convert + forward them. No
                         # end-of-run on_persist for Naukri (that would double-insert).
                         async def _naukri_on_batch(scraped_batch: list[NaukriScrapedJob]) -> None:
+                            """Record a scraped batch, bump the count, persist it."""
                             if not scraped_batch:
                                 return
                             naukri_so_far.extend(scraped_batch)
@@ -923,6 +954,7 @@ class OrchestratorAgent:
                                 await on_persist([_naukri_to_unified(j) for j in scraped_batch])
 
                         async def _run_on(p: Any) -> list[NaukriScrapedJob]:
+                            """Run the Naukri agent on page p with the run's filters."""
                             return await agent._run(
                                 p, config.filters, on_status=_status_for("naukri"),
                                 on_batch=_naukri_on_batch,
@@ -1015,6 +1047,14 @@ class OrchestratorAgent:
                         return "Naukri", partial
 
                 async def _harvest_linkedin(page: Any) -> tuple[str, list[UnifiedJob]]:
+                    """Run the LinkedIn harvest; return ("LinkedIn", jobs). Never raises.
+
+                    Jobs are persisted in batches as scraped. A login failure, an
+                    extraction-LLM outage (kept in linkedin_outage so only LinkedIn stops)
+                    or any other error is recorded on the tracker, and the jobs already
+                    persisted are returned as the partial result. Also writes a debug
+                    snapshot of the received jobs (best effort).
+                    """
                     if await _skip_if_stopped("linkedin"):
                         return "LinkedIn", []
                     logger.info("orchestrator_dispatching", source="linkedin")
@@ -1039,6 +1079,7 @@ class OrchestratorAgent:
                         # where mid-scrape crash protection + live progress matter
                         # most. Best-effort in the callback itself.
                         async def _linkedin_on_batch(scraped_batch: list[LinkedInScrapedJob]) -> None:
+                            """Record a scraped batch, bump the count, persist it."""
                             if not scraped_batch:
                                 return
                             scraped_so_far.extend(scraped_batch)
@@ -1128,6 +1169,10 @@ class OrchestratorAgent:
                         return "LinkedIn", partial
 
                 async def _harvest_dice(page: Any) -> tuple[str, list[UnifiedJob]]:
+                    """Scrape Dice on the shared tab; return ("Dice", jobs) after one persist.
+
+                    Never raises: errors are recorded on the tracker -> ("Dice", []).
+                    """
                     if await _skip_if_stopped("dice"):
                         return "Dice", []
                     logger.info("orchestrator_dispatching", source="dice")
@@ -1160,6 +1205,7 @@ class OrchestratorAgent:
                 }
 
                 async def _run_in_tab(src: str) -> tuple[str, list[UnifiedJob]]:
+                    """Run one source's harvester on its tab, then release just that tab."""
                     # Run one source on its own tab, then close JUST that tab
                     # (finished, failed or user-stopped) so the remaining
                     # source(s) keep the window. release_page never closes the

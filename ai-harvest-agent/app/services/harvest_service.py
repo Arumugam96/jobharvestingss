@@ -26,11 +26,13 @@ class HarvestService:
     """CRUD + lifecycle operations for HarvestJob entities."""
 
     def __init__(self, db: AsyncSession) -> None:
+        """Bind to the caller's session; methods flush/execute but never commit."""
         self._db = db
 
     # ── Create ───────────────────────────────────────────────────────────────────
 
     async def create_job(self, payload: HarvestJobCreate) -> HarvestJob:
+        """Insert a new PENDING job with a fresh UUID (flushed, not committed)."""
         job = HarvestJobORM(
             id=str(uuid.uuid4()),
             url=payload.url,
@@ -48,10 +50,12 @@ class HarvestService:
     # ── Read ─────────────────────────────────────────────────────────────────────
 
     async def get_job(self, job_id: str) -> HarvestJob:
+        """The job by id; raises JobNotFoundError (404) when missing."""
         orm = await self._get_or_raise(job_id)
         return HarvestJob.model_validate(orm)
 
     async def get_job_with_results(self, job_id: str) -> HarvestJobWithResults:
+        """The job plus its per-page results; raises JobNotFoundError when missing."""
         orm = await self._get_or_raise(job_id)
         return HarvestJobWithResults.model_validate(orm)
 
@@ -61,6 +65,7 @@ class HarvestService:
         page: int = 1,
         page_size: int = 20,
     ) -> list[HarvestJob]:
+        """One page (1-based) of jobs, newest first, optionally filtered by status."""
         stmt = select(HarvestJobORM).order_by(HarvestJobORM.created_at.desc())
         if status:
             stmt = stmt.where(HarvestJobORM.status == status)
@@ -71,6 +76,10 @@ class HarvestService:
     # ── Update ───────────────────────────────────────────────────────────────────
 
     async def mark_running(self, job_id: str) -> HarvestJob:
+        """Move the job to RUNNING; raises JobAlreadyRunningError if it already is.
+
+        Raises JobNotFoundError when the job does not exist.
+        """
         orm = await self._get_or_raise(job_id)
         if orm.status == JobStatus.RUNNING:
             raise JobAlreadyRunningError(job_id)
@@ -83,9 +92,11 @@ class HarvestService:
         return HarvestJob.model_validate(orm)
 
     async def mark_completed(self, job_id: str) -> HarvestJob:
+        """Set status COMPLETED and return the refreshed job."""
         return await self._set_status(job_id, JobStatus.COMPLETED)
 
     async def mark_failed(self, job_id: str, error: str) -> HarvestJob:
+        """Set status FAILED with ``error`` as the error_message; return the refreshed job."""
         await self._db.execute(
             update(HarvestJobORM)
             .where(HarvestJobORM.id == job_id)
@@ -94,6 +105,7 @@ class HarvestService:
         return await self.get_job(job_id)
 
     async def mark_cancelled(self, job_id: str) -> HarvestJob:
+        """Set status CANCELLED and return the refreshed job."""
         return await self._set_status(job_id, JobStatus.CANCELLED)
 
     # ── Results ──────────────────────────────────────────────────────────────────
@@ -107,6 +119,7 @@ class HarvestService:
         extracted_data: dict[str, Any] | None = None,
         screenshot_path: str | None = None,
     ) -> HarvestResult:
+        """Store one scraped page's content/extraction for a job (flushed, not committed)."""
         result_orm = HarvestResultORM(
             id=str(uuid.uuid4()),
             job_id=job_id,
@@ -124,6 +137,7 @@ class HarvestService:
     # ── Delete ───────────────────────────────────────────────────────────────────
 
     async def delete_job(self, job_id: str) -> None:
+        """Delete the job; raises JobNotFoundError when it does not exist."""
         orm = await self._get_or_raise(job_id)
         await self._db.delete(orm)
         logger.info("job_deleted", job_id=job_id)
@@ -131,6 +145,7 @@ class HarvestService:
     # ── Helpers ──────────────────────────────────────────────────────────────────
 
     async def _get_or_raise(self, job_id: str) -> HarvestJobORM:
+        """Load the job ORM row or raise JobNotFoundError."""
         result = await self._db.execute(
             select(HarvestJobORM).where(HarvestJobORM.id == job_id)
         )
@@ -140,6 +155,7 @@ class HarvestService:
         return orm
 
     async def _set_status(self, job_id: str, status: JobStatus) -> HarvestJob:
+        """UPDATE the status column, then re-read the job (JobNotFoundError if missing)."""
         await self._db.execute(
             update(HarvestJobORM).where(HarvestJobORM.id == job_id).values(status=status)
         )

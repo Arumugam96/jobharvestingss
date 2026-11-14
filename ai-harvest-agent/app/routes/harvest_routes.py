@@ -46,12 +46,14 @@ _storage_svc = HarvestStorageService()
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _make_run_id(keyword: str, location: str) -> str:
+    """Build a run id: UTC timestamp + "_" + a 40-char keyword/location slug."""
     ts   = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     slug = re.sub(r"[^a-z0-9]+", "_", f"{keyword} {location}".lower()).strip("_")
     return f"{ts}_{slug[:40]}"
 
 
 def _err(msg: str, detail: str = "") -> JSONResponse:
+    """Failure body `{"status": "failed", "message", "detail"?}` returned with HTTP 200."""
     body: dict[str, Any] = {"status": "failed", "message": msg}
     if detail:
         body["detail"] = detail
@@ -276,6 +278,14 @@ async def _apply_schedule(scheduler, config: HarvestConfig) -> None:
     from app.services.job_tracker import JobTracker
 
     async def _auto_harvest() -> None:
+        """Scheduled tick: run one unattended harvest with the current config.
+
+        Reloads the config each time, then skips (logging why) when no source is enabled, the global
+        daily cap is reached, or another run is active. Otherwise claims the single-flight slot,
+        creates the JobTracker entry and harvest_run row, and awaits the shared persisted pipeline
+        with wait_for_login=False. Releases the slot itself only if setup fails before that
+        hand-off.
+        """
         cfg     = _config_svc.load()
         run_id  = _make_run_id(cfg.filters.keyword, cfg.filters.location)
         now_iso = datetime.now(timezone.utc).isoformat()

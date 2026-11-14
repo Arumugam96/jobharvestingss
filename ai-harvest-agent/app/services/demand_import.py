@@ -72,6 +72,7 @@ class DemandFileError(ValueError):
     carries what the UI shows with it (e.g. headers_found for missing_column)."""
 
     def __init__(self, code: str, title: str, message: str, **extra) -> None:
+        """``title``/``message`` are user-facing text; ``extra`` is passed through to the UI."""
         super().__init__(message)
         self.code = code
         self.title = title
@@ -79,10 +80,12 @@ class DemandFileError(ValueError):
         self.extra = extra
 
     def to_dict(self) -> dict:
+        """JSON error body: code, title, message plus every ``extra`` key."""
         return {"code": self.code, "title": self.title, "message": self.message, **self.extra}
 
 
 def _norm(h: str) -> str:
+    """Normalize a header for matching: lowercase, non-alphanumeric runs → one space."""
     return re.sub(r"[^a-z0-9]+", " ", str(h).lower()).strip()
 
 
@@ -132,6 +135,8 @@ def demand_job_url(title: str, jd: str, context: dict[str, str] | None = None) -
 
 
 def split_skills(text: str) -> list[str]:
+    """Split a skills cell on , ; | or newlines; whitespace-collapsed, case-insensitive
+    de-dupe, first spelling and order kept."""
     seen: list[str] = []
     for part in _SKILL_SPLIT_RE.split(text or ""):
         p = " ".join(part.split())
@@ -141,6 +146,7 @@ def split_skills(text: str) -> list[str]:
 
 
 def _fmt_size(n: int) -> str:
+    """Human file size for error messages: "1.2 MB", else whole KB (minimum "1 KB")."""
     if n >= 1024 * 1024:
         return f"{n / (1024 * 1024):.1f} MB"
     return f"{max(1, round(n / 1024))} KB"
@@ -438,6 +444,8 @@ def parse_and_validate(content: bytes, filename: str) -> dict:
         )
 
     def cell(record: dict, field: str) -> str:
+        """The record's stripped value for ``field``'s mapped column; "" if unmapped or a
+        placeholder ("-", "n/a", "null", ...)."""
         col = mapping.get(field)
         if not col:
             return ""

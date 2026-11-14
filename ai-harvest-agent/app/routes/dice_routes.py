@@ -45,12 +45,14 @@ _storage_svc = DiceStorageService()
 
 
 def _make_run_id(keyword: str, location: str) -> str:
+    """Build a run id: UTC timestamp + "_dice_" + a 30-char keyword/location slug."""
     ts   = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     slug = re.sub(r"[^a-z0-9]+", "_", f"{keyword} {location}".lower()).strip("_")
     return f"{ts}_dice_{slug[:30]}"
 
 
 def _err(msg: str, reason: str = "") -> JSONResponse:
+    """Failure body `{"status": "failed", "message", "reason"?}` returned with HTTP 200."""
     body: dict[str, Any] = {"status": "failed", "message": msg}
     if reason:
         body["reason"] = reason
@@ -58,6 +60,7 @@ def _err(msg: str, reason: str = "") -> JSONResponse:
 
 
 def _to_dice_job(j: DiceScrapedJob) -> DiceJob:
+    """Map a scraped Dice job onto the API response model (source fixed to "Dice")."""
     return DiceJob(
         job_title       = j.job_title,
         company         = j.company,
@@ -149,6 +152,7 @@ async def run_dice_agent() -> Any:
     log.info("dice_search_started", max_jobs=f.max_jobs)
 
     async def _do_harvest() -> list[DiceScrapedJob]:
+        """Run the Dice scrape with the configured filters and browser settings."""
         agent = DiceAgent()
         return await agent.harvest(
             filters  = f,
@@ -174,6 +178,12 @@ async def run_dice_agent() -> Any:
     jobs = [_to_dice_job(j) for j in scraped]
 
     async def _mirror_run_to_db(response: DiceRunResponse) -> None:
+        """Best-effort mirror of this run and its jobs into harvest_runs / scraped_jobs.
+
+        Creates the run row, stamps its final status and count, then bulk-inserts the jobs. Each
+        step goes through db_write, so DB errors are logged and swallowed; nothing more is written
+        if the run row could not be created.
+        """
         run_pk = await db_write(lambda db: HarvestRunService(db).create_run(
             run_id           = run_id,
             source           = "Dice",

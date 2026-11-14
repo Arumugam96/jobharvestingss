@@ -33,6 +33,7 @@ _WS_RE = re.compile(r"\s+")
 
 
 def _sources(texts: Iterable[str | None]) -> list[str]:
+    """Materialise the source texts as a list, dropping None and empty strings."""
     return [t for t in texts if t]
 
 

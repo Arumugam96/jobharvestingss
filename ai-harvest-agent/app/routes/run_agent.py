@@ -80,12 +80,14 @@ class RunSummary(BaseModel):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _make_run_id(keywords: str, location: str) -> str:
+    """Build a run id: UTC timestamp + "_" + a 50-char keyword/location slug."""
     ts   = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     slug = re.sub(r"[^a-z0-9]+", "_", f"{keywords} {location}".lower()).strip("_")
     return f"{ts}_{slug[:50]}"
 
 
 def _scraped_to_card(job: ScrapedJob) -> JobCard:
+    """Map a scraped search card onto a JobCard (skills left empty: no description fetch here)."""
     return JobCard(
         title     = job.title,
         company   = job.company,
@@ -100,6 +102,7 @@ def _scraped_to_card(job: ScrapedJob) -> JobCard:
 
 
 def _save_run(run_id: str, filters: FiltersConfig, response: AgentRunResponse) -> str:
+    """Write filters + result to data/results/linkedin/<run_id>.json; returns the file path."""
     payload = {
         "run_id":       run_id,
         "executed_at":  response.executed_at,
@@ -125,6 +128,7 @@ def _save_run(run_id: str, filters: FiltersConfig, response: AgentRunResponse) -
 
 
 def _load_run(run_id: str) -> dict:
+    """Load a saved run's JSON file; 404 if no file exists for `run_id`."""
     path = _OUTPUT_DIR / f"{run_id}.json"
     if not path.exists():
         raise HTTPException(
@@ -135,6 +139,7 @@ def _load_run(run_id: str) -> dict:
 
 
 def _list_runs() -> list[RunSummary]:
+    """Summaries of every saved run file, filename-descending; unreadable files are skipped."""
     summaries: list[RunSummary] = []
     for p in sorted(_OUTPUT_DIR.glob("*.json"), reverse=True):
         try:
@@ -153,6 +158,7 @@ def _list_runs() -> list[RunSummary]:
 
 
 def _error_json(message: str, detail: str = "") -> JSONResponse:
+    """Failure body `{"status": "failed", "message", "detail"?}` returned with HTTP 200."""
     body: dict[str, Any] = {"status": "failed", "message": message}
     if detail:
         body["detail"] = detail
@@ -182,6 +188,7 @@ async def run_linkedin_agent() -> Any:
     log.info("agent_start", max_jobs=f.max_jobs)
 
     async def _do_scrape() -> list[ScrapedJob]:
+        """Run the LinkedIn form scraper with the configured filters."""
         async with LinkedInFormScraper() as scraper:
             return await scraper.search(f)
 
@@ -270,6 +277,7 @@ async def run_linkedin_agent() -> Any:
     include_in_schema = False,
 )
 async def list_results() -> list[RunSummary]:
+    """List summaries of the saved run files written by this legacy LinkedIn agent."""
     return _list_runs()
 
 
@@ -279,6 +287,7 @@ async def list_results() -> list[RunSummary]:
     include_in_schema = False,
 )
 async def get_result(run_id: str) -> dict:
+    """Return one saved run file of this legacy LinkedIn agent; 404 if it doesn't exist."""
     return _load_run(run_id)
 
 
@@ -299,6 +308,13 @@ async def save_linkedin_session() -> Any:
     from playwright.async_api import async_playwright
 
     async def _do_manual_login() -> str:
+        """Log in to LinkedIn in a visible browser and save its storage state to the session file.
+
+        Auto-fills LINKEDIN_EMAIL / LINKEDIN_PASSWORD from settings and clicks Sign in, then polls
+        every 2 s for up to 10 minutes until the URL leaves the login/checkpoint pages (OTP or MFA
+        are completed by a human). Returns the saved file's path. On timeout raises RuntimeError,
+        prefixed "mfa_timeout:" when stuck on an MFA page.
+        """
         from app.config import get_settings
         cfg = get_settings()
 

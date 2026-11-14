@@ -53,6 +53,10 @@ _lead_jobs: dict[str, dict[str, Any]] = {}
     },
 )
 async def run_lead_intelligence(body: LeadIntelligenceRequest) -> dict[str, Any]:
+    """Start a hybrid lead-intelligence run as a detached asyncio task and return its `job_id`.
+
+    Run state is kept only in this process's memory (`_lead_jobs`), so it is lost on restart.
+    """
     import uuid
     job_id = uuid.uuid4().hex
 
@@ -163,6 +167,11 @@ async def _run_lead_intelligence_background(
     summary = "Poll Lead Intelligence Run Status",
 )
 async def lead_intelligence_status(job_id: str) -> dict[str, Any]:
+    """Return the in-memory state of a lead-intelligence run; 404 if the id is unknown.
+
+    `status` is "running", "success", "action_required" (Naukri Premium session needed, see
+    `next_step`) or "failed" (see `error`).
+    """
     job = _lead_jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found")
@@ -189,6 +198,11 @@ async def list_lead_intelligence(
     source:           str   = Query("", description="Filter by source: linkedin | premium_naukri"),
     keyword:          str   = Query("", description="Filter by keyword (case-insensitive)"),
 ) -> dict[str, Any]:
+    """Page through lead records from the newest output JSON file, with optional filters.
+
+    `keyword` matches recruiter name, company or designation; `source` matches any entry of a
+    record's source list. 404 when no output file exists yet.
+    """
     records = _load_lead_records()
     if records is None:
         raise HTTPException(status_code=404, detail="No lead intelligence results found yet.")
@@ -235,6 +249,10 @@ async def list_lead_intelligence(
     },
 )
 async def get_lead_record(lead_id: str) -> dict[str, Any]:
+    """Return one lead by stored `lead_id` or its derived id (MD5 of profile URL or name::company).
+
+    404 when no output file exists or no record matches.
+    """
     records = _load_lead_records()
     if records is None:
         raise HTTPException(status_code=404, detail="No lead intelligence results found yet.")
@@ -260,6 +278,7 @@ async def get_lead_record(lead_id: str) -> dict[str, Any]:
     },
 )
 async def download_lead_intelligence_json() -> FileResponse:
+    """Download the newest lead-intelligence JSON output file; 404 if none exists."""
     path = _latest_file("*.json")
     if not path:
         raise HTTPException(status_code=404, detail="No lead intelligence JSON file found.")
@@ -286,6 +305,7 @@ async def download_lead_intelligence_json() -> FileResponse:
     },
 )
 async def download_lead_intelligence_excel() -> FileResponse:
+    """Download the newest lead-intelligence Excel (.xlsx) output file; 404 if none exists."""
     path = _latest_file("*.xlsx")
     if not path:
         raise HTTPException(status_code=404, detail="No lead intelligence Excel file found.")

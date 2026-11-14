@@ -41,6 +41,16 @@ const styles = `
 @media (max-width: 640px) { .lmm-overlay { padding: 0; align-items: flex-end; } .lmm-card { max-width: 100%; max-height: 100vh; height: 100%; border-radius: 0; } }
 `;
 
+/**
+ * Modal that drafts a LinkedIn outreach message for a job on open
+ * (POST /outreach/generate-linkedin), lets the user edit, regenerate and copy it,
+ * and records a manual send with "Mark as sent" (POST /outreach/log-linkedin).
+ * @param {object} props
+ * @param {object} props.job Harvested job row (uses id, company).
+ * @param {() => void} [props.onClose]
+ * @param {() => void} [props.onLogged] Called once the send is recorded, so the caller
+ *   can refresh the row's LinkedIn icon.
+ */
 export default function LinkedInMessageModal({ job = {}, onClose = () => {}, onLogged = () => {} }) {
   const [message, setMessage] = useState("");
   const [fallbackUsed, setFallbackUsed] = useState(false);
@@ -50,6 +60,7 @@ export default function LinkedInMessageModal({ job = {}, onClose = () => {}, onL
   const [marking, setMarking] = useState(false);
   const [marked, setMarked] = useState(false);
 
+  /** Fetches an LLM draft (a fresh one when `regenerate`) into the message box. */
   const generate = useCallback(async (regenerate) => {
     setGenerating(true);
     setError("");
@@ -67,11 +78,13 @@ export default function LinkedInMessageModal({ job = {}, onClose = () => {}, onL
   useEffect(() => { generate(false); }, [generate]);
 
   useEffect(() => {
+    /** Closes the modal on Escape. */
     const onKey = (e) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
+  /** Copies the message to the clipboard and flashes "Copied" for 1.6s. */
   const copy = () => {
     navigator.clipboard?.writeText(message);
     setCopied(true);

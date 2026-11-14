@@ -47,10 +47,12 @@ def generate_otp(length: int) -> str:
 
 
 def hash_otp(otp: str, settings: Settings) -> str:
+    """HMAC-SHA256 hex digest of the OTP, keyed by APP_SECRET_KEY (the stored form)."""
     return hmac.new(settings.app_secret_key.encode(), otp.encode(), hashlib.sha256).hexdigest()
 
 
 def verify_otp_hash(otp: str, otp_hash: str, settings: Settings) -> bool:
+    """Constant-time check that ``otp`` hashes to the stored ``otp_hash``."""
     return hmac.compare_digest(hash_otp(otp, settings), otp_hash)
 
 
@@ -77,6 +79,10 @@ class InvalidTokenError(Exception):
 
 
 def create_access_token(*, subject: str, email: str, settings: Settings) -> str:
+    """Sign a bearer JWT carrying ``sub`` (user id) and ``email``.
+
+    Expires after ACCESS_TOKEN_EXPIRE_MINUTES; signed with JWT_SECRET_KEY/JWT_ALGORITHM.
+    """
     now = datetime.now(timezone.utc)
     expires = now + timedelta(minutes=settings.access_token_expire_minutes)
     payload: dict[str, Any] = {
@@ -89,6 +95,10 @@ def create_access_token(*, subject: str, email: str, settings: Settings) -> str:
 
 
 def decode_access_token(token: str, settings: Settings) -> dict[str, Any]:
+    """Verify a bearer JWT and return its claims.
+
+    Raises InvalidTokenError on a bad signature, malformed token or expiry.
+    """
     try:
         return jwt.decode(token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm])
     except JWTError as exc:

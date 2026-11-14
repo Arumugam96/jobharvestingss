@@ -62,6 +62,7 @@ class ApolloFallbackResult:
 
     @property
     def enrichment_source(self) -> str:
+        """Alias of ``source``: "apollo" when Apollo supplied the email, else ""."""
         return self.source
 
 
@@ -69,6 +70,7 @@ _SKIP = ApolloFallbackResult()  # attempted=False, nothing found
 
 
 def _aware_utc(dt: datetime | None) -> datetime | None:
+    """Treat a naive datetime as UTC so it can be compared with ``now(timezone.utc)``."""
     if dt is None:
         return None
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
@@ -237,6 +239,7 @@ async def apollo_company_contact_fallback(
     from app.services import apollo_budget
 
     async def _budget_ok() -> bool:
+        """True if the enrichment budget has headroom today (None = unlimited / DB error)."""
         # Front-run the ApolloClient's own gate so we can distinguish "cap reached"
         # (defer, no negative) from "searched, found nothing" (cacheable negative).
         # Harvest-time fallback → also bound by the enrichment sub-cap.

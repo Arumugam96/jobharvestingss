@@ -121,6 +121,7 @@ async def run_prospect_intelligence(
     agent = ProspectIntelligenceAgent(concurrency=body.concurrency)
 
     async def _run():
+        """Run the prospect-intelligence agent on the input workbook."""
         return await agent.run(input_path)
 
     try:

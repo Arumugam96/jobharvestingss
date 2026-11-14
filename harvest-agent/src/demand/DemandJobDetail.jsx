@@ -38,16 +38,24 @@ const TIER_LABEL = {
   3: "Broad: tier 2's query, experience ±2 yrs, any location",
 };
 
+/** Coerce a value to an array: arrays pass through, null/undefined/"" → [], anything else → [v]. */
 const asList = (v) => (Array.isArray(v) ? v : v == null || v === "" ? [] : [v]);
+/** Null-safe lowercase string, used for case-insensitive skill matching. */
 const lc = (s) => String(s || "").toLowerCase();
+/** Normalise extracted requirements' mandatory_skills to [{name, priority?}], dropping nameless
+ * entries (plain strings become {name}). */
 const normMust = (req) => asList(req?.mandatory_skills).map((m) => (typeof m === "string" ? { name: m } : m)).filter((m) => m?.name);
 
+/** Collapse whitespace in a candidate name and title-case it when it is all-upper or all-lower
+ * case; mixed-case names are returned as-is. */
 function displayName(raw) {
   const s = String(raw || "").replace(/\s+/g, " ").trim();
   if (!s || (s !== s.toUpperCase() && s !== s.toLowerCase())) return s;
   return s.toLowerCase().replace(/(^|[\s.'-])(\w)/g, (m, a, b) => a + b.toUpperCase());
 }
 
+/** Turn a search tier's filters (experience range, locations, active-in/within) into
+ * [label, value] pairs for display chips. */
 function filterChips(filters) {
   const f = filters || {};
   const out = [];
@@ -59,12 +67,18 @@ function filterChips(filters) {
   return out;
 }
 
+/** Render a Boolean Resdex query with its AND/OR/NOT operators highlighted. */
 function QueryText({ query }) {
   return String(query).split(/\b(AND|OR|NOT)\b/).map((part, i) => (i % 2 ? <span key={i} className="dmj-op">{part}</span> : part));
 }
 
+/**
+ * "Copy query" button with a polite live-region status. Falls back to selecting the text in
+ * `targetRef` (so the user can press Ctrl+C) when clipboard access fails.
+ */
 function CopyButton({ text, targetRef }) {
   const [msg, setMsg] = useState("");
+  /** Copy `text` to the clipboard, or select the target element's text if copying fails. */
   const onCopy = async () => {
     if (await copyText(text)) { setMsg("Copied"); setTimeout(() => setMsg(""), 1800); return; }
     const el = targetRef.current;
@@ -79,6 +93,8 @@ function CopyButton({ text, targetRef }) {
   );
 }
 
+/** One search tier (T1–T3): label, "Searched" marker, the highlighted query, filter chips and a
+ * copy button. */
 function TierRow({ t }) {
   const ref = useRef(null);
   const chips = filterChips(t.filters);
@@ -98,6 +114,14 @@ function TierRow({ t }) {
   );
 }
 
+/**
+ * Card for one kept Resdex candidate: rank/initials, designation, must-have coverage bar,
+ * key facts (experience, notice, location, CTC…), matched/other/missing skill chips and a link
+ * to the Naukri profile or the originating Resdex search.
+ * @param {object} props
+ * @param {object} props.c - candidate record.
+ * @param {Array<{name: string}>} props.must - normalised must-have skills (see normMust).
+ */
 function CandidateCard({ c, must }) {
   const matched = new Set(asList(c.matched_skills).map(lc));
   const name = displayName(c.candidate_name) || `Candidate ${c.rank}`;
@@ -157,6 +181,14 @@ function CandidateCard({ c, must }) {
   );
 }
 
+/**
+ * Collapsible (open by default) "Naukri Resdex candidates" section of a Demand job: extracted
+ * requirements, candidate cards or a state callout explaining why none were kept, and the
+ * T1–T3 search tiers with copy/open-in-Resdex actions.
+ * @param {object} props
+ * @param {object} props.data - payload from GET /demand/jobs/{id} ({job, row, resdex, …}).
+ * @param {Function} props.onLogin - opens the recruiter-login live browser.
+ */
 function ResdexSection({ data, onLogin }) {
   const [open, setOpen] = useState(true);
   const { resdex, row, job } = data;
@@ -277,6 +309,17 @@ function ResdexSection({ data, onLogin }) {
   );
 }
 
+/**
+ * View-only page for one Demand job: hero with status and a "Re-run Resdex search" action,
+ * ResdexSection, the JD and the batch / LLM-context side card.
+ * Loads GET /demand/jobs/{jobId} and polls every 4s while the row is active; re-run calls
+ * POST /demand/jobs/{jobId}/rerun-resdex (a running harvest opens HarvestRunningModal).
+ * Also hosts the recruiter-session LiveBrowserView via useDemandUsage.
+ * @param {object} props
+ * @param {string} props.jobId - Demand job id.
+ * @param {string} props.runId - parent batch run id (fallback label).
+ * @param {Function} props.onBack - return to the batch page.
+ */
 export default function DemandJobDetail({ jobId, runId, onBack }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState("");
@@ -316,6 +359,8 @@ export default function DemandJobDetail({ jobId, runId, onBack }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [load]);
 
+  /** Start a fresh Resdex search for this job, reload and poll; harvest_running opens the
+   * modal, other errors show under the action. */
   const doRerun = async () => {
     setRerun("starting");
     setRerunErr(null);

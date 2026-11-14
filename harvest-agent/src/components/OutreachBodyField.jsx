@@ -119,6 +119,17 @@ export function linkifyOutreachBody(text, jobTitle = "", jobUrl = "") {
   return out;
 }
 
+/**
+ * Outreach message body with a Preview / Edit toggle (starts in Preview). Preview
+ * renders the text via linkifyOutreachBody (links, bold reach-out line, linked job
+ * title) inside a box styled with `textareaClassName`; Edit shows the plain textarea.
+ * @param {object} props
+ * @param {string} props.value Message text.
+ * @param {(text: string) => void} props.onChange Called with the edited text.
+ * @param {boolean} [props.disabled] Disables the textarea (e.g. while generating).
+ * @param {string} [props.jobTitle] Title to link in Preview (needs jobUrl too).
+ * @param {string} [props.jobUrl] Posting URL for the job-title link.
+ */
 export default function OutreachBodyField({
   value = "",
   onChange = () => {},
@@ -135,6 +146,7 @@ export default function OutreachBodyField({
 }) {
   const [mode, setMode] = useState("preview");
 
+  /** Inline style for a Preview/Edit tab button, highlighted when `active`. */
   const tab = (active) => ({
     border: "none",
     background: active ? "#EFF6FF" : "transparent",

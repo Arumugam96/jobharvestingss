@@ -618,6 +618,7 @@ def correct_platform_mentions(text: str, job: dict) -> tuple[str, int]:
     protected = _protected_spans(text, job)
 
     def _is_protected(start: int, end: int) -> bool:
+        """True if the span overlaps a protected span (job title, company, URL or email)."""
         return any(start < pe and ps < end for ps, pe in protected)
 
     edits: dict[int, tuple[int, int, str]] = {}  # keyed by plat start → (start, end, repl)
@@ -1003,6 +1004,11 @@ def render_followup_fallback(
 # ── LinkedIn ─────────────────────────────────────────────────────────────────
 
 def build_linkedin_prompt(job: dict) -> str:
+    """User prompt for an LLM-written LinkedIn message to the job's recruiter.
+
+    Interpolates ``_job_context(job)`` (company, exact job title, recipient, and the JD
+    truncated to 1500 chars) and asks for the message text only.
+    """
     return (
         "Write a short LinkedIn outreach message to this recruiter offering "
         "Sightspectrum's IT staffing support for the role they posted.\n\n"

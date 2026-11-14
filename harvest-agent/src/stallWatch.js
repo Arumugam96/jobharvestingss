@@ -22,6 +22,7 @@ export function makeStallWatch(warnMs = STALL_WARN_MS) {
   let lastSig = null;
   let lastChange = Date.now();
   return {
+    /** Record this poll's progress signature; returns { stalled, elapsedMs }. */
     note(signature) {
       const now = Date.now();
       if (signature !== lastSig) {
@@ -31,6 +32,7 @@ export function makeStallWatch(warnMs = STALL_WARN_MS) {
       const elapsedMs = now - lastChange;
       return { stalled: elapsedMs >= warnMs, elapsedMs };
     },
+    /** Forget the last signature and restart the clock (call when a new run starts). */
     reset() {
       lastSig = null;
       lastChange = Date.now();

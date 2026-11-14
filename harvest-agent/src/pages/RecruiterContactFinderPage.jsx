@@ -36,6 +36,7 @@ const CHIP = {
 };
 const IN_PROGRESS_TIP = "Waiting for Apollo to deliver the phone number";
 
+/** Status chip for a finder row / bulk job (CHIP map); spins for processing and phone_pending. */
 function Chip({ status }) {
   const [cls, label] = CHIP[status] || CHIP.pending;
   const spin = status === "processing" || status === "phone_pending";
@@ -47,6 +48,7 @@ function Chip({ status }) {
   );
 }
 
+/** Segmented button control; options are {value, label, icon?, disabled?, title?}. */
 function Seg({ value, onChange, options }) {
   return (
     <div className="seg">
@@ -65,6 +67,8 @@ const PHONE_POLL_MS = 8000;
 // Stop polling a stuck request a little after the backend's pending TTL (usage
 // .phone_pending_ttl_minutes, default 60) — by then it reads NOT_FOUND server-side.
 const PHONE_POLL_GRACE_MIN = 12;
+/** How long to keep polling a pending phone: the backend pending TTL (default 60 min) plus
+ * PHONE_POLL_GRACE_MIN, in milliseconds. */
 function phonePollMaxMs(ttlMinutes) {
   return ((ttlMinutes || 60) + PHONE_POLL_GRACE_MIN) * 60 * 1000;
 }
@@ -143,6 +147,8 @@ function usePhonePoll(pendingIds, onUpdate, maxMs = phonePollMaxMs()) {
     if (!startedRef.current || ids.some((id) => !seenRef.current.has(id))) startedRef.current = Date.now();
     seenRef.current = new Set(ids);
     let cancelled = false;
+    /** Fetch phone status for the pending ids and report it; after maxMs, report a final
+     * snapshot with leftovers marked NOT_FOUND and stop, else reschedule. */
     const tick = async () => {
       if (cancelled) return;
       const gaveUp = Date.now() - startedRef.current > maxMs;
@@ -215,6 +221,7 @@ function Dropdown({ value, onChange, options, icon, minWidth }) {
   const ref = useRef(null);
   useEffect(() => {
     if (!open) return;
+    /** Close the dropdown on a mousedown outside it. */
     const h = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
     document.addEventListener("mousedown", h);
     return () => document.removeEventListener("mousedown", h);
@@ -237,6 +244,7 @@ function Dropdown({ value, onChange, options, icon, minWidth }) {
   );
 }
 
+/** "Recent contacts" table (name, title, company/domain, email, phone) for the given list. */
 function RecentContacts({ recent }) {
   return (
     <>
@@ -263,7 +271,10 @@ function RecentContacts({ recent }) {
   );
 }
 
+/** Download finder result rows (company, contact, title, email + status, phone, confidence,
+ * status) as a CSV file named `filename`. */
 function downloadCsv(rows, filename) {
+  /** Quote a CSV cell, doubling inner quotes. */
   const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
   const header = ["Company", "Contact", "Title", "Email", "Email status", "Phone", "Confidence", "Status"];
   const lines = [header.join(",")].concat(
@@ -276,6 +287,12 @@ function downloadCsv(rows, filename) {
   URL.revokeObjectURL(url);
 }
 
+/**
+ * Recruiter Contact Finder page: on-demand Apollo contact lookups with a sticky usage / credit
+ * StatBand (GET /recruiter-finder/usage, reloaded after each spend) and Single search / Bulk
+ * upload tabs. The page is its own scroll container so the stat band can collapse on scroll;
+ * styles are injected and scoped under `.rcf`.
+ */
 export default function RecruiterContactFinderPage() {
   const [tab, setTab] = useState("single");
   const [usage, setUsage] = useState(null);
@@ -333,6 +350,7 @@ function StatBand({ usage, collapsed }) {
   // Account-wide Apollo usage (harvest enrichment sub-cap + global ceiling) — context
   // for why harvest enrichment may have stopped while this workspace still has credits.
   const ap = usage?.apollo;
+  /** "used / cap" text, with "unlimited" when the cap is 0 or unset. */
   const of = (n, c) => `${n ?? 0} / ${c > 0 ? c : "unlimited"}`;
   const apolloLine = ap
     ? `Harvest enrichment: ${of(ap.enrichment_used, ap.enrichment_cap)} Apollo credits today · Account: ${of(ap.global_used, ap.global_cap)}`
@@ -421,6 +439,7 @@ function MultiPersonaSelect({ value, onChange }) {
   const inputRef = useRef(null);
   useEffect(() => {
     if (!open) return;
+    /** Close the suggestions popover on a mousedown outside the control. */
     const h = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
     document.addEventListener("mousedown", h);
     return () => document.removeEventListener("mousedown", h);
@@ -429,10 +448,12 @@ function MultiPersonaSelect({ value, onChange }) {
   const ql = q.trim().toLowerCase();
   const matches = PERSONA_OPTIONS.filter((p) => !ql || p.toLowerCase().includes(ql));
   const canAdd = !!ql && !PERSONA_OPTIONS.some((p) => p.toLowerCase() === ql) && !value.some((v) => v.toLowerCase() === ql);
+  /** Add or remove a persona from the selection, then clear and refocus the input. */
   const toggle = (p) => {
     onChange(value.includes(p) ? value.filter((x) => x !== p) : [...value, p]);
     setQ(""); if (inputRef.current) inputRef.current.focus();
   };
+  /** Add the typed text as a custom title (skipped if already selected) and clear the input. */
   const addCustom = () => { const v = q.trim(); if (v && !value.some((x) => x.toLowerCase() === v.toLowerCase())) onChange([...value, v]); setQ(""); };
 
   return (
@@ -497,16 +518,20 @@ function EmptyState({ icon, title, children, tags }) {
 
 // ── History tab: filterable log of every revealed contact ─────────────────────
 const HIST_PAGE = 25;
+/** Chip class for an email status: verified/valid → "done", *likely* → "proc", else "nf". */
 function histStatusTone(s) {
   const v = (s || "").toLowerCase();
   if (v === "verified" || v === "valid") return "done";
   if (v.includes("likely")) return "proc";
   return "nf";
 }
+/** Chip class for a confidence level: High → "done", Medium → "nf", otherwise "pending". */
 function confTone(c) { return c === "High" ? "done" : c === "Medium" ? "nf" : "pending"; }
 const SOURCE_LABEL = { company_browse: "Company browse", person: "Specific person", company_single: "Company" };
 
+/** Download history rows (the current page) as revealed-contacts.csv. */
 function exportHistoryCsv(rows) {
+  /** Quote a CSV cell, doubling inner quotes. */
   const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
   const head = ["Contact", "Title", "Company", "Domain", "Email", "Email status", "Secondary email",
     "Phone", "Location", "Industry", "Confidence", "Reveal", "Credits", "Source", "Revealed by", "Date"];
@@ -522,6 +547,12 @@ function exportHistoryCsv(rows) {
   URL.revokeObjectURL(url);
 }
 
+/**
+ * History tab: KPI tiles, filters (search, company, email status, confidence, period) and a
+ * paged table of revealed contacts from GET /recruiter-finder/history-log, debounced
+ * 220 ms; quietly reloads every 15 s while any phone is
+ * still pending. Exports the current page as CSV.
+ */
 function HistoryTab() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -547,6 +578,7 @@ function HistoryTab() {
     return () => clearTimeout(t);
   }, [anyPhonePending, data, load]);
 
+  /** Apply a filter change and go back to page 1. */
   const setFilter = (fn) => { fn(); setPage(1); };
   const rows = data?.rows || [];
   const k = data?.kpis || { revealed_total: 0, verified_pct: 0, this_week: 0, credits_spent: 0 };
@@ -680,6 +712,8 @@ function SinglePanel({ usage, onSpent }) {
 
   // ── People mode ──
   const canSubmitPerson = !!(personName.trim() || linkedinUrl.trim());
+  /** Confirmed person lookup: POST /recruiter-finder/search with name / LinkedIn URL / company
+   * and the reveal choice; shows the result and refreshes usage. */
   const runPerson = async () => {
     setConfirming(false); setLoading(true); setError(""); setResult(null);
     try {
@@ -691,6 +725,8 @@ function SinglePanel({ usage, onSpent }) {
   };
 
   // ── Company mode ──
+  /** Free browse: reset selection/reveals and list the company's candidates with locked emails
+   * (POST /recruiter-finder/candidates); unconfigured / over-budget replies show an error. */
   const findCandidates = async () => {
     setCandLoading(true); setError(""); setCandidates(null); setCompanyDomain("");
     setSelected(new Set()); setRevealedMap({}); setRevealSummary(null);
@@ -720,6 +756,7 @@ function SinglePanel({ usage, onSpent }) {
       (!q || `${c.name} ${c.title}`.toLowerCase().includes(q)));
   }, [candidates, titleFilter, nameQuery]);
 
+  /** Whether this candidate has already been revealed successfully in this session. */
   const isRevealed = (pid) => revealedMap[pid]?.status === "completed";
   const selectableVisible = filtered.filter((c) => c.person_id && !isRevealed(c.person_id));
   const allVisibleSelected = selectableVisible.length > 0 && selectableVisible.every((c) => selected.has(c.person_id));
@@ -730,11 +767,14 @@ function SinglePanel({ usage, onSpent }) {
     if (selectAllRef.current) selectAllRef.current.indeterminate = someVisibleSelected && !allVisibleSelected;
   });
 
+  /** Tick / untick one candidate for reveal. */
   const toggleOne = (pid) => setSelected((prev) => {
     const next = new Set(prev);
     next.has(pid) ? next.delete(pid) : next.add(pid);
     return next;
   });
+  /** Header checkbox: select every visible unrevealed candidate, or clear them if all are
+   * already selected. */
   const toggleAll = () => setSelected((prev) => {
     const next = new Set(prev);
     if (allVisibleSelected) selectableVisible.forEach((c) => next.delete(c.person_id));
@@ -744,6 +784,8 @@ function SinglePanel({ usage, onSpent }) {
 
   const selCount = selected.size;
   const batch = countStates((revealSummary?.ids || []).map((id) => revealedMap[id]).filter(Boolean));
+  /** Reveal the selected candidates (POST /recruiter-finder/reveal), merge results into
+   * revealedMap, record the batch summary, clear the selection and refresh usage. */
   const doReveal = async () => {
     if (selCount === 0) return;
     setRevealing(true); setError("");
@@ -934,6 +976,16 @@ function SinglePanel({ usage, onSpent }) {
   );
 }
 
+/**
+ * Result of a specific-person lookup: a config / budget notice, a single explanatory row when
+ * nothing was revealed (ambiguous / not found / failed), or the revealed contacts with live
+ * revealed / in-progress counts.
+ * @param {object} props
+ * @param {object} props.result - POST /recruiter-finder/search response (rows merged with
+ *   phone deliveries).
+ * @param {string} props.company - company typed in the form (shown when no row matched).
+ * @param {number} props.phoneCost - credits charged per delivered phone.
+ */
 function SingleResult({ result, company, phoneCost }) {
   if (result.status === "unconfigured" || result.status === "over_budget") {
     return <div className="valnote" style={{ marginTop: 16 }}><AlertTriangle className="ic" /><div className="t">{result.message}</div></div>;
@@ -1023,6 +1075,7 @@ function bucketOf(iso) {
   if (days < 30) return "This month";
   return "Earlier";
 }
+/** Compact age of an ISO timestamp: "just now", "5m", "3h", "2d", "1w" or "4mo" ("" if empty). */
 function relTimeFrom(iso) {
   if (!iso) return "";
   const mins = Math.max(0, Math.floor((Date.now() - new Date(iso)) / 60000));
@@ -1035,7 +1088,9 @@ function relTimeFrom(iso) {
 }
 // Per-company avatar tint (stable hash → palette) and per-row severity stripe class.
 const FAV_COLORS = ["#2563EB", "#7C3AED", "#059669", "#D97706", "#DC2626", "#0891B2", "#DB2777", "#4F46E5"];
+/** Stable avatar colour for a company name (string hash into FAV_COLORS). */
 function favColor(name) { let h = 0; for (const c of (name || "?")) h = (h * 31 + c.charCodeAt(0)) >>> 0; return FAV_COLORS[h % FAV_COLORS.length]; }
+/** Row severity-stripe class for a bulk item status ("" for pending/unknown). */
 function rowTone(s) {
   return s === "completed" ? "r-good" : s === "failed" ? "r-bad" : s === "not_found" ? "r-warn"
     : s === "ambiguous" ? "r-viol" : s === "processing" ? "r-pri" : "";
@@ -1190,9 +1245,12 @@ function BulkPanel({ usage, onSpent }) {
     catch { return []; }
   }, []);
 
+  /** Cancel the pending bulk-job poll. */
   const stopPoll = () => { if (pollRef.current) { clearTimeout(pollRef.current); pollRef.current = null; } };
   useEffect(() => () => stopPoll(), []);
 
+  /** Take a chosen file and validate it (POST /recruiter-finder/validate) for the preview;
+   * a failure clears the file and shows the error. */
   const onFile = async (f) => {
     setError(""); setPreview(null); setFile(f);
     if (!f) return;
@@ -1265,12 +1323,15 @@ function BulkPanel({ usage, onSpent }) {
     if (!selHistId && history.length) openHist(history[0].job_id);
   };
 
+  /** Retry the selected past run's unsuccessful rows, then reload it and the run list. */
   const histRetry = async () => {
     if (!selHistId) return;
     try { await retryFinderJob(selHistId); openHist(selHistId); loadHistory(); }
     catch { /* surfaced on next poll */ }
   };
 
+  /** Upload the file with the chosen personas and reveal type (finderUpload) to start a bulk
+   * job, switch to the Running pane, begin polling and refresh the run list. */
   const start = async () => {
     if (!file) return;
     setStarting(true); setError("");
@@ -1279,7 +1340,9 @@ function BulkPanel({ usage, onSpent }) {
     finally { setStarting(false); }
   };
 
+  /** Retry the live job's unsuccessful rows (POST /recruiter-finder/jobs/{id}/retry) and poll. */
   const retry = async () => { if (!jobId) return; try { await retryFinderJob(jobId); tick(jobId); } catch (err) { setError(err instanceof ApiError ? err.message : "Retry failed."); } };
+  /** Stop polling and clear the file, preview and live job for a fresh upload. */
   const reset = () => { stopPoll(); setFile(null); setPreview(null); setJobId(null); setJob(null); setItems([]); setError(""); if (fileRef.current) fileRef.current.value = ""; };
 
   const running = job && (job.status === "running" || job.status === "queued");
@@ -1290,6 +1353,7 @@ function BulkPanel({ usage, onSpent }) {
 
   // ── History list: search → flat matches; else Folders (recency tiles → drill-in) or Rows ──
   const BUCKET_ORDER = ["Today", "This week", "This month", "Earlier"];
+  /** One clickable past-run card (filename, age, progress bar, enriched count, status chip). */
   const histItem = (j) => {
     const pct = j.total ? Math.round((j.completed / j.total) * 100) : 0;
     const [cls, label] = JCHIP[j.status] || JCHIP.queued;
@@ -1309,6 +1373,8 @@ function BulkPanel({ usage, onSpent }) {
       </div>
     );
   };
+  /** Render the history list: filename-search matches, flat rows, recency-folder tiles, or the
+   * runs inside the opened folder. */
   const histListNode = () => {
     if (!history.length) return <div className="hist-empty">No runs yet.<br />Upload a file to start your first enrichment.</div>;
     const q = histQuery.trim().toLowerCase();

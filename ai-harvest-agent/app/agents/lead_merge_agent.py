@@ -63,6 +63,11 @@ def _norm_company(company: str) -> str:
 
 
 def _name_company_key(name: str, company: str) -> str:
+    """Build a "first:last::company" dedup key from a normalised name and company.
+
+    Middle names and legal company suffixes are ignored, so minor spelling variants of the
+    same person at the same company collapse to one key.
+    """
     parts = _norm_name(name).split()
     first = parts[0] if parts else ""
     last  = parts[-1] if len(parts) > 1 else ""

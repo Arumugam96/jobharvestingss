@@ -170,11 +170,13 @@ def description_text_to_html(text: str) -> str:
     bullets: list[str] = []
 
     def _flush_para() -> None:
+        """Emit pending paragraph lines as one escaped <p>, joined by <br>."""
         if para:
             out.append("<p>" + "<br>".join(_escape(l) for l in para) + "</p>")
             para.clear()
 
     def _flush_bullets() -> None:
+        """Emit pending bullet items as one escaped <ul> list."""
         if bullets:
             out.append("<ul>" + "".join(f"<li>{_escape(b)}</li>" for b in bullets) + "</ul>")
             bullets.clear()
@@ -258,6 +260,7 @@ def html_description_to_text(html: str) -> str:
 
 # ── Structure repair for authored description HTML (Naukri) ────────────────────
 def _seg_text(nodes: list) -> str:
+    """Visible text of a node segment with all whitespace runs collapsed to one space."""
     raw = "".join(n.get_text() if isinstance(n, Tag) else str(n) for n in nodes)
     return " ".join(raw.split())
 
@@ -291,6 +294,7 @@ def _is_heading_segment(nodes: list) -> bool:
 
 
 def _is_bullet_segment(nodes: list) -> bool:
+    """True when the segment's text starts with a typed bullet marker ("- ", "• ", ...)."""
     return bool(_LINE_BULLET_RE.match(_seg_text(nodes)))
 
 
@@ -464,6 +468,7 @@ def _rebuild_line_run(nodes: list, soup: BeautifulSoup) -> list[Tag] | None:
 
 
 def _has_block_child(tag: Tag) -> bool:
+    """True if any direct child is a block-level tag (so the tag isn't a flat line run)."""
     return any(isinstance(c, Tag) and c.name in _STRUCTURE_BLOCK_TAGS for c in tag.children)
 
 
@@ -480,6 +485,10 @@ def _split_paragraph_lines(root: Tag, soup: BeautifulSoup) -> None:
     run: list = []
 
     def _flush() -> None:
+        """Rebuild the pending inline run in place if it contains a <br>, then reset it.
+
+        The rebuilt nodes are inserted before the run and the original nodes detached.
+        """
         if run and any(isinstance(n, Tag) and n.name == "br" for n in run):
             rebuilt = _rebuild_line_run(list(run), soup)
             if rebuilt:

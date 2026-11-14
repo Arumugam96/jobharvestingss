@@ -20,6 +20,11 @@ const LABEL = { fontSize: 11, letterSpacing: ".12em", textTransform: "uppercase"
 const K = { color: "#64748B" };
 const V = { color: "#0F172A", fontWeight: 600, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" };
 
+/**
+ * Route /mail/:id — one sent outreach plus its whole contact thread, fetched via
+ * GET outreach history by job_id / recruiter_id (from navigation state or the
+ * ?job= / ?recruiter= query). Offers copy-message and an email follow-up composer.
+ */
 export default function OutreachThreadPage() {
   const { id } = useParams();
   const location = useLocation();
@@ -70,6 +75,7 @@ export default function OutreachThreadPage() {
 
   useEffect(() => { loadThread(); }, [loadThread]);
 
+  /** Copy subject + body to the clipboard and flash the "copied" state for 1.6s. */
   const copyMessage = () => {
     if (!detail) return;
     navigator.clipboard?.writeText(`${detail.subject || ""}\n\n${detail.body || ""}`);
@@ -78,6 +84,7 @@ export default function OutreachThreadPage() {
   };
 
   const canFollowUp = detail && detail.channel === "email" && detail.job_id;
+  /** Open EmailComposeModal as a follow-up to this email (email rows with a job only). */
   const startFollowUp = () => {
     if (!canFollowUp) return;
     setComposeFor({

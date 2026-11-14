@@ -123,6 +123,7 @@ class RuleVerdict:
     details: dict   = field(default_factory=dict, hash=False, compare=False)
 
     def __str__(self) -> str:
+        """One-line ✓/✗ form: ``✓ [rule] reason``."""
         icon = "✓" if self.passed else "✗"
         return f"{icon} [{self.rule}] {self.reason}"
 
@@ -152,14 +153,17 @@ class QualificationResult:
 
     @property
     def violations(self) -> list[RuleVerdict]:
+        """Verdicts that failed, in evaluation order."""
         return [v for v in self.verdicts if not v.passed]
 
     @property
     def passes(self) -> list[RuleVerdict]:
+        """Verdicts that passed, in evaluation order."""
         return [v for v in self.verdicts if v.passed]
 
     @property
     def score(self) -> float:
+        """Fraction of verdicts that passed; 1.0 when no rules were applied."""
         if not self.verdicts:
             return 1.0
         return sum(1 for v in self.verdicts if v.passed) / len(self.verdicts)
@@ -182,6 +186,7 @@ class QualificationResult:
         }
 
     def __repr__(self) -> str:
+        """Compact debug form: PASS/FAIL, score, rule count and violation count."""
         status = "PASS" if self.passed else "FAIL"
         return (
             f"QualificationResult({status}, score={self.score:.2f}, "
@@ -252,6 +257,9 @@ def _require_list(cfg: dict, key: str, rule: str) -> list[str]:
 
 
 def _require_bool(cfg: dict, key: str, rule: str, default: bool) -> bool:
+    """Read a boolean option from the rule config (``default`` if absent); raise
+    RulesConfigError if the value is not a real bool.
+    """
     val = cfg.get(key, default)
     if not isinstance(val, bool):
         raise RulesConfigError(
@@ -269,6 +277,11 @@ def _check_employment_type(
     cfg: dict,
     policy: Literal["skip", "fail"],
 ) -> RuleVerdict:
+    """Pass only if the parsed employment type is in ``allowed`` (when set).
+
+    An undeterminable type fails when ``reject_not_specified`` (default True), else
+    passes. No constraints configured -> pass; no parsed JD -> missing-data policy.
+    """
     RULE = "employment_type"
 
     allowed              = _require_list(cfg, "allowed", RULE)
@@ -314,6 +327,11 @@ def _check_work_mode(
     cfg: dict,
     policy: Literal["skip", "fail"],
 ) -> RuleVerdict:
+    """Pass only if the parsed work mode is in ``allowed`` (when set).
+
+    Same shape as the employment-type rule, but ``reject_not_specified`` defaults to
+    False, so an unknown work mode passes unless configured otherwise.
+    """
     RULE = "work_mode"
 
     allowed              = _require_list(cfg, "allowed", RULE)
@@ -360,6 +378,11 @@ def _check_location(
     cfg: dict,
     policy: Literal["skip", "fail"],
 ) -> RuleVerdict:
+    """Pass if the location contains any ``must_contain_any`` term (plain substring match).
+
+    Uses the parsed location, falling back to the card location; remote roles skip the
+    check when ``skip_if_remote`` (default True). No location -> missing-data policy.
+    """
     RULE = "location"
 
     must_contain  = _require_list(cfg, "must_contain_any", RULE)
@@ -411,6 +434,13 @@ def _check_salary(
     cfg: dict,
     policy: Literal["skip", "fail"],
 ) -> RuleVerdict:
+    """Check the parsed salary against an optional currency and annualised minimum.
+
+    Both amounts are converted to annual before comparing; the job's min is used, or
+    its max when min is absent. Missing salary passes unless ``reject_if_missing``; a
+    currency mismatch can't be compared, so it follows the missing-data policy. Raises
+    RulesConfigError for a non-numeric ``min_value`` or unknown period.
+    """
     RULE = "salary"
 
     min_value        = cfg.get("min_value")
@@ -516,6 +546,12 @@ def _check_skills(
     cfg: dict,
     policy: Literal["skip", "fail"],
 ) -> RuleVerdict:
+    """Apply the skill blocklist, must-have-all and must-have-any terms, in that order.
+
+    Terms match whole words, case-insensitively, against the required, preferred or
+    all skills (``search_in``). An empty skill pool follows the missing-data policy;
+    an invalid ``search_in`` raises RulesConfigError.
+    """
     RULE = "skills"
 
     must_have_any    = _require_list(cfg, "must_have_any",    RULE)
@@ -592,6 +628,11 @@ def _check_experience(
     cfg: dict,
     policy: Literal["skip", "fail"],
 ) -> RuleVerdict:
+    """Compare the JD's minimum required years against the configured min/max bounds.
+
+    Only ``experience_years_min`` is checked; when it is absent the missing-data
+    policy applies.
+    """
     RULE = "experience"
 
     max_required = cfg.get("max_years_required")
@@ -640,6 +681,11 @@ def _check_title(
     cfg: dict,
     policy: Literal["skip", "fail"],
 ) -> RuleVerdict:
+    """Fail titles containing any excluded term, or none of the required terms.
+
+    Plain substring matching (case-insensitive unless ``case_sensitive``), not whole
+    words. No title -> missing-data policy.
+    """
     RULE = "title"
 
     must_contain     = _require_list(cfg, "must_contain_any",    RULE)
@@ -693,6 +739,10 @@ def _check_confidence(
     cfg: dict,
     policy: Literal["skip", "fail"],
 ) -> RuleVerdict:
+    """Fail when the parser's confidence score is below ``min_score``.
+
+    Raises RulesConfigError unless ``min_score`` is a number in [0.0, 1.0].
+    """
     RULE = "confidence"
 
     min_score = cfg.get("min_score")

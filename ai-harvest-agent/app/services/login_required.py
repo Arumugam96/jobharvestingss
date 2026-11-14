@@ -60,14 +60,17 @@ _lock = threading.RLock()
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 def _now() -> datetime:
+    """Current time as a timezone-aware UTC datetime."""
     return datetime.now(timezone.utc)
 
 
 def _iso(dt: datetime | None) -> str | None:
+    """ISO-8601 string for ``dt``, or None."""
     return dt.isoformat() if dt else None
 
 
 def _parse(value: Any) -> datetime | None:
+    """Parse an ISO timestamp (naive values assumed UTC); None if empty or invalid."""
     if not value:
         return None
     try:
@@ -78,15 +81,18 @@ def _parse(value: Any) -> datetime | None:
 
 
 def _norm_account(account: Any) -> str | None:
+    """Account id as a stripped string; None when missing or blank."""
     s = str(account).strip() if account is not None else ""
     return s or None
 
 
 def _key(source: str, account: str | None, kind: str) -> str:
+    """Registry key for one flag: ``source|account|kind`` (empty account segment if None)."""
     return f"{source}|{account or ''}|{kind}"
 
 
 def source_label(source: str, account: str | None = None) -> str:
+    """Human-readable source name for the UI banner (LinkedIn account defaults to "1")."""
     if source == SOURCE_NAUKRI_RECRUITER:
         return "Naukri recruiter"
     if source == SOURCE_LINKEDIN:
@@ -95,6 +101,11 @@ def source_label(source: str, account: str | None = None) -> str:
 
 
 def default_action(source: str, account: str | None, kind: str) -> dict[str, Any]:
+    """The banner button's action for a flag when the caller did not supply one.
+
+    A CAPTCHA/challenge (``human_needed``) always means "watch the Live Browser";
+    logins map to the source's own login/setup flow.
+    """
     if kind == KIND_HUMAN_NEEDED:
         return {"type": ACTION_LIVE_BROWSER}
     if source == SOURCE_NAUKRI_RECRUITER:
@@ -105,6 +116,10 @@ def default_action(source: str, account: str | None, kind: str) -> dict[str, Any
 
 
 def _load() -> dict[str, dict]:
+    """Read the persisted flag entries (non-dict entries dropped).
+
+    Any read or parse error is logged and treated as no flags ({}).
+    """
     try:
         if not STATE_PATH.exists():
             return {}
@@ -117,6 +132,11 @@ def _load() -> dict[str, dict]:
 
 
 def _save(entries: dict[str, dict]) -> None:
+    """Persist all flag entries, atomically via a .tmp file where possible.
+
+    Falls back to a direct write if the rename fails (Windows reader holding the file);
+    any error is logged and swallowed so callers never break.
+    """
     try:
         STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
         payload = json.dumps({"entries": entries}, indent=2)
@@ -135,6 +155,7 @@ def _save(entries: dict[str, dict]) -> None:
 
 
 def _expired(entry: dict, now: datetime) -> bool:
+    """True when the entry has an ``expires_at`` at or before ``now``."""
     exp = _parse(entry.get("expires_at"))
     return exp is not None and exp <= now
 
@@ -284,6 +305,11 @@ CHECKERS: dict[str, Callable[[str | None, datetime], bool]] = {
 
 
 def _logged_in_since(source: str, account: str | None, since: datetime, had_flag: bool) -> bool:
+    """True when ``source`` reports a login newer than ``since`` (persisted state only).
+
+    Uses the source's registered checker; a checker error counts as not logged in. For
+    a source without a checker, "logged in" means a flag existed and has been cleared.
+    """
     checker = CHECKERS.get(source)
     try:
         if checker is not None:

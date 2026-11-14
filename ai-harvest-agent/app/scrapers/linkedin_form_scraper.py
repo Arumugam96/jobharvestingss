@@ -275,12 +275,14 @@ _WHITESPACE   = re.compile(r"[ \t]{2,}")
 
 
 def _clean(text: str) -> str:
+    """Replace zero-width/soft-hyphen junk, collapse runs of spaces and newlines, and strip."""
     text = _UNICODE_JUNK.sub(" ", text)
     text = _WHITESPACE.sub(" ", text)
     return re.sub(r"\n+", " ", text).strip()
 
 
 def _infer_work_mode(location: str) -> str:
+    """Map a location string to remote / hybrid / onsite by keyword, else "not_specified"."""
     loc = (location or "").lower()
     if "remote" in loc:
         return "remote"
@@ -310,6 +312,7 @@ async def _delay(page: Page, lo: int, hi: int) -> None:
 
 
 async def _first_text(root: Page | ElementHandle, selectors: list[str]) -> str:
+    """Stripped inner text of the first selector that matches with non-blank text, else ""."""
     for sel in selectors:
         try:
             el = await root.query_selector(sel)
@@ -323,6 +326,7 @@ async def _first_text(root: Page | ElementHandle, selectors: list[str]) -> str:
 
 
 async def _first_attr(root: Page | ElementHandle, selectors: list[str], attr: str) -> str:
+    """Stripped `attr` value of the first selector with a non-empty value, else ""."""
     for sel in selectors:
         try:
             el = await root.query_selector(sel)
@@ -356,6 +360,7 @@ class LinkedInFormScraper:
     """
 
     def __init__(self) -> None:
+        """Read the LinkedIn credentials from settings; the browser starts in __aenter__."""
         self._pw:               Playwright     | None = None
         self._browser:          Browser        | None = None
         self._context:          BrowserContext | None = None
@@ -367,6 +372,10 @@ class LinkedInFormScraper:
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     async def __aenter__(self) -> "LinkedInFormScraper":
+        """Launch a visible stealth Chromium, loading the saved session file if present.
+
+        Records whether a saved session was loaded so _run can verify it before searching.
+        """
         self._pw = await async_playwright().start()
         self._browser = await self._pw.chromium.launch(
             headless = False,
@@ -397,6 +406,7 @@ class LinkedInFormScraper:
         return self
 
     async def __aexit__(self, *_: Any) -> None:
+        """Close the context, browser and Playwright driver (errors here are not suppressed)."""
         if self._context:
             await self._context.close()
         if self._browser:
@@ -430,6 +440,13 @@ class LinkedInFormScraper:
     # ── Internal flow ──────────────────────────────────────────────────────────
 
     async def _run(self, page: Page, f: FiltersConfig) -> list[ScrapedJob]:
+        """Full search flow: auth, fill + submit the form, apply filters, scroll, extract.
+
+        Verifies a saved session (falling back to credential login when it expired) or logs in with
+        credentials when configured. After submitting the form it re-navigates to a URL carrying the
+        work-mode / job-type / date filters. Raises LinkedInBlockedError on a login/checkpoint
+        redirect and LinkedInNoResultsError when no cards are found.
+        """
 
         # ── Step 0: Login or verify saved session ─────────────────────────────
         if self._has_saved_session:
@@ -526,6 +543,10 @@ class LinkedInFormScraper:
     # ── Form interaction ───────────────────────────────────────────────────────
 
     async def _fill(self, page: Page, selectors: list[str], value: str) -> bool:
+        """Type `value` into the first visible field among `selectors`, human-paced.
+
+        Falls back to a direct page.fill() per selector. Returns False if no selector worked.
+        """
         for sel in selectors:
             try:
                 # Wait for element to be in DOM and visible (more reliable than is_visible poll)
@@ -557,6 +578,7 @@ class LinkedInFormScraper:
         return False
 
     async def _submit(self, page: Page) -> None:
+        """Click the first visible search submit button, else press Enter; never raises."""
         # Try clicking a submit button
         for sel in _S.SUBMIT:
             try:
@@ -577,6 +599,7 @@ class LinkedInFormScraper:
     # ── Overlay dismissal ──────────────────────────────────────────────────────
 
     async def _dismiss_overlays(self, page: Page) -> None:
+        """Best-effort close of the cookie banner and sign-in modal, then Escape any modal."""
         # Cookie banner
         for sel in _S.COOKIE:
             try:
@@ -655,6 +678,10 @@ class LinkedInFormScraper:
         max_jobs: int,
         job_type: str,
     ) -> list[ScrapedJob]:
+        """Collect up to `max_jobs` unique job cards from the results list.
+
+        Waits up to 10 s per card selector for cards to render; cards without a URL are dropped.
+        """
         # Wait for at least one card selector to appear
         for sel in _S.CARD:
             try:
@@ -690,6 +717,10 @@ class LinkedInFormScraper:
         el:       ElementHandle,
         job_type: str,
     ) -> ScrapedJob | None:
+        """Parse one result card into a ScrapedJob; None when it has no title or parsing fails.
+
+        Strips the query string from the job URL and stamps the requested `job_type` on the job.
+        """
         try:
             title   = await _first_text(el, _S.TITLE)
             company = await _first_text(el, _S.COMPANY)
@@ -938,6 +969,7 @@ class LinkedInFormScraper:
         return False
 
     async def _submit_login(self, page: Page) -> None:
+        """Submit the login form: role locator, CSS selectors, JS click, then Enter."""
         # Try role-based locator first (most semantic / reliable)
         try:
             btn = page.get_by_role("button", name="Sign in", exact=True).first
@@ -992,6 +1024,10 @@ class LinkedInFormScraper:
     # ── Blocked detection ──────────────────────────────────────────────────────
 
     async def _check_blocked(self, page: Page) -> None:
+        """Raise LinkedInBlockedError (after a debug screenshot) if the page sits on a gated URL.
+
+        Gated means /login, /checkpoint, /challenge or /authwall.
+        """
         blocked_patterns = ("/login", "/checkpoint", "/challenge", "/authwall")
         for pat in blocked_patterns:
             if pat in page.url:

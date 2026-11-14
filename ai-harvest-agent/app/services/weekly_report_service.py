@@ -121,6 +121,8 @@ async def compute_weekly_stats(
 
 
 def _status_color(status: str) -> str:
+    """Hex background for a run-status pill (green/red/amber/blue/grey);
+    unknown statuses get the muted grey."""
     return {
         "success": "#10b981", "completed": "#10b981", "failed": "#ef4444",
         "stopped": "#f59e0b", "running": "#3b82f6", "no_results": "#6b7280",
@@ -191,6 +193,7 @@ def render_weekly_report_html(stats: dict[str, Any]) -> str:
 
     # ── Per-run breakdown table ─────────────────────────────────────────
     def _th(text: str, align: str, width: str = "") -> str:
+        """A small upper-case column-header cell, optionally with a fixed width."""
         w = f' width="{width}"' if width else ""
         return _cell(
             text,
@@ -200,6 +203,8 @@ def render_weekly_report_html(stats: dict[str, Any]) -> str:
         )
 
     def _td(content: str, align: str, last: bool = False) -> str:
+        """A body cell of the per-run table; ``last`` marks the bold totals row
+        (heavier top border and weight). ``content`` is inserted as-is (pre-escaped)."""
         top = f"border-top:2px solid {_LINE};" if last else f"border-top:1px solid {_LINE};"
         weight = "800" if last else "600"
         return _cell(

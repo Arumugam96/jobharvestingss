@@ -28,11 +28,14 @@ const DAYS_OPTIONS = [
   { value: "0", label: "All time" },
 ];
 
+/** Locale date + time for an ISO timestamp; "—" when empty. */
 const fmtTime = (iso) => {
   if (!iso) return "—";
   try { return new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }); } catch { return "—"; }
 };
 
+/** Round check / cross badge for a call's answered/unanswered status (PHONE_STATUSES colours);
+ * renders nothing for unknown statuses. */
 function StatusMark({ status }) {
   const st = PHONE_STATUSES[status];
   if (!st) return null;
@@ -47,6 +50,11 @@ function StatusMark({ status }) {
   );
 }
 
+/**
+ * Admin-only Phone logs page: summary tiles, status / assignment / date filters, a debounced
+ * search box and a paged table of every logged call in the tenant.
+ * Fetches GET /phone-verifications/logs whenever filters, search, page or Refresh change.
+ */
 export default function PhoneLogsPage() {
   const [filters, setFilters] = useState({ status: "", assignment: "", days: "7" });
   const [query, setQuery] = useState("");
@@ -57,6 +65,7 @@ export default function PhoneLogsPage() {
   const [error, setError] = useState("");
   const [reloadKey, setReloadKey] = useState(0);
 
+  /** Update one filter and jump back to page 1. */
   const setFilter = (key, value) => { setFilters((f) => ({ ...f, [key]: value })); setPage(1); };
 
   useEffect(() => {

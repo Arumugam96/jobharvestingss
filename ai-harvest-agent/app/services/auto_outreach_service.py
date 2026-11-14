@@ -226,6 +226,7 @@ async def _skip_reason(
     # One read for do-not-contact + already-contacted + duplicate-posting
     # + the per-recipient / per-company+location daily limits.
     async def _checks(db):
+        """Run the DB-backed eligibility checks in order; first failing verdict or "ok"."""
         if await _job_assigned(db, job_id):
             return "assigned"
         if await is_suppressed(db, email):
@@ -359,6 +360,11 @@ async def run_auto_outreach_after_harvest(
             pre_claimed: set[str] = set()
 
             async def _would_skip(target: dict) -> bool:
+                """Dry-run eligibility for the Resdex pre-pass; True = the send would skip it.
+
+                Eligible addresses are claimed into ``pre_claimed`` (never the real
+                ``claimed`` set) so later duplicates in the pre-pass also skip.
+                """
                 if target["contact_kind"] == "none":   # never emailed — nothing to check
                     return False
                 reason = await _skip_reason(
@@ -431,6 +437,13 @@ async def run_auto_outreach_after_harvest(
         sem = asyncio.Semaphore(_CONCURRENCY)
 
         async def _process(target: dict) -> None:
+            """Check, generate (LLM), send and log one outreach email, bounded by ``sem``.
+
+            Skips bump ``skipped_<reason>``; a send failure is logged as a "failed"
+            row rather than raised. On success it may link Resdex candidates, advance
+            the company+location rotation, and request an Apollo phone for a recruiter
+            contact, then sleeps _SEND_DELAY_SECONDS to throttle the relay.
+            """
             async with sem:
                 email = target["email"]
                 job_id = target["job_id"]
@@ -533,6 +546,7 @@ async def run_auto_outreach_after_harvest(
                 # db_write awaits the callback, so it must return an awaitable —
                 # wrap the synchronous db.add in an async fn. db_write commits.
                 async def _persist(db, _row=row):
+                    """Add the send-log row (db_write commits); returns its id."""
                     db.add(_row)
                     return _row.id
 

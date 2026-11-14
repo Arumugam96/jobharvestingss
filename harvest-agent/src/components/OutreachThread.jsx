@@ -23,6 +23,7 @@ const LinkedInGlyph = ({ size = 12 }) => (
   </svg>
 );
 
+/** Locale date + time ("—" when missing; the raw string if formatting throws). */
 function fmtDate(iso) {
   if (!iso) return "—";
   try {
@@ -32,6 +33,7 @@ function fmtDate(iso) {
   }
 }
 
+/** "LinkedIn" or "Email" channel pill for a thread message. */
 function ChannelChip({ channel }) {
   const isLi = channel === "linkedin";
   return (
@@ -41,6 +43,7 @@ function ChannelChip({ channel }) {
   );
 }
 
+/** "Follow-up" (amber) or "Initial" pill for an outbound message's `outreach_kind`. */
 function KindChip({ kind }) {
   const isFollow = kind === "followup";
   return (
@@ -59,6 +62,7 @@ function ReplyChip() {
   );
 }
 
+/** Purple marker for an inbound message flagged as an auto-reply (out-of-office etc.). */
 function AutoReplyChip() {
   return (
     <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, fontWeight: 700, color: "#9333EA", background: "#F3E8FF", borderRadius: 999, padding: "2px 9px 2px 7px" }}>
@@ -67,12 +71,18 @@ function AutoReplyChip() {
   );
 }
 
+/** Red "Failed" pill for an outbound message whose status isn't "sent". */
 function FailedChip() {
   return (
     <span style={{ fontSize: 11, fontWeight: 700, color: "#B91C1C", background: "#FEF2F2", borderRadius: 999, padding: "2px 8px" }}>Failed</span>
   );
 }
 
+/**
+ * Body of one thread message: From (inbound) or To (outbound) line, subject, then
+ * either the stored delivered HTML (`body_html`, with the cid: logo swapped for the
+ * public/ copy) or the plain-text body linkified.
+ */
 function MessageBody({ m }) {
   const inbound = m.direction === "inbound";
   return (
@@ -115,6 +125,17 @@ function MessageBody({ m }) {
   );
 }
 
+/**
+ * Read-only outreach thread (sent emails, follow-ups, LinkedIn notes and inbound
+ * replies), newest first; replies are indented. Presentational: the caller fetches
+ * the messages (GET /outreach/history) and passes them oldest-first.
+ * @param {object} props
+ * @param {object[]} props.messages Thread items, oldest first.
+ * @param {boolean} [props.loading] Show the loading line instead of the thread.
+ * @param {string} [props.emptyText] Shown when there are no messages.
+ * @param {boolean} [props.collapsible] Accordion cards, newest open by default.
+ * @param {boolean} [props.forceCollapsed] Closes (and disables) every card.
+ */
 export default function OutreachThread({
   messages = [],
   loading = false,

@@ -112,6 +112,10 @@ async def parse_job_description(
     body:   JobParseRequest,
     gemini: GeminiService = Depends(get_gemini),
 ) -> APIResponse[JobParseResponse]:
+    """Parse one raw job description with the LLM into structured fields.
+
+    502 when the model's reply can't be parsed, 503 on LLM errors (or no API key), 500 otherwise.
+    """
 
     log = logger.bind(input_chars=len(body.description))
     log.info("job_parse_requested")
@@ -156,6 +160,11 @@ async def parse_batch(
     body:   BatchParseRequest,
     gemini: GeminiService = Depends(get_gemini),
 ) -> APIResponse[BatchParseResponse]:
+    """Parse 1-10 job descriptions concurrently with the LLM.
+
+    Same error mapping as /parse (502 unparseable reply, 503 LLM error or no API key, 500
+    otherwise); one failing item fails the whole request.
+    """
 
     count = len(body.descriptions)
     log   = logger.bind(batch_size=count)

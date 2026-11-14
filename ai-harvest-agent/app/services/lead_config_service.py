@@ -79,6 +79,7 @@ class LeadConfigService:
             return _DEFAULTS.copy()
 
     def save(self, cfg: dict[str, Any]) -> None:
+        """Overwrite the lead config JSON file with ``cfg`` (no merge with defaults)."""
         _CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         _CONFIG_PATH.write_text(
             json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8",
@@ -86,4 +87,5 @@ class LeadConfigService:
         logger.info("lead_config_saved", path=str(_CONFIG_PATH))
 
     def get(self, key: str, default: Any = None) -> Any:
+        """Return one top-level key from the merged config; re-reads the file on every call."""
         return self.load().get(key, default)

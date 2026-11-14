@@ -45,14 +45,17 @@ def _norm(email: str | None) -> str:
 # ── Stateless unsubscribe token (HMAC of the email) ─────────────────────────────
 
 def _secret() -> bytes:
+    """HMAC key for unsubscribe tokens: the JWT secret, or "change-me" when unset."""
     return (get_settings().jwt_secret_key or "change-me").encode("utf-8")
 
 
 def _b64(raw: bytes) -> str:
+    """URL-safe base64 of ``raw`` with the "=" padding stripped."""
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 
 def _unb64(s: str) -> bytes:
+    """Inverse of _b64: re-pad and decode (raises on malformed input)."""
     return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
 
 

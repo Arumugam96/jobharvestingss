@@ -17,6 +17,7 @@ router = APIRouter(dependencies=[Depends(require_api_key)])
     summary="Get Celery task status",
 )
 async def get_task(task_id: str) -> APIResponse[Task]:
+    """Return the Celery status of `task_id`, with its result when ready or error when failed."""
     info = get_task_status(task_id)
     task = Task(
         task_id=task_id,
@@ -34,5 +35,6 @@ async def get_task(task_id: str) -> APIResponse[Task]:
     summary="Cancel a running task",
 )
 async def cancel_task(task_id: str) -> APIResponse[dict]:
+    """Revoke `task_id`, terminating it if running. A no-op when Celery is unavailable."""
     revoke_task(task_id, terminate=True)
     return APIResponse(data={"task_id": task_id, "cancelled": True})

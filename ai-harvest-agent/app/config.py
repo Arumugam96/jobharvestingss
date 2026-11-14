@@ -291,6 +291,7 @@ class Settings(BaseSettings):
 
     @property
     def resdex_source_list(self) -> list[str]:
+        """RESDEX_SOURCES split on commas, stripped, with empty entries dropped."""
         return [s.strip() for s in self.resdex_sources.split(",") if s.strip()]
     # Per-job detail pass (description HTML, employment type, work mode, industry,
     # company website, recruiter contact when Naukri shows one). Off ⇒ listing-only.
@@ -444,6 +445,10 @@ class Settings(BaseSettings):
     
     @property
     def cors_origins_list(self) -> list[str]:
+        """Allowed CORS origins from the comma-separated CORS_ORIGINS.
+
+        Blank entries are dropped, but kept entries are not stripped of surrounding spaces.
+        """
         return [o for o in self.cors_origins.split(",") if o.strip()]
 
     @property
@@ -500,10 +505,12 @@ class Settings(BaseSettings):
 
     @property
     def is_production(self) -> bool:
+        """True when APP_ENV is exactly "production"."""
         return self.app_env == "production"
 
     @property
     def is_development(self) -> bool:
+        """True when APP_ENV is exactly "development"."""
         return self.app_env == "development"
 
 

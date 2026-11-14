@@ -221,6 +221,10 @@ async def _go_to_next_page(page: Page) -> bool:
 # ── CLI entry point ───────────────────────────────────────────────────────────
 
 async def _main() -> None:
+    """CLI demo: search 3 pages for the argv keywords, print a table, write a JSON file.
+
+    Writes linkedin_jobs_results.json into the current working directory.
+    """
     import sys
 
     keywords = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else "Contract Java Developer"

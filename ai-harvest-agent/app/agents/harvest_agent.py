@@ -34,6 +34,7 @@ class HarvestAgent(BaseAgent):
         playwright_service: PlaywrightService,
         config: AgentConfig | None = None,
     ) -> None:
+        """Set up the base agent plus the current page snapshot and the extract_data accumulator."""
         super().__init__(llm_service, playwright_service, config)
         self._current_snapshot: PageSnapshot | None = None
         self._collected: list[dict[str, Any]] = []
@@ -121,6 +122,13 @@ class HarvestAgent(BaseAgent):
     async def _dispatch_tool(
         self, tool_name: str, tool_input: dict[str, Any]
     ) -> str:
+        """Execute one Claude tool call against the browser and return the observation text.
+
+        navigate/click/scroll/fill_form update the current snapshot via PlaywrightService;
+        extract_data runs an LLM JSON extraction over the page text and appends it to the
+        collected results. Never raises: unknown tools, a missing page and any exception
+        come back as an error string so the agent loop can continue.
+        """
         try:
             if tool_name == "navigate":
                 url = tool_input["url"]
@@ -179,6 +187,7 @@ class HarvestAgent(BaseAgent):
 
     @staticmethod
     def _snapshot_summary(snap: PageSnapshot) -> str:
+        """Render a short text summary of a page (URL, title, text preview, 5 links, form count)."""
         links_preview = "; ".join(
             f"{l['text'][:30]} → {l['href'][:60]}" for l in snap.links[:5]
         )

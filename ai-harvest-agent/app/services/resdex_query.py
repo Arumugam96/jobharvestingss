@@ -63,6 +63,7 @@ class TextMatcher:
     equal the concatenation of a contiguous run of the text's tokens."""
 
     def __init__(self, *texts: Any) -> None:
+        """Tokenize all ``texts`` (strings or lists of them; None skipped) once."""
         parts: list[str] = []
         for t in texts:
             if isinstance(t, (list, tuple, set)):
@@ -73,6 +74,8 @@ class TextMatcher:
         self._compact = "".join(self._tokens)
 
     def contains(self, term: str | None) -> bool:
+        """True when ``term``'s key equals a contiguous run of the text's tokens
+        ("spring boot" matches "Spring-Boot", but "java" does not match "javascript")."""
         needle = term_key(term)
         if not needle or needle not in self._compact:
             return False
@@ -98,6 +101,8 @@ def _clean_term(term: Any) -> str:
 
 
 def _dedup_terms(terms: Iterable[Any]) -> list[str]:
+    """Cleaned terms in order, dropping empties / punctuation-only ones and repeats
+    by spelling_key (so distinct spellings like "SpringBoot" vs "Spring Boot" stay)."""
     out: list[str] = []
     seen: set[str] = set()
     for t in terms:
@@ -110,6 +115,7 @@ def _dedup_terms(terms: Iterable[Any]) -> list[str]:
 
 
 def _or_group(terms: list[str]) -> str:
+    """``("a" OR "b")`` for the given terms; "" for an empty list."""
     return "(" + " OR ".join(f'"{t}"' for t in terms) + ")" if terms else ""
 
 
@@ -128,6 +134,7 @@ def _sorted_mandatory(req: dict) -> list[Any]:
     items = list(req.get("mandatory_skills") or [])
 
     def _prio(pair: tuple[int, Any]) -> tuple[int, int]:
+        """Sort key: explicit int priority, else after all prioritised skills by index."""
         idx, s = pair
         p = s.get("priority") if isinstance(s, dict) else None
         return (p if isinstance(p, int) and not isinstance(p, bool) else 10_000 + idx, idx)
@@ -140,6 +147,9 @@ class _QueryParts:
     order and re-render; rendering is the only place syntax is produced."""
 
     def __init__(self, req: dict, tier: int) -> None:
+        """Build the groups for ``tier``: T1 = every mandatory skill AND the titles;
+        T2/T3 drop the lowest-priority mandatory (when >1) and OR optional skills
+        into the title group. Optional terms already used as titles/skills are dropped."""
         groups = [g for g in (_skill_terms(s) for s in _sorted_mandatory(req)) if g]
         self.merged = tier >= 2
         if self.merged and len(groups) > 1:
@@ -159,6 +169,10 @@ class _QueryParts:
         self.exclude: list[str] = _dedup_terms(req.get("exclude_terms") or [])
 
     def render(self) -> str:
+        """The Boolean query string: AND of the OR-groups, then ``NOT (excludes)``.
+
+        "" when there is nothing to search; excludes are never rendered alone.
+        """
         clauses = [_or_group(g) for g in self.mandatory]
         second = self.titles + self.optional if self.merged else self.titles
         if second:
@@ -170,12 +184,14 @@ class _QueryParts:
 
     # Trimming steps, in the order they are tried (each removes one piece).
     def _pop_optional(self) -> bool:
+        """Drop the last optional skill; False when none are left."""
         if self.optional:
             self.optional.pop()
             return True
         return False
 
     def _pop_variant(self) -> bool:
+        """Drop one variant from the lowest-priority skill group that has >1 term."""
         for g in reversed(self.mandatory):            # lowest priority first
             if len(g) > 1:
                 g.pop()
@@ -183,30 +199,36 @@ class _QueryParts:
         return False
 
     def _pop_extra_title(self) -> bool:
+        """Drop the last title while more than one remains."""
         if len(self.titles) > 1:
             self.titles.pop()
             return True
         return False
 
     def _pop_exclude(self) -> bool:
+        """Drop the last exclusion term; False when none are left."""
         if self.exclude:
             self.exclude.pop()
             return True
         return False
 
     def _pop_last_title(self) -> bool:
+        """Drop a remaining title, only while a mandatory group keeps the query non-empty."""
         if self.titles and self.mandatory:            # never leave the query empty
             self.titles.pop()
             return True
         return False
 
     def _pop_mandatory(self) -> bool:
+        """Drop the lowest-priority mandatory group, always keeping at least one."""
         if len(self.mandatory) > 1:
             self.mandatory.pop()
             return True
         return False
 
     def trimmers(self) -> list[Callable[[], bool]]:
+        """The trimming steps in the order build_boolean_query tries them; each
+        removes one piece and returns True, or False when it has nothing to drop."""
         return [
             self._pop_optional, self._pop_variant, self._pop_extra_title,
             self._pop_exclude, self._pop_last_title, self._pop_mandatory,
@@ -246,6 +268,7 @@ def build_boolean_query(req: dict, tier: int, max_len: int = DEFAULT_MAX_QUERY_L
 # ── Filters ───────────────────────────────────────────────────────────────────
 
 def _int_or_none(v: Any) -> int | None:
+    """``int(v)`` for an int/float (truncated); None for bools and anything else."""
     if isinstance(v, bool):
         return None
     if isinstance(v, (int, float)):

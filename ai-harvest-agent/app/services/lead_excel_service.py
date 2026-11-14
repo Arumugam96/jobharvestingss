@@ -148,6 +148,11 @@ class LeadExcelService:
         self, ws: object, result: "LeadIntelligenceResult",
         Font: object, PatternFill: object, Alignment: object,
     ) -> None:
+        """Write the merged title banner (row 1) and run-summary label/value rows (rows 2-8).
+
+        The ``Font`` / ``PatternFill`` / ``Alignment`` parameters are unused; the styles are
+        re-imported from openpyxl inside the method.
+        """
         from openpyxl.styles import Font as _Font, PatternFill as _Fill, Alignment as _Align
 
         title_font   = _Font(bold=True, size=13, color="FFFFFF")

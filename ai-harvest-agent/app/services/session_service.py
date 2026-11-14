@@ -23,6 +23,7 @@ logger = structlog.get_logger(__name__)
 
 
 def _aware_utc(dt: datetime) -> datetime:
+    """``dt`` unchanged if timezone-aware, else tagged as UTC."""
     # Datetimes read back through SQLite come back naive though we always wrote
     # UTC; normalize so comparisons against datetime.now(timezone.utc) never raise.
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
@@ -30,6 +31,7 @@ def _aware_utc(dt: datetime) -> datetime:
 
 class SessionService:
     def __init__(self, db: AsyncSession, settings: Settings) -> None:
+        """Bind to the caller's DB session (the caller commits) and auth settings."""
         self._db = db
         self._settings = settings
 

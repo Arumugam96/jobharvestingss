@@ -86,6 +86,7 @@ class ApolloAPIError(HarvestException):
     expose_details = False
 
     def __init__(self, message: str, details: dict[str, Any] | None = None) -> None:
+        """502 ENRICHMENT_API_ERROR; ``details`` is kept for logs, never sent to clients."""
         super().__init__(
             message=message,
             code="ENRICHMENT_API_ERROR",
@@ -122,6 +123,11 @@ class ApolloOrgResult(BaseModel):
 
     @classmethod
     def from_dict(cls, org: dict[str, Any] | None) -> "ApolloOrgResult | None":
+        """Build from an Apollo organization dict; None when ``org`` is empty or missing.
+
+        Falls back across Apollo's alternate keys (``primary_domain``/``domain``,
+        ``city``/``organization_city``, ...) since the two endpoints name them differently.
+        """
         if not org:
             return None
         return cls(
@@ -163,10 +169,16 @@ class ApolloPersonResult(BaseModel):
 
     @classmethod
     def no_match(cls) -> "ApolloPersonResult":
+        """The empty result for Apollo's 200-with-no-person response."""
         return cls(matched=False)
 
     @classmethod
     def from_person(cls, person: dict[str, Any] | None) -> "ApolloPersonResult":
+        """Normalize an Apollo person dict into a matched result (no_match() if empty).
+
+        Locked-email sentinels are dropped, the name falls back to first + last, and
+        ``phone_requested`` is left False here (the caller sets it after a reveal request).
+        """
         if not person:
             return cls.no_match()
         primary = _clean_email(person.get("email"))
@@ -190,10 +202,12 @@ class ApolloPersonResult(BaseModel):
 
     @property
     def has_email(self) -> bool:
+        """True when a primary (unlocked) email was revealed; ignores secondary_email."""
         return bool(self.email)
 
     @property
     def has_phone(self) -> bool:
+        """True when a phone came back synchronously (webhook-delivered phones don't count)."""
         return bool(self.phone)
 
 
@@ -247,6 +261,11 @@ class ApolloClient:
     """Async wrapper around Apollo's people-match REST API."""
 
     def __init__(self, settings: Settings, *, purpose: str = "enrichment") -> None:
+        """Capture API key, base URL, timeout and phone-webhook config from settings.
+
+        ``purpose`` selects which daily budget credits count toward: "enrichment"
+        (global cap plus the enrichment sub-cap) or "finder" (global cap only).
+        """
         self._settings = settings
         # Which daily budget this client's credits count toward: "enrichment"
         # (harvest/maintenance contact enrichment — also gated by the enrichment
@@ -264,6 +283,7 @@ class ApolloClient:
 
     @property
     def enabled(self) -> bool:
+        """True when an Apollo API key is configured; without one no calls are made."""
         return bool(self._api_key)
 
     @property
@@ -666,6 +686,12 @@ class ApolloClient:
         params: dict[str, Any] | None = None,
         json: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        """POST to an Apollo endpoint and return the parsed JSON body (one tenacity attempt).
+
+        429 / 5xx / connect or timeout errors raise _ApolloRetryable, so the decorator
+        retries up to 3 attempts with backoff. Other 4xx and non-JSON bodies raise
+        ApolloAPIError immediately. Does not check or record credit budgets.
+        """
         url = f"{self._base_url}{path}"
         headers = {
             "X-Api-Key": self._api_key,
@@ -708,6 +734,7 @@ class ApolloClient:
         params: dict[str, Any] | None = None,
         json: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        """Retrying POST; a transient failure that outlives the retries becomes ApolloAPIError."""
         try:
             return await self._request_once(path, params=params, json=json)
         except _ApolloRetryable as exc:
@@ -716,6 +743,7 @@ class ApolloClient:
             raise ApolloAPIError(_MSG_UNAVAILABLE) from exc
 
     def _log_result(self, endpoint: str, linkedin_url: str, result: ApolloPersonResult) -> None:
+        """Log a match outcome: no match, contact revealed (credits used), or match w/o contact."""
         if not result.matched:
             logger.info("apollo_no_match", endpoint=endpoint, linkedin_url=linkedin_url,
                         person_id=result.id)
@@ -785,5 +813,6 @@ def _strip_phone(payload: dict[str, Any] | None) -> dict[str, Any] | None:
 
 
 def _bool(v: bool) -> str:
+    """Render a bool as Apollo's query-param form, "true" or "false"."""
     # Apollo expects lowercase string booleans in query params.
     return "true" if v else "false"

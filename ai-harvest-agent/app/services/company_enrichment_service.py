@@ -139,6 +139,7 @@ async def resolve_apollo_org(
     purpose = getattr(client, "purpose", "enrichment")
 
     async def _budget_left() -> bool:
+        """True if the client's purpose budget has headroom (None = unlimited / DB error)."""
         remaining = await apollo_budget.remaining_today(purpose=purpose)
         return remaining is None or remaining > 0
 

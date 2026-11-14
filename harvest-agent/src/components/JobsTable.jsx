@@ -80,6 +80,23 @@ const DEFAULT_DISPLAY_PAGE_SIZE = 100;
 
 const NO_OUTREACH_TITLE = "No outreach for Demand Search jobs";
 
+/**
+ * The harvested-jobs table: filter bar (source, company, size, locations, job, contact,
+ * POC, free-text search), sortable columns, pagination, and per-row actions —
+ * self-assign, outreach email / LinkedIn message modals, and phone-call verification.
+ * Fetches outreach state (GET /outreach/status) and latest phone calls
+ * (GET /phone-verifications/latest) for just the visible rows.
+ *
+ * Two modes: client mode filters/sorts/pages `jobs` in memory (e.g. a run's results);
+ * `serverMode` treats `jobs` as one server page and emits GET /jobs query params via
+ * `onParamsChange`, taking dropdown options from `facets` and counts from
+ * `serverTotal`. With `urlState`, filter/search/sort/page are mirrored to the URL.
+ * @param {object} props
+ * @param {object[]} props.jobs Rows to show (the current page in server mode).
+ * @param {(job: object) => void} props.onView Opens a job's detail view.
+ * @param {((job: object) => boolean)|null} [props.preFilter] Extra client-side filter.
+ * @param {(rows: object[]) => void} [props.onFilteredChange] Receives the filtered rows.
+ */
 export default function JobsTable({
   jobs,
   onView,

@@ -265,11 +265,13 @@ class _Stealth:
 
     @staticmethod
     async def apply(context: BrowserContext) -> None:
+        """Register every stealth init script on the context so each new page gets them."""
         for script in _Stealth.INIT_SCRIPTS:
             await context.add_init_script(script)
 
     @staticmethod
     def launch_args() -> list[str]:
+        """Chromium launch flags that hide automation and keep background tabs from throttling."""
         return [
             "--disable-blink-features=AutomationControlled",
             "--no-sandbox",
@@ -283,6 +285,10 @@ class _Stealth:
 
     @staticmethod
     def context_kwargs(headless: bool) -> dict:
+        """Fixed context settings: 1366x900 viewport, a Chrome 124 UA, en-US, Europe/London.
+
+        `headless` is accepted but currently unused.
+        """
         return dict(
             viewport    = {"width": 1366, "height": 900},
             user_agent  = (
@@ -308,6 +314,7 @@ def _jitter(base_ms: int, pct: float = 0.20) -> int:
 
 
 async def _wait(page: Page, base_ms: int, pct: float = 0.20) -> None:
+    """Wait `base_ms` plus or minus `pct` jitter on the page."""
     await page.wait_for_timeout(_jitter(base_ms, pct))
 
 
@@ -351,6 +358,7 @@ class _Overlay:
 
     @staticmethod
     async def dismiss_all(page: Page) -> None:
+        """Dismiss the cookie banner and sign-in prompt, then Escape any modal still shown."""
         await _Overlay._try_click(page, _Sel.COOKIE_ACCEPT, label="cookie")
         await _Overlay._try_click(page, _Sel.SIGNIN_DISMISS, label="signin_dismiss")
         # If modal is still visible, try pressing Escape
@@ -365,6 +373,7 @@ class _Overlay:
 
     @staticmethod
     async def _try_click(page: Page, selectors: list[str], label: str) -> None:
+        """Click the first visible element among `selectors` and pause; errors are ignored."""
         for sel in selectors:
             try:
                 loc = page.locator(sel).first
@@ -395,6 +404,10 @@ class _Scroll:
 
     @staticmethod
     async def load_all_cards(page: Page, pause_ms: int = 400) -> None:
+        """Scroll the results container down until its height stops growing (max 30 rounds).
+
+        Falls back to scrolling the window when no container is found.
+        """
         container = await _Scroll._find_container(page)
         if container is None:
             # Fallback: scroll the window body
@@ -418,6 +431,7 @@ class _Scroll:
 
     @staticmethod
     async def _find_container(page: Page) -> ElementHandle | None:
+        """First matching results-list container element, or None."""
         for sel in _Sel.RESULT_CONTAINER:
             try:
                 el = await page.query_selector(sel)
@@ -429,6 +443,7 @@ class _Scroll:
 
     @staticmethod
     async def _scroll_window(page: Page, pause_ms: int) -> None:
+        """Scroll the window to the bottom until the body height stops growing (max 20 rounds)."""
         prev_height = -1
         for _ in range(20):
             height = await page.evaluate("document.body.scrollHeight")
@@ -451,6 +466,7 @@ _MULTI_SPACE   = re.compile(r"[ \t]{2,}")
 
 
 def _clean(text: str) -> str:
+    """Replace NBSP/zero-width junk, cap blank-line runs at one, collapse spaces, and strip."""
     text = _UNICODE_JUNK.sub(" ", text)
     text = _MULTI_NEWLINE.sub("\n\n", text)
     text = _MULTI_SPACE.sub(" ", text)
@@ -541,6 +557,7 @@ class _SearchPage:
     """
 
     def __init__(self, page: Page, slow_mo: int = 0) -> None:
+        """Wrap a page already showing search results; `slow_mo` adds extra ms to page waits."""
         self._page    = page
         self._slow_mo = slow_mo     # extra pause (ms) added on top of jitter
 
@@ -623,6 +640,7 @@ class _DescriptionPage:
     _MAX_CHARS = 20_000    # cap description at 20 KB
 
     def __init__(self, page: Page, screenshot_dir: Path | None = None) -> None:
+        """Wrap a detail-fetch page; failures screenshot to `screenshot_dir` when set."""
         self._page           = page
         self._screenshot_dir = screenshot_dir
 
@@ -716,6 +734,10 @@ class _DescriptionPage:
                 continue
 
     async def _maybe_screenshot(self, url: str) -> None:
+        """Save a full-page failed_<job id>.png to the screenshot dir, if one is configured.
+
+        Errors are swallowed.
+        """
         if self._screenshot_dir is None:
             return
         try:
@@ -747,6 +769,7 @@ class _PagePool:
     """
 
     def __init__(self, context: BrowserContext, size: int) -> None:
+        """Create an empty pool; at most `size` pages are borrowed at once, opened lazily."""
         self._context = context
         self._sem     = asyncio.Semaphore(size)
         self._pages:  list[Page] = []
@@ -754,6 +777,10 @@ class _PagePool:
         self._crashed: set[Page] = set()
 
     async def _get_page(self) -> Page:
+        """Pop a reusable idle page (closing crashed/closed ones) or open a new one.
+
+        New pages get a crash listener so a crashed page is never handed out again.
+        """
         async with self._lock:
             while self._pages:
                 page = self._pages.pop()
@@ -770,6 +797,7 @@ class _PagePool:
             return page
 
     def _return_page(self, page: Page) -> None:
+        """Put a page back for reuse unless it crashed or was closed."""
         if page in self._crashed or page.is_closed():
             self._crashed.discard(page)
             return
@@ -786,6 +814,10 @@ class _PagePool:
                 self._return_page(page)
 
     async def close_all(self) -> None:
+        """Close every idle pooled page (errors ignored) and forget crash state.
+
+        Pages still borrowed are not closed here; they go with the context.
+        """
         for page in self._pages:
             try:
                 await page.close()
@@ -849,6 +881,7 @@ class LinkedInScraper:
         screenshot_on_error: bool                      = False,
         on_card_scraped:     ProgressCallback | None   = None,
     ) -> None:
+        """Store the config and options; the browser starts in __aenter__."""
         self._config    = config
         self._ss_errors = screenshot_on_error
         self._on_card   = on_card_scraped
@@ -861,6 +894,10 @@ class LinkedInScraper:
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     async def __aenter__(self) -> "LinkedInScraper":
+        """Launch Chromium, open a stealth-patched context and create the description page pool.
+
+        Creates a temp screenshot directory first when `screenshot_on_error` is set.
+        """
         if self._ss_errors:
             self._ss_dir = Path(tempfile.mkdtemp(prefix="linkedin_scraper_"))
 
@@ -893,6 +930,7 @@ class LinkedInScraper:
         return self
 
     async def __aexit__(self, *_) -> None:
+        """Close the page pool, context, browser and Playwright driver."""
         if self._pool:
             await self._pool.close_all()
         if self._context:
@@ -1025,6 +1063,11 @@ class LinkedInScraper:
         sem = asyncio.Semaphore(concurrency)
 
         async def _fetch_one(card: LinkedInJobCard) -> tuple[LinkedInJobCard, str | None]:
+            """Fetch one card's detail page under the concurrency semaphore; None without a URL.
+
+            Note: fetch_description returns a (description, contact) tuple, and that tuple is what
+            gets paired with the card here, despite the `str | None` annotation.
+            """
             async with sem:
                 desc = await self.fetch_description(card.job_url) if card.job_url else None
                 return card, desc
@@ -1070,6 +1113,7 @@ async def _cli() -> None:
     scraped_count = 0
 
     async def _on_card(idx: int, card: LinkedInJobCard) -> None:
+        """Progress callback: print one table row per scraped card and track the latest index."""
         nonlocal scraped_count
         scraped_count = idx
         print(f"  [{idx:>3}] {card.job_title[:40]:<40}  {card.company[:25]:<25}  {card.location[:20]}")

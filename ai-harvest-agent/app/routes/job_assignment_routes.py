@@ -42,6 +42,11 @@ async def assign_job_to_me(
     current_user: AuthenticatedUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
 ) -> dict:
+    """Claim the job for the current user, optionally with a note shown beside the assignment.
+
+    Calling it again on a job you already hold just updates the note. Returns
+    `{"job_id", "assigned_to"}`; 404 if the job does not exist, 409 if someone else holds it.
+    """
     job = await assign_job(db, job_id, current_user, body.note)
     logger.info("job_assigned", job_id=job_id, user=current_user.email)
     return {"job_id": job_id, "assigned_to": assignment_view(job)}
@@ -58,6 +63,11 @@ async def unassign_job_route(
     current_user: AuthenticatedUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
 ) -> dict:
+    """Release the job from the current user.
+
+    Releasing an unassigned job is a no-op that still returns 200. Returns
+    `{"job_id", "assigned_to": null}`; 404 if the job does not exist, 403 if another user holds it.
+    """
     job = await unassign_job(db, job_id, current_user)
     logger.info("job_unassigned", job_id=job_id, user=current_user.email)
     return {"job_id": job_id, "assigned_to": assignment_view(job)}

@@ -124,6 +124,10 @@ class LogLinkedinRequest(BaseModel):
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 async def _load_job_view(db: AsyncSession, job_id: str, user: AuthenticatedUser) -> dict:
+    """Load a scraped job as its public view dict, plus the ORM-only `_recruiter_id`.
+
+    Raises 404 if the job does not exist and 403 if another user has assigned it to themselves.
+    """
     job = await HarvestRunService(db).get_scraped_job_by_id(job_id)
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Job {job_id} not found")

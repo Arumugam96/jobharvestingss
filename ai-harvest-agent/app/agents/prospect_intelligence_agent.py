@@ -265,6 +265,7 @@ def _load_prospects(xlsx_path: str) -> list[ProspectRecord]:
         return []
 
     def _find_col(*kws: str) -> int:
+        """Index of the first header containing any keyword (tried in priority order), else -1."""
         for kw in kws:
             for i, h in enumerate(header):
                 if kw in h:
@@ -280,6 +281,7 @@ def _load_prospects(xlsx_path: str) -> list[ProspectRecord]:
         return []
 
     def _cell(row: tuple, col: int) -> str:
+        """Stripped cell text for col, or "" when out of range, empty, "none", "n/a" or "-"."""
         if col < 0 or col >= len(row) or row[col] is None:
             return ""
         val = str(row[col]).strip()
@@ -327,6 +329,7 @@ def _infer_company_domain(company_name: str) -> tuple[str, str]:
 
 
 def _infer_department(designation: str, headline: str = "") -> str:
+    """Map designation + headline keywords to a department via _DEPT_MAP ("" if none match)."""
     text = (designation + " " + headline).lower()
     for keywords, dept in _DEPT_MAP:
         if any(kw in text for kw in keywords):
@@ -455,6 +458,7 @@ async def _extract_linkedin_profile_metadata(page: Any) -> dict:
 
 
 def _normalize_name(name: str) -> str:
+    """Lower-case, trim and collapse internal whitespace for name/company comparisons."""
     return re.sub(r"\s+", " ", name.strip().lower())
 
 
@@ -538,6 +542,10 @@ def _extract_email_from_text(text: str, company_domain: str = "") -> str:
 
 
 def _extract_phone_from_text(text: str) -> str:
+    """Return the first Indian/international phone number in text with whitespace removed.
+
+    Returns "" when no match. Only numbers literally present in the text are returned.
+    """
     m = _PHONE_RE.search(text)
     return re.sub(r'\s+', '', m.group(0)) if m else ""
 
@@ -545,6 +553,7 @@ def _extract_phone_from_text(text: str) -> str:
 # ── Persistence ────────────────────────────────────────────────────────────────
 
 def _save_intermediate(results: list[ProspectResult], batch_num: int, run_id: str) -> None:
+    """Checkpoint all results so far to <run_id>_batch_NNN.json; write errors are only logged."""
     try:
         _INTERMEDIATE_DIR.mkdir(parents=True, exist_ok=True)
         path = _INTERMEDIATE_DIR / f"{run_id}_batch_{batch_num:03d}.json"
@@ -560,6 +569,10 @@ def _save_intermediate(results: list[ProspectResult], batch_num: int, run_id: st
 
 
 def _save_final_json(results: list[ProspectResult], run_id: str) -> str:
+    """Write confidence/contact counts plus every result to <run_id>_lead_intelligence.json.
+
+    Returns the absolute path of the written file.
+    """
     _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     path    = _OUTPUT_DIR / f"{run_id}_lead_intelligence.json"
     payload = {
@@ -617,6 +630,7 @@ def _save_debug_json(results: list[ProspectResult], run_id: str) -> str:
 
 
 def _save_summary(run_id: str, result: "ProspectIntelligenceResult") -> None:
+    """Overwrite lead_intelligence_summary.json with this run's summary (errors only logged)."""
     try:
         _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         path = _OUTPUT_DIR / "lead_intelligence_summary.json"
@@ -1075,6 +1089,10 @@ class ProspectIntelligenceAgent:
     """
 
     def __init__(self, concurrency: int = _DEFAULT_CONCURRENCY) -> None:
+        """Set up a strictly sequential enricher; the requested concurrency is ignored (always 1).
+
+        Also reads the min/max human-like delay between profile visits from settings.
+        """
         # Force SEQUENTIAL profile visits regardless of the requested value —
         # parallel /in/ opens are a strong bot signal. The `concurrency` param is
         # kept for backward compatibility but is always clamped to 1.
@@ -1100,6 +1118,14 @@ class ProspectIntelligenceAgent:
         return self._llm_service
 
     async def run(self, xlsx_path: str) -> ProspectIntelligenceResult:
+        """Enrich every prospect in the Excel file with publicly scraped contact details.
+
+        Profiles are visited one at a time in the persistent Chrome profile, with a random
+        human-like pause between visits. Intermediate JSON is saved per batch; at the end the
+        final JSON, debug JSON, Excel report and summary file are written. Returns an empty
+        result when the sheet has no prospects; a missing file raises FileNotFoundError.
+        Per-prospect failures become Low-confidence NOT_FOUND results.
+        """
         started_at = datetime.now(timezone.utc)
         run_id     = started_at.strftime("%Y%m%d_%H%M%S")
 
@@ -1127,6 +1153,11 @@ class ProspectIntelligenceAgent:
         sem    = asyncio.Semaphore(self._concurrency)
 
         async def _enrich_one(prospect: ProspectRecord) -> ProspectResult:
+            """Enrich one prospect in a fresh tab, then close it and sleep the anti-detection gap.
+
+            The gap is taken while still holding the semaphore so the next visit waits for it.
+            Errors are logged and turned into a Low-confidence NOT_FOUND result, never raised.
+            """
             async with sem:
                 page = await pbm.new_page()
                 try:

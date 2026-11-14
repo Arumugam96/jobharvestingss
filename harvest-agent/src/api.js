@@ -5,6 +5,11 @@ import { getDevTenant } from "./devTenant";
 const API_BASE = process.env.REACT_APP_API_BASE_URL ?? "http://localhost:8000";
 
 class ApiError extends Error {
+  /**
+   * @param {string} message human-readable error (from the response body when present)
+   * @param {number} status HTTP status code
+   * @param {*} body parsed JSON response body, or null
+   */
   constructor(message, status, body) {
     super(message);
     this.status = status;
@@ -12,6 +17,13 @@ class ApiError extends Error {
   }
 }
 
+/**
+ * fetch() wrapper used by every API call: prefixes API_BASE, sends the session
+ * cookie and the X-Dev-Tenant header, and parses the JSON body.
+ * A 401 outside /auth/* also dispatches the window "auth:logout" event.
+ * @returns {Promise<*>} the parsed JSON body (null when the response had none)
+ * @throws {ApiError} on any non-2xx response
+ */
 async function request(path, options = {}) {
   const res = await fetch(`${API_BASE}${path}`, {
     // Send the HttpOnly session cookie on every call — this is how the browser

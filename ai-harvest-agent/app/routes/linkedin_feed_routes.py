@@ -50,6 +50,7 @@ _SETUP_HINT = (
 
 
 def _make_run_id() -> str:
+    """Build a Home-Feed run id: UTC timestamp + "_feed"."""
     return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S") + "_feed"
 
 
@@ -66,6 +67,13 @@ async def _run_feed_background(job_id: str, run_id: str, run_pk: str | None) -> 
 
 
 async def _run_feed_background_impl(job_id: str, run_id: str, run_pk: str | None) -> None:
+    """Harvest the LinkedIn Home Feed and record progress/results in JobTracker and the DB.
+
+    Leads are inserted batch by batch as they are found; at the end the run's job set is replaced
+    with the final list and the LLM call log stored. Ends the run as "success", "no_results" or
+    "stopped" (stop requested), "action_required" when the LinkedIn session is not logged in, or
+    "failed" (LLM unavailable / any other error). Never raises; DB writes are best-effort.
+    """
     log = logger.bind(job_id=job_id, run_id=run_id, source=_SOURCE)
     log.info("linkedin_feed_background_start")
 
@@ -84,15 +92,23 @@ async def _run_feed_background_impl(job_id: str, run_id: str, run_pk: str | None
     saved = {"n": 0}
 
     async def _do_write(coro) -> None:
+        """Await a DB write coroutine on the main loop (whose asyncpg pool it needs) when running in
+        the proactor worker thread; otherwise await it directly.
+        """
         if needs_proactor():
             await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(coro, main_loop))
         else:
             await coro
 
     async def _on_status(msg: str) -> None:
+        """Mirror an agent status message into the JobTracker entry."""
         JobTracker.update(job_id, message=msg)
 
     async def _on_batch(leads: list) -> None:
+        """Persist one batch of leads and bump the live saved-count / progress message.
+
+        No-op when there is no run row or the batch is empty.
+        """
         if not run_pk or not leads:
             return
         dicts = [lead.to_scraped_job_dict() for lead in leads]
@@ -103,6 +119,7 @@ async def _run_feed_background_impl(job_id: str, run_id: str, run_pk: str | None
         await _do_write(db_write(lambda db: HarvestRunService(db).update_run(run_pk, combined_count=n)))
 
     async def _do_harvest():
+        """Run the feed agent; returns (leads, token usage, LLM call log)."""
         leads = await agent.harvest(
             headless=headless, slow_mo=slow_mo, on_status=_on_status, on_batch=_on_batch,
         )

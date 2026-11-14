@@ -34,6 +34,7 @@ logger = structlog.get_logger(__name__)
 
 
 def _utc_today():
+    """Today's date in UTC — the key of the per-tenant daily usage row."""
     return datetime.now(timezone.utc).date()
 
 
@@ -108,6 +109,7 @@ async def charge(cost: int, tenant_id: str) -> bool:
 
 
 def _resolve_cap(cap: int | None) -> int:
+    """``cap`` if given, else ``settings.recruiter_finder_daily_cap`` (<= 0 = unlimited)."""
     return get_settings().recruiter_finder_daily_cap if cap is None else cap
 
 

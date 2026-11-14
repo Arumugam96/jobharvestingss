@@ -22,6 +22,7 @@ class DiceAgent:
     """
 
     def __init__(self) -> None:
+        """No per-instance setup; the Chrome profile path is resolved on each harvest() call."""
         pass
 
     # ── Public API ─────────────────────────────────────────────────────────────

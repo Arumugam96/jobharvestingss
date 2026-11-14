@@ -58,6 +58,7 @@ _ORG_CAP_MSG = "Daily enrichment credit limit reached — try again tomorrow."
 
 
 def _now():
+    """Current time as a timezone-aware UTC datetime."""
     return datetime.now(timezone.utc)
 
 
@@ -75,6 +76,7 @@ def _reveal_flags(reveal: str) -> tuple[bool, bool, int]:
 
 
 def _confidence(email_status: str, has_email: bool, has_phone: bool) -> str:
+    """High for a verified/valid email, Medium for any email or phone, else Low."""
     if (email_status or "").lower() in ("verified", "valid"):
         return "High"
     if has_email or has_phone:
@@ -83,6 +85,9 @@ def _confidence(email_status: str, has_email: bool, has_phone: bool) -> str:
 
 
 def _recruiter_email_status(outcome: dict) -> str:
+    """Email status stored on `recruiters`: VERIFIED for a verified/valid email, PUBLIC for
+    any other email, NOT_FOUND when there is none.
+    """
     if not outcome.get("email"):
         return "NOT_FOUND"
     return "VERIFIED" if (outcome.get("email_status") or "").lower() in ("verified", "valid") else "PUBLIC"
@@ -98,10 +103,12 @@ def _recruiter_phone_status(outcome: dict) -> str:
 
 
 def _log_phone_status(outcome: dict) -> str:
+    """Phone status for the reveal log: the outcome's own status, else PUBLIC/NOT_FOUND."""
     return outcome.get("phone_status") or ("PUBLIC" if outcome.get("phone") else "NOT_FOUND")
 
 
 def _blank_outcome(status: str, **extra) -> dict:
+    """Outcome dict with ``status`` and every contact field empty; ``extra`` overrides keys."""
     out = {
         "status": status, "contact_name": "", "contact_title": "", "email": "",
         "email_status": "", "phone": "", "phone_status": "", "confidence": "", "company_domain": "",
@@ -115,6 +122,12 @@ def _completed_outcome(
     match, person, org, *, want_email: bool = True, phone_status: str = "", phone_ref: str = "",
 ) -> dict:
     # A phone-only reveal never surfaces (or bills) an email Apollo may have returned anyway.
+    """Build the ``completed`` outcome dict from an Apollo match plus person/org context.
+
+    The email (and secondary email) is dropped unless ``want_email``, so a phone-only
+    reveal never surfaces or bills one. ``email_charged`` is True when an email is kept.
+    Also carries the internal ``phone_ref`` and the richer fields used by the reveal log.
+    """
     email = (match.email or "") if (match and want_email) else ""
     phone = (match.phone or "") if match else ""
     email_status = (match.email_status or "") if (match and email) else ""
@@ -168,6 +181,7 @@ class _PhoneCtx:
         self, *, want_email: bool, want_phone: bool, tenant: str, cap: int | None,
         requested_by: str | None = None, job_id: str | None = None,
     ) -> None:
+        """Capture the reveal choice, tenant/cap and owner; reads whether phones are enabled."""
         self.want_email = want_email
         self.want_phone = want_phone
         self.tenant = tenant
@@ -179,6 +193,7 @@ class _PhoneCtx:
 
     @property
     def phone_only_unavailable(self) -> bool:
+        """True for a phone-only reveal when phone delivery (the webhook) isn't configured."""
         return self.want_phone and not self.want_email and not self.enabled
 
     async def begin(self, *, person_id: str | None = None, item_id: str | None = None) -> tuple[str, str]:
@@ -199,12 +214,18 @@ class _PhoneCtx:
         return ref, apollo_phone_service.PS_PENDING
 
     async def settle(self, ref: str, result) -> str:
+        """Settle the pending phone request from Apollo's synchronous reply; returns the
+        phone status ("" when no request was made).
+        """
         if not ref:
             return ""
         ps = await db_write(lambda db: apollo_phone_service.settle_request(db, ref, result))
         return ps or apollo_phone_service.status_after_call(result)
 
     async def cancel(self, ref: str) -> None:
+        """Cancel the pending phone request (no-op without a ref), e.g. when the email
+        credit could not be reserved.
+        """
         if ref:
             await db_write(lambda db: apollo_phone_service.cancel_request(db, ref))
 
@@ -242,6 +263,7 @@ def _reveal_state(status: str, email: str, phone: str, phone_status: str) -> str
 
 
 def _with_reveal_state(r: dict) -> dict:
+    """Add the UI ``reveal_state`` to a result dict in place and return it."""
     r["reveal_state"] = _reveal_state(
         r.get("status", ""), r.get("email", ""), r.get("phone", ""), r.get("phone_status", ""))
     return r
@@ -262,12 +284,14 @@ async def _person_lookup(client: ApolloClient, item: dict, pctx: _PhoneCtx) -> d
     want_email = pctx.want_email
     if item["linkedin_url"]:
         async def call(reveal_phone, kw):
+            """Enrich by LinkedIn URL (name/company/domain as match hints)."""
             return await client.enrich_person_by_linkedin(
                 item["linkedin_url"], reveal_email=want_email, reveal_phone=reveal_phone,
                 name=item["person_name"], company=item["company"], domain=item["domain"], **kw,
             )
     else:
         async def call(reveal_phone, kw):
+            """Bulk-enrich a single name + company record; first result or None."""
             results = await client.bulk_enrich_people(
                 [{"name": item["person_name"], "organization_name": item["company"], "domain": item["domain"]}],
                 reveal_email=want_email, reveal_phone=reveal_phone, **kw,
@@ -431,6 +455,9 @@ async def _enrich_item(
 # ── Job + item persistence (small, mirror HarvestRunService.update_run) ──────────
 
 async def _load_job_dict(db: AsyncSession, job_id: str) -> dict | None:
+    """Snapshot of the job fields the worker needs (personas split from newline-joined
+    storage), or None if the job is gone.
+    """
     job = await db.get(RecruiterFinderJobORM, job_id)
     if job is None:
         return None
@@ -442,6 +469,7 @@ async def _load_job_dict(db: AsyncSession, job_id: str) -> dict | None:
 
 
 async def _mark_job_running(db: AsyncSession, job_id: str) -> None:
+    """Set the job to running with a start time and an initial message."""
     job = await db.get(RecruiterFinderJobORM, job_id)
     if job is not None:
         job.status = "running"
@@ -451,6 +479,7 @@ async def _mark_job_running(db: AsyncSession, job_id: str) -> None:
 
 
 async def _set_job_message(db: AsyncSession, job_id: str, message: str) -> None:
+    """Update the job's progress message shown in the UI."""
     job = await db.get(RecruiterFinderJobORM, job_id)
     if job is not None:
         job.message = message
@@ -458,6 +487,7 @@ async def _set_job_message(db: AsyncSession, job_id: str, message: str) -> None:
 
 
 async def _next_pending_item(db: AsyncSession, job_id: str) -> dict | None:
+    """Lowest-row-index pending item of the job as a plain dict, or None when drained."""
     stmt = (
         select(RecruiterFinderItemORM)
         .where(RecruiterFinderItemORM.job_id == job_id, RecruiterFinderItemORM.status == "pending")
@@ -472,6 +502,7 @@ async def _next_pending_item(db: AsyncSession, job_id: str) -> dict | None:
 
 
 async def _mark_item_processing(db: AsyncSession, item_id: str) -> None:
+    """Mark the item as processing and stamp the attempt time."""
     item = await db.get(RecruiterFinderItemORM, item_id)
     if item is not None:
         item.status = "processing"
@@ -480,6 +511,9 @@ async def _mark_item_processing(db: AsyncSession, item_id: str) -> None:
 
 
 async def _apply_item_result(db: AsyncSession, item_id: str, outcome: dict, recruiter_id: str | None) -> None:
+    """Copy an outcome onto the item row, link the recruiter if one was saved, and bump
+    its attempt count. No-op if the item no longer exists.
+    """
     item = await db.get(RecruiterFinderItemORM, item_id)
     if item is None:
         return
@@ -524,6 +558,11 @@ async def _requeue_item(db: AsyncSession, item_id: str) -> None:
 
 
 async def _bump_counters(db: AsyncSession, job_id: str, status: str, cost: int) -> None:
+    """Count one processed item under its status and add ``cost`` to credits_spent.
+
+    ``cost`` is added whatever the outcome (the bulk worker reserves the email credit
+    before the lookup). Progress excludes budget-queued items from the denominator.
+    """
     job = await db.get(RecruiterFinderJobORM, job_id)
     if job is None:
         return
@@ -537,6 +576,9 @@ async def _bump_counters(db: AsyncSession, job_id: str, status: str, cost: int) 
 
 
 async def _queue_remaining(db: AsyncSession, job_id: str) -> int:
+    """Move all still-pending items to ``queued`` (deferred by the budget) and add them to
+    the job's queued count. Returns the number moved.
+    """
     result = await db.execute(
         update(RecruiterFinderItemORM)
         .where(RecruiterFinderItemORM.job_id == job_id, RecruiterFinderItemORM.status == "pending")
@@ -551,6 +593,9 @@ async def _queue_remaining(db: AsyncSession, job_id: str) -> int:
 
 
 async def _finalize_job(db: AsyncSession, job_id: str) -> None:
+    """Set the job's final status: ``partial`` if any items were queued, ``failed`` if
+    every processed item failed, else ``completed``; stamp completion and progress.
+    """
     job = await db.get(RecruiterFinderJobORM, job_id)
     if job is None:
         return
@@ -571,6 +616,11 @@ async def _fail_job_unconfigured(
     db: AsyncSession, job_id: str, *, error: str = "Contact enrichment isn't configured",
     message: str = "Contact enrichment isn't configured. Contact your administrator.",
 ) -> None:
+    """Fail the whole job up front (no Apollo key / phone reveal unavailable).
+
+    Marks every pending item failed with ``error`` and sets the job to failed at 100%
+    with ``message`` for the UI.
+    """
     await db.execute(
         update(RecruiterFinderItemORM)
         .where(RecruiterFinderItemORM.job_id == job_id, RecruiterFinderItemORM.status == "pending")
@@ -588,6 +638,7 @@ async def _fail_job_unconfigured(
 
 
 async def _recount_job(db: AsyncSession, job: RecruiterFinderJobORM) -> None:
+    """Recompute the job's status counters and progress from its items (caller flushes)."""
     rows = await db.execute(
         select(RecruiterFinderItemORM.status, func.count())
         .where(RecruiterFinderItemORM.job_id == job.id)
@@ -665,6 +716,14 @@ def launch_job(job_id: str) -> None:
 
 
 async def _run_enrichment_background(job_id: str) -> None:
+    """Detached worker that drains a bulk job's pending items through Apollo.
+
+    Binds the job's tenant, then per item: reserves the email credit (or, phone-only,
+    checks the phone budget), enriches, upserts a hit into `recruiters`, and records
+    the result. When the budget runs out the remaining items are queued. The job is
+    always finalized, even on error. Spends Apollo credits; failures are logged by the
+    best-effort db helpers rather than raised.
+    """
     settings = get_settings()
     jobd = await db_read(lambda db: _load_job_dict(db, job_id))
     if not jobd:
@@ -767,6 +826,9 @@ async def _persist_completed(
     log_id = str(uuid.uuid4())
 
     async def _work(db, o=outcome, it=item):
+        """Upsert the recruiter, add the reveal-log row and link any pending phone request,
+        in one transaction. Returns the recruiter id.
+        """
         recruiter_id = await save_finder_contact(
             db,
             person_name=o["contact_name"] or it["person_name"] or "",
@@ -830,6 +892,9 @@ async def run_single(
     want_email, want_phone, email_cost = _reveal_flags(reveal)
 
     def _resp(status, *, results=None, requested=1, budget_exhausted=False, message="", domain_out=""):
+        """Shape the run_single response: strip internal ``phone_ref``, add ``reveal_state``,
+        and derive the revealed/in-progress/credit/phone-pending totals.
+        """
         results = [_with_reveal_state({k: v for k, v in r.items() if k != "phone_ref"})
                    for r in (results or [])]
         return {
@@ -870,6 +935,7 @@ async def run_single(
         want_count = min(want_count, remaining // need)
 
     async def reserve():
+        """Reserve one contact's email credit against the tenant's daily Finder cap."""
         return await recruiter_finder_budget.try_consume(email_cost, tenant, cap=cap)
 
     client = ApolloClient(settings, purpose="finder")
@@ -1010,6 +1076,9 @@ async def reveal_candidates(
     requested = len([s for s in selections if s.get("person_id")])
 
     def _resp(status, *, results=None, budget_exhausted=False, message=""):
+        """Shape the reveal_candidates response: add ``reveal_state`` and derive the
+        revealed/in-progress/credit/phone-pending totals.
+        """
         results = [_with_reveal_state(r) for r in (results or [])]
         # Only contacts with a delivered email/phone count as revealed; a contact whose
         # phone is still on its way is in_progress.
@@ -1025,6 +1094,7 @@ async def reveal_candidates(
                 "message": message, "results": results}
 
     def _miss(pid, status, *, error="", phone_status=""):
+        """Result row for a selection that produced no contact (not_found / failed)."""
         return {"person_id": pid, "status": status, "email": "", "email_status": "",
                 "phone": "", "phone_status": phone_status, "confidence": "", "recruiter_id": None,
                 "error": error}
@@ -1105,6 +1175,7 @@ async def reveal_candidates(
 # ── Reads for the routes (tenant-scoped via apply_tenant) ───────────────────────
 
 async def get_job(db: AsyncSession, job_id: str) -> RecruiterFinderJobORM | None:
+    """The bulk job by id within the current tenant, or None."""
     stmt = apply_tenant(
         select(RecruiterFinderJobORM).where(RecruiterFinderJobORM.id == job_id),
         RecruiterFinderJobORM.tenant_id,
@@ -1115,6 +1186,9 @@ async def get_job(db: AsyncSession, job_id: str) -> RecruiterFinderJobORM | None
 async def list_items(
     db: AsyncSession, job_id: str, *, statuses: list[str] | None = None, limit: int = 25, offset: int = 0
 ) -> tuple[list[RecruiterFinderItemORM], int]:
+    """One page of a job's items (tenant-scoped, optional status filter) in row order,
+    plus the total matching count.
+    """
     base = select(RecruiterFinderItemORM).where(RecruiterFinderItemORM.job_id == job_id)
     base = apply_tenant(base, RecruiterFinderItemORM.tenant_id)
     if statuses:
@@ -1128,6 +1202,7 @@ async def list_items(
 
 
 async def list_jobs(db: AsyncSession, *, limit: int = 50) -> list[RecruiterFinderJobORM]:
+    """The tenant's most recent bulk jobs, newest first."""
     stmt = apply_tenant(
         select(RecruiterFinderJobORM).order_by(RecruiterFinderJobORM.created_at.desc()).limit(limit),
         RecruiterFinderJobORM.tenant_id,
@@ -1150,6 +1225,7 @@ async def list_recent_contacts(db: AsyncSession, *, limit: int = 12) -> list:
 
 
 def _reveal_log_dict(r) -> dict:
+    """Serialise a reveal-log row for the History tab (adds a joined location string)."""
     loc = ", ".join(x for x in (r.city, r.state, r.country) if x)
     return {
         "id": r.id, "person_id": r.person_id,
@@ -1177,6 +1253,7 @@ async def history_log(
     L = RecruiterFinderRevealLogORM
 
     def scoped(stmt):
+        """Restrict a reveal-log query to the current tenant."""
         return apply_tenant(stmt, L.tenant_id)
 
     # KPIs (tenant-wide, unfiltered)
@@ -1265,6 +1342,9 @@ async def fail_stale_jobs() -> int:
     survive a restart, so mark orphaned running/queued jobs failed and their in-flight
     items failed so a retry can pick them up. Mirrors HarvestRunService.fail_stale_running."""
     async def _reap(db: AsyncSession) -> int:
+        """Fail in-flight items of running/queued jobs, then fail those jobs; returns the
+        number of jobs reaped.
+        """
         await db.execute(
             update(RecruiterFinderItemORM)
             .where(

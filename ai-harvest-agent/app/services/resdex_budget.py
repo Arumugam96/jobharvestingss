@@ -26,6 +26,7 @@ _COLUMNS = ("searches", "candidates")
 
 
 def _utc_today():
+    """Today's date in UTC — the budget row key (caps reset at UTC midnight)."""
     return datetime.now(timezone.utc).date()
 
 
@@ -53,6 +54,10 @@ async def _reserve(db: AsyncSession, today, column: str, cap: int, cost: int) ->
 
 
 async def _used(db: AsyncSession, today, column: str) -> int:
+    """Current value of ``column`` for ``today`` (0 when no row exists yet).
+
+    Raises ValueError for a column outside ``_COLUMNS`` (it is interpolated into SQL).
+    """
     if column not in _COLUMNS:
         raise ValueError(f"unknown resdex budget column {column!r}")
     row = await db.execute(
@@ -62,6 +67,11 @@ async def _used(db: AsyncSession, today, column: str) -> int:
 
 
 async def _try(column: str, cap: int, cost: int) -> bool:
+    """Reserve ``cost`` units of ``column`` in its own session and commit it.
+
+    True when granted. Fails CLOSED: any DB error is logged and returns False, as does
+    hitting the cap (logged as ``resdex_daily_cap_reached``).
+    """
     today = _utc_today()
     try:
         factory = get_session_factory(get_settings())

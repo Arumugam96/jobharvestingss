@@ -44,6 +44,7 @@ export default function SearchableMultiSelect({
   useLayoutEffect(() => {
     if (!open) return;
     computePos();
+    /** Re-anchors the portaled panel under the trigger on scroll/resize. */
     const onMove = () => computePos();
     window.addEventListener("scroll", onMove, true);
     window.addEventListener("resize", onMove);
@@ -58,11 +59,13 @@ export default function SearchableMultiSelect({
   // close on its own controls.
   useEffect(() => {
     if (!open) return;
+    /** Closes on a mousedown outside both the trigger and the portaled panel. */
     const onDown = (e) => {
       if (rootRef.current && rootRef.current.contains(e.target)) return;
       if (panelRef.current && panelRef.current.contains(e.target)) return;
       setOpen(false);
     };
+    /** Closes the panel on Escape. */
     const onKey = (e) => { if (e.key === "Escape") setOpen(false); };
     document.addEventListener("mousedown", onDown);
     document.addEventListener("keydown", onKey);
@@ -88,9 +91,11 @@ export default function SearchableMultiSelect({
     return options.filter((o) => o.toLowerCase().includes(q));
   }, [options, query]);
 
+  /** Adds or removes one option from the lifted `selected` list via onChange. */
   const toggleOne = (name) => {
     onChange(selected.includes(name) ? selected.filter((s) => s !== name) : [...selected, name]);
   };
+  /** "Select all" checkbox: selects every option, or clears all when all are selected. */
   const toggleAll = () => { onChange(allChecked ? [] : [...options]); };
 
   const summary = allChecked

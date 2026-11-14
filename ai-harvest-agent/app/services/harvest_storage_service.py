@@ -104,6 +104,7 @@ class HarvestStorageService:
 
     @staticmethod
     def _timestamp_slug(keyword: str, location: str) -> str:
+        """File stem "<UTC timestamp>_<keyword_location slug, max 40 chars>"."""
         ts   = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         slug = re.sub(r"[^a-z0-9]+", "_", f"{keyword} {location}".lower()).strip("_")
         return f"{ts}_{slug[:40]}"

@@ -25,10 +25,12 @@ _WHITESPACE = re.compile(r"\s+")
 
 
 def normalize_linkedin_url(url: str) -> str:
+    """Canonical profile URL for matching: query string and trailing "/" dropped, lowercased."""
     return url.split("?")[0].rstrip("/").lower().strip()
 
 
 def _slug(text: str) -> str:
+    """Lowercase and drop legal suffixes (inc, ltd, pvt, ...) and punctuation, collapse spaces."""
     text = (text or "").lower()
     text = _LEGAL_SUFFIXES.sub("", text)
     text = _PUNCTUATION.sub("", text)
@@ -36,10 +38,14 @@ def _slug(text: str) -> str:
 
 
 def compute_name_company_key(person_name: str, company_name: str) -> str:
+    """``person|company`` key built from the slugged name and company."""
     return f"{_slug(person_name)}|{_slug(company_name)}"
 
 
 def compute_dedup_key(person_name: str, company_name: str, linkedin_profile_url: str | None) -> str:
+    """Recruiter identity: ``li:<normalized url>`` when a LinkedIn URL is known, else
+    ``nc:<name|company>``.
+    """
     if linkedin_profile_url:
         return f"li:{normalize_linkedin_url(linkedin_profile_url)}"
     return f"nc:{compute_name_company_key(person_name, company_name)}"
@@ -179,6 +185,7 @@ async def save_enrichment(
         return
 
     def _apply(field: str, value: str, not_found: str = "") -> None:
+        """Set ``field`` only when ``value`` is non-empty and not the ``not_found`` sentinel."""
         if value and value != not_found:
             setattr(recruiter, field, value)
 
@@ -404,6 +411,11 @@ async def save_discovery_run(
     started_at: datetime | None = None,
     completed_at: datetime | None = None,
 ) -> None:
+    """Add one recruiter-discovery run history row and flush (the caller commits).
+
+    Empty output paths are stored as NULL; ``tenant_id`` is not set here, so the
+    row gets the column's server default.
+    """
     db.add(RecruiterDiscoveryRunORM(
         id=str(uuid.uuid4()),
         run_id=run_id,
@@ -430,6 +442,7 @@ async def save_discovery_run(
 
 
 async def list_discovery_runs(db: AsyncSession, limit: int = 50) -> list[RecruiterDiscoveryRunORM]:
+    """Newest discovery runs first, up to ``limit`` (no tenant filter is applied)."""
     result = await db.execute(
         select(RecruiterDiscoveryRunORM).order_by(RecruiterDiscoveryRunORM.created_at.desc()).limit(limit)
     )
@@ -437,6 +450,7 @@ async def list_discovery_runs(db: AsyncSession, limit: int = 50) -> list[Recruit
 
 
 async def get_discovery_run(db: AsyncSession, run_id: str) -> RecruiterDiscoveryRunORM | None:
+    """The discovery run with this human-readable ``run_id``, or None (not tenant-scoped)."""
     result = await db.execute(
         select(RecruiterDiscoveryRunORM).where(RecruiterDiscoveryRunORM.run_id == run_id)
     )

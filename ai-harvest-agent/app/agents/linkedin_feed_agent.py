@@ -311,6 +311,11 @@ class LinkedInFeedAgent:
         settings: Settings | None = None,
         llm_service: "LLMService | None" = None,
     ) -> None:
+        """Read the feed scroll/stop limits, LLM call cap and confidence gate from settings.
+
+        The harvest start time is fixed here so every relative post date in the run resolves
+        against the same reference point.
+        """
         self._settings = settings or get_settings()
         self._llm_service = llm_service or get_llm_service(self._settings)
         self._llm_calls_made = 0
@@ -329,12 +334,14 @@ class LinkedInFeedAgent:
         self._min_confidence   = float(s.linkedin_feed_min_confidence)
 
     def get_token_usage(self) -> dict:
+        """LLM token-usage summary for this agent's calls (an empty summary when no LLM service)."""
         if self._llm_service is None:
             from app.services.llm_service import empty_usage_summary
             return empty_usage_summary()
         return self._llm_service.get_usage_summary()
 
     def get_llm_call_log(self) -> list[dict]:
+        """Per-call LLM log from the service ([] when no LLM service is configured)."""
         if self._llm_service is None:
             return []
         return self._llm_service.get_call_log()
@@ -394,6 +401,11 @@ class LinkedInFeedAgent:
     # ── Open + auth-gate the feed ───────────────────────────────────────────────
 
     async def _open_feed(self, page: "Page") -> None:
+        """Open the LinkedIn Home Feed, dismiss overlays and verify the session is logged in.
+
+        Raises FeedAuthError if navigation fails, if there is no li_at cookie, or if LinkedIn
+        redirected to a gated (login/checkpoint) path.
+        """
         try:
             await page.goto(FEED_URL, wait_until="domcontentloaded", timeout=30_000)
             await page.wait_for_timeout(3_000)
@@ -418,6 +430,7 @@ class LinkedInFeedAgent:
         logger.info("linkedin_feed_ready", url=page.url[:80])
 
     async def _dismiss_overlays(self, page: "Page") -> None:
+        """Close any visible dismiss/close popups (e.g. messaging bubbles); failures are ignored."""
         for sel in (
             "button[aria-label='Dismiss']",
             "button.msg-overlay-bubble-header__control--close",
@@ -570,6 +583,14 @@ class LinkedInFeedAgent:
         on_status: StatusCallback | None = None,
         on_batch: BatchCallback | None = None,
     ) -> list[FeedLead]:
+        """Turn collected feed posts into IT-hiring leads via filter -> LLM classify -> LLM extract.
+
+        A cheap keyword filter runs first, so only candidate posts cost LLM calls. Stops early
+        on a user stop request, when the per-run LLM call cap is reached, or when the LLM
+        provider is unavailable (leads found so far are kept). A failure on one post is logged
+        and skipped. Leads are handed to on_batch every _PERSIST_BATCH and at the end, and a
+        per-post diagnostic file (feed_diag.json) is written.
+        """
         leads: list[FeedLead] = []
         pending: list[FeedLead] = []
         diag: list[dict] = []            # per-post trace → feed_diag.json
@@ -718,6 +739,10 @@ class LinkedInFeedAgent:
         on_status: StatusCallback | None,
         total: int,
     ) -> None:
+        """Hand a copy of the pending leads to on_batch and report the running saved count.
+
+        Persistence errors are logged and swallowed so the harvest keeps going.
+        """
         try:
             await on_batch(list(pending))
             if on_status:
@@ -741,6 +766,11 @@ class LinkedInFeedAgent:
     # ── Stage 2: classification ─────────────────────────────────────────────────
 
     async def _classify(self, text: str, raw: dict) -> dict:
+        """Ask the LLM whether a post is a genuine, current IT hiring post (one LLM call).
+
+        Returns the classifier dict (is_it_hiring, it_relevance, category, confidence,
+        reason) or {} when the LLM returns nothing. Counts toward the per-run call cap.
+        """
         headline = _clean(raw.get("author_headline", ""))
         content = (
             f"---AUTHOR HEADLINE---\n{headline or '(none)'}\n\n"
@@ -787,6 +817,12 @@ class LinkedInFeedAgent:
     # ── Stage 3: extraction (verbatim-only, no fabrication) ─────────────────────
 
     async def _extract(self, text: str, raw: dict) -> dict:
+        """Ask the LLM to extract job and recruiter fields from a confirmed hiring post.
+
+        The posting date is resolved in Python first and passed in (stored back on the result
+        as "_resolved_date"); the prompt forbids invented companies/emails/phones. Counts
+        toward the per-run LLM call cap. Returns {} plus "_resolved_date" on an empty reply.
+        """
         headline = _clean(raw.get("author_headline", ""))
         author_name = _clean(raw.get("author_name", ""))
         profile_url = (raw.get("author_profile_url") or "").strip()
@@ -933,6 +969,7 @@ class LinkedInFeedAgent:
 
     @staticmethod
     def _permalink(urn: str) -> str:
+        """Build the post URL from an activity URN ("" for any other URN shape)."""
         urn = (urn or "").strip()
         if urn.startswith("urn:li:activity"):
             return f"https://www.linkedin.com/feed/update/{urn}/"

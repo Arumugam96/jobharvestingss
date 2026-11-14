@@ -23,6 +23,11 @@ Rules:
 
 
 def build_harvest_user_prompt(url: str, goal: str, strategy: str) -> str:
+    """Opening user message for the tool-driven browser harvest loop.
+
+    Interpolates the starting URL, the goal and the planned strategy text, and tells
+    the agent to navigate to the URL first and call ``finish`` when done.
+    """
     return f"""## Harvest Task
 
 **Starting URL:** {url}

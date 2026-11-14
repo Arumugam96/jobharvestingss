@@ -61,6 +61,7 @@ RESDEX_REQUIREMENTS_SCHEMA = (
 
 
 def _skills_text(skills: Any) -> str:
+    """Render a skills list (or a plain string) as one comma-separated line; "" if empty."""
     if isinstance(skills, (list, tuple)):
         return ", ".join(str(s).strip() for s in skills if str(s or "").strip())
     return str(skills or "").strip()
@@ -102,6 +103,11 @@ def humanize_key(key: str) -> str:
 
 
 def _metadata_lines(meta: Any) -> str:
+    """Render a Demand job's ``metadata`` dict as "Label: value" lines, one per entry.
+
+    Only non-empty string values are kept (numbers and other types are dropped);
+    whitespace is collapsed. Returns "" when ``meta`` is not a dict.
+    """
     if not isinstance(meta, dict):
         return ""
     lines = []
@@ -114,6 +120,7 @@ def _metadata_lines(meta: Any) -> str:
 
 
 def _job_matcher(job: dict) -> TextMatcher:
+    """Matcher over the job's title, skills, description and location (the grounding text)."""
     return TextMatcher(
         job.get("job_title") or "", job.get("skills") or [],
         job.get("job_description") or "", job.get("location") or "",
@@ -121,6 +128,11 @@ def _job_matcher(job: dict) -> TextMatcher:
 
 
 def _str(v: Any, max_len: int = 120) -> str:
+    """Coerce a scalar LLM value to a whitespace-collapsed string.
+
+    Returns "" for non-scalars, booleans, and strings longer than ``max_len`` (an
+    over-long value is rejected outright, not truncated).
+    """
     if not isinstance(v, (str, int, float)) or isinstance(v, bool):
         return ""
     s = " ".join(str(v).split())
@@ -128,6 +140,7 @@ def _str(v: Any, max_len: int = 120) -> str:
 
 
 def _str_list(v: Any) -> list[str]:
+    """Coerce a string or list to a list of non-empty ``_str`` values; [] otherwise."""
     if isinstance(v, str):
         v = [v]
     if not isinstance(v, list):
@@ -136,6 +149,11 @@ def _str_list(v: Any) -> list[str]:
 
 
 def _int_or_none(v: Any, lo: int, hi: int) -> int | None:
+    """Parse ``v`` as an int (via float) clamped to ``lo..hi``.
+
+    Returns None for None, booleans and unparseable values; out-of-range numbers are
+    clamped rather than rejected.
+    """
     if isinstance(v, bool) or v is None:
         return None
     try:
@@ -182,6 +200,7 @@ def _ground_skills(raw: Any, matcher: TextMatcher, seen: set[str], limit: int,
 
 
 def _ground_exp(req: dict) -> tuple[int | None, int | None]:
+    """Clamp the LLM's min/max experience years to 0..MAX_EXP_YEARS, swapping if inverted."""
     lo = _int_or_none(req.get("min_exp"), 0, MAX_EXP_YEARS)
     hi = _int_or_none(req.get("max_exp"), 0, MAX_EXP_YEARS)
     if lo is not None and hi is not None and lo > hi:
@@ -347,6 +366,10 @@ _PROFILE_STR_FIELDS = tuple(
 
 
 def build_profile_content(card_text: str) -> str:
+    """extract_json content for one Resdex search-result card.
+
+    Interpolates the card text, stripped and cut to CARD_MAX_CHARS.
+    """
     text = (card_text or "").strip()
     if len(text) > CARD_MAX_CHARS:
         text = text[:CARD_MAX_CHARS]
@@ -373,6 +396,7 @@ def parse_experience_years(text: str | None) -> float | None:
 
 
 def _ground_value(v: Any, matcher: TextMatcher, max_len: int = 500) -> str:
+    """Return the cleaned value only if it appears in the card text, else ""."""
     s = _str(v, max_len)
     return s if s and matcher.contains(s) else ""
 

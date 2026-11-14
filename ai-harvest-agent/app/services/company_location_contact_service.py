@@ -136,6 +136,7 @@ async def upsert_location_contact(
             )).scalar_one()
 
     def _set(field: str, value: str) -> None:
+        """Set ``field`` on the cache row only when ``value`` is non-empty."""
         if value:
             setattr(row, field, value)
 
@@ -251,6 +252,7 @@ def rotation_order(
 
 
 async def _contactable(db: AsyncSession, email: str) -> bool:
+    """True unless the address is suppressed or its owner has already replied."""
     return not await is_suppressed(db, email) and not await recipient_has_replied(db, email)
 
 
@@ -372,6 +374,7 @@ async def location_emailed_since(
 # ── Discovery pass ──────────────────────────────────────────────────────────────
 
 def _job_attr(job, name: str) -> str:
+    """A job attribute as a stripped string ("" when missing or None)."""
     return (getattr(job, name, "") or "").strip()
 
 

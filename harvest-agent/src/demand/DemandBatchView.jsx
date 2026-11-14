@@ -16,6 +16,8 @@ import DemandJobsTable from "./DemandJobsTable";
 const POLL_MS = 4000;
 const DETAILS_KEY = "demand.showProcessingDetails";
 
+/** Read the remembered "Show processing details" choice from localStorage.
+ * @returns {boolean|null} true/false when the user chose, null when unset or unavailable. */
 function readDetailsPref() {
   try {
     const v = window.localStorage.getItem(DETAILS_KEY);
@@ -25,10 +27,21 @@ function readDetailsPref() {
   }
 }
 
+/** Persist the "Show processing details" choice ("1"/"0"); silently ignores storage errors. */
 function writeDetailsPref(on) {
   try { window.localStorage.setItem(DETAILS_KEY, on ? "1" : "0"); } catch { /* storage unavailable */ }
 }
 
+/**
+ * Page for one Demand Search batch: header with status pill and clickable count cards (which
+ * filter the jobs table), the optional ProcessingPanel, and DemandJobsTable.
+ * Polls GET /demand/batches/{runId} every 4s while the batch or any row is active, and refreshes
+ * GET /demand/resdex-usage on the first tick and every third live tick.
+ * @param {object} props
+ * @param {string} props.runId - batch run id to load.
+ * @param {Function} props.onBack - return to the Demand Search landing.
+ * @param {Function} props.onOpenJob - called with (runId, jobId) to open a job's detail page.
+ */
 export default function DemandBatchView({ runId, onBack, onOpenJob }) {
   const [batch, setBatch] = useState(null);
   const [usage, setUsage] = useState(null);
@@ -60,6 +73,7 @@ export default function DemandBatchView({ runId, onBack, onOpenJob }) {
 
   useEffect(() => {
     alive.current = true;
+    /** One poll: reload the batch, occasionally the quota, and reschedule while still live. */
     const tick = async () => {
       const res = await load();
       if (!alive.current) return;
@@ -73,6 +87,7 @@ export default function DemandBatchView({ runId, onBack, onOpenJob }) {
   }, [load, loadUsage]);
 
   const showDetails = pref ?? running;
+  /** Set the details switch and remember the choice in this browser. */
   const toggle = (on) => { setPref(on); writeDetailsPref(on); };
 
   if (!batch) {
@@ -182,6 +197,8 @@ const LEGEND = [
   ["stop", "Stopped", "The batch was stopped before this row ran."],
 ];
 
+/** Compact status chip for one row in the processing panel's row list (spinner + sub-step
+ * label while in progress, candidate count for matched/reused). */
 function ListChip({ r }) {
   const meta = ROW_META[r.status] || ROW_META.error;
   let label = meta.label;
@@ -198,6 +215,16 @@ function ListChip({ r }) {
   );
 }
 
+/**
+ * Side panel with live batch progress: state chip, current row and sub-step, progress bar with
+ * time estimate, outcome counts, quota used, per-row status list and a status legend.
+ * Offers a confirm-then-Stop action (POST /demand/batches/{run_id}/stop).
+ * @param {object} props
+ * @param {object} props.batch - batch payload from GET /demand/batches/{run_id}.
+ * @param {object|null} props.usage - payload from GET /demand/resdex-usage.
+ * @param {boolean} props.running - whether the batch or any row is still active.
+ * @param {Function} props.onStopped - reload callback invoked after a stop request.
+ */
 function ProcessingPanel({ batch, usage, running, onStopped }) {
   const [ask, setAsk] = useState(false);
   const [stopping, setStopping] = useState(false);
@@ -214,6 +241,7 @@ function ProcessingPanel({ batch, usage, running, onStopped }) {
 
   useEffect(() => { if (ended) { setAsk(false); setStopping(false); } }, [ended]);
 
+  /** Request a stop after the current row, show the server's message and reload the batch. */
   const stop = async () => {
     setStopping(true);
     setAsk(false);

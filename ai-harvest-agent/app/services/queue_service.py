@@ -50,6 +50,11 @@ if _CELERY_AVAILABLE:
         settings = get_settings()
 
         async def _run() -> dict:  # type: ignore[type-arg]
+            """Run one agent harvest inside the worker's own event loop.
+
+            Starts a dedicated Playwright browser and LLMService for this task and always
+            stops the browser afterwards; ``max_iterations`` is ``max_pages * 3``.
+            """
             from app.services.playwright_service import PlaywrightService
             from app.services.llm_service import LLMService
 

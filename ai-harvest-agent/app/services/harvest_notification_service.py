@@ -39,6 +39,7 @@ _IST = timezone(timedelta(hours=5, minutes=30), "IST")
 
 
 def _fmt_duration(seconds: float) -> str:
+    """Format whole seconds as "1h 2m 3s", "2m 3s" or "3s"."""
     m, s = divmod(int(seconds or 0), 60)
     if m >= 60:
         h, m = divmod(m, 60)
@@ -47,10 +48,12 @@ def _fmt_duration(seconds: float) -> str:
 
 
 def _esc(value: object) -> str:
+    """HTML-escape ``str(value)``; None renders as ""."""
     return html_lib.escape(str(value if value is not None else ""))
 
 
 def _to_ist(value: object) -> datetime | None:
+    """Convert a datetime (naive = UTC) to IST; None for anything that isn't a datetime."""
     if not isinstance(value, datetime):
         return None
     if value.tzinfo is None:
@@ -95,6 +98,12 @@ def _render_body(
     run_timing: dict | None = None,
     attachment_names: list[str] | None = None,
 ) -> str:
+    """Plain-text report body (the email's text part / fallback).
+
+    A failed run gets a short failure notice. Otherwise: status, sources and total,
+    IST run timing with phase split, a per-source contact breakdown and this run's
+    Apollo credits when insights are given, and an attachment line when files exist.
+    """
     if status == "failed":
         return (
             "Hello,\n\n"
@@ -187,6 +196,7 @@ def _bg_cell(content: str, color: str, style: str = "", attrs: str = "") -> str:
 
 
 def _spacer_cell(height: int, color: str = "") -> str:
+    """A fixed-height empty ``<td>`` (optionally filled), sized so Outlook won't inflate it."""
     style = f"height:{height}px;font-size:0;line-height:0;"
     if color:
         return (
@@ -210,6 +220,7 @@ def _divider(margin: int = 32) -> str:
 
 
 def _section_title(title: str) -> str:
+    """Small uppercase muted heading for a report section (title is escaped)."""
     return (
         f'<div style="font-size:11px;font-weight:700;letter-spacing:0.1em;'
         f'text-transform:uppercase;color:{_MUTED};margin:0 0 16px;">{_esc(title)}</div>'
@@ -266,6 +277,7 @@ _SRC_ROUND = {"naukri"}
 
 
 def _icon_file(slug: str) -> Path | None:
+    """The source's icon file in data/static/email-icons (PNG preferred), or None."""
     # PNG first: Gmail and Outlook don't render SVG images.
     for ext in ("png", "jpg", "jpeg", "svg"):
         candidate = _ICONS_DIR / f"{slug}.{ext}"
@@ -393,6 +405,7 @@ def embed_source_icons_for_preview(html: str, attachments: list[dict] | None = N
     by_cid = {a["ContentID"]: a for a in attachments}
 
     def _sub(m: re.Match[str]) -> str:
+        """Swap one ``cid:`` reference for its data: URI; unknown CIDs are left as-is."""
         a = by_cid.get(m.group(1))
         return f"data:{a['ContentType']};base64,{a['Base64Content']}" if a else m.group(0)
 
@@ -459,6 +472,13 @@ def _render_body_html(
     apollo_monthly: dict | None = None,
     attachment_names: list[str] | None = None,
 ) -> str:
+    """Outlook-safe HTML report: header, hero job count, stat pills, run details,
+    per-source breakdown, Apollo cycle/monthly credits and an attachment footer.
+
+    A failed run renders _render_failed_html instead. ``apollo_daily`` is accepted
+    but not currently used; the credits card shows only when ``apollo_monthly`` has
+    usage or a cap.
+    """
     src_str = _esc(", ".join(sources) or "-")
 
     if status == "failed":
@@ -564,6 +584,7 @@ def _render_body_html(
 
     # ── Source breakdown ─────────────────────────────────────────────────
     def _th(text: str, align: str) -> str:
+        """Breakdown-table header cell; the left (Source) column is fixed at 200px."""
         return _cell(
             text,
             f"padding:0 0 10px;font-size:10px;font-weight:700;letter-spacing:0.08em;"
@@ -572,6 +593,7 @@ def _render_body_html(
         )
 
     def _src_td(content: str, align: str, last: bool = False) -> str:
+        """Breakdown-table body cell; ``last`` styles the bolder Total row."""
         top = f"border-top:2px solid {_LINE};" if last else f"border-top:1px solid {_LINE};"
         weight = "800" if last else "700"
         color = f"color:{_MUTED};" if last and align == "left" else ""
@@ -667,6 +689,10 @@ def _render_body_html(
 
 
 def _render_failed_html(run_id: str, status: str, src_str: str, error: str) -> str:
+    """HTML failure alert: run id, the escaped error, status and sources (no report).
+
+    ``src_str`` must already be HTML-escaped.
+    """
     header = (
         f'<div style="font-size:11px;font-weight:700;letter-spacing:0.1em;'
         f'text-transform:uppercase;color:{_MUTED};margin-bottom:8px;">Sightspectrum</div>'

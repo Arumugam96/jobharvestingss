@@ -23,6 +23,20 @@ import { useTenant } from "../TenantContext";
 // apart from Harvested Jobs'.
 const DEMAND_SOURCE = "Demand";
 
+/**
+ * Harvested Jobs page (also reused as My Workspace and Demand Jobs): date range, stat cards and
+ * a server-paginated JobsTable fed by GET /jobs, with whole-dataset dropdowns/stats from
+ * GET /jobs/facets, plus CSV / Excel / JSON export. Views are cached in HarvestDataContext so
+ * returning to the same URL renders instantly and revalidates quietly.
+ * @param {object} props
+ * @param {Function} props.onNavigate - navigate by page key ("jobs", "library").
+ * @param {Function} props.onView - open a job's detail view (passed to JobsTable).
+ * @param {string|number} props.pageSizeSel - rows per page; onPageSizeChange sets it.
+ * @param {boolean} [props.urlState] - let JobsTable sync its filters to the URL.
+ * @param {boolean} [props.demand] - Demand Jobs mode: source pinned to "Demand", own cache.
+ * @param {React.ReactNode} [props.demandTabs] - Demand Search tabs rendered in demand mode.
+ * @param {boolean} [props.library] - My Workspace mode: only jobs assigned to the current user.
+ */
 export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeChange, urlState = false, demand = false, demandTabs = null, library = false }) {
   const { jobsViewRef: sharedViewRef } = useHarvestData();
   const demandViewRef = useRef(null);
@@ -139,11 +153,14 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
   // Close format dropdown on outside click.
   useEffect(() => {
     if (!formatOpen) return;
+    /** Close the format menu when a mousedown lands outside it. */
     const close = (e) => { if (formatRef.current && !formatRef.current.contains(e.target)) setFormatOpen(false); };
     document.addEventListener("mousedown", close);
     return () => document.removeEventListener("mousedown", close);
   }, [formatOpen]);
 
+  /** Export in the selected format: JSON / Excel navigate to the backend download URLs; CSV is
+   * built client-side by exportCsv(). */
   function doExport() {
     if (exportFormat === "json") { window.location.href = downloadJsonUrl(); return; }
     if (exportFormat === "excel") { window.location.href = downloadExcelUrl(); return; }

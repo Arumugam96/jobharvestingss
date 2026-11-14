@@ -65,6 +65,10 @@ webhook_router = APIRouter(tags=["Recruiter Contact Finder"])
 # ── Serializers ──────────────────────────────────────────────────────────────
 
 def _job_dict(job, *, phones_pending: int | None = None) -> dict[str, Any]:
+    """Serialise a finder job row for the API (counters, ISO timestamps, `personas` split per line).
+
+    `phones_pending` is included only when passed.
+    """
     out = {
         "job_id": job.id, "status": job.status, "progress": job.progress, "message": job.message,
         "source": job.source, "filename": job.filename, "persona": job.persona,
@@ -82,6 +86,7 @@ def _job_dict(job, *, phones_pending: int | None = None) -> dict[str, Any]:
 
 
 def _item_dict(it) -> dict[str, Any]:
+    """Serialise one finder item row, including the UI-facing `reveal_state`."""
     return {
         "id": it.id, "row_index": it.row_index, "company": it.company,
         "person_name": it.person_name, "linkedin_url": it.linkedin_url, "location": it.location,
@@ -252,6 +257,11 @@ async def job_status(
     db: AsyncSession = Depends(get_db_session),
     current_user=Depends(get_current_user),
 ) -> Any:
+    """Return a bulk finder job's status and live counters (the UI's poll target).
+
+    Includes `phones_pending`, the number of outstanding async Apollo phone deliveries; the UI keeps
+    polling after completion while it is above zero. 404 if the job isn't in the caller's tenant.
+    """
     job = await get_job(db, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -279,6 +289,11 @@ async def job_items(
     db: AsyncSession = Depends(get_db_session),
     current_user=Depends(get_current_user),
 ) -> Any:
+    """Page through a job's rows, optionally filtered by UI bucket.
+
+    `bucket` is all | successful | ambiguous | unsuccessful | queued (an unknown value means no
+    filter). `page_size` is clamped to 1-200. 404 if the job isn't in the caller's tenant.
+    """
     job = await get_job(db, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -298,6 +313,11 @@ async def retry(
     db: AsyncSession = Depends(get_db_session),
     current_user=Depends(get_current_user),
 ) -> Any:
+    """Re-queue a job's unsuccessful and budget-deferred rows and relaunch the background worker.
+
+    Successful/ambiguous rows are left alone, so a retry never re-spends credits on them. Returns
+    `{"job_id", "status": "queued"}`; 404 if the job isn't in the caller's tenant.
+    """
     ok = await retry_job(db, job_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -310,6 +330,11 @@ async def retry(
 
 @router.get("/recruiter-finder/usage")
 async def usage(current_user=Depends(get_current_user)) -> Any:
+    """Today's Recruiter Finder credit gauge for the caller's tenant plus 14 days of history.
+
+    Also reports whether async phone reveal is enabled, its per-phone credit cost, pending phone
+    deliveries, the pending-phone TTL and account-wide Apollo usage (global cap and sub-caps).
+    """
     tenant = current_user.tenant_id
     cap = await resolve_tenant_cap(tenant)
     used = await recruiter_finder_budget.usage_today(tenant)
@@ -335,6 +360,7 @@ async def history(
     db: AsyncSession = Depends(get_db_session),
     current_user=Depends(get_current_user),
 ) -> Any:
+    """The 50 most recent bulk finder jobs of the caller's tenant, newest first."""
     jobs = await list_jobs(db, limit=50)
     return {"jobs": [_job_dict(j) for j in jobs]}
 
@@ -377,6 +403,7 @@ async def recent_contacts(
 # ── Async phone reveal (Apollo webhook) ──────────────────────────────────────
 
 def _csv(value: str) -> list[str]:
+    """Split a comma-separated query value into trimmed, non-empty parts."""
     return [v.strip() for v in (value or "").split(",") if v.strip()]
 
 
@@ -437,6 +464,10 @@ async def reprocess_apollo_webhook_events(
 
 
 def _remote_addr(request: Request) -> str:
+    """Best-effort client IP for webhook logging: first X-Forwarded-For hop, X-Real-IP, then peer.
+
+    Header values are client-supplied, so this is for diagnostics only, not trust decisions.
+    """
     fwd = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
     return fwd or request.headers.get("x-real-ip") or (request.client.host if request.client else "")
 
@@ -455,6 +486,13 @@ def _clean_ref(*candidates: str | None) -> str:
 
 
 async def _handle_apollo_phone_webhook(request: Request, token: str | None, ref: str) -> dict:
+    """Shared body of both Apollo phone-webhook routes.
+
+    Parses the raw body as JSON (None when empty or invalid) and checks `token` against
+    APOLLO_WEBHOOK_TOKEN in constant time; any token passes when no secret is configured. The
+    delivery is always logged and, with a valid token, matched to pending phone requests. Raises
+    401 after logging when the token is wrong; otherwise returns the processing counts.
+    """
     settings = get_settings()
     raw = (await request.body()).decode("utf-8", errors="replace")
     try:

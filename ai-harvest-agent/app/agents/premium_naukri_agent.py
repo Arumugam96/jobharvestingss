@@ -169,6 +169,10 @@ class PremiumNaukriAgent:
     """
 
     def __init__(self, max_profiles: int = 3) -> None:
+        """Store max_profiles (currently unused here) and an empty session-check cache.
+
+        The Naukri session check result is cached per instance so it runs only once.
+        """
         self._max_profiles = max_profiles
         self._session_ok: bool | None = None  # cached per-agent-instance to avoid re-verifying
 

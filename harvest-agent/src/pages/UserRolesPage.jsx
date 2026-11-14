@@ -11,11 +11,13 @@ import { useCurrentUserEmail } from "../components/AssignJob";
 
 const WORKSPACES = { internal: "Internal", client_us: "US", client_in: "India" };
 
+/** Locale date ("medium") for an ISO timestamp; "—" when empty. */
 const fmtDate = (iso) => {
   if (!iso) return "—";
   try { return new Date(iso).toLocaleDateString(undefined, { dateStyle: "medium" }); } catch { return "—"; }
 };
 
+/** Pill showing "Admin" (shield, purple) or "User" (grey) for a role. */
 function RolePill({ role }) {
   const admin = role === "admin";
   return (
@@ -30,6 +32,10 @@ function RolePill({ role }) {
   );
 }
 
+/**
+ * Admin-only User roles page: user / admin counts, an email search and a table of signed-in
+ * users (GET /auth/users) with a Make admin / Remove admin action per row (not for yourself).
+ */
 export default function UserRolesPage() {
   const myEmail = useCurrentUserEmail();
   const [users, setUsers] = useState([]);
@@ -55,6 +61,7 @@ export default function UserRolesPage() {
   }, [users, query]);
   const adminCount = users.filter((u) => u.role === "admin").length;
 
+  /** Set a user's role (PATCH /auth/users/{id}/role) and merge the updated user into the list. */
   const changeRole = async (user, role) => {
     setSaving(user.id);
     setError("");

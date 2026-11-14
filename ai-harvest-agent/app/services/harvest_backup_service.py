@@ -31,6 +31,7 @@ logger = structlog.get_logger(__name__)
 
 
 def backup_path() -> Path:
+    """The single backup file location (HARVEST_BACKUP_PATH)."""
     from app.config import get_settings
 
     return Path(get_settings().harvest_backup_path)
@@ -54,6 +55,11 @@ def _write_sync(
     jobs: list[dict[str, Any]],
     db_saved: bool | None,
 ) -> Path | None:
+    """Blocking body of write_harvest_backup; returns the path, or None on any error.
+
+    A previous backup from a different run that never reached the DB is first moved
+    aside to ``<name>_unsaved_<run_id>`` instead of being overwritten.
+    """
     path = backup_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)

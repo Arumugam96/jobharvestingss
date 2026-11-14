@@ -196,6 +196,7 @@ class NaukriStoppedEarly(RuntimeError):
     NaukriAgent.stopped_early)."""
 
     def __init__(self, reason: str) -> None:
+        """Keep the STOP_* reason and build a human-readable "Naukri stopped early" message."""
         self.reason = reason
         super().__init__(f"Naukri stopped early — {_STOP_MESSAGES.get(reason, reason)}")
 
@@ -246,18 +247,22 @@ class NaukriScrapedJob:
     # job_poster_* via getattr.
     @property
     def job_poster_name(self) -> str | None:
+        """LinkedIn-style alias for recruiter_name."""
         return self.recruiter_name
 
     @property
     def job_poster_company(self) -> str | None:
+        """LinkedIn-style alias for recruiter_company."""
         return self.recruiter_company
 
     @property
     def job_poster_email(self) -> str | None:
+        """LinkedIn-style alias for email_id."""
         return self.email_id
 
     @property
     def job_poster_phone(self) -> str | None:
+        """LinkedIn-style alias for contact_number."""
         return self.contact_number
 
 
@@ -335,12 +340,14 @@ _WHITESPACE   = re.compile(r"[ \t]{2,}")
 
 
 def _clean(text: Any) -> str:
+    """Stringify (None -> ""), replace unicode junk with spaces and collapse to one line."""
     text = _UNICODE_JUNK.sub(" ", str(text or ""))
     text = _WHITESPACE.sub(" ", text)
     return re.sub(r"\n+", " ", text).strip()
 
 
 def _infer_work_mode(text: str) -> str:
+    """Classify text as "remote" (incl. WFH) / "hybrid" / "onsite" / "not_specified"."""
     t = (text or "").lower()
     if "remote" in t or "work from home" in t or "wfh" in t:
         return "remote"
@@ -420,6 +427,7 @@ def _resolve_relative_posted(raw: str, ref: datetime) -> str:
 
 
 def _abs_url(href: str) -> str:
+    """Make a Naukri href absolute (protocol-relative or site-relative); "" for empty input."""
     href = (href or "").strip()
     if not href:
         return ""
@@ -524,6 +532,7 @@ def build_search_url(f: FiltersConfig, page_no: int = 1) -> str:
 
 
 def _norm_kw(text: str) -> str:
+    """Lower-case and keep only [a-z0-9], for comparing keywords as Naukri echoes them back."""
     return re.sub(r"[^a-z0-9]", "", (text or "").lower())
 
 
@@ -553,6 +562,7 @@ def missing_search_filters(search_url: str, f: FiltersConfig, page_no: int) -> l
 
 
 def _placeholder(d: dict, kind: str) -> str:
+    """Cleaned label of the v3 search card placeholder of the given type ("" if absent)."""
     for ph in d.get("placeholders") or []:
         if isinstance(ph, dict) and ph.get("type") == kind:
             return _clean(ph.get("label", ""))
@@ -560,6 +570,7 @@ def _placeholder(d: dict, kind: str) -> str:
 
 
 def _split_skills(raw: Any) -> list[str]:
+    """Normalise a skills list or comma string: cleaned, case-insensitively deduped, max 15."""
     if isinstance(raw, list):
         items = [_clean(x) for x in raw]
     else:
@@ -574,6 +585,7 @@ def _split_skills(raw: Any) -> list[str]:
 
 
 def _snippet_to_text(snippet: str) -> str:
+    """Convert a description snippet (HTML or plain text) to formatted plain text."""
     if not snippet:
         return ""
     if "<" in snippet:
@@ -582,6 +594,7 @@ def _snippet_to_text(snippet: str) -> str:
 
 
 def _salary_label(raw: str) -> str:
+    """Cleaned salary text, or "Not Disclosed" when empty / not disclosed / not specified."""
     raw = _clean(raw)
     if not raw or raw.lower() in ("not disclosed", "not specified"):
         return "Not Disclosed"
@@ -663,6 +676,7 @@ _PHONE_IN_TEXT_RE = re.compile(
 
 
 def _clean_email(raw: str | None) -> str | None:
+    """Normalise an email, returning None when invalid or matching a junk/system pattern."""
     email = normalize_email(raw)
     if email and any(p in email.lower() for p in _JUNK_EMAIL_PATTERNS):
         return None
@@ -846,6 +860,7 @@ def apply_detail_json(job: NaukriScrapedJob, payload: dict) -> bool:
 
 
 def _find_job_posting(obj: Any) -> dict | None:
+    """Find the first schema.org JobPosting dict in parsed ld+json (lists and @graph searched)."""
     if isinstance(obj, list):
         for item in obj:
             if (found := _find_job_posting(item)) is not None:
@@ -923,6 +938,7 @@ def naukri_guest_browser(headless: bool = True, slow_mo: int = 0) -> BrowserMana
 
 
 async def _delay(page: Page, lo: int, hi: int) -> None:
+    """Wait a random lo..hi milliseconds on the page (human-like pacing)."""
     await page.wait_for_timeout(random.randint(lo, hi))
 
 
@@ -1004,6 +1020,7 @@ class NaukriRateGovernor:
         break_max_s: float = 0.0,
         rng: random.Random | None = None,
     ) -> None:
+        """Clamp the pacing settings to sane ranges; start at multiplier 1.0 with zero counters."""
         self.min_ms = max(0, int(min_ms))
         self.max_ms = max(self.min_ms, int(max_ms))
         self.max_multiplier = max(1.0, float(max_multiplier))
@@ -1019,6 +1036,7 @@ class NaukriRateGovernor:
 
     @classmethod
     def from_settings(cls, settings: Any) -> "NaukriRateGovernor":
+        """Build a governor from the NAUKRI_DETAIL_DELAY_* / backoff / break settings."""
         return cls(
             min_ms         = settings.naukri_detail_delay_min_ms,
             max_ms         = settings.naukri_detail_delay_max_ms,
@@ -1030,13 +1048,16 @@ class NaukriRateGovernor:
         )
 
     def next_gap_s(self) -> float:
+        """Seconds to wait before the next detail visit (random base gap x current multiplier)."""
         return self._rng.uniform(self.min_ms, self.max_ms) / 1000.0 * self.multiplier
 
     def note_visit(self) -> None:
+        """Count one detail-page load toward the run total and the next scheduled break."""
         self.visits += 1
         self.since_break += 1
 
     def on_clean(self) -> None:
+        """Record a clean page; every clean_streak in a row halves the multiplier (floor 1.0)."""
         self.clean += 1
         if self.clean >= self.clean_streak:
             self.clean = 0
@@ -1044,13 +1065,16 @@ class NaukriRateGovernor:
                 self.multiplier = max(1.0, self.multiplier / 2)
 
     def on_block(self) -> None:
+        """Record a block: reset the clean streak and double the multiplier (capped)."""
         self.clean = 0
         self.multiplier = min(self.multiplier * 2, self.max_multiplier)
 
     def break_due(self) -> bool:
+        """True when breaks are enabled and break_every visits have passed since the last rest."""
         return self.break_every > 0 and self.since_break >= self.break_every
 
     def break_s(self) -> float:
+        """Random length in seconds for a periodic break (break_min_s..break_max_s)."""
         return self._rng.uniform(self.break_min_s, self.break_max_s)
 
     def rested(self) -> None:
@@ -1072,6 +1096,7 @@ class NaukriCircuitBreaker:
         pause_max_s: float,
         rng: random.Random | None = None,
     ) -> None:
+        """Clamp the threshold and pause range, starting CLOSED with zeroed counters."""
         self.threshold = max(1, int(threshold))
         self.pause_min_s = max(0.0, float(pause_min_s))
         self.pause_max_s = max(self.pause_min_s, float(pause_max_s))
@@ -1083,6 +1108,7 @@ class NaukriCircuitBreaker:
 
     @classmethod
     def from_settings(cls, settings: Any) -> "NaukriCircuitBreaker":
+        """Build a breaker from the NAUKRI_BREAKER_* settings."""
         return cls(
             threshold   = settings.naukri_breaker_threshold,
             pause_min_s = settings.naukri_breaker_pause_min_s,
@@ -1108,15 +1134,18 @@ class NaukriCircuitBreaker:
         return False
 
     def on_success(self) -> None:
+        """A clean load: close the breaker and reset the block and reopen counters."""
         self.state = self.CLOSED
         self.consecutive = 0
         self.reopens = 0
 
     def half_open(self) -> None:
+        """Move OPEN -> HALF_OPEN after the pause so the next load acts as a probe."""
         if self.state == self.OPEN:
             self.state = self.HALF_OPEN
 
     def pause_s(self) -> float:
+        """Random OPEN pause in seconds, doubled per failed probe, capped at 2 x pause_max_s."""
         base = self._rng.uniform(self.pause_min_s, self.pause_max_s) * (2 ** self.reopens)
         return min(base, 2 * self.pause_max_s)
 
@@ -1136,6 +1165,7 @@ class NaukriBlockStats:
     final_multiplier: float = 1.0
 
     def as_log(self) -> dict[str, Any]:
+        """Counters as a dict for the block-summary log, with cooldown rounded to whole seconds."""
         out = asdict(self)
         out["cooldown_seconds_total"] = int(round(self.cooldown_seconds_total))
         return out
@@ -1165,6 +1195,12 @@ class NaukriAgent:
         llm_service: Any | None = None,
         wait_for_human: bool = False,
     ) -> None:
+        """Set up per-run state: dedup sets, LLM enrichment, captured API responses, pacing.
+
+        already_harvested URLs (and the Naukri job ids parsed from them) are skipped before
+        the detail visit. wait_for_human lets a breaker trip hold the CAPTCHA tab open in
+        the Live Browser for a person. llm_service is resolved lazily unless injected.
+        """
         # When the circuit breaker trips, hold the CAPTCHA tab open in the Live
         # Browser and wait (bounded, settings.naukri_human_wait_s) for a person
         # to tick the box before falling back to the timed pause.
@@ -1202,6 +1238,10 @@ class NaukriAgent:
         self._srp_url: str | None = None
 
     def _reset_pacing(self, settings: Any) -> None:
+        """Rebuild the rate governor, circuit breaker and block stats and clear early-stop state.
+
+        Called once per run so pacing never carries over between harvests.
+        """
         self._governor = NaukriRateGovernor.from_settings(settings)
         self._breaker = NaukriCircuitBreaker.from_settings(settings)
         self._block_stats = NaukriBlockStats()
@@ -1305,6 +1345,11 @@ class NaukriAgent:
     # breaker. Any LLM error leaves the deterministic values in place.
 
     def _get_llm(self, settings: Any) -> Any | None:
+        """Return the LLM service for enrichment, creating it on first use from settings.
+
+        Returns None once enrichment is off for this run (no provider configured, call cap
+        reached or repeated failures); the "not configured" case is logged once.
+        """
         if self._llm_off_reason:
             return None
         if not self._llm_resolved:
@@ -1322,6 +1367,10 @@ class NaukriAgent:
         return self._llm_service
 
     def _llm_budget_left(self, settings: Any) -> bool:
+        """False once NAUKRI_LLM_MAX_CALLS_PER_RUN calls were made (0 = unlimited).
+
+        The first time the cap is hit, LLM enrichment is switched off for the rest of the run.
+        """
         cap = int(getattr(settings, "naukri_llm_max_calls_per_run", 0) or 0)
         if cap and self._llm_calls >= cap:
             if self._llm_off_reason is None:
@@ -1356,6 +1405,7 @@ class NaukriAgent:
             logger.warning("naukri_llm_schedule_failed", url=job.job_url, error=str(exc))
 
     def _llm_failed(self, exc: BaseException, what: str, ref: str) -> None:
+        """Log an LLM enrichment failure; after too many in a row, disable LLM for the run."""
         self._llm_failure_streak += 1
         logger.warning(
             "naukri_llm_enrichment_failed", what=what, job=ref,
@@ -1374,6 +1424,13 @@ class NaukriAgent:
         self, job: NaukriScrapedJob, llm: Any, want_contacts: bool, want_restructure: bool,
         timeout_s: float, settings: Any,
     ) -> None:
+        """Background LLM enrichment of one job, bounded by the LLM semaphore.
+
+        Optionally runs grounded contact extraction (applied only where allowed by
+        apply_llm_contacts) and description restructuring, each counting toward the per-run
+        cap. Mutates job in place; failures are recorded via _llm_failed and the
+        deterministic values are kept.
+        """
         assert self._llm_sem is not None
         async with self._llm_sem:
             ref = job.job_url or job.job_id
@@ -1544,6 +1601,11 @@ class NaukriAgent:
             logger.debug("naukri_response_capture_failed", error=str(exc))
 
     async def _await_capture(self, page: Page, check: Callable[[], Any], timeout_ms: int) -> Any:
+        """Poll check() every 250 ms until it returns a truthy value or timeout_ms passes.
+
+        Used to wait for an intercepted Naukri API response; returns check()'s final value
+        (possibly None) on timeout.
+        """
         waited = 0
         while waited < timeout_ms:
             if (val := check()):
@@ -1588,6 +1650,10 @@ class NaukriAgent:
         pending: list[NaukriScrapedJob] = []
 
         async def _flush_pending() -> None:
+            """Wait for the pending jobs' LLM enrichment, then hand them to on_batch and clear.
+
+            on_batch errors are logged, not raised.
+            """
             # LLM enrichment of these jobs must land before they are persisted.
             if pending:
                 await self._drain_llm(list(pending))
@@ -1608,6 +1674,11 @@ class NaukriAgent:
         }
 
         async def _progress(message: str | None = None, **fields: Any) -> None:
+            """Merge fields into the live progress state, recompute totals and send to on_progress.
+
+            target is the smaller of the safety cap and the reported/listed total minus skipped
+            jobs. No-op without on_progress; callback errors are logged and swallowed.
+            """
             if on_progress is None:
                 return
             try:
@@ -1882,6 +1953,7 @@ class NaukriAgent:
     #   back to "details" / "listing" with resume_at=0 when the pause ends.
 
     async def _emit_progress(self, message: str | None = None, **fields: Any) -> None:
+        """Report progress through the current run's progress sink, if any; never raises."""
         cb = self._progress_cb
         if cb is None:
             return
@@ -2200,6 +2272,7 @@ class NaukriAgent:
 
     @staticmethod
     async def _goto(target: Any, url: str, referer: str | None) -> Any:
+        """Navigate target to url (domcontentloaded, 30s), sending referer when given."""
         kwargs: dict[str, Any] = {"wait_until": "domcontentloaded", "timeout": 30_000}
         if referer:
             kwargs["referer"] = referer
@@ -2220,6 +2293,7 @@ class NaukriAgent:
         return tab
 
     async def _close_tab(self, tab: Any) -> None:
+        """Detach the API-response listener and close a detail tab; errors are swallowed."""
         try:
             tab.remove_listener("response", self._on_response)
         except Exception:
@@ -2334,6 +2408,7 @@ class NaukriAgent:
         return None
 
     async def _raise_if_blocked(self, page: Page, page_num: int, job_id: str | None = None) -> None:
+        """Raise _PageBlocked if the page is a CAPTCHA/bot wall, saving debug artefacts first."""
         reason = await self._block_reason(page)
         if reason is None:
             return
@@ -2404,6 +2479,10 @@ class NaukriAgent:
     # ── Overlay dismissal ──────────────────────────────────────────────────────
 
     async def _dismiss_overlays(self, page: Page) -> None:
+        """Press Escape, then click the first visible cookie banner and modal close button.
+
+        Best effort: missing or unclickable elements are ignored.
+        """
         try:
             await page.keyboard.press("Escape")
             await _delay(page, 300, 500)
@@ -2423,6 +2502,7 @@ class NaukriAgent:
     # ── Screenshot helper ──────────────────────────────────────────────────────
 
     async def _screenshot(self, page: Page, label: str) -> None:
+        """Save a viewport screenshot to the debug dir as <label>_<UTC time>.png (best effort)."""
         try:
             _DEBUG_DIR.mkdir(parents=True, exist_ok=True)
             ts   = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
@@ -2436,6 +2516,7 @@ class NaukriAgent:
 
     @staticmethod
     def _build_search_url(f: FiltersConfig, page_no: int = 1) -> str:
+        """Build the Naukri search-results URL for these filters and page (see build_search_url)."""
         return build_search_url(f, page_no)
 
 
@@ -2446,6 +2527,7 @@ class _PageBlocked(RuntimeError):
     NaukriAgent._fetch_detail); None when it was already closed."""
 
     def __init__(self, reason: str, tab: Any | None = None) -> None:
+        """Keep the block reason as the message and the optionally held challenged tab."""
         super().__init__(reason)
         self.tab = tab
 
@@ -2457,6 +2539,7 @@ _RESUME_MESSAGES = {
 
 
 async def _status(cb: StatusCallback | None, msg: str) -> None:
+    """Send msg to an optional status callback, logging (not raising) callback errors."""
     if cb is None:
         return
     try:

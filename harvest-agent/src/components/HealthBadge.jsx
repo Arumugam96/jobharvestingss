@@ -16,6 +16,7 @@ export default function HealthBadge({ dark = true }) {
 
   useEffect(() => {
     let cancelled = false;
+    /** Calls GET /health and stores status/version/environment ("offline" on failure). */
     const tick = async () => {
       try {
         const res = await getHealth();
@@ -25,6 +26,7 @@ export default function HealthBadge({ dark = true }) {
       }
     };
     tick();
+    /** Re-checks backend health whenever the window regains focus. */
     const onFocus = () => tick();
     window.addEventListener("focus", onFocus);
     return () => { cancelled = true; window.removeEventListener("focus", onFocus); };

@@ -51,6 +51,7 @@ _profile_locks: dict[str, asyncio.Lock] = {}
 
 
 def _get_profile_lock(profile_key: str) -> asyncio.Lock:
+    """Return (creating on first use) the in-process asyncio lock for a Chrome profile key."""
     lock = _profile_locks.get(profile_key)
     if lock is None:
         lock = asyncio.Lock()
@@ -313,6 +314,11 @@ class BrowserManager:
         locale: str = "en-US",
         timezone_id: str = "Europe/London",
     ) -> None:
+        """Store launch settings only; the browser starts in __aenter__.
+
+        `storage_state` is a saved session file (cookies/localStorage) to load into the context;
+        `channel="chromium"` forces the full bundled Chromium instead of chromium-headless-shell.
+        """
         self._headless:      bool               = headless
         self._slow_mo:       int                = slow_mo
         self._storage_state: str | None         = storage_state
@@ -328,6 +334,11 @@ class BrowserManager:
         self._context:       BrowserContext | None = None
 
     async def __aenter__(self) -> "BrowserManager":
+        """Launch Chromium and open a stealth-patched context (jittered viewport, matching UA).
+
+        Loads `storage_state` when given. If the launch fails, the Playwright driver is stopped
+        before the error propagates.
+        """
         self._pw = await async_playwright().start()
 
         launch_kwargs: dict = dict(
@@ -368,6 +379,7 @@ class BrowserManager:
         return self
 
     async def __aexit__(self, *_: Any) -> None:
+        """Close the context, browser and Playwright driver, ignoring errors from each."""
         if self._context:
             try:
                 await self._context.close()
@@ -424,6 +436,7 @@ class PersistentBrowserManager:
         locale:      str  = "en-US",
         timezone_id: str  = "Europe/London",
     ) -> None:
+        """Store launch settings and look up the per-profile lock; nothing is launched yet."""
         self._profile_dir: Path              = Path(profile_dir)
         self._headless:    bool              = headless
         self._slow_mo:     int               = slow_mo
@@ -451,6 +464,12 @@ class PersistentBrowserManager:
         self._tab_lock                        = asyncio.Lock()
 
     async def __aenter__(self) -> "PersistentBrowserManager":
+        """Take the profile lock, clear stale Chrome locks, then launch the persistent context.
+
+        Waits (logging why) if another task in this process holds the same profile. Before launch it
+        kills a dead/orphaned Chromium holding the OS-level lock and removes leftover Singleton*
+        files. On failure the driver is stopped and the lock released before re-raising.
+        """
         if self._lock.locked():
             logger.info(
                 "chrome_profile_lock_wait",
@@ -566,6 +585,7 @@ class PersistentBrowserManager:
             raise
 
     async def __aexit__(self, *_: Any) -> None:
+        """Close the persistent context and driver (errors ignored) and release the profile lock."""
         if self._context:
             try:
                 await self._context.close()
@@ -614,6 +634,7 @@ class PersistentBrowserManager:
             page = await self._context.new_page()
 
         def _on_crash(_: Any = None) -> None:
+            """Log that this tab's renderer crashed; other tabs keep running."""
             logger.error("browser_tab_crashed", tab=label or "?",
                          hint="Only this tab's renderer died; other tabs keep running.")
 
@@ -649,6 +670,7 @@ class PersistentBrowserManager:
 
     @property
     def context(self) -> BrowserContext:
+        """The live persistent BrowserContext; RuntimeError when used outside `async with`."""
         if not self._context:
             raise RuntimeError("PersistentBrowserManager must be used as an async context manager")
         return self._context

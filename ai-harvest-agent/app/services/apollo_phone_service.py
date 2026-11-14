@@ -90,6 +90,7 @@ _TYPE_RANK = {"mobile": 0, "work_direct": 1}
 
 
 def _now() -> datetime:
+    """Current time as an aware UTC datetime."""
     return datetime.now(timezone.utc)
 
 
@@ -101,6 +102,7 @@ def phone_enabled() -> bool:
 
 
 def phone_cost() -> int:
+    """Credits charged per delivered phone (RECRUITER_FINDER_PHONE_CREDIT_COST, floored at 0)."""
     return max(0, int(get_settings().recruiter_finder_phone_credit_cost))
 
 
@@ -110,6 +112,7 @@ async def pending_count(tenant_id: str) -> int:
     """Outstanding (pending) phone requests for ``tenant_id`` (explicit tenant filter —
     the budget is per tenant even for the all-access internal workspace)."""
     async def _q(db: AsyncSession) -> int:
+        """Count this tenant's pending request rows."""
         stmt = select(func.count()).select_from(ApolloPhoneRequestORM).where(
             ApolloPhoneRequestORM.tenant_id == tenant_id,
             ApolloPhoneRequestORM.status == PENDING,
@@ -127,6 +130,7 @@ async def pending_phone_credits_for_purpose(purpose: str) -> int:
     """Credits every outstanding (pending) ``purpose`` phone request — all tenants: the
     enrichment sub-cap and the global cap are account-wide — would cost if delivered."""
     async def _q(db: AsyncSession) -> int:
+        """Count pending request rows for ``purpose`` across all tenants."""
         stmt = select(func.count()).select_from(ApolloPhoneRequestORM).where(
             ApolloPhoneRequestORM.purpose == purpose,
             ApolloPhoneRequestORM.status == PENDING,
@@ -219,6 +223,7 @@ def status_after_call(result: Any) -> str:
 
 
 async def _rows_for_ref(db: AsyncSession, ref: str) -> list[ApolloPhoneRequestORM]:
+    """Every request row carrying ``ref`` (normally one; empty list if none)."""
     stmt = select(ApolloPhoneRequestORM).where(ApolloPhoneRequestORM.ref == ref)
     return list((await db.execute(stmt)).scalars().all())
 
@@ -318,6 +323,7 @@ async def _recent_found_row(
 
 
 async def _recruiter_by_person_id(db: AsyncSession, person_id: str) -> RecruiterORM | None:
+    """Most recently seen recruiter with this Apollo person id, across all tenants."""
     R = RecruiterORM
     return (await db.execute(
         select(R).where(R.apollo_person_id == person_id).order_by(R.last_seen_at.desc()).limit(1)
@@ -353,6 +359,13 @@ async def _unsolicited_row(
 
 
 async def _find_row(db: AsyncSession, ref: str, person_id: str) -> ApolloPhoneRequestORM | None:
+    """Locate the request row a delivered ``people[]`` entry belongs to.
+
+    With a ref: the ref's row for this person id, else the ref's single row whose person
+    id was never learned (otherwise None). Without a ref: the newest open row for the
+    person, then a FOUND row delivered in the last day (a duplicate), then a synthetic
+    row for a harvest recruiter carrying the id (which may INSERT a new row).
+    """
     R = ApolloPhoneRequestORM
     if ref:
         if person_id:
@@ -402,6 +415,13 @@ async def _resolve_recruiter_by_url(db: AsyncSession, row: ApolloPhoneRequestORM
 
 
 async def _apply_to_recruiter(db: AsyncSession, row: ApolloPhoneRequestORM, rid: str, found: bool) -> None:
+    """Write a phone outcome onto recruiter ``rid``.
+
+    Finder rows overwrite the recruiter's number; enrichment rows only fill an empty
+    one. Any remaining PENDING marker then becomes PUBLIC (has a phone) or NOT_FOUND.
+    A found enrichment phone also back-fills the person id and re-links the
+    recruiter's jobs by LinkedIn URL.
+    """
     R = RecruiterORM
     finder = (row.purpose or PURPOSE_FINDER) == PURPOSE_FINDER
     if found and finder:
@@ -514,6 +534,10 @@ async def _charge_delivery(
 
 def _settle_row_delivery(row: ApolloPhoneRequestORM, best: dict | None, cost: int,
                          delivered_at: datetime) -> None:
+    """Mark the row FOUND with the best number and ``cost`` charged, else NOT_FOUND.
+
+    Only mutates the ORM row; the charge itself is booked separately (_charge_delivery).
+    """
     row.delivered_at = delivered_at
     if best:
         row.status = FOUND
@@ -527,6 +551,10 @@ def _settle_row_delivery(row: ApolloPhoneRequestORM, best: dict | None, cost: in
 
 
 def _people(payload: Any) -> list[dict]:
+    """Person dicts from a webhook payload: ``people[]``, a single ``person``, or a bare list.
+
+    Returns [] for any other shape; non-dict entries are dropped.
+    """
     if isinstance(payload, dict):
         people = payload.get("people")
         if isinstance(people, list):
@@ -539,6 +567,7 @@ def _people(payload: Any) -> list[dict]:
 
 
 def _body_text(payload: Any, raw: str | None) -> str:
+    """Webhook body to store on the event log: the raw text, else JSON, capped at 64 KB."""
     if raw is not None:
         return raw[:_BODY_MAX]
     try:
@@ -612,6 +641,11 @@ async def process_webhook(
 # ── Expiry ───────────────────────────────────────────────────────────────────
 
 async def expire_pending(db: AsyncSession, *, older_than: datetime) -> int:
+    """Mark pending rows requested before ``older_than`` as expired; return how many.
+
+    Each row's links are resolved as not delivered (PENDING markers → NOT_FOUND).
+    Flushes but does not commit.
+    """
     rows = (await db.execute(
         select(ApolloPhoneRequestORM).where(
             ApolloPhoneRequestORM.status == PENDING,
@@ -638,6 +672,7 @@ async def expire_stale() -> int:
 # ── Read models (polling / diagnostics) ──────────────────────────────────────
 
 def _aware(dt: datetime | None) -> datetime | None:
+    """Re-attach UTC to a naive datetime (as read back from SQLite); None passes through."""
     if dt is not None and dt.tzinfo is None:
         return dt.replace(tzinfo=timezone.utc)  # SQLite drops the tz — stored as UTC
     return dt
@@ -666,6 +701,7 @@ def ui_phone_status(row: ApolloPhoneRequestORM, *, stale_before: datetime | None
 
 
 def _row_view(row: ApolloPhoneRequestORM, *, stale_before: datetime | None = None) -> dict:
+    """JSON-ready polling view of a request row: UI status, number, type, DNC, requested_at."""
     requested = _aware(row.requested_at)
     return {"phone_status": ui_phone_status(row, stale_before=stale_before),
             "phone": row.phone or "",
@@ -699,12 +735,17 @@ async def phone_status_for(
 
 
 async def job_pending_count(db: AsyncSession, job_id: str) -> int:
+    """Phone requests of a Finder job still awaiting delivery (not tenant-scoped)."""
     R = ApolloPhoneRequestORM
     stmt = select(func.count()).select_from(R).where(R.finder_job_id == job_id, R.status == PENDING)
     return int((await db.execute(stmt)).scalar() or 0)
 
 
 async def recent_webhook_events(db: AsyncSession, *, limit: int = 20) -> list[dict]:
+    """Newest logged webhook deliveries (diagnostics), ``limit`` clamped to 1-100.
+
+    Not tenant-scoped; each body is truncated to 4000 characters.
+    """
     E = ApolloWebhookEventORM
     rows = (await db.execute(
         select(E).order_by(E.received_at.desc()).limit(max(1, min(100, limit)))
@@ -723,6 +764,7 @@ _REOPEN = (PENDING, EXPIRED, REJECTED)
 
 
 def _event_day(received_at: datetime):
+    """UTC calendar date of a delivery: the budget day a backfilled charge is booked on."""
     return received_at.astimezone(timezone.utc).date()
 
 
@@ -756,6 +798,7 @@ async def _resolve_target(
                 "reveal_log_id": log.id, "linkedin_url": log.linkedin_url or None}
 
     async def _by_url(url: str, via: str) -> dict | None:
+        """Target for the newest recruiter with this normalized LinkedIn URL, or None."""
         norm = normalize_linkedin_url(url or "")
         if not norm:
             return None

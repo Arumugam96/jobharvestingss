@@ -3,6 +3,10 @@ import {
   GLASS_BTN, GLASS_INPUT, GLASS_INPUT_FOCUS, GLASS_PANEL, GLASS_STAT, GLASS_STAT_HOVER,
 } from "../theme";
 
+/**
+ * Global `<style>` block for the shared `ha-*` app chrome (layout, glass cards, inputs,
+ * tables, etc.), built from the theme tokens in ../theme. Mounted once by HarvestAgent.
+ */
 const ThemeStyles = () => (
   <style>{`
     .ha-root{display:flex;min-height:100vh;font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;${PAGE_BG}color:${C.text};}

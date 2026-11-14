@@ -30,8 +30,14 @@ export default function StopHarvestButton({ harvestRunning, onStopped, className
   if (!harvestRunning) return null;
 
   const canConfirm = text.trim().toLowerCase() === "stop" && !busy;
+  /** Closes the confirm dialog and clears its input/error (ignored while the stop request runs). */
   const close = () => { if (!busy) { setOpen(false); setText(""); setError(""); } };
 
+  /**
+   * Once "stop" is typed, calls POST /run-harvest-agent/stop, switches the button to
+   * "Stopping…", closes the dialog and passes the response to onStopped; shows the error
+   * on failure.
+   */
   const confirm = async () => {
     if (!canConfirm) return;
     setBusy(true);

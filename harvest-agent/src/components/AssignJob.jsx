@@ -15,6 +15,12 @@ import { GLASS_MODAL, GLASS_BTN, GLASS_INPUT, GLASS_INPUT_FOCUS } from "../theme
 // instead of flashing the "still loading → locked" state.
 let mePromise = null;
 let meEmail = "";
+/**
+ * Hook returning the logged-in user's email via GET /auth/me (getMe). The request
+ * is made once per page load and shared through the module-level `mePromise`;
+ * a failed request is cleared so the next mount retries.
+ * @returns {string} The email, or "" until it is known.
+ */
 export function useCurrentUserEmail() {
   const [email, setEmail] = useState(meEmail);
   useEffect(() => {
@@ -36,9 +42,11 @@ export function useCurrentUserEmail() {
 export const isAssignedToOther = (assignedTo, myEmail) =>
   !!assignedTo && (!myEmail || (assignedTo.email || "").toLowerCase() !== myEmail.toLowerCase());
 
+/** Up to two uppercase initials from a person's name, for the avatar circle ("?" when empty). */
 const initials = (name) =>
   (name || "?").split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join("");
 
+/** Formats an ISO timestamp as a locale medium date + short time; "" if formatting throws. */
 const fmtTime = (iso) => {
   try { return new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }); } catch { return ""; }
 };
@@ -122,6 +130,18 @@ export function AssignCell({ assignedTo, myEmail, onOpen }) {
   );
 }
 
+/**
+ * Modal for claiming a job ("Self-assign") or, when `assignedTo` is set (the
+ * caller's own assignment), updating the comment or releasing it. Calls
+ * POST /jobs/{id}/assign or DELETE /jobs/{id}/assign; a 409 (someone else
+ * claimed it first) is shown inline. Escape / backdrop click close it unless busy.
+ * @param {object} props
+ * @param {{id: string, title: string, company: string}} props.job
+ * @param {object|null} props.assignedTo Current assignment ({name, note, assigned_at}).
+ * @param {(assignedTo: object|null) => void} props.onChange Gets the new assignment
+ *   (null after unassign).
+ * @param {() => void} props.onClose
+ */
 export default function AssignJobModal({ job, assignedTo, onChange = () => {}, onClose = () => {} }) {
   const mine = !!assignedTo;
   const [note, setNote] = useState(assignedTo?.note || "");
@@ -129,11 +149,17 @@ export default function AssignJobModal({ job, assignedTo, onChange = () => {}, o
   const [error, setError] = useState("");
 
   useEffect(() => {
+    /** Closes the modal on Escape unless a request is in flight. */
     const onKey = (e) => { if (e.key === "Escape" && !busy) onClose(); };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose, busy]);
 
+  /**
+   * Assigns (with the trimmed note) or unassigns the job, reports the new assignment
+   * via onChange and closes; on failure shows the error and keeps the modal open.
+   * @param {"assign"|"unassign"} kind
+   */
   const run = async (kind) => {
     setBusy(kind);
     setError("");

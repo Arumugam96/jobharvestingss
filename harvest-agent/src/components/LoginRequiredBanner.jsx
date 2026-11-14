@@ -28,19 +28,29 @@ const AMBER = "#B45309";
 const AMBER_SOFT = "#FEF3C7";
 const AMBER_LINE = "rgba(217,119,6,.35)";
 
+/** Stable key for a login request: source|account|kind. */
 const itemKey = (it) => `${it.source}|${it.account || ""}|${it.kind}`;
 
+/** Formats a remaining duration in ms as m:ss (clamped at 0). */
 function fmtLeft(ms) {
   const s = Math.max(0, Math.round(ms / 1000));
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
+/** Subject of the countdown text: "the harvest is" (LinkedIn), "Resdex search is", "a run is". */
 function waitingWhat(it) {
   if (it.source === "linkedin") return "the harvest is";
   if (/resdex/i.test(it.reason || "")) return "Resdex search is";
   return "a run is";
 }
 
+/**
+ * App-wide, top-centre stack of "login needed" cards (only for tenants with the "rules"
+ * feature). Polls GET /login-required every 12s while the tab is visible, corrects
+ * countdowns for server clock skew, and per card offers "Open Live Browser"
+ * (POST /login-required/open, which may open the embedded LiveBrowserView) and
+ * dismiss (POST /login-required/dismiss). Closes the live view once its request clears.
+ */
 export default function LoginRequiredBanner() {
   const { hasFeature } = useTenant();
   const enabled = hasFeature("rules");
@@ -53,6 +63,7 @@ export default function LoginRequiredBanner() {
   const timer = useRef(null);
   const alive = useRef(true);
 
+  /** Fetches pending login requests and the server clock skew; keeps last state on error. */
   const poll = useCallback(async () => {
     try {
       const res = await getLoginRequired();
@@ -69,6 +80,7 @@ export default function LoginRequiredBanner() {
   useEffect(() => {
     alive.current = true;
     if (!enabled) return undefined;
+    /** (Re)starts polling when the tab is visible; stops it while hidden. */
     const start = () => {
       clearInterval(timer.current);
       timer.current = null;
@@ -101,6 +113,10 @@ export default function LoginRequiredBanner() {
     if (live && !items.some((it) => itemKey(it) === live.key)) setLive(null);
   }, [items, live]);
 
+  /**
+   * Starts the source's login flow via POST /login-required/open, opens the Live Browser
+   * if the backend asks, shows any returned message under the card, and re-polls in 1.5s.
+   */
   const open = async (it) => {
     const key = itemKey(it);
     setBusy((b) => ({ ...b, [key]: true }));
@@ -126,6 +142,7 @@ export default function LoginRequiredBanner() {
     }
   };
 
+  /** Hides a request locally and via POST /login-required/dismiss (best-effort). */
   const dismiss = async (it) => {
     setItems((cur) => cur.filter((x) => itemKey(x) !== itemKey(it)));
     try { await dismissLoginRequired({ source: it.source, account: it.account, kind: it.kind }); }

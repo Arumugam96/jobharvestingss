@@ -62,6 +62,7 @@ def _strip_fences(text: str) -> str:
 
 class OutreachService:
     def __init__(self, llm_service: LLMService) -> None:
+        """Wrap the shared LLMService used for every outreach draft."""
         self._llm = llm_service
 
     async def _complete(self, prompt: str, system: str, *, json_mode: bool) -> tuple[str, GenMeta]:
@@ -208,6 +209,10 @@ class OutreachService:
 
     @staticmethod
     def _parse_email_json(text: str) -> tuple[str, str] | None:
+        """Parse the model's ``{"subject", "body"}`` JSON (fences stripped).
+
+        Returns None when the text isn't a JSON object or either field is empty.
+        """
         try:
             data = json.loads(_strip_fences(text))
         except Exception:
@@ -221,6 +226,13 @@ class OutreachService:
     # ── LinkedIn ───────────────────────────────────────────────────────────────
 
     async def generate_linkedin(self, job: dict, regenerate: bool = False) -> LinkedinDraft:
+        """Draft a LinkedIn message to the job's recruiter via the configured LLM (no send).
+
+        ``regenerate`` asks for a distinctly different variation. An LLM error or empty
+        reply yields the deterministic fallback with ``fallback_used=True``; ``meta``
+        records the call either way. Unlike the email path, no platform-mention
+        correction is applied to the LLM text.
+        """
         company = (job.get("company") or "").strip()
         prompt = outreach_prompts.build_linkedin_prompt(job)
         if regenerate:

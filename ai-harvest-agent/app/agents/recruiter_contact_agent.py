@@ -163,6 +163,7 @@ class RecruiterDiscoveryResult:
     results: list[ProspectResult] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialise the run summary to a plain dict (per-recruiter results are not included)."""
         return {
             "run_id":            self.run_id,
             "started_at":        self.started_at,
@@ -190,6 +191,7 @@ class RecruiterDiscoveryResult:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _clean_name(raw: str) -> str:
+    """Drop characters that cannot be UTF-8 encoded and collapse whitespace ("" for empty)."""
     if not raw:
         return ""
     cleaned = raw.encode("utf-8", errors="ignore").decode("utf-8", errors="ignore")
@@ -375,6 +377,10 @@ async def _persist_enrichment(rec: RecruiterRecord, result: ProspectResult) -> N
     meaning even a JSON-mode run still warms the DB cache for next time.
     """
     async def _write(db):
+        """Resolve or create the recruiter row if needed, then save the enrichment fields onto it.
+
+        Silently does nothing when no recruiter row can be resolved.
+        """
         recruiter_id = rec.recruiter_id
         if not recruiter_id:
             recruiter = await upsert_recruiter(
@@ -436,6 +442,7 @@ class RecruiterContactAgent:
     """
 
     def __init__(self, concurrency: int = _DEFAULT_CONCURRENCY) -> None:
+        """Clamp concurrency to 1-5 parallel profile tabs; the LLM service is built lazily."""
         self._concurrency = max(1, min(concurrency, 5))
         self._llm_service: Any = None
 
@@ -455,6 +462,15 @@ class RecruiterContactAgent:
         run_ids: list[str] | None = None,
         max_files: int = 10,
     ) -> RecruiterDiscoveryResult:
+        """Enrich every recruiter found in recent harvests with publicly scraped contact details.
+
+        Recruiters are loaded from the DB or harvest JSON files (per DATA_SOURCE), then
+        enriched in batches inside the persistent Chrome profile, each result cached onto its
+        RecruiterORM row. Intermediate JSON is saved per batch; at the end the JSON, debug
+        JSON, Excel report and summary file are written and the run summary is saved to the
+        DB (best effort). Returns an empty summary (no files written) when no recruiters
+        are found. Per-recruiter failures become Low-confidence NOT_FOUND results.
+        """
         started_at = datetime.now(timezone.utc)
         run_id     = "rcd_" + started_at.strftime("%Y%m%d_%H%M%S")
 
@@ -488,6 +504,10 @@ class RecruiterContactAgent:
         sem    = asyncio.Semaphore(self._concurrency)
 
         async def _enrich_one(rec: RecruiterRecord) -> ProspectResult:
+            """Enrich one recruiter in a fresh tab and persist the result; the tab is always closed.
+
+            Errors are logged and turned into a Low-confidence NOT_FOUND result, never raised.
+            """
             async with sem:
                 page = await pbm.new_page()
                 try:
@@ -878,6 +898,10 @@ class RecruiterContactAgent:
         return result
 
     def _save_json(self, results: list[ProspectResult], run_id: str, source_filter: str) -> str:
+        """Write confidence/contact counts plus every result to <run_id>_recruiter_contacts.json.
+
+        Returns the absolute path of the written file.
+        """
         _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         path    = _OUTPUT_DIR / f"{run_id}_recruiter_contacts.json"
         payload = {

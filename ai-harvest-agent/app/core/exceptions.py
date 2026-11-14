@@ -19,6 +19,10 @@ class HarvestException(Exception):
         status_code: int = status.HTTP_500_INTERNAL_SERVER_ERROR,
         details: dict[str, Any] | None = None,
     ) -> None:
+        """Store the error's message, machine-readable code, HTTP status and details.
+
+        harvest_exception_handler renders these as the ``{"error": {...}}`` JSON body.
+        """
         super().__init__(message)
         self.message = message
         self.code = code
@@ -28,6 +32,7 @@ class HarvestException(Exception):
 
 class JobNotFoundError(HarvestException):
     def __init__(self, job_id: str) -> None:
+        """404 JOB_NOT_FOUND for the given harvest job id."""
         super().__init__(
             message=f"Harvest job '{job_id}' not found",
             code="JOB_NOT_FOUND",
@@ -37,6 +42,7 @@ class JobNotFoundError(HarvestException):
 
 class JobAlreadyRunningError(HarvestException):
     def __init__(self, job_id: str, details: dict[str, Any] | None = None) -> None:
+        """409 JOB_ALREADY_RUNNING; details default to ``{"job_id": job_id}``."""
         super().__init__(
             message=(
                 "A harvest is already running — only one can run at a time "
@@ -51,6 +57,7 @@ class JobAlreadyRunningError(HarvestException):
 
 class DailyJobLimitExceededError(HarvestException):
     def __init__(self, used: int, limit: int) -> None:
+        """429 DAILY_LIMIT_EXCEEDED when today's scraped-job count hit MAX_JOBS_PER_DAY."""
         super().__init__(
             message=(
                 f"Daily harvest limit reached — {used} of {limit} jobs already "
@@ -65,6 +72,7 @@ class DailyJobLimitExceededError(HarvestException):
 
 class AgentError(HarvestException):
     def __init__(self, message: str, details: dict[str, Any] | None = None) -> None:
+        """500 AGENT_ERROR for a failure inside an agent's workflow."""
         super().__init__(
             message=message,
             code="AGENT_ERROR",
@@ -75,6 +83,7 @@ class AgentError(HarvestException):
 
 class PlaywrightError(HarvestException):
     def __init__(self, message: str, url: str = "") -> None:
+        """502 PLAYWRIGHT_ERROR for a browser-automation failure; ``url`` goes in details."""
         super().__init__(
             message=message,
             code="PLAYWRIGHT_ERROR",
@@ -85,6 +94,7 @@ class PlaywrightError(HarvestException):
 
 class LLMError(HarvestException):
     def __init__(self, message: str) -> None:
+        """503 LLM_ERROR for a single LLM call that went wrong."""
         super().__init__(
             message=message,
             code="LLM_ERROR",
@@ -100,12 +110,14 @@ class LLMUnavailableError(LLMError):
     """
 
     def __init__(self, message: str) -> None:
+        """Same 503 as LLMError but with code LLM_UNAVAILABLE (provider itself is down)."""
         super().__init__(message)
         self.code = "LLM_UNAVAILABLE"
 
 
 class ValidationError(HarvestException):
     def __init__(self, message: str, field: str = "") -> None:
+        """422 VALIDATION_ERROR; the offending ``field`` name goes in details."""
         super().__init__(
             message=message,
             code="VALIDATION_ERROR",
@@ -115,6 +127,10 @@ class ValidationError(HarvestException):
 
 
 async def harvest_exception_handler(request: Request, exc: HarvestException) -> JSONResponse:
+    """Render a HarvestException as ``{"error": {code, message, details}}`` with its status.
+
+    ``details`` is replaced by ``{}`` when the exception sets ``expose_details = False``.
+    """
     return JSONResponse(
         status_code=exc.status_code,
         content={
@@ -128,6 +144,7 @@ async def harvest_exception_handler(request: Request, exc: HarvestException) -> 
 
 
 async def http_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Catch-all: render any exception as a 500 INTERNAL_ERROR with ``str(exc)`` as message."""
     return JSONResponse(
         status_code=500,
         content={"error": {"code": "INTERNAL_ERROR", "message": str(exc), "details": {}}},

@@ -9,6 +9,10 @@ import { mapRun } from "./lib/jobsData";
  * read it via useHarvestData() instead of receiving it all as props. */
 const HarvestDataContext = createContext(null);
 
+/**
+ * Shared app data (jobs total, run history, harvestRunning mutex, view caches).
+ * Throws when used outside HarvestDataProvider.
+ */
 export function useHarvestData() {
   const ctx = useContext(HarvestDataContext);
   if (!ctx) throw new Error("useHarvestData must be used within HarvestAgent");
@@ -101,6 +105,7 @@ export function HarvestDataProvider({ children }) {
   useEffect(() => { fetchRuns(); }, [fetchRuns]);
   useEffect(() => {
     syncActiveRun();
+    /** Re-sync the active-run flag whenever the window regains focus. */
     const onFocus = () => syncActiveRun();
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);

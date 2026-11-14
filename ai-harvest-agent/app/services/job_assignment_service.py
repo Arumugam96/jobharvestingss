@@ -47,6 +47,7 @@ def assignment_view(job: ScrapedJobORM) -> dict[str, Any] | None:
 
 
 def _same_user(email: str | None, user: AuthenticatedUser) -> bool:
+    """Case-insensitive match of an assignee email against the user; False if email is empty."""
     return bool(email) and email.lower() == (user.email or "").lower()
 
 

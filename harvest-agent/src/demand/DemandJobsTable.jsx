@@ -24,6 +24,8 @@ export const STATUS_FILTERS = [
   { value: "stopped", label: "Stopped" },
 ];
 
+/** Whether a batch row passes a STATUS_FILTERS value ("active", "finished" and "attention" are
+ * groups; other values match row.status exactly). */
 export function rowMatchesStatus(r, f) {
   if (f === "all") return true;
   if (f === "active") return isActiveRow(r);
@@ -32,6 +34,7 @@ export function rowMatchesStatus(r, f) {
   return r.status === f;
 }
 
+/** Table cell showing a skill-coverage fraction as a bar plus percentage ("—" when absent). */
 function CoverageCell({ value }) {
   const v = pct(value);
   if (v == null) return <span className="dm-muted">—</span>;
@@ -43,6 +46,16 @@ function CoverageCell({ value }) {
   );
 }
 
+/**
+ * Jobs table for one Demand batch with status / job / text filters and title sorting.
+ * Finished rows open the job page; queued and in-progress rows are not clickable.
+ * @param {object} props
+ * @param {Array} props.rows - batch rows from GET /demand/batches/{run_id}.
+ * @param {string} props.uploadedOn - batch upload date shown in the rows.
+ * @param {string} props.status - controlled STATUS_FILTERS value (set by the batch stat cards).
+ * @param {Function} props.onStatusChange - setter for `status`.
+ * @param {Function} props.onOpenJob - called with the row to open its job page.
+ */
 export default function DemandJobsTable({ rows, uploadedOn, status, onStatusChange, onOpenJob }) {
   const [jobFilter, setJobFilter] = useState("all");
   const [q, setQ] = useState("");

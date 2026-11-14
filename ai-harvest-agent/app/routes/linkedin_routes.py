@@ -78,12 +78,14 @@ class SetupSessionRequest(BaseModel):
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _make_run_id(keyword: str, location: str) -> str:
+    """Build a run id: UTC timestamp + "_linkedin_" + a 30-char keyword/location slug."""
     ts   = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     slug = re.sub(r"[^a-z0-9]+", "_", f"{keyword} {location}".lower()).strip("_")
     return f"{ts}_linkedin_{slug[:30]}"
 
 
 def _err(msg: str, reason: str = "") -> JSONResponse:
+    """Failure body `{"status": "failed", "message", "reason"?}` returned with HTTP 200."""
     body: dict[str, Any] = {"status": "failed", "message": msg}
     if reason:
         body["reason"] = reason
@@ -91,6 +93,7 @@ def _err(msg: str, reason: str = "") -> JSONResponse:
 
 
 def _to_linkedin_job(j: LinkedInScrapedJob) -> LinkedInJob:
+    """Map a scraped LinkedIn job onto the API response model (source fixed to "LinkedIn")."""
     return LinkedInJob(
         job_title       = j.job_title,
         company         = j.company,
@@ -202,6 +205,7 @@ async def run_linkedin_agent() -> Any:
     log.info("linkedin_search_started", max_jobs=f.max_jobs)
 
     async def _do_harvest() -> tuple[list[LinkedInScrapedJob], dict, list[dict], list[dict]]:
+        """Run the LinkedIn scrape; returns (jobs, token usage, LLM call log, re-enrich queue)."""
         agent = LinkedInAgent()
         jobs = await agent.harvest(
             filters  = f,
@@ -233,6 +237,12 @@ async def run_linkedin_agent() -> Any:
     log.info("linkedin_token_usage", **token_usage["total"])
 
     async def _mirror_run_to_db(response: LinkedInRunResponse) -> None:
+        """Best-effort mirror of this run into the DB: run row, token usage, jobs and LLM calls.
+
+        Jobs whose extraction fell back to selectors only (all LLM providers down) are queued for
+        re-enrichment and flagged pending. Each step goes through db_write, so DB errors are logged
+        and swallowed; nothing more is written if the run row could not be created.
+        """
         run_pk = await db_write(lambda db: HarvestRunService(db).create_run(
             run_id           = run_id,
             source           = "LinkedIn",
@@ -329,6 +339,13 @@ async def setup_linkedin_session(body: SetupSessionRequest | None = None) -> Any
     chrome_profile = account_profile_dir(config.browser.chrome_profile, account)
 
     async def _open_for_login() -> dict:
+        """Open a headed persistent-profile browser and wait for LinkedIn to be logged in.
+
+        Clears stale Chrome Singleton* lock files first. Reuses an existing session when the home
+        page lands logged in and the `li_at` cookie is present; otherwise opens the login page and
+        polls every 2 s for up to 10 minutes (MFA included). Saves the session file on success and
+        returns the auth result dict; raises RuntimeError on timeout.
+        """
         from pathlib import Path as _Path
 
         # ── Step 0: Clear Chrome profile lock files before launching ─────────
@@ -525,6 +542,10 @@ async def linkedin_auth_status() -> Any:
 
     async def _check() -> dict:
         # Use non-persistent BrowserManager with session file — never locks Chrome profile
+        """Open /feed/ headless with the saved session file and classify where LinkedIn lands.
+
+        Returns `{"status", "url", "message"}`, or `{"status": "error"}` if navigation fails.
+        """
         async with BrowserManager(
             headless      = True,
             storage_state = sm.storage_state_arg(),

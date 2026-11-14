@@ -17,6 +17,7 @@ logger = structlog.get_logger(__name__)
 
 
 def _aware_utc(dt: datetime) -> datetime:
+    """Treat a naive datetime as UTC so it can be compared with ``now(timezone.utc)``."""
     # SQLite has no real timezone-aware storage — datetimes read back through
     # it come back naive even though we always wrote UTC. Normalize so
     # comparisons/arithmetic against datetime.now(timezone.utc) never raise.
@@ -27,6 +28,7 @@ class OTPRequestError(Exception):
     """Raised when an OTP cannot be issued right now (e.g. resend cooldown)."""
 
     def __init__(self, message: str, retry_after: int | None = None) -> None:
+        """``retry_after`` is the seconds until another OTP may be requested, if known."""
         super().__init__(message)
         self.message = message
         self.retry_after = retry_after
@@ -40,6 +42,7 @@ class OTPVerifyError(Exception):
 
 class AuthService:
     def __init__(self, db: AsyncSession, settings: Settings, email_sender: EmailSender) -> None:
+        """Bind to the request's DB session; this service flushes but never commits."""
         self._db = db
         self._settings = settings
         self._email_sender = email_sender
@@ -47,6 +50,12 @@ class AuthService:
     # ── Request OTP ──────────────────────────────────────────────────────────────
 
     async def request_otp(self, email: str, purpose: str = OTPPurpose.LOGIN) -> None:
+        """Issue a fresh OTP for ``email`` and send it by email.
+
+        Raises OTPRequestError (with ``retry_after``) inside the resend cooldown. Every
+        earlier unconsumed OTP for the email/purpose is consumed so only the newest can
+        verify. Only the HMAC of the code is stored; the plain code goes to the sender.
+        """
         settings = self._settings
         now = datetime.now(timezone.utc)
 
@@ -99,6 +108,14 @@ class AuthService:
         purpose: str = OTPPurpose.LOGIN,
         workspace: str | None = None,
     ) -> UserORM:
+        """Check ``otp`` against the latest OTP for ``email`` and return the (new) user.
+
+        Raises a generic OTPVerifyError when the OTP is missing, consumed, expired,
+        out of attempts or wrong; a wrong code bumps ``attempt_count`` uncommitted (the
+        route must commit it). Consumption is an atomic conditional UPDATE so only one
+        concurrent verify wins. ``workspace`` picks the user's tenant (see
+        _get_or_create_user). Issuing the token/session cookie is left to the route.
+        """
         settings = self._settings
         now = datetime.now(timezone.utc)
 
@@ -151,6 +168,7 @@ class AuthService:
     # ── Internals ────────────────────────────────────────────────────────────────
 
     async def _latest_otp(self, email: str, purpose: str) -> OTPVerificationORM | None:
+        """Most recently created OTP row for the email/purpose, consumed or not."""
         result = await self._db.execute(
             select(OTPVerificationORM)
             .where(OTPVerificationORM.email == email, OTPVerificationORM.purpose == purpose)
@@ -160,6 +178,11 @@ class AuthService:
         return result.scalar_one_or_none()
 
     async def _get_or_create_user(self, email: str, workspace: str | None = None) -> UserORM:
+        """Load or create the verified user and (re)assign its tenant for this login.
+
+        Tenant = the chosen workspace, else the email-domain mapping, else internal. An
+        existing user's tenant is overwritten on every login. Flushes, no commit.
+        """
         result = await self._db.execute(select(UserORM).where(UserORM.email == email))
         user = result.scalar_one_or_none()
         # FOR NOW: the login page's workspace switch decides the tenant — any

@@ -56,18 +56,22 @@ class SchedulerService:
     """
 
     def __init__(self) -> None:
+        """Create the (not yet started) AsyncIOScheduler."""
         self._scheduler = AsyncIOScheduler()
         self._running   = False
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     def start(self) -> None:
+        """Start the scheduler on the running event loop; no-op if already started."""
         if not self._running:
             self._scheduler.start()
             self._running = True
             logger.info("scheduler_started")
 
     def stop(self) -> None:
+        """Shut down without waiting for running jobs; shutdown errors are swallowed.
+        No-op if not started."""
         if self._running:
             try:
                 self._scheduler.shutdown(wait=False)

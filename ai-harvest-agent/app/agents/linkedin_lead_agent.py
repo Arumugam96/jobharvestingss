@@ -62,6 +62,7 @@ _HIRING_KEYWORDS = {
 
 
 def _is_hiring_post(text: str) -> bool:
+    """True if the post text contains any hiring-intent keyword (case-insensitive substring)."""
     t = text.lower()
     return any(kw in t for kw in _HIRING_KEYWORDS)
 
@@ -123,6 +124,7 @@ class LinkedInLeadAgent:
         max_pages:    int = 5,
         scroll_times: int = 8,
     ) -> None:
+        """Store search limits: max posts kept, result pages visited and scrolls per page."""
         self._max_posts    = max_posts
         self._max_pages    = max_pages
         self._scroll_times = scroll_times

@@ -42,6 +42,7 @@ const LANE_ORDER = ["linkedin", "naukri", "dice"];
 const MAX_SEGMENTS = 30; // batch meter rendering bound (a huge batch size scales down)
 
 const n = (v) => (v === null || v === undefined || v === "" || Number.isNaN(Number(v)) ? null : Number(v));
+/** Locale-formats a number for display; "—" for null/undefined. */
 const fmt = (v) => (v === null || v === undefined ? "—" : Number(v).toLocaleString());
 
 /** "Past 24h" / "Past 7d" for a search_window_hours value. */
@@ -57,6 +58,7 @@ export function hasProgress(entry) {
   return !!entry && (entry.phase != null || entry.listed != null || entry.reported_total != null);
 }
 
+/** Lane state chip (running gets a pulsing dot); unknown states render as "pending". */
 function StateChip({ state }) {
   const st = STATE_META[state] || STATE_META.pending;
   return (
@@ -67,6 +69,7 @@ function StateChip({ state }) {
   );
 }
 
+/** A failed/skipped lane's reason plus its error (when different); nothing if both empty. */
 function FailDetail({ entry }) {
   const detail = [entry.reason, entry.error && entry.error !== entry.reason ? entry.error : ""]
     .filter(Boolean).join(" — ");
@@ -74,6 +77,7 @@ function FailDetail({ entry }) {
   return <div className="lh-err" title={entry.error || entry.reason}>{detail}</div>;
 }
 
+/** SOURCE_META display info (name, glyph, tint) for a source key, with a grey fallback. */
 const srcMeta = (srcKey) =>
   SOURCE_META[srcKey] || { name: srcKey, glyph: (srcKey || "?").slice(0, 1).toUpperCase(), tint: "#64748B" };
 
@@ -117,6 +121,13 @@ function PauseBanner({ srcKey, entry, onOpenLiveBrowser }) {
   );
 }
 
+/**
+ * Lane header: source glyph and name, state / pause / search-window / cap chips, and
+ * the big corner number.
+ * @param {object} props
+ * @param {string} props.corner Pre-formatted corner number.
+ * @param {string} props.cornerLabel Caption under the corner number.
+ */
 function LaneHead({ srcKey, entry, windowHours, corner, cornerLabel }) {
   const meta = srcMeta(srcKey);
   const win = windowLabel(entry.window_hours ?? windowHours);
@@ -155,6 +166,11 @@ function CompactLane({ srcKey, entry, windowHours }) {
   );
 }
 
+/**
+ * Full lane for a source entry with progress keys: Listing → Details → Done stepper,
+ * pause banner, Found / Already harvested / To fetch / Saved funnel, detail-extraction
+ * bar, batch meter (or failure detail), and the latest progress message.
+ */
 function ProgressLane({ srcKey, entry, windowHours, onOpenLiveBrowser }) {
   const state = entry.state || "pending";
   const running = state === "running";

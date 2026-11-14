@@ -49,6 +49,7 @@ def _norm_phone(raw: str | None) -> str:
 
 
 def _empty(run_id: str) -> dict[str, Any]:
+    """Zeroed insights payload for a run with no phones (same keys as the real result)."""
     return {"total_phones": 0, "called": 0, "not_called": 0, "answered": 0, "unanswered": 0,
             "called_pct": 0, "not_called_pct": 0, "sources": [], "run_id": run_id}
 
@@ -241,6 +242,10 @@ def render_phone_insights_email_html(
 
     # ── KPI card helper (compact, Outlook-safe) ──────────────────────────
     def _kpi(value, label: str, color: str, sub: str = "") -> str:
+        """One KPI ``<td>`` cell (big value, label, optional coloured sub-line) for the email.
+
+        Inline styles only, for Outlook; values are interpolated unescaped.
+        """
         sub_html = (
             f'<div style="font-size:10px;font-weight:600;color:{color};'
             f'margin-top:2px">{sub}</div>' if sub else ""
@@ -416,6 +421,7 @@ async def _claim(run_id: str) -> bool:
     """Atomically stamp phone_insights_sent_at (only if still NULL). True when this
     caller won the claim — the one-shot and the sweep can never both send."""
     async def _w(db: AsyncSession) -> bool:
+        """Stamp ``phone_insights_sent_at`` only if still NULL; True if this update won."""
         H = HarvestRunORM
         res = await db.execute(
             update(H).where(H.id == run_id, H.phone_insights_sent_at.is_(None))
@@ -428,6 +434,7 @@ async def _claim(run_id: str) -> bool:
 async def _release(run_id: str) -> None:
     """Undo a claim after a failed send so the sweep retries it."""
     async def _w(db: AsyncSession) -> None:
+        """Reset ``phone_insights_sent_at`` to NULL for the run."""
         H = HarvestRunORM
         await db.execute(update(H).where(H.id == run_id).values(phone_insights_sent_at=None))
     await db_write(_w)

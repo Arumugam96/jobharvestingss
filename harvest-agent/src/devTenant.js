@@ -24,6 +24,11 @@ export const DEV_TENANTS = [
 const KEY = "ss_dev_tenant";
 const VALID = new Set(DEV_TENANTS.map((t) => t.id));
 
+/**
+ * The dev-bypass tenant id: a valid ?tenant= param (also persisted), else the
+ * stored choice, else "internal".
+ * @returns {string}
+ */
 export function getDevTenant() {
   try {
     const fromUrl = new URLSearchParams(window.location.search).get("tenant");
@@ -39,6 +44,10 @@ export function getDevTenant() {
   return "internal";
 }
 
+/**
+ * Persist the dev-bypass tenant (unknown ids fall back to "internal") and reload
+ * the page so every view refetches under the new header.
+ */
 export function setDevTenant(id) {
   try {
     localStorage.setItem(KEY, VALID.has(id) ? id : "internal");

@@ -32,6 +32,10 @@ _NOISY_ACCESS_PATHS = ("/harvest-status", "/health", "/run-history")
 
 class _QuietPollingFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
+        """Drop successful (" 200 ") access lines for the UI's polling endpoints.
+
+        Everything else, including non-200 responses on those paths, passes through.
+        """
         msg = record.getMessage()
         if " 200 " not in msg:
             return True

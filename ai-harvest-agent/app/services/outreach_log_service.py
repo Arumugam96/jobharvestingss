@@ -147,6 +147,7 @@ BREVO_EVENT_MAP = {
 
 
 def _event_time(raw: Any) -> datetime:
+    """Webhook unix timestamp as a UTC datetime; falls back to now if missing/invalid."""
     try:
         return datetime.fromtimestamp(int(raw), tz=timezone.utc)
     except (TypeError, ValueError):
@@ -530,9 +531,11 @@ async def outreach_list_stats(
     )
 
     async def _count(stmt) -> int:
+        """Row count of the given filtered select."""
         return (await db.execute(select(func.count()).select_from(stmt.subquery()))).scalar_one()
 
     async def _status(value: str) -> int:
+        """Count of filtered rows whose headline delivery_status equals ``value``."""
         return await _count(base.where(EmailOutreachORM.delivery_status == value))
 
     return {
@@ -669,6 +672,11 @@ async def companies_replied_since(db: AsyncSession, since: datetime) -> set[str]
 
 
 async def get_by_id(db: AsyncSession, outreach_id: str) -> EmailOutreachORM | None:
+    """Fetch one outreach send row by id, or None.
+
+    Not tenant-scoped (unlike the list/stat queries here): webhook handlers use it to
+    match provider events, which arrive without a tenant context.
+    """
     return (
         await db.execute(select(EmailOutreachORM).where(EmailOutreachORM.id == outreach_id))
     ).scalar_one_or_none()

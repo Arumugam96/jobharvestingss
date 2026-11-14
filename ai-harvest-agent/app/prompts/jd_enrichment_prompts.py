@@ -79,4 +79,8 @@ JD_RESTRUCTURE_SCHEMA = (
 
 
 def build_restructure_content(description_text: str) -> str:
+    """extract_json content for the JD-reformatting call: the raw description under a header.
+
+    Pairs with JD_RESTRUCTURE_SYSTEM_PROMPT; a None/empty description yields just the header.
+    """
     return f"---JOB DESCRIPTION---\n{description_text or ''}"

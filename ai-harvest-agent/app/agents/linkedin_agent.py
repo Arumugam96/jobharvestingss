@@ -367,6 +367,7 @@ _WHITESPACE   = re.compile(r"[ \t]{2,}")
 
 
 def _clean(text: str) -> str:
+    """Replace NBSP/zero-width junk with spaces and collapse all whitespace into one line."""
     text = _UNICODE_JUNK.sub(" ", text)
     text = _WHITESPACE.sub(" ", text)
     return re.sub(r"\n+", " ", text).strip()
@@ -529,6 +530,7 @@ def _cut_profile_text_before_activity(text: str) -> str:
 
 
 def _infer_work_mode(text: str) -> str:
+    """Classify free text as "remote" / "hybrid" / "onsite" / "not_specified" (first match wins)."""
     t = (text or "").lower()
     if "remote" in t:
         return "remote"
@@ -540,6 +542,11 @@ def _infer_work_mode(text: str) -> str:
 
 
 def _format_posted(raw: str) -> str:
+    """Return the YYYY-MM-DD prefix of an ISO date/datetime string.
+
+    Anything else (empty, or relative text like "3 days ago") falls back to today's UTC
+    date rather than None.
+    """
     if not raw:
         return datetime.now(timezone.utc).strftime("%Y-%m-%d")
     raw = raw.strip()
@@ -632,6 +639,7 @@ _COMPANY_NAME_PUNCT_RE = re.compile(r"[^\w\s]")
 
 
 def _normalize_company_name(name: str) -> str:
+    """Lower-case, strip punctuation and collapse whitespace for company-name comparisons."""
     name = _COMPANY_NAME_PUNCT_RE.sub("", (name or "").lower())
     return re.sub(r"\s+", " ", name).strip()
 
@@ -672,6 +680,7 @@ def _test_mode_max_jobs() -> int | None:
 
 
 async def _delay(page: Page, lo: int, hi: int) -> None:
+    """Wait a random lo..hi milliseconds on the page (human-like pacing)."""
     await page.wait_for_timeout(random.randint(lo, hi))
 
 
@@ -717,6 +726,10 @@ async def _wait_for_page_text_stable(
 
 
 async def _first_text(root: Page | ElementHandle, selectors: list[str]) -> str:
+    """Stripped inner text of the first selector that matches a non-empty element, else "".
+
+    Selector errors are skipped silently.
+    """
     for sel in selectors:
         try:
             el = await root.query_selector(sel)
@@ -730,6 +743,10 @@ async def _first_text(root: Page | ElementHandle, selectors: list[str]) -> str:
 
 
 async def _first_attr(root: Page | ElementHandle, selectors: list[str], attr: str) -> str:
+    """Stripped attr value from the first selector whose element has it set, else "".
+
+    Selector errors are skipped silently.
+    """
     for sel in selectors:
         try:
             el = await root.query_selector(sel)
@@ -743,6 +760,7 @@ async def _first_attr(root: Page | ElementHandle, selectors: list[str], attr: st
 
 
 def _ensure_debug_dir() -> Path:
+    """Create the debug artefact directory if missing and return its path."""
     _DEBUG_DIR.mkdir(parents=True, exist_ok=True)
     return _DEBUG_DIR
 
@@ -940,6 +958,7 @@ def _extract_company_card_text(html: str) -> str:
     soup = BeautifulSoup(html, "html.parser")
 
     def _has_labels(text: str, need: int) -> bool:
+        """True if text contains at least `need` of the known company-card labels."""
         low = (text or "").lower()
         return sum(1 for lbl in _COMPANY_CARD_LABELS if lbl in low) >= need
 
@@ -1098,6 +1117,12 @@ class LinkedInAgent:
         llm_service: "LLMService | None" = None,
         already_harvested: set[str] | None = None,
     ) -> None:
+        """Set up per-run state: LLM service, cross-run dedup set and anti-detection limits.
+
+        already_harvested holds normalised job URLs from earlier runs; matching cards are
+        skipped before any detail fetch or LLM call. Recruiter profile-visit cap and delay
+        range come from settings. One instance is meant to serve a single harvest run.
+        """
         _settings                = get_settings()
         self._llm_service        = llm_service or get_llm_service(_settings)
         self._llm_fallback_calls = 0
@@ -1161,6 +1186,7 @@ class LinkedInAgent:
             logger.debug("linkedin_login_required_flag_failed", error=str(exc))
 
     def _clear_login_required(self) -> None:
+        """Clear this account's pending "LinkedIn login needed" request (errors only logged)."""
         try:
             from app.services import login_required as lr
 
@@ -1618,6 +1644,7 @@ class LinkedInAgent:
 
             # Navigate
             async def _goto(url: str = search_url) -> None:
+                """Navigate the results tab to url (this page's search URL by default)."""
                 await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
 
             try:
@@ -2065,6 +2092,11 @@ class LinkedInAgent:
         the Overview card text with BeautifulSoup and let the LLM turn it into
         {company_size, company_country, company_state, company_industry}."""
         async def _fallback(company_name: str, company_url: str) -> dict:
+            """Scrape a company's LinkedIn About card in a new tab and LLM-extract its fields.
+
+            Returns {} when the card text is empty or no LLM service is available. The tab is
+            always closed. Navigation and LLM errors propagate.
+            """
             llm = self._get_llm_service()
             tab = None
             try:
@@ -2211,6 +2243,12 @@ class LinkedInAgent:
 
     @staticmethod
     def _build_search_url(f: FiltersConfig, start: int = 0) -> str:
+        """Build the LinkedIn job-search URL for these filters and result offset.
+
+        Keywords go in keywords=; location via a resolved geoId when known; work mode, job
+        type and the posted-within window use LinkedIn's native f_WT / f_JT / f_TPR filters;
+        results are sorted newest first (sortBy=DD).
+        """
         # The keywords= box carries a typed keyword, else the OR-joined selected
         # sub-categories / custom titles, else the coarse domain label as-is (see
         # _compose_keyword_query). LinkedIn's own filtered results are the source
@@ -2249,6 +2287,7 @@ class LinkedInAgent:
 
     @staticmethod
     def _check_blocked(url: str) -> None:
+        """Raise LinkedInLoginError if url is a login/checkpoint/authwall (gated) page."""
         for pat in _GATED_PATHS:
             if pat in url:
                 raise LinkedInLoginError(f"LinkedIn redirected to a gated page: {url}")
@@ -2256,6 +2295,10 @@ class LinkedInAgent:
     # ── Overlay dismissal ──────────────────────────────────────────────────────
 
     async def _dismiss_overlays(self, page: Page) -> None:
+        """Best-effort close of a cookie banner, one dismissable modal and any open dialog.
+
+        Each step is optional; missing or unclickable elements are ignored.
+        """
         for sel in _Sel.COOKIE:
             try:
                 el = page.locator(sel).first
@@ -2336,6 +2379,10 @@ class LinkedInAgent:
     # ── Scrolling ──────────────────────────────────────────────────────────────
 
     async def _scroll_results(self, page: Page) -> None:
+        """Scroll the results list human-style until it stops growing, so all cards load.
+
+        Scrolls the results container if one of the known selectors matches, else the window.
+        """
         container     = None
         matched_sel   = None
         for sel in _Sel.CONTAINER:
@@ -2445,6 +2492,17 @@ class LinkedInAgent:
         seen_urls: set[str],
         on_batch:  Callable[[list["LinkedInScrapedJob"]], Awaitable[None]] | None = None,
     ) -> list[LinkedInScrapedJob]:
+        """Turn one results page's cards into LinkedInScrapedJob objects, up to `remaining`.
+
+        Phase A reads every card's list-view fields up front, skipping URLs already seen
+        this run, duplicated on the page, or harvested in earlier runs (those don't use up
+        the cap). Phase B opens each card's own job URL for the detail fetch and LLM
+        extraction, then merges list + detail data. Jobs are passed to on_batch every
+        HARVEST_PERSIST_BATCH_SIZE jobs and at the end, and live progress is reported.
+        Stops early on a user stop request; a failing card is skipped, but
+        LLMUnavailableError is re-raised after flushing what is buffered. Also writes
+        linkedin_raw_jobs.json to the debug dir (best effort).
+        """
         import json as _json
         jobs: list[LinkedInScrapedJob] = []
 
@@ -2457,6 +2515,7 @@ class LinkedInAgent:
         _pending: list[LinkedInScrapedJob] = []
 
         async def _flush_pending() -> None:
+            """Send buffered jobs to on_batch and empty the buffer; callback errors are logged."""
             if on_batch and _pending:
                 batch = list(_pending)
                 _pending.clear()

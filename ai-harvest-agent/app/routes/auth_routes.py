@@ -56,6 +56,12 @@ async def request_otp(
     settings: Settings = Depends(get_settings),
     email_sender: EmailSender = Depends(get_email_sender),
 ) -> MessageResponse | JSONResponse:
+    """Email a one-time login code to `email`.
+
+    Any previous unused code for the address is invalidated. Always answers with the same generic
+    message (so it does not reveal whether the email is known); returns 429 with a `Retry-After`
+    header when a code was requested too recently.
+    """
     service = AuthService(db, settings, email_sender)
     try:
         await service.request_otp(payload.email)
@@ -81,6 +87,13 @@ async def verify_otp(
     settings: Settings = Depends(get_settings),
     email_sender: EmailSender = Depends(get_email_sender),
 ) -> TokenResponse | JSONResponse:
+    """Verify the emailed OTP, sign the user in and return a bearer access token.
+
+    On success the user is created if new (tenant chosen by `workspace`, else by email domain), a
+    persistent session is minted and set as the HttpOnly session cookie, and a JWT is returned for
+    API clients. Returns 401 for a wrong, expired, already-used or attempt-exhausted code; a wrong
+    code still counts against the attempt cap.
+    """
     service = AuthService(db, settings, email_sender)
     try:
         user = await service.verify_otp(payload.email, payload.otp, workspace=payload.workspace)

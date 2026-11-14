@@ -62,6 +62,7 @@ class LinkedInPipelineService:
         settings: Settings,
         gemini: GeminiService | None = None,
     ) -> None:
+        """Store settings and an optional GeminiService; None disables the parse phase."""
         self._settings = settings
         self._gemini   = gemini          # None → Gemini disabled
 
@@ -92,6 +93,7 @@ class LinkedInPipelineService:
             sem = asyncio.Semaphore(config.description_concurrency)
 
             async def _process(card: LinkedInJobCard) -> EnrichedLinkedInJob:
+                """Enrich one card under the shared semaphore (bounds detail-page concurrency)."""
                 async with sem:
                     return await self._process_one(card, config, scraper, errors)
 

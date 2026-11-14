@@ -43,6 +43,7 @@ class JobStatus:
     sources:      dict = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialise the status as a plain dict (the shape persisted and polled by the UI)."""
         return asdict(self)
 
 
@@ -56,6 +57,7 @@ class JobTracker:
 
     @classmethod
     def create(cls, job_id: str, run_id: str) -> JobStatus:
+        """Register a new ``running`` entry stamped with the current UTC time and persist it."""
         js = JobStatus(
             job_id     = job_id,
             run_id     = run_id,
@@ -67,6 +69,10 @@ class JobTracker:
 
     @classmethod
     def update(cls, job_id: str, **kwargs: Any) -> None:
+        """Set the given fields on a tracked job and persist.
+
+        Unknown job ids are ignored, as are keyword names that are not JobStatus fields.
+        """
         js = cls._jobs.get(job_id)
         if js is None:
             return
@@ -79,6 +85,7 @@ class JobTracker:
 
     @classmethod
     def get(cls, job_id: str) -> JobStatus | None:
+        """Return the in-memory status for ``job_id``, or None if it is not tracked."""
         return cls._jobs.get(job_id)
 
     # ── Startup restore ───────────────────────────────────────────────────────
@@ -107,6 +114,7 @@ class JobTracker:
 
     @classmethod
     def _persist(cls) -> None:
+        """Write every tracked job to the tracker JSON file; any I/O error is silently ignored."""
         try:
             _TRACKER_FILE.parent.mkdir(parents=True, exist_ok=True)
             _TRACKER_FILE.write_text(

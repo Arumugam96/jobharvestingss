@@ -56,11 +56,13 @@ _token_cache: dict[str, Any] = {"value": "", "expires_at": datetime(1970, 1, 1, 
 # ── On-disk received-time high-water state ────────────────────────────────────
 
 def _state_path(settings: Settings) -> str:
+    """Path of the poller's state file under STORAGE_LOCAL_DIR (default ./data/results)."""
     base = settings.storage_local_dir or "./data/results"
     return os.path.join(base, _STATE_FILENAME)
 
 
 def _load_last_received(settings: Settings) -> datetime | None:
+    """The stored received-time high-water mark (aware UTC), or None if absent/unreadable."""
     try:
         with open(_state_path(settings), "r", encoding="utf-8") as fh:
             raw = json.load(fh).get("last_received")
@@ -73,6 +75,7 @@ def _load_last_received(settings: Settings) -> datetime | None:
 
 
 def _save_last_received(settings: Settings, dt: datetime) -> None:
+    """Persist the high-water mark atomically (temp file + os.replace); errors propagate."""
     path = _state_path(settings)
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     tmp = f"{path}.tmp"
@@ -201,6 +204,7 @@ async def _filter_already_stored(db, items: list[dict[str, Any]]) -> list[dict[s
 
 
 def _max_received(messages: list[dict[str, Any]]) -> datetime | None:
+    """Latest ``receivedDateTime`` among Graph messages; unparseable ones ignored, None if none."""
     best: datetime | None = None
     for m in messages:
         raw = m.get("receivedDateTime")

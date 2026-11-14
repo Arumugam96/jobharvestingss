@@ -22,23 +22,28 @@ const QUICK_KEYS = [
 ];
 
 let seq = 0;
+/** Module-unique id for job cards / metadata rows: the prefix plus an incrementing counter. */
 const uid = (p) => `${p}${(seq += 1)}`;
 
+/** Empty job card state (title, JD, key–value metadata mode, no errors). */
 export function newJob() {
   return { id: uid("j"), title: "", jd: "", mode: "kv", kv: [], json: "", modeError: "" };
 }
 
+/** Default batch name for manual entry, e.g. "Manual – 13 Nov 2026". */
 export function defaultBatchName() {
   const d = new Date().toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
   return `Manual – ${d}`;
 }
 
+/** Fresh manual-entry draft: default batch name and one empty job card. */
 export function newDraft() {
   return { batchName: defaultBatchName(), jobs: [newJob()] };
 }
 
 // ── Rules ─────────────────────────────────────────────────────────────────────
 
+/** Validation message for a metadata key (format, reserved names), or "" when valid. */
 function keyError(key) {
   if (!key) return "Enter a key.";
   if (!KEY_RE.test(key)) return "Use lowercase letters, digits and _ ; start with a letter; max 40 characters.";
@@ -46,6 +51,7 @@ function keyError(key) {
   return "";
 }
 
+/** Validation message for a metadata value (must be non-empty text ≤ MAX_VALUE chars), or "". */
 function valueError(value) {
   if (value === null || typeof value === "boolean" || typeof value === "number") return "Must be text — put it in quotes.";
   if (typeof value === "object") return "Nested objects and arrays are not allowed — use plain text.";
@@ -70,8 +76,11 @@ function checkEntries(entries) {
   return { fieldErrs, general };
 }
 
+/** True when a key–value metadata row has neither a key nor a value (ignored by validation). */
 const isBlankRow = (r) => !(r.key || "").trim() && !(r.value || "").trim();
 
+/** Parse pasted metadata JSON. Blank text → {obj: {}}; invalid JSON or a non-object →
+ * {obj: null, error}. */
 function parseJson(text) {
   if (!(text || "").trim()) return { obj: {}, error: "" };
   let obj;
@@ -151,6 +160,8 @@ export function checkDraft(draft) {
 
 // ── Mode switching ────────────────────────────────────────────────────────────
 
+/** Convert a card's key–value rows to pretty JSON text for the JSON editor.
+ * @returns {{json: string}|{error: string}} error when keys are duplicated. */
 function toJson(job) {
   const rows = job.kv.filter((r) => !isBlankRow(r));
   const keys = rows.map((r) => r.key.trim().toLowerCase());
@@ -159,6 +170,8 @@ function toJson(job) {
   return { json: rows.length ? JSON.stringify(obj, null, 2) : "" };
 }
 
+/** Convert a card's JSON text back to key–value rows.
+ * @returns {{kv: Array}|{error: string}} error for invalid JSON or non-string values. */
 function toKv(job) {
   const { obj, error } = parseJson(job.json);
   if (error) return { error: `Fix the JSON before switching back. ${error}` };
@@ -169,19 +182,35 @@ function toKv(job) {
 
 // ── UI ────────────────────────────────────────────────────────────────────────
 
+/**
+ * Manual-entry form for a new Demand Search batch: batch name, 1–50 job cards (title, JD and
+ * metadata edited as key–value rows or pasted JSON) with live validation, and a rules aside.
+ * State is owned by the parent (draft/setDraft); nothing is sent to the backend here.
+ * @param {object} props
+ * @param {{batchName: string, jobs: Array}} props.draft - draft from newDraft().
+ * @param {Function} props.setDraft - React state setter for the draft.
+ * @param {Function} props.onReview - called by the "Start search" button once there are no issues.
+ * @param {boolean} [props.starting] - disables the button and shows "Starting…".
+ */
 export default function DemandManualEntry({ draft, setDraft, onReview, starting = false }) {
   const { checks, issues } = useMemo(() => checkDraft(draft), [draft]);
   const valueRefs = useRef({});
 
+  /** Merge the patch returned by fn(job) into the job card with this id. */
   const setJob = (id, fn) => setDraft((d) => ({ ...d, jobs: d.jobs.map((j) => (j.id === id ? { ...j, ...fn(j) } : j)) }));
+  /** Append an empty job card (no-op at MAX_JOBS). */
   const addJob = () => setDraft((d) => (d.jobs.length >= MAX_JOBS ? d : { ...d, jobs: [...d.jobs, newJob()] }));
+  /** Remove a job card, always keeping at least one. */
   const removeJob = (id) => setDraft((d) => ({ ...d, jobs: d.jobs.length > 1 ? d.jobs.filter((j) => j.id !== id) : d.jobs }));
 
+  /** Add a metadata row (optionally pre-filled key) to a card and focus its value input. */
   const addField = (job, key = "") => {
     const row = { id: uid("m"), key, value: "" };
     setJob(job.id, (j) => ({ kv: [...j.kv, row] }));
     setTimeout(() => valueRefs.current[row.id]?.focus(), 0);
   };
+  /** Switch a card's metadata editor between key–value and JSON, converting the content;
+   * a conversion error is shown on the card and the mode stays unchanged. */
   const switchMode = (job, mode) => {
     if (mode === job.mode) return;
     const res = mode === "json" ? toJson(job) : toKv(job);

@@ -17,6 +17,11 @@ Rules:
 
 
 def build_extraction_prompt(url: str, goal: str, html_sample: str) -> str:
+    """User prompt asking the LLM for CSS selectors that extract the goal's data.
+
+    Interpolates the URL, the goal and the page HTML truncated to 8000 chars; the reply
+    is expected as a JSON object mapping field name to selector.
+    """
     return f"""URL: {url}
 Goal: {goal}
 
@@ -31,6 +36,11 @@ Return a JSON object: {{ "field_name": "css_selector", ... }}
 def build_structured_extraction_prompt(
     content: str, schema: dict, goal: str
 ) -> str:
+    """User prompt asking the LLM to extract data from ``content`` matching a JSON schema.
+
+    Interpolates the schema (pretty JSON), the goal and the content truncated to 6000
+    chars; the reply is expected to be JSON only.
+    """
     import json
 
     return f"""Extract data matching this JSON schema:

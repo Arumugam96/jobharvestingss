@@ -108,6 +108,11 @@ function JobsRoute() {
   );
 }
 
+/**
+ * /jobs/:jobId — full-page JobDetailsView. Uses the job passed in navigation
+ * state, else fetches GET /jobs/{id} (a 403 shows the server's "assigned to" message).
+ * Back returns to `state.from` (the filtered list URL) or /jobs.
+ */
 function JobDetailRoute() {
   const { jobId } = useParams();
   const location = useLocation();
@@ -170,6 +175,7 @@ function JobDetailRoute() {
   return <JobDetailsView job={job} onBack={() => navigate(location.state?.from || "/jobs")} />;
 }
 
+/** /library — JobsPage in My Workspace mode (only jobs assigned to the current user). */
 function MyWorkspaceRoute() {
   const { pageSizeSel, setPageSizeSel } = useHarvestData();
   const navigate = useNavigate();
@@ -185,6 +191,7 @@ function MyWorkspaceRoute() {
   );
 }
 
+/** /history — RunHistoryPage fed from the shared run-history context. */
 function HistoryRoute() {
   const { runs, runsTotal, runsAggStats, runsLoading, runsError, fetchRuns } = useHarvestData();
   const navigate = useNavigate();
@@ -198,6 +205,7 @@ function HistoryRoute() {
   );
 }
 
+/** /history/:runId — full-page RunDetailView; opening a job returns here on Back. */
 function RunDetailRoute() {
   const { runId } = useParams();
   const navigate = useNavigate();
@@ -212,11 +220,16 @@ function RunDetailRoute() {
   );
 }
 
+/** /sources — SourceRunsPage wired to the shared harvest-running mutex. */
 function SourcesRoute() {
   const { harvestRunning, setHarvestRunning } = useHarvestData();
   return <SourceRunsPage harvestRunning={harvestRunning} setHarvestRunning={setHarvestRunning} />;
 }
 
+/**
+ * /rules — RuleEngineRedesign when the tenant has `ruleEngineRedesign`, else the
+ * classic RuleEngineConfig (refreshes jobs + runs when a run completes).
+ */
 function RulesRoute() {
   const { jobsTotal, runsTotal, refreshAll, harvestRunning, setHarvestRunning } = useHarvestData();
   const { features } = useTenant();
@@ -232,6 +245,7 @@ function RulesRoute() {
   );
 }
 
+/** Catch-all 404 page with a link back to Harvested Jobs. */
 function NotFound() {
   const navigate = useNavigate();
   return (

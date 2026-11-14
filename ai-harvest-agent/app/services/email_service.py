@@ -697,6 +697,7 @@ class EmailSender:
     _MAILJET_URL = "https://api.mailjet.com/v3.1/send"
 
     def __init__(self, settings: Settings) -> None:
+        """Hold settings only; no connection is opened until a send."""
         self._settings = settings
 
     @property
@@ -705,6 +706,11 @@ class EmailSender:
         return self._settings
 
     async def send_otp(self, recipient: str, otp: str) -> None:
+        """Email a login OTP (plain-text + HTML parts) from the dedicated login identity.
+
+        Embeds the logo as an inline CID image when available. Sends via the configured
+        transport; transport errors propagate. The OTP itself is never logged.
+        """
         settings = self._settings
         log = logger.bind(recipient=recipient)
         log.debug("otp_email_build_start")
@@ -1108,6 +1114,7 @@ class EmailSender:
 
 
 def _guess_attachment_type(path: Path) -> tuple[str, str]:
+    """(maintype, subtype) guessed from the file extension; application/octet-stream if unknown."""
     content_type, _ = mimetypes.guess_type(path.name)
     if content_type is None:
         return "application", "octet-stream"

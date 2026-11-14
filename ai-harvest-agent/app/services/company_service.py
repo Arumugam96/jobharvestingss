@@ -114,6 +114,7 @@ async def upsert_company_enrichment(
     row = await _get_or_create_company(db, company_key, company_name)
 
     def _set(field: str, value: str) -> None:
+        """Set ``field`` on the company row only when ``value`` is non-empty."""
         if value:
             setattr(row, field, value)
 

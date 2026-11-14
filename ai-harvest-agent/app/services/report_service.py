@@ -67,6 +67,7 @@ def build_excel_report_bytes(job_dicts: list[dict[str, Any]]) -> bytes:
 
 
 def _has(value: Any) -> bool:
+    """True when ``value`` is non-empty after stripping whitespace (None/"" → False)."""
     return bool(value and str(value).strip())
 
 

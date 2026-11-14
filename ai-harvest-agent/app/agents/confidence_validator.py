@@ -61,19 +61,27 @@ _BAND_MEDIUM = 0.60
 
 
 def _is_valid_email(email: str) -> bool:
+    """Return True if email is non-empty and matches the strict email regex."""
     return bool(email and _EMAIL_RE.match(email.strip()))
 
 
 def _is_valid_phone(phone: str) -> bool:
+    """Return True if phone, after stripping spaces/dashes/parens, is Indian mobile or E.164."""
     cleaned = re.sub(r"[\s\-\(\)]", "", phone)
     return bool(cleaned and _PHONE_RE.match(cleaned))
 
 
 def _is_valid_linkedin(url: str) -> bool:
+    """Return True if url is non-empty and looks like a linkedin.com/in/ profile URL."""
     return bool(url and _LINKEDIN_RE.match(url))
 
 
 def _score(record: LeadRecord) -> float:
+    """Compute the weighted confidence score (0.0-1.0, 3 decimals) for a lead.
+
+    Only format-valid fields count; VERIFIED email/phone earn the higher weight, any
+    other status the PUBLIC weight. See the module docstring for the weight table.
+    """
     s = 0.0
 
     if _is_valid_linkedin(record.linkedin_profile_url):
@@ -101,6 +109,7 @@ def _score(record: LeadRecord) -> float:
 
 
 def _band(score: float) -> str:
+    """Map a confidence score to its "High" / "Medium" / "Low" band label."""
     if score >= _BAND_HIGH:
         return "High"
     if score >= _BAND_MEDIUM:

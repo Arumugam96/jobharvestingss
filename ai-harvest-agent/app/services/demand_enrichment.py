@@ -65,6 +65,7 @@ _META_COMPANY_SIZE = ("company_size", "company size")
 
 
 def _empty(value: Any) -> bool:
+    """True for None, blank or placeholder strings ("Any", "not_specified"), empty containers."""
     if value is None:
         return True
     if isinstance(value, str):
@@ -75,6 +76,10 @@ def _empty(value: Any) -> bool:
 
 
 def _meta(row: dict, keys: tuple[str, ...]) -> str:
+    """First non-blank string in the row's ``metadata`` under any of ``keys``.
+
+    Metadata keys are matched case-insensitively; returns "" when none is found.
+    """
     meta = row.get("metadata") or {}
     if not isinstance(meta, dict):
         return ""
@@ -102,10 +107,15 @@ def _default_llm(settings: Any) -> Any | None:
 
 
 async def _load(job_id: str):
+    """The scraped job row by id, or None when missing or the DB read failed."""
     return await db_read(lambda db: HarvestRunService(db).get_scraped_job_by_id(job_id))
 
 
 async def _write(job_id: str, values: dict) -> list[str]:
+    """Persist the staged field values; returns the sorted field names written.
+
+    Returns [] when nothing was staged or the update did not succeed.
+    """
     if not values:
         return []
     ok = await db_write(lambda db: HarvestRunService(db).update_scraped_job_fields(job_id, values))
@@ -113,6 +123,10 @@ async def _write(job_id: str, values: dict) -> list[str]:
 
 
 async def _llm_contacts(llm: Any, text: str, ref: str, timeout_s: float) -> GroundedContacts:
+    """LLM contact extraction from the JD, grounded against the JD text itself.
+
+    Uses Naukri's junk-address filter, so only addresses present in the text survive.
+    """
     from app.agents.naukri_agent import _clean_email   # Naukri's junk-address filter
     return await llm_extract_contacts(
         llm, text, sources=[text], job_ref=ref, timeout_s=timeout_s, email_filter=_clean_email,
@@ -228,6 +242,7 @@ async def enrich_from_jd(job_id: str | None, row: dict, *, run_pk: str | None = 
 # ── After the search: Resdex requirements back-fill ───────────────────────────
 
 def _experience_text(lo: Any, hi: Any) -> str:
+    """Format an experience range as "3-5 Yrs" / "3 Yrs" / "3+ Yrs" / "0-5 Yrs", or ""."""
     if isinstance(lo, int) and isinstance(hi, int):
         return f"{lo}-{hi} Yrs" if lo != hi else f"{lo} Yrs"
     if isinstance(lo, int):
@@ -257,9 +272,14 @@ def requirements_fields(req: dict | None) -> dict[str, Any]:
 
 
 async def _latest_requirements(norm: str) -> dict | None:
+    """Newest non-null Resdex requirements stored for this job URL in the current tenant.
+
+    None when there is none or the read failed.
+    """
     tenant_id = get_current_tenant_id()
 
     async def _q(db):
+        """Select the newest requirements JSON for (tenant, job_url)."""
         stmt = (
             select(ResdexSearchORM.requirements)
             .where(ResdexSearchORM.tenant_id == tenant_id, ResdexSearchORM.job_url == norm,

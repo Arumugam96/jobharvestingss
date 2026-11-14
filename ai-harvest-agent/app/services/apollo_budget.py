@@ -51,6 +51,7 @@ logger = structlog.get_logger(__name__)
 
 
 def _utc_today():
+    """Today's date in UTC: the key of the daily counter row (caps reset at UTC midnight)."""
     return datetime.now(timezone.utc).date()
 
 

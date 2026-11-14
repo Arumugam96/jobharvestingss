@@ -70,10 +70,12 @@ DEMAND_SOURCE = "Demand"
 
 
 def _not_demand_job():
+    """SQL predicate excluding Demand Search jobs (case-insensitive source match)."""
     return func.lower(ScrapedJobORM.source) != DEMAND_SOURCE.lower()
 
 
 def _not_demand_run():
+    """SQL predicate excluding Demand batches; NULL-source (multi-source) runs are kept."""
     return or_(HarvestRunORM.source.is_(None), HarvestRunORM.source != DEMAND_SOURCE)
 
 
@@ -153,6 +155,7 @@ class _normalized_job_url(FunctionElement):  # type: ignore[type-arg]
 
 @compiles(_normalized_job_url)
 def _compile_normalized_job_url(element, compiler, **kw) -> str:  # SQLite (tests)
+    """Default (SQLite) SQL for _normalized_job_url using substr/instr."""
     url = compiler.process(list(element.clauses)[0], **kw)
     no_frag = f"substr({url}, 1, instr({url} || '#', '#') - 1)"
     no_query = f"substr({no_frag}, 1, instr({no_frag} || '?', '?') - 1)"
@@ -161,6 +164,7 @@ def _compile_normalized_job_url(element, compiler, **kw) -> str:  # SQLite (test
 
 @compiles(_normalized_job_url, "postgresql")
 def _compile_normalized_job_url_pg(element, compiler, **kw) -> str:
+    """PostgreSQL SQL for _normalized_job_url using split_part/btrim."""
     url = compiler.process(list(element.clauses)[0], **kw)
     return f"lower(rtrim(btrim(split_part(split_part({url}, '#', 1), '?', 1)), '/'))"
 
@@ -205,6 +209,7 @@ _EDGE_BLANK_RE = re.compile(r"^[\s\u200b\ufeff]+|[\s\u200b\ufeff]+$")
 
 
 def _txt(value: Any) -> str:
+    """``str(value)`` with edge whitespace, zero-width spaces and BOMs trimmed; None → ""."""
     return "" if value is None else _EDGE_BLANK_RE.sub("", str(value))
 
 
@@ -340,6 +345,7 @@ class HarvestRunService:
     """CRUD for HarvestRunORM / ScrapedJobORM / LlmCallORM."""
 
     def __init__(self, db: AsyncSession) -> None:
+        """Bind to a session (typically from db_read/db_write, which own the commit)."""
         self._db = db
 
     # ── Write ────────────────────────────────────────────────────────────────
@@ -371,6 +377,7 @@ class HarvestRunService:
         return run.id
 
     async def update_run(self, run_pk: str, **fields: Any) -> None:
+        """UPDATE the given columns on the run with surrogate id ``run_pk``; no-op if empty."""
         if not fields:
             return
         await self._db.execute(
@@ -656,6 +663,11 @@ class HarvestRunService:
         return bool(res.rowcount)
 
     async def bulk_insert_llm_calls(self, run_pk: str, calls: list[dict[str, Any]]) -> None:
+        """Insert one llm_calls row per recorded LLM call of the run (flushed, not committed).
+
+        Each dict must carry provider, model and prompt (KeyError otherwise); a missing
+        ``called_at`` falls back to now. No-op for an empty list.
+        """
         if not calls:
             return
         self._db.add_all(
@@ -706,6 +718,8 @@ class HarvestRunService:
         return result.scalars().first()
 
     async def list_runs(self, source: str | None = None, limit: int = 50) -> list[HarvestRunORM]:
+        """Newest runs for the current tenant: orchestrator runs (source IS NULL) when
+        ``source`` is None, else only that source's standalone runs."""
         stmt = select(HarvestRunORM)
         stmt = stmt.where(HarvestRunORM.source.is_(None) if source is None else HarvestRunORM.source == source)
         stmt = apply_tenant(stmt, HarvestRunORM.tenant_id)
@@ -1022,6 +1036,7 @@ class HarvestRunService:
         scope = (func.lower(ScrapedJobORM.source) == DEMAND_SOURCE.lower()) if demand else _not_demand_job()
 
         async def _distinct(col) -> list[str]:
+            """Sorted non-empty distinct values of ``col`` within scope, tenant-filtered."""
             result = await self._db.execute(apply_tenant(
                 select(col).distinct().where(scope), ScrapedJobORM.tenant_id,
             ))
@@ -1039,6 +1054,7 @@ class HarvestRunService:
         presence = _contact_presence_exprs()
 
         def _count_if(expr):
+            """SQL SUM(CASE WHEN expr THEN 1 ELSE 0): count rows matching ``expr``."""
             return func.sum(case((expr, 1), else_=0))
 
         stats_stmt = (
@@ -1080,6 +1096,7 @@ class HarvestRunService:
         }
 
     async def get_scraped_job_by_id(self, job_id: str) -> ScrapedJobORM | None:
+        """The scraped job by id, or None if missing or owned by another tenant."""
         stmt = apply_tenant(select(ScrapedJobORM).where(ScrapedJobORM.id == job_id), ScrapedJobORM.tenant_id)
         result = await self._db.execute(stmt)  # tenant predicate closes the by-id IDOR
         return result.scalar_one_or_none()
@@ -1246,6 +1263,7 @@ class HarvestRunService:
         )).scalars().first()
         if row is not None:
             def _set(attr: str, val: Any) -> None:
+                """Overwrite ``attr`` only with a non-empty value (None, "", [] are skipped)."""
                 if val not in (None, "", []):
                     setattr(row, attr, val)
             _set("job_description", extracted.get("description"))

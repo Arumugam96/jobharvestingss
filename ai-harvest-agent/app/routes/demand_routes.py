@@ -54,6 +54,7 @@ router = APIRouter(prefix="/demand", tags=["Demand Search"])
 
 
 def _raise(exc: ds.DemandError) -> None:
+    """Re-raise a DemandError as an HTTPException carrying its status code and structured detail."""
     raise HTTPException(status_code=exc.status_code, detail=exc.to_detail()) from exc
 
 
@@ -61,6 +62,7 @@ async def _ensure_job_access(job_id: str, user: AuthenticatedUser) -> None:
     """403 when the job is assigned ("Assign to me") to someone else. A job that is
     missing (or a failed read) passes here, so demand_service raises its usual 404."""
     async def _q(db):
+        """Return the job's assignee email, or None when the job is missing."""
         job = await HarvestRunService(db).get_scraped_job_by_id(job_id)
         return job.assigned_to_email if job is not None else None
     ensure_job_access(await db_read(_q), user)
@@ -81,6 +83,7 @@ async def _read_upload(file: UploadFile) -> dict:
 
 def _without_jds(preview: dict) -> dict:
     # The full JDs stay server-side; the preview already carries a snippet.
+    """Copy of an upload preview with each row's full `job_description` removed."""
     return {**preview, "rows": [
         {k: v for k, v in r.items() if k != "job_description"} for r in preview["rows"]
     ]}
@@ -112,6 +115,12 @@ class ManualBatchRequest(BaseModel):
 
     @model_validator(mode="after")
     def _check(self) -> ManualBatchRequest:
+        """Reject an empty or oversized job list and any job with invalid metadata.
+
+        Raises a PydanticCustomError "invalid_jobs" carrying every problem as
+        `{job, field, key, message}` so the route can return them all at once (title/JD issues are
+        row checks, handled elsewhere).
+        """
         errors: list[dict] = []
         if not self.jobs:
             errors.append({"job": None, "field": "jobs", "key": "",
@@ -131,6 +140,7 @@ class ManualBatchRequest(BaseModel):
 
 
 def _invalid_message(errors: list[dict]) -> str:
+    """Human summary for the invalid-jobs error, e.g. "2 problems in the jobs - fix them ..."."""
     n = len(errors)
     return (f"{n} {'problem' if n == 1 else 'problems'} in the jobs — fix "
             f"{'it' if n == 1 else 'them'} and try again.")
@@ -261,6 +271,7 @@ async def list_jobs(
 
 @router.get("/batches/{run_id}")
 async def get_batch(run_id: str) -> Any:
+    """Return a batch header plus every row with its live or final status (404 if unknown)."""
     try:
         return await ds.get_batch(run_id)
     except ds.DemandError as exc:
@@ -269,6 +280,11 @@ async def get_batch(run_id: str) -> Any:
 
 @router.post("/batches/{run_id}/stop")
 async def stop_batch(run_id: str) -> Any:
+    """Ask the running batch `run_id` to stop after its current row.
+
+    Finished rows are kept; the rest end as stopped. Returns `{"status": "stopping"}`, or
+    `{"status": "idle"}` when that batch is not the active run. Always HTTP 200.
+    """
     return ds.stop_batch(run_id)
 
 

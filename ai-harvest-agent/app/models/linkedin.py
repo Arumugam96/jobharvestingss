@@ -107,6 +107,10 @@ class LinkedInSearchConfig(BaseModel):
     }
 
     def build_search_url(self) -> str:
+        """Build the LinkedIn jobs-search URL from this config's keyword and filters.
+
+        Empty filter mappings are omitted; results are always sorted by date (sortBy=DD).
+        """
         params: list[str] = [f"keywords={self.keywords.replace(' ', '%20')}"]
 
         if tpr := DATE_FILTER_MAP[self.date_posted]:
@@ -174,6 +178,7 @@ class EnrichedLinkedInJob(BaseModel):
 
     @property
     def is_fully_enriched(self) -> bool:
+        """True once both the raw description and the parsed JD are present."""
         return self.raw_description is not None and self.parsed is not None
 
     @property
@@ -281,6 +286,7 @@ class HarvestJob(BaseModel):
 
     @property
     def duration_ms(self) -> float | None:
+        """Elapsed run time in milliseconds, or None while the job is still running."""
         if self.completed_at is None:
             return None
         return (self.completed_at - self.started_at).total_seconds() * 1000
@@ -302,6 +308,7 @@ class HarvestJobSummary(BaseModel):
 
     @classmethod
     def from_job(cls, job: HarvestJob) -> "HarvestJobSummary":
+        """Build a summary from a HarvestJob; result counts are None until it has a result."""
         return cls(
             id           = job.id,
             status       = job.status,

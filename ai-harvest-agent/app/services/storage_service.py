@@ -18,10 +18,12 @@ class StorageService:
     """Save screenshots and extracted JSON to the configured storage backend."""
 
     def __init__(self, settings: Settings) -> None:
+        """Read the backend choice and local root (``storage_local_dir``) from settings."""
         self._settings = settings
         self._local_dir = Path(settings.storage_local_dir)
 
     def _ensure_dir(self, path: Path) -> None:
+        """Create ``path`` (and parents) if missing."""
         path.mkdir(parents=True, exist_ok=True)
 
     # ── Screenshots ──────────────────────────────────────────────────────────────
@@ -33,6 +35,8 @@ class StorageService:
         return self._save_screenshot_local(job_id, page_number, b64_data)
 
     def _save_screenshot_local(self, job_id: str, page_number: int, b64_data: str) -> str:
+        """Decode and write ``<root>/<job_id>/screenshots/page_NNNN.png``; returns
+        the path (an existing file for that page is overwritten)."""
         dir_path = self._local_dir / job_id / "screenshots"
         self._ensure_dir(dir_path)
         filename = f"page_{page_number:04d}.png"
@@ -42,6 +46,7 @@ class StorageService:
         return str(file_path)
 
     async def _upload_screenshot_s3(self, job_id: str, page_number: int, b64_data: str) -> str:
+        """S3 screenshot upload — not implemented; always raises NotImplementedError."""
         # Placeholder — wire up boto3 / aioboto3 as needed
         raise NotImplementedError("S3 backend not yet implemented")
 
@@ -54,6 +59,8 @@ class StorageService:
         return self._save_result_local(job_id, data)
 
     def _save_result_local(self, job_id: str, data: dict[str, Any]) -> str:
+        """Write ``data`` to ``<root>/<job_id>/result_<UTC timestamp>.json`` (non-JSON
+        values stringified) and return the path."""
         dir_path = self._local_dir / job_id
         self._ensure_dir(dir_path)
         ts = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
@@ -63,11 +70,14 @@ class StorageService:
         return str(file_path)
 
     async def _upload_result_s3(self, job_id: str, data: dict[str, Any]) -> str:
+        """S3 result upload — not implemented; always raises NotImplementedError."""
         raise NotImplementedError("S3 backend not yet implemented")
 
     # ── Read Back ────────────────────────────────────────────────────────────────
 
     def list_job_files(self, job_id: str) -> list[str]:
+        """Paths of every file saved locally under the job's directory (recursive);
+        [] when it doesn't exist. Local backend only."""
         job_dir = self._local_dir / job_id
         if not job_dir.exists():
             return []

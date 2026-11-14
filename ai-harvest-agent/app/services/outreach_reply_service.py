@@ -74,6 +74,7 @@ def _addr(obj: Any) -> tuple[str, str]:
 
 
 def _first_recipient(item: dict) -> tuple[str, str]:
+    """(email, name) of the first "To" entry of an inbound item; ("", "") if absent."""
     to = item.get("To") or item.get("to") or []
     if isinstance(to, list) and to:
         return _addr(to[0])
@@ -81,6 +82,7 @@ def _first_recipient(item: dict) -> tuple[str, str]:
 
 
 def _headers(item: dict) -> dict:
+    """The item's Headers map (either key casing); {} when missing or not a dict."""
     h = item.get("Headers") or item.get("headers") or {}
     return h if isinstance(h, dict) else {}
 
@@ -407,6 +409,7 @@ async def replies_for_thread(
 
 
 async def unread_reply_count(db: AsyncSession) -> int:
+    """Number of unread inbound replies in the current tenant (drives the bell badge)."""
     stmt = apply_tenant(select(func.count()).select_from(OutreachReplyORM), OutreachReplyORM.tenant_id)
     stmt = stmt.where(OutreachReplyORM.is_read.is_(False))
     return (await db.execute(stmt)).scalar_one()

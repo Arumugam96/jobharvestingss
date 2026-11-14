@@ -91,6 +91,11 @@ def word_sequence(text: str | None) -> list[str]:
 
 
 def words_preserved(original: str | None, candidate: str | None) -> bool:
+    """True when ``candidate`` has exactly the same word sequence as ``original``.
+
+    Used to reject an LLM reformat that added, dropped or reordered any word; only
+    punctuation, bullets and whitespace may differ.
+    """
     return word_sequence(original) == word_sequence(candidate)
 
 
@@ -126,6 +131,7 @@ class GroundedContacts:
 
     @property
     def empty(self) -> bool:
+        """True when no contact value at all survived grounding."""
         return not (self.name or self.designation or self.company or self.emails or self.phones)
 
 
@@ -147,6 +153,7 @@ def ground_llm_contacts(
     out = GroundedContacts()
 
     def _reject(fld: str, value: Any, reason: str) -> None:
+        """Record a rejected LLM value (truncated to 120 chars) with its reason and log it."""
         out.rejected.append({"field": fld, "value": str(value)[:120], "reason": reason})
         logger.info("jd_llm_contact_rejected", job=job_ref, field=fld,
                     value=str(value)[:120], reason=reason)

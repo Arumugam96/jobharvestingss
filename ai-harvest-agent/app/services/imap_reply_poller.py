@@ -50,11 +50,16 @@ _STATE_FILENAME = "imap_reply_state.json"
 # ── On-disk UID high-water state ──────────────────────────────────────────────
 
 def _state_path(settings: Settings) -> str:
+    """Path of the IMAP UID high-water JSON file under the local storage dir."""
     base = settings.storage_local_dir or "./data/results"
     return os.path.join(base, _STATE_FILENAME)
 
 
 def _load_state(settings: Settings) -> dict[str, int]:
+    """Read the persisted ``uidvalidity`` / ``last_uid`` pair.
+
+    A missing or unreadable file yields zeros, so the poller treats it as a first run.
+    """
     try:
         with open(_state_path(settings), "r", encoding="utf-8") as fh:
             data = json.load(fh)
@@ -67,6 +72,7 @@ def _load_state(settings: Settings) -> dict[str, int]:
 
 
 def _save_state(settings: Settings, uidvalidity: int, last_uid: int) -> None:
+    """Persist the UID high-water mark atomically (write a .tmp file, then replace)."""
     path = _state_path(settings)
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     tmp = f"{path}.tmp"

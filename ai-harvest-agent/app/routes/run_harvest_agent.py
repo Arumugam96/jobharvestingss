@@ -95,10 +95,12 @@ class HarvestAgentRequest(BaseModel):
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _make_run_id() -> str:
+    """Build a unified-harvest run id: the UTC timestamp (YYYYmmdd_HHMMSS)."""
     return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
 
 def _err(msg: str, reason: str = "") -> JSONResponse:
+    """Failure body `{"status": "failed", "message", "reason"?}` returned with HTTP 200."""
     body: dict[str, Any] = {"status": "failed", "message": msg}
     if reason:
         body["reason"] = reason
@@ -106,6 +108,7 @@ def _err(msg: str, reason: str = "") -> JSONResponse:
 
 
 def _filters_snapshot(cfg) -> dict:
+    """Snapshot of the config's search filters, stored as the run row's `filters_snapshot`."""
     f = cfg.filters
     return {
         "keyword":                  f.keyword,
@@ -257,6 +260,7 @@ async def _recruiter_preflight() -> None:
             return
 
         def _factory():
+            """Build the headless recruiter verify coroutine (no legacy session import)."""
             return NaukriRecruiterAgent(headless=True).verify(import_legacy=False)
 
         result = await run_in_proactor(_factory) if needs_proactor() else await _factory()
@@ -377,6 +381,7 @@ async def _run_harvest_background_impl(
     orch = OrchestratorAgent(config, already_harvested=already_harvested)
 
     async def _on_status(msg: str) -> None:
+        """Mirror an orchestrator status message onto the JobTracker entry and the log."""
         # Surfaces live progress (e.g. "waiting for LinkedIn login…") to
         # GET /harvest-status/{job_id} while the run is still in flight.
         JobTracker.update(job_id, message=msg)
@@ -396,6 +401,9 @@ async def _run_harvest_background_impl(
     saved_counter = {"n": 0}
 
     async def _do_write(coro):
+        """Await a DB write coroutine, marshalled onto the main loop when the scrape runs on the
+        proactor worker thread (the asyncpg pool belongs to the main loop).
+        """
         # On Windows --reload, run_all runs on a proactor worker thread; the
         # asyncpg pool is bound to the main loop, so marshal DB writes back to it.
         # On Linux/EC2 (needs_proactor False) run_all is on the main loop already.
@@ -404,12 +412,18 @@ async def _run_harvest_background_impl(
         return await coro
 
     async def _persist(unified: list) -> None:
+        """Persist a batch of raw scraped jobs as soon as they are scraped and bump the live count.
+
+        Only rows that actually landed are counted. Never raises: the end-of-run reconcile rewrites
+        the final job set anyway. No-op without a run row or with an empty batch.
+        """
         if not run_pk or not unified:
             return
         try:
             dicts = [j.to_dict() for j in unified]
 
             async def _insert(db) -> bool:
+                """Bulk-insert the batch; True tells success apart from a swallowed error."""
                 await HarvestRunService(db).bulk_insert_scraped_jobs(run_pk, dicts)
                 return True
 
@@ -430,6 +444,11 @@ async def _run_harvest_background_impl(
             log.warning("harvest_incremental_persist_failed", error=str(exc))
 
     async def _on_source_status(snapshot: dict) -> None:
+        """Record the orchestrator's per-source state/count snapshot in JobTracker and the run row.
+
+        Also mirrors the per-source counts onto the legacy linkedin/naukri/dice count fields. The DB
+        write is best-effort.
+        """
         # Per-source state/count/message from the orchestrator's tracker — already
         # throttled there (state/count changes immediately, message-only changes
         # at most every few seconds). Mirrors the live per-source counts onto the

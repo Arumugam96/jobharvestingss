@@ -22,13 +22,19 @@ const SOURCE_DISPLAY = {
 // "Demand" (Demand Search uploads) is hidden from GET /jobs unless picked here.
 export const SOURCE_ORDER = ["LinkedIn", "Naukri", "Dice", "LinkedIn Feed", "Demand"];
 
+/**
+ * Canonical display name for a source string ("naukri" → "Naukri"); unknown
+ * sources pass through trimmed, empty/null → "—".
+ */
 export function canonicalSource(raw) {
   const s = raw == null ? "" : String(raw).trim();
   if (!s) return "—";
   return SOURCE_DISPLAY[s.toLowerCase()] || s;
 }
 
+/** Copy of `list` sorted by SOURCE_ORDER, unknown sources after it alphabetically. */
 export function sortSources(list) {
+  /** Index in SOURCE_ORDER, or past the end for unknown sources. */
   const rank = (s) => {
     const i = SOURCE_ORDER.indexOf(s);
     return i === -1 ? SOURCE_ORDER.length : i;
@@ -36,6 +42,7 @@ export function sortSources(list) {
   return [...list].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
 }
 
+/** Trimmed string of `v`; "" for null/undefined. */
 const clean = (v) => (v == null ? "" : String(v).trim());
 
 /**
@@ -67,6 +74,11 @@ export function contactParts(scraped, recruiter, company, fallback) {
 const contactKind = (parts) =>
   parts.length === 0 ? null : parts[0].variant === "company" ? "company" : "poster";
 
+/**
+ * Build the source-agnostic contact view (see jobContact) from a mapped job row:
+ * per-channel email/phone parts in priority order, the primary value and its kind,
+ * and the POC name (poster first, else the company contact).
+ */
 function deriveJobContact(j) {
   const emailParts = contactParts(j.emailScraped, j.emailRecruiter, j.emailCompany, j.email);
   const phoneParts = contactParts(j.mobileScraped, j.mobileRecruiter, j.mobileCompany, j.mobile);
@@ -103,6 +115,7 @@ export function jobContact(j) {
 
 // CSV label for a POC kind / the source tag of a channel's primary value.
 export const pocKindLabel = (kind) => (kind === "poster" ? "Job poster" : kind === "company" ? "Enriched contact" : "—");
+/** Label ("Job" / "Recruiter" / …) of a channel's primary part; "—" when empty. */
 export const partSourceLabel = (parts) => (parts.length && parts[0].label) || "—";
 
 /* ── API job → table row shape ─────────────────────────────────────────── */
@@ -115,6 +128,10 @@ export function mapApiJob(j) {
   return row;
 }
 
+/**
+ * Map one GET /jobs record (snake_case) to the UI row shape (camelCase), with
+ * display defaults; mapApiJob adds the derived `contact` on top.
+ */
 function mapApiJobFields(j) {
   return {
     id: j.id,
@@ -189,6 +206,10 @@ function mapApiJobFields(j) {
   };
 }
 
+/**
+ * Map a table row (from mapApiJob) to the JobDetailsView `job` shape: poster contact
+ * and the inferred company HR contact as separate sections.
+ */
 export function mapJobToDetail(j) {
   return {
     // id/email/linkedin are carried through so the detail view's Email/LinkedIn
@@ -267,6 +288,11 @@ export function fmtSeconds(sec) {
   return `${s}s`;
 }
 
+/**
+ * Map one run-history entry from the API to the UI shape: camelCase counts
+ * (default 0), wall-time duration, and scrape vs post-harvest (Resdex + outreach)
+ * phase seconds (null when the run predates the split).
+ */
 export function mapRun(entry) {
   const phases = entry.phase_timings || {};
   return {

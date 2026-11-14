@@ -217,12 +217,14 @@ _WHITESPACE   = re.compile(r"[ \t]{2,}")
 
 
 def _clean(text: str) -> str:
+    """Replace zero-width/soft-hyphen junk, collapse runs of spaces and newlines, and strip."""
     text = _UNICODE_JUNK.sub(" ", text)
     text = _WHITESPACE.sub(" ", text)
     return re.sub(r"\n+", " ", text).strip()
 
 
 def _infer_work_mode(text: str) -> str:
+    """Map free text to remote / hybrid / onsite by keyword, else "not_specified"."""
     t = (text or "").lower()
     if "remote" in t:
         return "remote"
@@ -234,6 +236,11 @@ def _infer_work_mode(text: str) -> str:
 
 
 def _format_posted(raw: str) -> str:
+    """Turn a Dice "posted" label into a YYYY-MM-DD date (UTC).
+
+    Handles today / N hours / minutes / yesterday / N days ago and ISO dates. Anything else,
+    including an empty label, falls back to today's date.
+    """
     if not raw:
         return datetime.now(timezone.utc).strftime("%Y-%m-%d")
     r = raw.strip().lower()
@@ -251,10 +258,15 @@ def _format_posted(raw: str) -> str:
 
 
 async def _delay(page: Page, lo: int, hi: int) -> None:
+    """Wait a random lo-hi milliseconds on the page (human-like pacing)."""
     await page.wait_for_timeout(random.randint(lo, hi))
 
 
 async def _first_text(root: "Page | ElementHandle", selectors: list[str]) -> str:
+    """Inner text of the first selector that matches with non-blank text, else "".
+
+    Selector errors are ignored and the next selector tried.
+    """
     for sel in selectors:
         try:
             el = await root.query_selector(sel)
@@ -268,6 +280,7 @@ async def _first_text(root: "Page | ElementHandle", selectors: list[str]) -> str
 
 
 async def _first_attr(root: "Page | ElementHandle", selectors: list[str], attr: str) -> str:
+    """Stripped `attr` value of the first selector that matches with a non-empty value, else ""."""
     for sel in selectors:
         try:
             el = await root.query_selector(sel)
@@ -281,6 +294,7 @@ async def _first_attr(root: "Page | ElementHandle", selectors: list[str], attr: 
 
 
 async def _all_texts(root: "Page | ElementHandle", selectors: list[str]) -> list[str]:
+    """Non-blank inner texts of every match of the first selector that yields any, else []."""
     for sel in selectors:
         try:
             els = await root.query_selector_all(sel)
@@ -294,11 +308,13 @@ async def _all_texts(root: "Page | ElementHandle", selectors: list[str]) -> list
 
 
 def _ensure_debug_dir() -> Path:
+    """Create (if needed) and return the data/debug/dice directory."""
     _DEBUG_DIR.mkdir(parents=True, exist_ok=True)
     return _DEBUG_DIR
 
 
 async def _screenshot(page: Page, name: str) -> None:
+    """Best-effort viewport screenshot to data/debug/dice/<name>.png; errors are only logged."""
     try:
         d = _ensure_debug_dir()
         await page.screenshot(path=str(d / f"{name}.png"), full_page=False)
@@ -308,6 +324,7 @@ async def _screenshot(page: Page, name: str) -> None:
 
 
 async def _save_html(page: Page, name: str) -> None:
+    """Best-effort dump of the page HTML to data/debug/dice/<name>.html; errors are only logged."""
     try:
         d = _ensure_debug_dir()
         content = await page.content()
@@ -321,6 +338,7 @@ class DiceScraper:
     """Low-level Dice.com browser scraper. Owned by DiceAgent."""
 
     def __init__(self, page: Page, filters: FiltersConfig) -> None:
+        """Bind the scraper to an already-open page and the harvest filters."""
         self._page    = page
         self._filters = filters
 
@@ -653,6 +671,10 @@ class DiceScraper:
 
     @staticmethod
     def _build_search_url(f: FiltersConfig, page_num: int = 1) -> str:
+        """Dice search URL for keyword, location, date window, job type, work mode and page.
+
+        Filter values with no Dice mapping are left out of the query string.
+        """
         params: dict[str, str] = {}
         params["q"] = f.keyword if f.keyword else ""
         if f.location:
@@ -669,6 +691,11 @@ class DiceScraper:
         return f"{_DICE_SEARCH_URL}?{qs}" if qs else _DICE_SEARCH_URL
 
     async def _dismiss_overlays(self) -> None:
+        """Clear cookie-consent banners and login/modal overlays that block the results.
+
+        Tries JS clicks, hides the consent overlay via CSS as a fallback, then locator clicks,
+        modal close buttons and Escape. Every step is best-effort and errors are swallowed.
+        """
         # ── Step 1: ConsentManager / cookie consent ────────────────────────────
         # JS-direct click is the most reliable approach (bypasses Playwright
         # viewport/focus/clickability checks that may fail for fixed overlays).
@@ -780,6 +807,10 @@ class DiceScraper:
             pass
 
     async def _scroll_results(self) -> None:
+        """Scroll the results container (or window) to the bottom until its height stops growing.
+
+        Bounded to 6 container / 4 window scroll passes, so lazily rendered cards get loaded.
+        """
         container = None
         for sel in _Sel.CONTAINER:
             try:
@@ -819,6 +850,10 @@ class DiceScraper:
         remaining: int,
         seen_urls: set[str],
     ) -> list[DiceScrapedJob]:
+        """Parse cards into jobs, skipping cards with no URL or a URL already in `seen_urls`.
+
+        Stops once `remaining` jobs are collected. Does not add the new URLs to `seen_urls`.
+        """
         jobs: list[DiceScrapedJob] = []
         for el in raw:
             if len(jobs) >= remaining:
@@ -833,6 +868,11 @@ class DiceScraper:
         return jobs
 
     async def _parse_card(self, el: ElementHandle) -> DiceScrapedJob | None:
+        """Parse one result card into a DiceScrapedJob; None if it has no title or parsing fails.
+
+        Recruiter email/phone are taken only from mailto:/tel: links on the card. Salary and
+        experience are set to "Not Disclosed" / "Not Specified"; skills are capped at 15.
+        """
         try:
             title = _clean(await _first_text(el, _Sel.TITLE))
             if not title:

@@ -105,6 +105,7 @@ async def linkedin_search(
     config:   LinkedInSearchConfig,
     pipeline: LinkedInPipelineService = Depends(get_pipeline_search_only),
 ) -> APIResponse[LinkedInSearchResult]:
+    """Run search phase 1 only and return the raw job cards; 500 with the error on failure."""
 
     log = logger.bind(keywords=config.keywords)
     log.info("linkedin_search_requested")
@@ -162,6 +163,7 @@ async def linkedin_harvest(
     config:   LinkedInSearchConfig,
     pipeline: LinkedInPipelineService = Depends(get_pipeline),
 ) -> APIResponse[LinkedInHarvestResult]:
+    """Run the full search + describe + LLM parse pipeline synchronously; 500 on failure."""
 
     log = logger.bind(keywords=config.keywords, max_jobs=config.max_jobs)
     log.info("linkedin_harvest_requested")
@@ -220,6 +222,11 @@ async def linkedin_harvest_async(
     background_tasks: BackgroundTasks,
     pipeline:         LinkedInPipelineService = Depends(get_pipeline),
 ) -> APIResponse[HarvestJobSummary]:
+    """Register an in-memory harvest job and run the full pipeline on it as a background task.
+
+    Job state lives only in this process's memory: it is lost on restart and not shared between
+    workers.
+    """
 
     job = HarvestJob(config=config)
     _harvest_jobs[job.id] = job
@@ -254,6 +261,7 @@ Returns the current status of a background harvest job.
 """,
 )
 async def get_harvest_job(job_id: str) -> APIResponse[HarvestJob]:
+    """Return the in-memory harvest job with its result or error once finished; 404 if unknown."""
     job = _harvest_jobs.get(job_id)
     if job is None:
         raise HTTPException(

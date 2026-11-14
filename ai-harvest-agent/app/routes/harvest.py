@@ -31,10 +31,20 @@ async def start_harvest(
     llm: LLMService = Depends(get_llm_service),
     playwright: PlaywrightService = Depends(get_playwright_service),
 ) -> APIResponse[HarvestJob]:
+    """Create a harvest job and run the matching agent on it in a background task.
+
+    Returns the newly created job immediately (202). The background run marks the job running,
+    stores the agent's output as a single page-1 result, then marks it completed, or failed with the
+    exception text.
+    """
     svc = HarvestService(db)
     job = await svc.create_job(payload)
 
     async def _run_job() -> None:
+        """Background body: run the orchestrator for this job and record result/failure via `svc`.
+
+        Never raises; any exception is stored on the job as a failure message.
+        """
         try:
             await svc.mark_running(job.id)
             orchestrator = AgentOrchestrator(llm, playwright)
@@ -70,6 +80,7 @@ async def get_job(
     job_id: str,
     db: AsyncSession = Depends(get_db_session),
 ) -> APIResponse[HarvestJob]:
+    """Return a harvest job's metadata and status; raises JobNotFoundError for an unknown id."""
     svc = HarvestService(db)
     job = await svc.get_job(job_id)
     return APIResponse(data=job)
@@ -84,6 +95,10 @@ async def get_job_results(
     job_id: str,
     db: AsyncSession = Depends(get_db_session),
 ) -> APIResponse[HarvestJobWithResults]:
+    """Return a harvest job together with all its extracted page results.
+
+    Raises JobNotFoundError for an unknown id.
+    """
     svc = HarvestService(db)
     job = await svc.get_job_with_results(job_id)
     return APIResponse(data=job)
@@ -100,6 +115,7 @@ async def list_jobs(
     page_size: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db_session),
 ) -> APIResponse[list[HarvestJob]]:
+    """List harvest jobs newest first, optionally filtered by `status`; paginated."""
     svc = HarvestService(db)
     jobs = await svc.list_jobs(status=status, page=page, page_size=page_size)
     return APIResponse(data=jobs)
@@ -115,6 +131,10 @@ async def delete_job(
     job_id: str,
     db: AsyncSession = Depends(get_db_session),
 ) -> Response:
+    """Delete a harvest job (does not stop a run already in progress); 204 on success.
+
+    Raises JobNotFoundError for an unknown id.
+    """
     svc = HarvestService(db)
     await svc.delete_job(job_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
