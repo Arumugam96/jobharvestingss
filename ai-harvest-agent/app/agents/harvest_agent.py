@@ -8,7 +8,7 @@ import structlog
 
 from app.agents.base_agent import BaseAgent
 from app.models.agent import AgentConfig, AgentType
-from app.prompts.harvest_prompts import HARVEST_SYSTEM_PROMPT, build_harvest_user_prompt
+from app.prompts.harvest_prompts import build_harvest_user_prompt, harvest_system_prompt
 from app.services.llm_service import HARVEST_TOOLS, LLMMessage, LLMService
 from app.services.playwright_service import PageSnapshot, PlaywrightService
 
@@ -50,7 +50,7 @@ class HarvestAgent(BaseAgent):
             f"Briefly describe your strategy: which pages to visit, "
             f"what signals to look for, and how you will extract the data."
         )
-        strategy = await self._llm.complete_text(prompt, system=HARVEST_SYSTEM_PROMPT)
+        strategy = await self._llm.complete_text(prompt, system=harvest_system_prompt())
         return {"strategy": strategy, "start_url": url, "goal": goal}
 
     async def execute(
@@ -65,7 +65,7 @@ class HarvestAgent(BaseAgent):
         for iteration in range(self._config.max_iterations):
             response = await self._llm.complete(
                 messages=messages,
-                system=HARVEST_SYSTEM_PROMPT,
+                system=harvest_system_prompt(),
                 tools=HARVEST_TOOLS,
             )
 

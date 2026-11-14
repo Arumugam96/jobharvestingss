@@ -161,11 +161,27 @@ def _autofit(ws: Any, max_width: int = 55) -> None:
         pass
 
 
+def _force_text(cells: Any) -> None:
+    """Formula-injection guard: keep every written value as plain text.
+
+    openpyxl binds any string starting with "=" as a FORMULA ("===== About ====="
+    corrupts the workbook, "=HYPERLINK(...)" would run). Re-typing such a cell as
+    a string stores the exact text (no "'" prefix), so nothing a user sees
+    changes. Values starting with + - @ / tab / CR (e.g. phones "+91 98...") are
+    already written as inline strings, which Excel never evaluates — left as is.
+    """
+    for cell in cells:
+        if cell.data_type == "f":
+            cell.data_type = "s"
+
+
 def _write_data_sheet(ws: Any, results: list[ProspectResult]) -> None:
-    """Write the header and one row per prospect, then style, colour, autofit and freeze row 1."""
+    """Write the header and one row per prospect (values kept as text, see
+    _force_text), then style, colour, autofit and freeze row 1."""
     ws.append([label for _, label in _COLUMNS])
     for r in results:
         ws.append(_to_row(r))
+        _force_text(ws[ws.max_row])
     _apply_header_style(ws)
     _color_status_columns(ws)
     _autofit(ws)

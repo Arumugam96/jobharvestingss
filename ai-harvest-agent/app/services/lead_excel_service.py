@@ -57,7 +57,8 @@ class LeadExcelService:
 
     def export(self, result: "LeadIntelligenceResult", run_id: str) -> str:
         """
-        Write leads to Excel and return the resolved file path.
+        Write leads to Excel and return the resolved file path. Lead values are
+        always stored as text, never as formulas (formula-injection guard).
 
         Requires openpyxl; raises ImportError if not installed.
         """
@@ -123,6 +124,10 @@ class LeadExcelService:
                     value = getattr(lead, field, "")
 
                 cell = ws.cell(row=row, column=col_idx, value=value)
+                # Formula-injection guard: a scraped "=..." stays literal text
+                # (exact value, no "'" prefix; "+91 ..." phones are already text).
+                if cell.data_type == "f":
+                    cell.data_type = "s"
                 cell.fill      = row_fill
                 cell.alignment = normal_align
 

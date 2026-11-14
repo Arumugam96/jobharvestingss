@@ -8,7 +8,10 @@ Strategy
 2. For every LinkedIn and Dice job that has a poster name but is missing
    email / phone / LinkedIn URL, look up the index and copy the contact
    data across.
-3. Also attempt a company-only match when no name match is found.
+3. Also attempt a company-only match, but ONLY for a job with no poster name
+   (a named poster must never inherit a different recruiter's contact), and
+   then copy only the company-level email / phone — never the other
+   recruiter's designation or LinkedIn profile.
 
 Logs emitted
 ────────────
@@ -45,7 +48,10 @@ class LeadEnrichmentService:
     def enrich(self, jobs: list[UnifiedJob]) -> list[UnifiedJob]:
         """
         Enrich LinkedIn and Dice jobs with contact data from Naukri records
-        that share the same recruiter name + company.
+        that share the same recruiter name + company. A job with NO poster name
+        may instead take the email / phone of the company's single contactable
+        Naukri recruiter (company-only fallback); designation and LinkedIn
+        profile are never copied on that path.
         """
         # ── Build lookup index from Naukri records ─────────────────────────────
         # Key: (name_norm, company_norm)
@@ -103,7 +109,10 @@ class LeadEnrichmentService:
                     )
 
             # ── Secondary match: company-only (single unambiguous match) ────────
-            if not match and job.company:
+            # Only for an UNNAMED poster: a job naming "Alice" must never get a
+            # different recruiter's address ("Hi Alice" sent to bob@).
+            company_only = False
+            if not match and not job.job_poster_name and job.company:
                 company_norm  = _normalize(job.company)
                 candidates    = company_index.get(company_norm, [])
                 # Only use company match when exactly one Naukri record for that company
@@ -114,6 +123,7 @@ class LeadEnrichmentService:
                 ]
                 if len(contactable) == 1:
                     match = contactable[0]
+                    company_only = True
 
             if not match:
                 continue
@@ -131,11 +141,13 @@ class LeadEnrichmentService:
                             phone=match.contact_number, via="naukri_cross_enrich")
                 changed = True
 
-            if not job.job_poster_designation and match.job_poster_designation:
+            # Person-level fields belong to the matched recruiter — copy them only
+            # on a name + company match, never on the company-only fallback.
+            if not company_only and not job.job_poster_designation                     and match.job_poster_designation:
                 job.job_poster_designation = match.job_poster_designation
                 changed = True
 
-            if not job.linkedin_profile_url and match.linkedin_profile_url:
+            if not company_only and not job.linkedin_profile_url and match.linkedin_profile_url:
                 job.linkedin_profile_url = match.linkedin_profile_url
                 changed = True
 

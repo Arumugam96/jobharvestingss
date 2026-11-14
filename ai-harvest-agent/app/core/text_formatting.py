@@ -20,7 +20,7 @@ _BULLET_PREFIX = re.compile(r"^(?:[•‣▪●○◦*·]|-|\d{1,2}[.)]|\([a-zA-
 # LinkedIn/board scrapes sometimes glue bullet items into one run of text
 # with no line breaks (e.g. "• Item one• Item two") — force each glyph onto
 # its own line before splitting into lines.
-_INLINE_BULLET_GLYPH = re.compile(r"\s*([{_GLYPHS}])\s*")
+_INLINE_BULLET_GLYPH = re.compile(rf"\s*([{re.escape(_GLYPHS)}])\s*")
 # Short "Responsibilities:" / "Requirements:" style section headers — get a
 # blank line before them for visual separation.
 _SECTION_HEADER = re.compile(r"^[A-Za-z][A-Za-z0-9 /&()'\-]{2,60}:$")
@@ -96,7 +96,7 @@ _ALLOWED_HTML_TAGS = {
     "dl", "dt", "dd"
 }
 _ALLOWED_HTML_ATTRS: dict[str, set[str]] = {"a": {"href", "target", "rel"},
-                                             "font": {"color", "size", "face","dl", "dt", "dd", "font",
+                                             "font": {"color", "size", "face",
                                                 },
                                             }
 _DROP_HTML_CONTAINERS = [

@@ -25,10 +25,12 @@ def test_strips_scripts_and_styles() -> None:
 
 
 def test_drops_disallowed_tags_but_keeps_text() -> None:
-    out = s("<div class='x'><section>hello <span>world</span></section></div>")
-    # div/section unwrapped (dropped), text + allowed span preserved
+    # div/section are deliberately on the allow-list (layout fidelity), so use
+    # tags that are not: nav/header are unwrapped, text + allowed span kept.
+    out = s("<nav class='x'><header>hello <span>world</span></header></nav>")
     assert "hello" in out and "world" in out
-    assert "<div" not in out and "<section" not in out
+    assert "<nav" not in out and "<header" not in out
+    assert "<span>world</span>" in out
 
 
 def test_strips_class_and_style_attrs() -> None:

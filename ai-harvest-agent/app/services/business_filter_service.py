@@ -299,7 +299,9 @@ class BusinessFilterService:
                              track_ambiguous: bool = True) -> tuple[bool, str]:
         """Returns (is_gcc, hiring_entity_label).
 
-        All master-list matching is whole-word (see _PhraseMatcher)."""
+        All master-list matching is whole-word (see _PhraseMatcher). A GCC
+        phrase found only in the description counts only when there is no
+        staffing-brand hit and no "staffing" hiring_hint."""
         c_words = _words(j.company)
         c_set   = set(c_words)
         gcc_hit      = _GCC_MATCHER.longest(c_words)
@@ -315,9 +317,15 @@ class BusinessFilterService:
         if gcc_hit and len(gcc_hit) >= max(len(staffing_hit), len(direct_hit)):
             return True, "GCC"
 
+        hint = (getattr(j, "hiring_hint", "") or "").lower()
+
         # ── GCC: phrase match in company name or description ──────────────────
-        if (_GCC_PHRASE_MATCHER.longest(c_words)
-                or _GCC_PHRASE_MATCHER.longest(_words(j.job_description))):
+        # A GCC phrase in the JD body (e.g. a client blurb a consultant pasted)
+        # must not override a known staffing brand or Naukri's consultant hint.
+        if _GCC_PHRASE_MATCHER.longest(c_words):
+            return True, "GCC"
+        if (not staffing_hit and hint != "staffing"
+                and _GCC_PHRASE_MATCHER.longest(_words(j.job_description))):
             return True, "GCC"
 
         # ── GCC: abbreviation token match ─────────────────────────────────────
@@ -325,8 +333,8 @@ class BusinessFilterService:
             return True, "GCC"
 
         # ── Staffing: the board itself says a consultant posted it ────────────
-        # (Naukri consultant=true). Strong signal, but GCC detection above wins.
-        hint = (getattr(j, "hiring_hint", "") or "").lower()
+        # (Naukri consultant=true). Strong signal, but GCC detection by company
+        # name above wins.
         if hint == "staffing":
             return False, "Staffing Firm"
 
@@ -396,6 +404,12 @@ class BusinessFilterService:
         "permanent":  ["permanent", "regular", "full-time", "fulltime", "full time"],
         "full-time":  ["permanent", "regular", "full-time", "fulltime", "full time"],
     }
+    # Whole-word versions of _JT_KEYWORDS: "temp" must not match "template",
+    # "gig" not "gigabit", "regular" not "irregular".
+    _JT_PATTERNS: dict[str, re.Pattern[str]] = {
+        jt: re.compile(r"\b(?:" + "|".join(re.escape(k) for k in kws) + r")\b")
+        for jt, kws in _JT_KEYWORDS.items()
+    }
 
     # "Permanent" (Naukri's term) and "Full-time" (LinkedIn's term) are the
     # same employment type under two different platform vocabularies.
@@ -404,9 +418,10 @@ class BusinessFilterService:
     def _infer_job_type(self, j: UnifiedJob) -> str:
         """Infer contract / freelance / part-time / permanent / full-time by keyword.
 
-        Naukri's own employmentType is judged first; otherwise the stored job_type,
-        title and description are scanned as substrings (first matching type in
-        _JT_KEYWORDS order wins). Returns "not_specified" when nothing matches.
+        Naukri's own employmentType is judged first, then the stored native
+        job_type label on its own; only then are title + description scanned,
+        as whole words (_JT_PATTERNS; first matching type in _JT_KEYWORDS order
+        wins). Returns "not_specified" when nothing matches.
         """
         # Naukri: the job's own employmentType ("Full Time, Permanent",
         # "Full Time, Temporary/Contractual", …) is authoritative — Naukri can't
@@ -421,9 +436,14 @@ class BusinessFilterService:
         # "Full-time"/"Contract", scraped verbatim from the job page) — that
         # authoritative hint is checked before falling back to scanning the
         # free-text title/description.
-        text = f"{j.job_type} {j.job_title} {j.job_description}".lower()
-        for job_type, keywords in self._JT_KEYWORDS.items():
-            if any(kw in text for kw in keywords):
+        native = (j.job_type or "").lower()
+        if native:
+            for job_type, pattern in self._JT_PATTERNS.items():
+                if pattern.search(native):
+                    return job_type
+        text = f"{j.job_title} {j.job_description}".lower()
+        for job_type, pattern in self._JT_PATTERNS.items():
+            if pattern.search(text):
                 return job_type
         return "not_specified"
 
@@ -506,7 +526,8 @@ def _deduplicate(jobs: list[UnifiedJob]) -> list[UnifiedJob]:
 
 # ── Salary parser ──────────────────────────────────────────────────────────────
 
-_LPA_RANGE_RE  = re.compile(r"([\d.]+)\s*[-–to]+\s*([\d.]+)\s*(?:lpa|lacs?|lakhs?|l\b)", re.I)
+_LPA_RANGE_RE  = re.compile(
+    r"([\d.]+)\s*(?:-|–|to)\s*([\d.]+)\s*(?:lpa|lacs?|lakhs?|l\b)", re.I)
 _LPA_SINGLE_RE = re.compile(r"([\d.]+)\s*(?:lpa|lacs?|lakhs?|l\b)", re.I)
 _NOT_DISCLOSED = {"not disclosed", "not specified", "n/a", "na", ""}
 

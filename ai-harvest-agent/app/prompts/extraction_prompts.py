@@ -1,9 +1,9 @@
 """Prompts for structured data extraction from HTML content."""
 from __future__ import annotations
 
-from app.prompts.base_prompts import AGENT_PERSONA, truncate
+from app.prompts.base_prompts import agent_persona, truncate
 
-EXTRACTION_SYSTEM_PROMPT = f"""{AGENT_PERSONA}
+_EXTRACTION_RULES = """
 
 You are a data extraction specialist. Given HTML content and a goal,
 produce precise CSS selectors or extract structured JSON directly.
@@ -14,6 +14,20 @@ Rules:
 - If a field doesn't exist, use null — never hallucinate values
 - Normalize whitespace in text fields
 """
+
+
+def extraction_system_prompt() -> str:
+    """System prompt for HTML data extraction: the agent persona (today's date computed
+    at call time) plus the extraction rules."""
+    return agent_persona() + "\n" + _EXTRACTION_RULES
+
+
+def __getattr__(name: str) -> str:
+    """Keep ``EXTRACTION_SYSTEM_PROMPT`` importable as a module attribute, rebuilt on
+    each access (prefer calling extraction_system_prompt())."""
+    if name == "EXTRACTION_SYSTEM_PROMPT":
+        return extraction_system_prompt()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def build_extraction_prompt(url: str, goal: str, html_sample: str) -> str:

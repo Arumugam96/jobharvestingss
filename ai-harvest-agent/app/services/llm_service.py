@@ -773,17 +773,22 @@ class LLMService:
         # triggers failover to the next provider (e.g. Claude) instead of killing
         # the extraction — a reachable-but-garbage response is no longer terminal.
         def _clean_and_parse(raw: str) -> dict[str, Any]:
-            """Strip a leading markdown code fence and parse the reply as JSON.
+            """Strip a leading markdown code fence and parse the reply as a JSON object.
 
             On a decode error, falls back to json_repair and returns the repair only if it is a
             non-empty dict; otherwise the JSONDecodeError is re-raised so failover moves on.
+            A reply that parses to a non-object (array / scalar) raises ValueError, which
+            the failover loop treats as an invalid response.
             """
             cleaned = (raw or "").strip()
             logger.debug(f"raw response from the LLM before cleaning = {cleaned}")
             if cleaned.startswith("```"):
-                cleaned = cleaned.split("\n", 1)[1].rsplit("```", 1)[0]
+                # "```json\n{...}\n```" -> drop the fence line; a fence with no
+                # newline ("```{...}```") -> drop just the backticks.
+                body = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned[3:]
+                cleaned = body.rsplit("```", 1)[0]
             try:
-                return json.loads(cleaned)
+                parsed = json.loads(cleaned)
             except json.JSONDecodeError as exc:
                 repaired = repair_json(cleaned, return_objects=True)
                 if isinstance(repaired, dict) and repaired:
@@ -793,6 +798,9 @@ class LLMService:
                     )
                     return repaired
                 raise
+            if not isinstance(parsed, dict):
+                raise ValueError(f"expected a JSON object, got {type(parsed).__name__}")
+            return parsed
 
         # Provider failover + per-attempt call-log recording live in the shared
         # helper. Only LLMUnavailableError (every provider down OR every provider

@@ -32,6 +32,8 @@ from typing import Any
 
 import structlog
 
+from app.core.company_domain import infer_company_domain, known_company_domain
+from app.core.contact_grounding import ground_email, ground_phone
 from app.core.contact_normalize import normalize_email, normalize_phone
 from app.models.harvest_run import LlmCallType
 from app.scrapers.human import human_click
@@ -63,86 +65,6 @@ _PHONE_RE = re.compile(
     r'|\+\d{1,3}[\s\-]?\(?\d{3}\)?[\s\-]?\d{3}[\s\-]?\d{4}'  # international
     r'|0\d{2,4}[\s\-]\d{6,8})'                   # Indian landline
 )
-
-# ── Known company → domain map ─────────────────────────────────────────────────
-
-_KNOWN_DOMAINS: dict[str, str] = {
-    "kiya ai":                        "kiya.ai",
-    "fino payments bank":             "finobank.com",
-    "fino":                           "finobank.com",
-    "odessa":                         "odessa.io",
-    "amadeus labs":                   "amadeus.com",
-    "amadeus":                        "amadeus.com",
-    "ness digital engineering":       "ness.com",
-    "ness digital engg":              "ness.com",
-    "fractal analytics":              "fractal.ai",
-    "fractal":                        "fractal.ai",
-    "lentra ai":                      "lentra.ai",
-    "lentra":                         "lentra.ai",
-    "perfios":                        "perfios.com",
-    "oracle financial services software limited": "oracle.com",
-    "oracle":                         "oracle.com",
-    "mastek":                         "mastek.com",
-    "ciklum":                         "ciklum.com",
-    "hexaware":                       "hexaware.com",
-    "e2 open":                        "e2open.com",
-    "dxc technologies":               "dxc.com",
-    "dxc":                            "dxc.com",
-    "niyoto infotech":                "niyoto.com",
-    "hashroot limited":               "hashroot.in",
-    "hashroot":                       "hashroot.in",
-    "collabera":                      "collabera.com",
-    "m360 research":                  "m360research.com",
-    "vlink inc":                      "vlinkinfo.com",
-    "vlink":                          "vlinkinfo.com",
-    "paytm":                          "paytm.com",
-    "ema unlimited":                  "ema-unlimited.com",
-    "awign":                          "awign.com",
-    "hurix":                          "hurix.com",
-    "ig group":                       "iggroup.com",
-    "intuitive ai":                   "intuitive.ai",
-    "nucleus software":               "nucleussoftware.com",
-    "i merit":                        "imerit.net",
-    "imerit":                         "imerit.net",
-    "global foundries":               "globalfoundries.com",
-    "global foundaries":              "globalfoundries.com",
-    "publicis sapient":               "publicissapient.com",
-    "coupang":                        "coupang.com",
-    "global data plc":                "globaldata.com",
-    "global data":                    "globaldata.com",
-    "razorpay":                       "razorpay.com",
-    "neilson iq":                     "nielseniq.com",
-    "nielsen iq":                     "nielseniq.com",
-    "guidewire software":             "guidewire.com",
-    "guidewire":                      "guidewire.com",
-    "linde":                          "linde.com",
-    "meesho":                         "meesho.com",
-    "adobe":                          "adobe.com",
-    "morgan stanley":                 "morganstanley.com",
-    "ybrant digital":                 "ybrantdigital.com",
-    "trilogy":                        "trilogy.com",
-    "the hartford":                   "thehartford.com",
-    "triotree technologies":          "triotree.com",
-    "apisero inc":                    "apisero.com",
-    "apisero":                        "apisero.com",
-    "nttdata":                        "nttdata.com",
-    "ntt data":                       "nttdata.com",
-    "hexagon":                        "hexagon.com",
-    "cyient":                         "cyient.com",
-    "ideagen":                        "ideagen.com",
-    "fleetx.io":                      "fleetx.io",
-    "fleetx":                         "fleetx.io",
-    "vikram solar":                   "vikramsolar.com",
-    "markets and markets":            "marketsandmarkets.com",
-    "markets & markets":              "marketsandmarkets.com",
-    "adani realty":                   "adanirealty.com",
-    "adani reality":                  "adanirealty.com",
-    "lpl financial":                  "lpl.com",
-    "ibm":                            "ibm.com",
-    "paychex":                        "paychex.com",
-    "clearwater analytics":           "clearwateranalytics.com",
-    "itc infotech":                   "itcinfotech.com",
-}
 
 # ── Department keyword map ─────────────────────────────────────────────────────
 
@@ -310,22 +232,11 @@ def _load_prospects(xlsx_path: str) -> list[ProspectRecord]:
 
 
 def _infer_company_domain(company_name: str) -> tuple[str, str]:
-    """Return (domain, website_url). Checks _KNOWN_DOMAINS then heuristic."""
-    slug = company_name.lower().strip()
-    for k, domain in _KNOWN_DOMAINS.items():
-        if k == slug or k in slug or slug in k:
-            return domain, f"https://www.{domain}"
-    cleaned = re.sub(
-        r'\b(inc|ltd|pvt|llc|corp|limited|technologies|tech|solutions|services|'
-        r'systems|group|global|digital|software|labs|ai|io|infotech|analytics|'
-        r'financial|payments|bank|realty|reality|plc|research|engg|engineering)\b',
-        "", slug,
-    )
-    cleaned = re.sub(r'[^a-z0-9]', "", cleaned)
-    if cleaned:
-        domain = f"{cleaned}.com"
-        return domain, f"https://www.{domain}"
-    return "", ""
+    """Return (domain, website_url) — a GUESS from the company name.
+
+    Delegates to app.core.company_domain.infer_company_domain (exact known-name
+    lookup, then the trailing-suffix heuristic); ("", "") when nothing fits."""
+    return infer_company_domain(company_name or "")
 
 
 def _infer_department(designation: str, headline: str = "") -> str:
@@ -466,18 +377,26 @@ def _score_confidence(result: ProspectResult, company_name: str, designation: st
     """
     High   — LinkedIn confirmed + VERIFIED or PUBLIC email + company match
     Medium — LinkedIn confirmed + company match (no email)
-    Low    — No LinkedIn profile resolved
+    Low    — No LinkedIn profile resolved, or no company match
+
+    company match = a company-name word (>3 chars) appears as a whole word in
+    the LinkedIn headline, or the domain is CONFIRMED: it is the curated domain
+    for this company, or the found email is on it. A merely guessed
+    company_domain (always filled by the name heuristic) does not count.
     """
     if not result.linkedin_url:
         return "Low"
 
+    headline_words = set(re.findall(r"[a-z0-9]+", _normalize_name(result.linkedin_headline)))
+    domain = (result.company_domain or "").lower()
+    email_host = (result.official_email_id or "").lower().rpartition("@")[2]
     company_match = bool(
-        result.company_domain
-        or any(
-            tok in _normalize_name(result.linkedin_headline)
-            for tok in _normalize_name(company_name).split()
+        any(
+            tok in headline_words
+            for tok in re.findall(r"[a-z0-9]+", _normalize_name(company_name))
             if len(tok) > 3
         )
+        or (domain and (domain == known_company_domain(company_name) or email_host == domain))
     )
 
     has_real_email = result.email_status in ("VERIFIED", "PUBLIC")
@@ -726,7 +645,9 @@ async def _llm_extract_contact_fields(
 
     Extraction only: the LLM is instructed to return a field ONLY if it appears
     verbatim in the text, never to guess or construct one (honours the module's
-    "email/phone are NEVER predicted" rule). Returns {"email": str, "phone": str}
+    "email/phone are NEVER predicted" rule), and every value it returns is then
+    checked with ground_email / ground_phone against that same text — anything
+    not literally present is dropped. Returns {"email": str, "phone": str}
     with "" for any field not present. Best-effort — any LLM failure (including
     provider outage) returns empties so the caller's regex result still stands.
     """
@@ -742,9 +663,9 @@ async def _llm_extract_contact_fields(
         'the text — never guess or construct one. Return it exactly as written '
         "with no masking; if it is masked/partial (e.g. contains '*'), null), "
         '"phone": str or null (ONLY if a phone number appears verbatim in the '
-        'text — never guess or construct one. Return it in E.164 with the '
-        'country code (e.g. +6581234567) when the country code is present or '
-        "unambiguous; strip spaces, brackets, dashes and masking noise such as "
+        'text — never guess or construct one. Return its digits exactly as '
+        'written (keep a leading + only if the text has one; never add a '
+        "country code); strip spaces, brackets, dashes and masking noise such as "
         "'*' or '\\'. If it is masked, partial, or you are not confident it is "
         'a complete real number, null)}'
     )
@@ -759,8 +680,8 @@ async def _llm_extract_contact_fields(
                 "that appears inside reposts, the activity feed, comments, job "
                 "posts, or other people's content. Never fabricate, guess, or "
                 "construct an email or phone number that is not literally "
-                "present in the text. Return a phone in E.164 with its country "
-                "code when determinable, and drop any masking/formatting noise "
+                "present in the text. Return a phone's digits as written (never "
+                "add a country code), and drop any masking/formatting noise "
                 "(asterisks, backslashes, brackets); if a value is masked or "
                 "partial, return null for it. Return only the fields in the "
                 "schema, no commentary."
@@ -772,9 +693,17 @@ async def _llm_extract_contact_fields(
         logger.debug("llm_contact_extract_failed", url=source_url, error=str(exc))
         return out
 
-    # Deterministic second layer — reject masked/partial noise before returning.
-    out["email"] = normalize_email(extracted.get("email")) or ""
-    out["phone"] = normalize_phone(extracted.get("phone")) or ""
+    # Deterministic second layer — reject masked/partial noise, then require the
+    # value to be grounded in the very text the LLM saw (never a model invention
+    # such as an added country code).
+    email = normalize_email(extracted.get("email"))
+    phone = normalize_phone(extracted.get("phone"))
+    if email:
+        email = normalize_email(ground_email(email, [text])[0])
+    if phone:
+        phone = normalize_phone(ground_phone(phone, [text])[0])
+    out["email"] = email or ""
+    out["phone"] = phone or ""
     return out
 
 
@@ -940,6 +869,43 @@ async def _extract_linkedin_contact_info(
     return out
 
 
+def _email_local_matches_person(local: str, person_name: str) -> bool:
+    """True when an email local-part is built from this person's name.
+
+    The local-part's letter runs ("priya.sharma" -> priya, sharma; "psharma")
+    must each be a concatenation of WHOLE name parts or their initials, with
+    no name part used twice; at least one full name part (3+ letters) must be
+    used, and two different name parts when the person has two or more.
+    Substrings never count, so "ramesh.iyer" does not match "Ram Kumar".
+    """
+    parts = re.findall(r"[a-z]+", (person_name or "").lower())
+    tokens = re.findall(r"[a-z]+", (local or "").lower())
+    if not parts or not tokens:
+        return False
+
+    def _split(tok: str, used: frozenset[int]) -> list[tuple[frozenset[int], bool]]:
+        """Ways to build `tok` from unused name parts: (parts used, any full part)."""
+        if not tok:
+            return [(used, False)]
+        ways: list[tuple[frozenset[int], bool]] = []
+        for i, part in enumerate(parts):
+            if i in used:
+                continue
+            for form, full in ((part, len(part) >= 3), (part[0], False)):
+                if tok.startswith(form):
+                    for u, f in _split(tok[len(form):], used | {i}):
+                        ways.append((u, f or full))
+        return ways
+
+    states: list[tuple[frozenset[int], bool]] = [(frozenset(), False)]
+    for tok in tokens:
+        states = [(u2, f or f2) for u, f in states for u2, f2 in _split(tok, u)]
+        if not states:
+            return False
+    need = min(2, len(parts))
+    return any(full and len(used) >= need for used, full in states)
+
+
 async def _scrape_company_website_contacts(
     page: Any, base_url: str, person_name: str, domain: str
 ) -> dict:
@@ -948,14 +914,16 @@ async def _scrape_company_website_contacts(
 
     Tries: /contact, /contact-us, /team, /about/leadership, /about, /management.
 
-    Email acceptance rules (ordered by confidence):
-      1. Email whose local-part contains a name token → most confident
-      2. Any @domain email on a team/leadership page
-      3. Skip generic local-parts (info, hr, contact, careers, etc.)
+    Email acceptance: an @domain address whose local-part words are WHOLE
+    name parts / initials of this person (see _email_local_matches_person) —
+    "ramesh.iyer@" never matches "Ram". Generic local-parts (info, hr, …) are
+    skipped, and no other address on a team page is taken.
+
+    `phone` is always "": a number on a company page (usually the switchboard)
+    is not this person's phone. The caller must only pass a CONFIRMED domain.
 
     Returns {email, phone, source_page}.
     """
-    person_tokens = {t.lower() for t in re.split(r'\s+', person_name) if len(t) > 2}
 
     domain_re = (
         re.compile(rf'\b([a-zA-Z0-9._%+-]+@{re.escape(domain)})\b', re.I)
@@ -983,22 +951,12 @@ async def _scrape_company_website_contacts(
                 local = m.group(1).split("@")[0].lower()
                 if local in _GENERIC_LOCALS:
                     continue
-                if any(tok in local for tok in person_tokens):
+                if _email_local_matches_person(local, person_name):
                     found_email = m.group(1).lower()
                     break
 
-        # Fallback: any non-generic domain email on team/leadership pages
-        if not found_email and domain_re and path in ("/team", "/about/leadership", "/management"):
-            for m in domain_re.finditer(text):
-                local = m.group(1).split("@")[0].lower()
-                if local not in _GENERIC_LOCALS:
-                    found_email = m.group(1).lower()
-                    break
-
-        found_phone = _extract_phone_from_text(text)
-
-        if found_email or found_phone:
-            return {"email": found_email, "phone": found_phone, "source_page": path}
+        if found_email:
+            return {"email": found_email, "phone": "", "source_page": path}
 
     return {"email": "", "phone": "", "source_page": ""}
 

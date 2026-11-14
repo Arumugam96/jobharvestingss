@@ -1,9 +1,9 @@
 """Prompts for the HarvestAgent navigation and decision loop."""
 from __future__ import annotations
 
-from app.prompts.base_prompts import AGENT_PERSONA
+from app.prompts.base_prompts import agent_persona
 
-HARVEST_SYSTEM_PROMPT = f"""{AGENT_PERSONA}
+_HARVEST_RULES = """
 
 You are controlling a real browser via Playwright. Use the provided tools to:
 1. Navigate to URLs
@@ -20,6 +20,20 @@ Rules:
 - Limit yourself to the pages needed — don't over-crawl
 - When you have enough data to satisfy the goal, call `finish` immediately
 """
+
+
+def harvest_system_prompt() -> str:
+    """System prompt for the browser harvest loop: the agent persona (with today's date,
+    computed at call time so a long-running process never goes stale) plus the rules."""
+    return agent_persona() + "\n" + _HARVEST_RULES
+
+
+def __getattr__(name: str) -> str:
+    """Keep ``HARVEST_SYSTEM_PROMPT`` importable as a module attribute, rebuilt on each
+    access (prefer calling harvest_system_prompt())."""
+    if name == "HARVEST_SYSTEM_PROMPT":
+        return harvest_system_prompt()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def build_harvest_user_prompt(url: str, goal: str, strategy: str) -> str:
