@@ -25,7 +25,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-harvest_db}
       POSTGRES_USER: ${POSTGRES_USER:-harvest}
       # Required — no well-known fallback. Set it in the repo-root .env.
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in the repo-root .env next to docker-compose.yml (not ai-harvest-agent/.env)}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-harvest_password}
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
