@@ -145,6 +145,17 @@ class AuthenticatedUser(BaseModel):
     tenant_id: str = "internal"
     role: str = USER_ROLE
 
+    @field_validator("role", mode="before")
+    @classmethod
+    def _normalize_role(cls, v: object) -> str:
+        """Lower-case and trim the stored role ("Admin", "ADMIN ", NULL → "admin"/"user").
+
+        Roles are sometimes edited by hand in the users table; without this a value
+        like "Admin" silently counted as a normal user both here (is_admin) and in
+        the UI, which compares /auth/me's role to "admin" exactly.
+        """
+        return str(v or USER_ROLE).strip().lower() or USER_ROLE
+
     @property
     def is_admin(self) -> bool:
         """True when the user's role is the admin role."""
