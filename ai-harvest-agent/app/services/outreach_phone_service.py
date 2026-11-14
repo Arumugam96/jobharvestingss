@@ -8,7 +8,7 @@ POST /send-email), and only when ALL hold:
   1. the job or its recruiter has a LinkedIn profile URL;
   2. no phone yet: the job's contact_number is empty (and the recruiter's, when one
      exists), and there is no pending / found apollo_phone_requests row — and the
-     enrichment budget covers it on top of every outstanding enrichment phone.
+     enrichment budget covers it on top of every outstanding phone (any purpose).
 
 Company size is NOT checked here — the outreach decision already passed that filter.
 A recruiter row is NOT required — when absent the job's own linkedin_profile_url is
@@ -140,8 +140,9 @@ async def _request(
     """Core of ``request_phone_after_outreach``; may raise (the wrapper catches it).
 
     Skips when phone reveal or the webhook is disabled, there is no LinkedIn URL, a
-    phone is already known or requested, or the enrichment budget (minus credits held
-    by pending requests) can't cover one phone. Otherwise writes a pending request
+    phone is already known or requested, or the enrichment budget (minus the credits
+    every pending phone request — enrichment and Finder — would cost) can't cover one
+    phone. Otherwise writes a pending request
     row, waits ``_APOLLO_REQUEST_DELAY`` seconds, and asks Apollo to reveal the phone
     (consumes Apollo credits; the number arrives later via the phone webhook). Returns
     REQUESTED, a skip reason, a lowercased settle status, or ERROR.
@@ -170,7 +171,9 @@ async def _request(
     cost = apollo_phone_service.phone_cost()
     remaining = await apollo_budget.remaining_today(purpose="enrichment")
     if remaining is not None:
-        outstanding = await apollo_phone_service.pending_phone_credits_for_purpose("enrichment")
+        # Every outstanding phone (enrichment AND Finder) is charged to the global
+        # counter on delivery, so all of them are subtracted from the headroom.
+        outstanding = await apollo_phone_service.pending_phone_credits_for_purpose(None)
         if remaining - outstanding < cost:
             return _skip(BUDGET, remaining=remaining, outstanding=outstanding, cost=cost, **log)
 

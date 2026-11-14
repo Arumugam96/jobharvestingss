@@ -15,8 +15,10 @@ round-trip (tables in app/models/apollo_phone.py):
      delivery, matches each ``people[]`` entry by ref + Apollo person id, picks the best
      number, charges the tenant's Finder budget ``recruiter_finder_phone_credit_cost``
      credits (ONLY on delivery of a real number) and writes the phone onto every
-     linked row. Idempotent: an already found/not_found row is skipped, so Apollo
-     retries never double-charge.
+     linked row. Idempotent: each row is claimed by a conditional UPDATE before it is
+     settled/charged, so concurrent Apollo retries never double-charge. A delivery for
+     a CANCELLED row is still billed by Apollo, so its charge is booked (once) but the
+     number is not stored.
   4. ``expire_stale`` (APScheduler, every 10 min) marks rows with no delivery after
      ``apollo_phone_pending_ttl_minutes`` as ``expired``; a late delivery still lands.
      Between ticks, ``phone_status_for`` already reads a past-TTL pending row as
@@ -63,7 +65,8 @@ NOT_FOUND = "not_found"
 EXPIRED = "expired"
 REJECTED = "rejected"
 CANCELLED = "cancelled"
-# A delivery for a row in one of these is a duplicate (Apollo retry) — skipped, no charge.
+# A delivery for a row in one of these is not stored (FOUND/NOT_FOUND: a duplicate Apollo
+# retry, no charge; CANCELLED: the first delivery's charge is booked — see process_delivery).
 _FINAL = (FOUND, NOT_FOUND, CANCELLED)
 
 # UI / recruiter phone_status vocabulary.
@@ -85,6 +88,8 @@ _UNSOLICITED_NS = uuid.UUID("6f1d3c52-8a0e-4c1e-9b7a-1f3e5a0c2d41")
 BACKFILL_NS = uuid.UUID("0b8e7f4a-2d3c-4e5f-8a9b-7c6d5e4f3a21")
 
 _BODY_MAX = 64 * 1024
+# Body excerpt kept for a delivery that failed the token check (diagnostics only).
+_BAD_TOKEN_BODY_MAX = 1024
 # Lower rank = preferred.
 _TYPE_RANK = {"mobile": 0, "work_direct": 1}
 
@@ -126,15 +131,17 @@ async def pending_phone_credits(tenant_id: str) -> int:
     return await pending_count(tenant_id) * phone_cost()
 
 
-async def pending_phone_credits_for_purpose(purpose: str) -> int:
+async def pending_phone_credits_for_purpose(purpose: str | None) -> int:
     """Credits every outstanding (pending) ``purpose`` phone request — all tenants: the
-    enrichment sub-cap and the global cap are account-wide — would cost if delivered."""
+    enrichment sub-cap and the global cap are account-wide — would cost if delivered.
+    ``purpose=None`` counts every purpose (the global cap's outstanding liability)."""
     async def _q(db: AsyncSession) -> int:
-        """Count pending request rows for ``purpose`` across all tenants."""
+        """Count pending request rows for ``purpose`` (None = any) across all tenants."""
         stmt = select(func.count()).select_from(ApolloPhoneRequestORM).where(
-            ApolloPhoneRequestORM.purpose == purpose,
             ApolloPhoneRequestORM.status == PENDING,
         )
+        if purpose is not None:
+            stmt = stmt.where(ApolloPhoneRequestORM.purpose == purpose)
         return int((await db.execute(stmt)).scalar() or 0)
     return (await db_read(_q) or 0) * phone_cost()
 
@@ -148,14 +155,28 @@ def mask_phone(number: str | None) -> str:
     return lead + "*" * (len(n) - 4 - len(lead)) + n[-4:]
 
 
-async def can_afford_phone(tenant_id: str, cap: int | None, *, extra_cost: int = 0) -> bool:
-    """True when today's remaining Finder budget covers one more phone on top of every
-    outstanding request (and ``extra_cost`` — e.g. the email credit of the same
-    reveal). Unlimited cap / budget read failure → True."""
+async def can_afford_phone(
+    tenant_id: str, cap: int | None, *, extra_cost: int = 0, global_extra_cost: int | None = None,
+) -> bool:
+    """True when one more Finder phone fits BOTH budgets it will be charged to on delivery:
+      * the tenant's remaining Finder budget, minus the tenant's outstanding requests and
+        ``extra_cost`` (e.g. the email credit of the same reveal, if not yet reserved);
+      * the account-wide APOLLO_DAILY_CAP headroom (``remaining_today(purpose="finder")``),
+        minus every outstanding phone request of ANY purpose and ``global_extra_cost``
+        (defaults to ``extra_cost``; the same reveal's email credit is reserved on the
+        global counter only when the Apollo call is made).
+    An unlimited cap / budget read failure passes that side."""
+    cost = phone_cost()
     remaining = await recruiter_finder_budget.remaining_today(tenant_id, cap=cap)
-    if remaining is None:
+    if remaining is not None and (
+        remaining - await pending_phone_credits(tenant_id) - extra_cost < cost
+    ):
+        return False
+    g_left = await apollo_budget.remaining_today(purpose=PURPOSE_FINDER)
+    if g_left is None:
         return True
-    return remaining - await pending_phone_credits(tenant_id) - extra_cost >= phone_cost()
+    g_extra = extra_cost if global_extra_cost is None else global_extra_cost
+    return g_left - await pending_phone_credits_for_purpose(None) - g_extra >= cost
 
 
 # ── Request lifecycle ────────────────────────────────────────────────────────
@@ -253,7 +274,8 @@ async def settle_request(db: AsyncSession, ref: str, result: Any) -> str:
 
 async def cancel_request(db: AsyncSession, ref: str) -> None:
     """The finder dropped this contact (e.g. budget ran out before persisting it):
-    stop tracking — a later delivery is logged but neither charged nor stored."""
+    stop tracking — a later delivery is logged and its (already incurred) charge booked
+    once, but the number is never stored."""
     for row in await _rows_for_ref(db, ref):
         if row.status == PENDING:
             row.status = CANCELLED
@@ -566,14 +588,34 @@ def _people(payload: Any) -> list[dict]:
     return []
 
 
-def _body_text(payload: Any, raw: str | None) -> str:
-    """Webhook body to store on the event log: the raw text, else JSON, capped at 64 KB."""
+def _body_text(payload: Any, raw: str | None, limit: int = _BODY_MAX) -> str:
+    """Webhook body to store on the event log: the raw text, else JSON, capped at
+    ``limit`` characters (64 KB by default; 1 KB for an unauthenticated request)."""
     if raw is not None:
-        return raw[:_BODY_MAX]
+        return raw[:limit]
     try:
-        return json.dumps(payload, default=str)[:_BODY_MAX]
+        return json.dumps(payload, default=str)[:limit]
     except Exception:
-        return str(payload)[:_BODY_MAX]
+        return str(payload)[:limit]
+
+
+async def _claim_delivery(
+    db: AsyncSession, row: ApolloPhoneRequestORM, *, found: bool, now: datetime,
+) -> bool:
+    """Atomically claim the right to settle (and charge) ``row`` for this delivery: a
+    conditional UPDATE whose row-count is the gate (row-locked in Postgres, serialized
+    in SQLite), so concurrent Apollo retries can never both charge. An open row moves
+    straight to its final status; a CANCELLED row is claimed once via ``delivered_at``
+    (still NULL). True when this caller won the claim."""
+    R = ApolloPhoneRequestORM
+    if row.status == CANCELLED:
+        stmt = update(R).where(R.id == row.id, R.status == CANCELLED, R.delivered_at.is_(None))
+        stmt = stmt.values(delivered_at=now)
+    else:
+        stmt = update(R).where(R.id == row.id, R.status.notin_(_FINAL))
+        stmt = stmt.values(status=FOUND if found else NOT_FOUND, delivered_at=now)
+    result = await db.execute(stmt.execution_options(synchronize_session=False))
+    return (result.rowcount or 0) > 0
 
 
 async def process_delivery(
@@ -581,7 +623,11 @@ async def process_delivery(
     raw_body: str | None = None,
 ) -> dict:
     """Session-taking core of ``process_webhook`` (one transaction: the event log row,
-    the request rows, the linked rows and the budget charge commit together)."""
+    the request rows, the linked rows and the budget charge commit together). Each row
+    is settled at most once — gated by ``_claim_delivery`` — so a duplicate delivery is
+    never charged twice. A delivery for a CANCELLED row (the finder dropped the contact
+    but Apollo still billed it) books the charge once but stores no number. A request
+    with a bad token stores only metadata plus the first ~1 KB of its body."""
     people = _people(payload)
     counts = {"received": len(people), "matched": 0, "found": 0, "not_found": 0, "duplicates": 0}
     cost = phone_cost()
@@ -593,13 +639,28 @@ async def process_delivery(
             if row is None:
                 continue
             counts["matched"] += 1
-            if row.status in _FINAL:
+            best = pick_best_number(person.get("phone_numbers"))
+            now = _now()
+            if row.status == CANCELLED:
+                # Apollo bills a delivered phone even though we stopped tracking it: book
+                # the charge exactly once, but never store or surface the number.
+                if await _claim_delivery(db, row, found=bool(best), now=now) and best:
+                    row.delivered_at = now
+                    row.credits_charged = cost
+                    await _charge_delivery(db, row, cost, day=today, endpoint="phone_webhook")
+                    logger.info("apollo_phone_cancelled_delivery_charged", ref=row.ref,
+                                request_id=row.id, tenant_id=row.tenant_id, credits=cost)
+                else:
+                    counts["duplicates"] += 1
+                continue
+            if row.status in _FINAL or not await _claim_delivery(
+                db, row, found=bool(best), now=now,
+            ):
                 counts["duplicates"] += 1  # Apollo retry / already resolved — never re-charge
                 continue
             if pid and not row.apollo_person_id:
                 row.apollo_person_id = pid
-            best = pick_best_number(person.get("phone_numbers"))
-            _settle_row_delivery(row, best, cost, _now())
+            _settle_row_delivery(row, best, cost, now)
             if best:
                 await _charge_delivery(db, row, cost, day=today, endpoint="phone_webhook")
                 counts["found"] += 1
@@ -616,7 +677,8 @@ async def process_delivery(
         id=str(uuid.uuid4()), received_at=_now(), ref=(ref or "")[:64],
         remote_addr=(remote_addr or "")[:64], token_ok=token_ok,
         people_count=len(people), matched_count=counts["matched"], found_count=counts["found"],
-        body=_body_text(payload, raw_body),
+        # Unauthenticated: keep only a short excerpt so anonymous POSTs can't bloat the table.
+        body=_body_text(payload, raw_body, _BODY_MAX if token_ok else _BAD_TOKEN_BODY_MAX),
     ))
     await db.flush()
     return counts

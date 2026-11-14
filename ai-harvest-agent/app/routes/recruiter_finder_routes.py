@@ -29,6 +29,7 @@ from typing import Any
 import hmac
 import json
 import re
+import time
 
 import structlog
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
@@ -41,6 +42,7 @@ from app.core.tenant_context import is_all_access
 from app.services import apollo_budget, apollo_phone_service, recruiter_finder_budget
 from app.services.recruiter_finder_import import parse_and_validate
 from app.services.recruiter_finder_service import (
+    FinderJobBusyError,
     _reveal_state,
     create_job_with_items,
     get_job,
@@ -316,9 +318,16 @@ async def retry(
     """Re-queue a job's unsuccessful and budget-deferred rows and relaunch the background worker.
 
     Successful/ambiguous rows are left alone, so a retry never re-spends credits on them. Returns
-    `{"job_id", "status": "queued"}`; 404 if the job isn't in the caller's tenant.
+    `{"job_id", "status": "queued"}`; 404 if the job isn't in the caller's tenant; 409 while the
+    job is still queued or running (a second worker would process the same rows).
     """
-    ok = await retry_job(db, job_id)
+    try:
+        ok = await retry_job(db, job_id)
+    except FinderJobBusyError:
+        await db.rollback()
+        raise HTTPException(
+            status_code=409, detail="This job is still running — wait for it to finish.",
+        )
     if not ok:
         raise HTTPException(status_code=404, detail="Job not found")
     await db.commit()
@@ -485,13 +494,33 @@ def _clean_ref(*candidates: str | None) -> str:
     return ""
 
 
+_NO_TOKEN_WARN_EVERY_S = 300.0
+_last_no_token_warn = 0.0
+
+
+def _warn_no_webhook_token() -> None:
+    """Log (at most every 5 minutes) that the phone webhook runs unauthenticated because
+    APOLLO_WEBHOOK_TOKEN is unset — requests are still accepted (warn-only by decision)."""
+    global _last_no_token_warn
+    now = time.monotonic()
+    if _last_no_token_warn and now - _last_no_token_warn < _NO_TOKEN_WARN_EVERY_S:
+        return
+    _last_no_token_warn = now
+    logger.warning(
+        "apollo_phone_webhook_unauthenticated",
+        hint="APOLLO_WEBHOOK_TOKEN is not set — accepting webhook requests without a token",
+    )
+
+
 async def _handle_apollo_phone_webhook(request: Request, token: str | None, ref: str) -> dict:
     """Shared body of both Apollo phone-webhook routes.
 
     Parses the raw body as JSON (None when empty or invalid) and checks `token` against
-    APOLLO_WEBHOOK_TOKEN in constant time; any token passes when no secret is configured. The
-    delivery is always logged and, with a valid token, matched to pending phone requests. Raises
-    401 after logging when the token is wrong; otherwise returns the processing counts.
+    APOLLO_WEBHOOK_TOKEN in constant time (hmac.compare_digest). When no secret is configured,
+    every request is accepted (WARN-ONLY, by decision) and a rate-limited warning is logged. The
+    delivery is always logged — a bad-token request only as metadata plus a ~1 KB body excerpt —
+    and, with a valid token, matched to pending phone requests. Raises 401 after logging when the
+    token is wrong; otherwise returns the processing counts.
     """
     settings = get_settings()
     raw = (await request.body()).decode("utf-8", errors="replace")
@@ -500,6 +529,8 @@ async def _handle_apollo_phone_webhook(request: Request, token: str | None, ref:
     except ValueError:
         payload = None
     expected = (settings.apollo_webhook_token or "").strip()
+    if not expected:
+        _warn_no_webhook_token()
     token_ok = not expected or hmac.compare_digest((token or "").encode(), expected.encode())
     result = await apollo_phone_service.process_webhook(
         payload, ref=ref, token_ok=token_ok, remote_addr=_remote_addr(request), raw_body=raw,

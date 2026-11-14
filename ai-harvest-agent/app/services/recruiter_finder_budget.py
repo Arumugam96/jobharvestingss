@@ -108,6 +108,32 @@ async def charge(cost: int, tenant_id: str) -> bool:
         return False
 
 
+async def release(cost: int, tenant_id: str) -> bool:
+    """Give back ``cost`` credits a ``try_consume`` reserved for ``tenant_id`` today but
+    that were not spent (the reveal missed / failed / was denied) — a negative charge,
+    clamped at 0, in its own session. True on success; False (logged) on a DB error."""
+    if cost <= 0:
+        return True
+    settings = get_settings()
+    try:
+        factory = get_session_factory(settings)
+        async with factory() as db:
+            await db.execute(
+                sa_text(
+                    "UPDATE recruiter_finder_usage "
+                    "SET count = CASE WHEN count > :n THEN count - :n ELSE 0 END, "
+                    "updated_at = CURRENT_TIMESTAMP WHERE usage_date = :d AND tenant_id = :t"
+                ),
+                {"n": cost, "d": _utc_today(), "t": tenant_id},
+            )
+            await db.commit()
+            return True
+    except Exception as exc:
+        logger.warning("recruiter_finder_budget_release_failed", tenant_id=tenant_id, cost=cost,
+                       error=str(exc))
+        return False
+
+
 def _resolve_cap(cap: int | None) -> int:
     """``cap`` if given, else ``settings.recruiter_finder_daily_cap`` (<= 0 = unlimited)."""
     return get_settings().recruiter_finder_daily_cap if cap is None else cap

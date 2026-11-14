@@ -10,6 +10,7 @@ credit-conservation rules live in exactly one spot:
     outreach email: app/services/outreach_phone_service.py);
   * skip if Apollo was EVER tried for this profile (apollo_enriched_at set) — no
     re-sweeps. (Company / company-location lookups still use apollo_recheck_days.)
+    A daily-cap denial or a transient Apollo outage is NOT a try (attempted=False).
 
 The helper only *decides + calls* Apollo and returns what it found. Persistence
 stays in each agent's existing save_enrichment(...) call, which now takes
@@ -55,6 +56,9 @@ class ApolloFallbackResult:
     company_country: str = ""
     matched: bool = False
     attempted: bool = False          # True once an Apollo call was actually issued
+    # True when the daily credit cap refused the lookup (attempted stays False, so the
+    # profile is NOT stamped as tried and is retried another day).
+    cap_reached: bool = False
     source: str = ""                 # "apollo" when Apollo supplied the email
     # Apollo person id — stored on recruiters.apollo_person_id so a later phone request
     # (outreach_phone_service) can match by id and a delivery can find the recruiter.
@@ -95,7 +99,12 @@ async def apollo_contact_fallback(
     EMAIL-ONLY: harvest enrichment never asks Apollo for a phone (8 credits each).
     Phones are requested only after an initial outreach email was actually sent to an
     eligible recruiter — app/services/outreach_phone_service.py (settings.apollo_reveal_phone
-    gates that step). ``already_phone`` is accepted for call compatibility only."""
+    gates that step). ``already_phone`` is accepted for call compatibility only.
+
+    ``attempted`` is True only when Apollo really looked the profile up (hit, miss, or a
+    permanent API error). A daily-cap denial (``cap_reached=True``) or a transient error
+    that outlived the client's retries (429 / 5xx / network) returns attempted=False,
+    so callers don't stamp apollo_enriched_at and the profile is retried later."""
     if not settings.apollo_api_key or not linkedin_url:
         return _SKIP
 
@@ -137,11 +146,20 @@ async def apollo_contact_fallback(
             domain=company_domain,
         )
     except ApolloAPIError as exc:
-        # A completed-but-failed attempt still counts as "attempted" so the
-        # cooldown backs us off a persistently-failing profile (transient errors
-        # were already retried inside the client).
-        logger.warning("apollo_fallback_failed", linkedin_url=linkedin_url, error=str(exc))
+        logger.warning("apollo_fallback_failed", linkedin_url=linkedin_url, error=str(exc),
+                       transient=exc.transient)
+        if exc.transient:
+            # 429 / 5xx / network outlived the client's retries — Apollo never answered
+            # for this profile, so don't record it as tried (it would never be retried).
+            return _SKIP
+        # A permanent failure still counts as "attempted" so we stop paying to re-ask
+        # about a profile Apollo rejects.
         return ApolloFallbackResult(attempted=True)
+
+    if getattr(person, "budget_denied", False):
+        # The daily cap refused the credit — no lookup happened. Not a miss.
+        logger.info("apollo_fallback_cap_reached", linkedin_url=linkedin_url)
+        return ApolloFallbackResult(cap_reached=True)
 
     email = person.email or ""
     logger.info(

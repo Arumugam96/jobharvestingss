@@ -35,10 +35,12 @@ async def run_apollo_recruiter_sweep(limit: int | None = None) -> dict[str, int]
       • candidates    — recruiters selected (missing email, has LinkedIn URL)
       • attempted     — Apollo calls actually issued (gate + cooldown passed)
       • emails_found  — of those, how many returned an email
-      • skipped       — no-op'd by apollo_contact_fallback (unconfigured / cooldown)
+      • skipped       — no-op'd by apollo_contact_fallback (unconfigured / already
+                        tried / cap denied / transient error); not stamped as tried
 
     `limit` defaults to a very large value (drain all candidates); pass a smaller
-    number to cap credit spend. Never raises."""
+    number to cap credit spend. Stops early when the daily credit cap is reached.
+    Never raises."""
     settings = get_settings()
     lim = limit if limit is not None else 1_000_000
     summary = {"candidates": 0, "attempted": 0, "emails_found": 0, "skipped": 0}
@@ -81,9 +83,13 @@ async def run_apollo_recruiter_sweep(limit: int | None = None) -> dict[str, int]
             continue
 
         if not res.attempted:
-            # Unconfigured, no URL, nothing left to reveal, or within the recheck
-            # cooldown — apollo_contact_fallback declined to spend a credit.
+            # Unconfigured, no URL, nothing left to reveal, already tried, the daily cap
+            # refused the credit, or a transient Apollo outage — nothing is stamped.
             summary["skipped"] += 1
+            if res.cap_reached:
+                # Every remaining row would be refused too — stop; they stay untried.
+                logger.info("apollo_recruiter_sweep_cap_reached", recruiter_id=r["id"])
+                break
             continue
         summary["attempted"] += 1
         if res.email:

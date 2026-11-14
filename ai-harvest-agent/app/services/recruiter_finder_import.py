@@ -118,11 +118,15 @@ def _dedupe_key(row: dict) -> str:
     """Identity of an import row: the LinkedIn URL when it is a real linkedin.com URL,
     else company + person name (lowercased).
 
-    Rows with the same company and no person name therefore share one key, so only
-    the first is kept as valid and the rest are marked duplicate.
+    A row with neither (a company-only row) is keyed on company + location + title +
+    domain, so company-only rows for one company that differ in any of those are
+    separate lookups; only an exact repeat is marked duplicate.
     """
     if "linkedin.com" in row["linkedin_url"].lower():
         return "li:" + row["linkedin_url"].lower().rstrip("/")
+    if not row["person_name"]:
+        parts = (row["company"], row["location"], row["title"], row["domain"])
+        return "co:" + "|".join(p.lower() for p in parts)
     return "cp:" + row["company"].lower() + "|" + row["person_name"].lower()
 
 
