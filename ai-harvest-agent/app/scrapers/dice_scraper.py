@@ -235,26 +235,61 @@ def _infer_work_mode(text: str) -> str:
     return "not_specified"
 
 
-def _format_posted(raw: str) -> str:
-    """Turn a Dice "posted" label into a YYYY-MM-DD date (UTC).
+_POSTED_REL_RE = re.compile(
+    r"\b(\d+|an?|one)\s*\+?\s*(minute|min|hour|hr|day|week|month|year|yr)s?\b", re.I,
+)
+_POSTED_REL_DAYS = {"day": 1, "week": 7, "month": 30, "year": 365, "yr": 365}
+_POSTED_ABS_RES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
+    # "Oct 12, 2026" / "October 12 2026" / "Sept. 3, 2026"
+    (re.compile(r"\b([a-z]{3,9})\.?\s+(\d{1,2}),?\s+(\d{4})\b"), ("%b %d %Y", "%B %d %Y")),
+    # "12 Oct 2026" / "12 October, 2026"
+    (re.compile(r"\b(\d{1,2})\s+([a-z]{3,9})\.?,?\s+(\d{4})\b"), ("%d %b %Y", "%d %B %Y")),
+    # "10/12/2026" (US month/day/year — Dice is a US board)
+    (re.compile(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b"), ("%m %d %Y",)),
+)
 
-    Handles today / N hours / minutes / yesterday / N days ago and ISO dates. Anything else,
-    including an empty label, falls back to today's date.
+
+def _format_posted(raw: str) -> str:
+    """Turn a Dice "posted" label into a YYYY-MM-DD date (UTC), or "" when unresolved.
+
+    Handles ISO dates, absolute dates ("Oct 12, 2026", "12 Oct 2026", "10/12/2026"), today /
+    just now / N minutes or hours, yesterday, and "N[+] days / weeks / months / years ago"
+    (also "a/an/one ..."; weeks = 7, months = 30, years = 365 days). An empty, unknown or
+    junk label returns "" — never a guessed "today".
     """
-    if not raw:
-        return datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    r = raw.strip().lower()
-    today = datetime.now(timezone.utc)
-    if not r or "today" in r or "just now" in r or "hour" in r or "minute" in r:
-        return today.strftime("%Y-%m-%d")
-    if "yesterday" in r:
-        return (today - timedelta(days=1)).strftime("%Y-%m-%d")
-    m = re.search(r"(\d+)\s*day", r)
+    r = re.sub(r"\bsept\b", "sep", (raw or "").strip().lower())
+    if not r:
+        return ""
+    now = datetime.now(timezone.utc)
+    m = re.search(r"\d{4}-\d{2}-\d{2}", r)
     if m:
-        return (today - timedelta(days=int(m.group(1)))).strftime("%Y-%m-%d")
-    if re.match(r"\d{4}-\d{2}-\d{2}", r):
-        return r[:10]
-    return today.strftime("%Y-%m-%d")
+        return m.group(0)
+    for pattern, formats in _POSTED_ABS_RES:
+        m = pattern.search(r)
+        if not m:
+            continue
+        text = " ".join(m.groups())
+        for fmt in formats:
+            try:
+                return datetime.strptime(text, fmt).strftime("%Y-%m-%d")
+            except ValueError:
+                continue
+    if "today" in r or "just now" in r or "moments ago" in r:
+        return now.strftime("%Y-%m-%d")
+    if "yesterday" in r:
+        return (now - timedelta(days=1)).strftime("%Y-%m-%d")
+    m = _POSTED_REL_RE.search(r)
+    if m:
+        n = int(m.group(1)) if m.group(1).isdigit() else 1
+        unit = m.group(2)
+        if unit in ("minute", "min"):
+            return (now - timedelta(minutes=n)).strftime("%Y-%m-%d")
+        if unit in ("hour", "hr"):
+            return (now - timedelta(hours=n)).strftime("%Y-%m-%d")
+        return (now - timedelta(days=n * _POSTED_REL_DAYS[unit])).strftime("%Y-%m-%d")
+    if "hour" in r or "minute" in r:
+        return now.strftime("%Y-%m-%d")   # "few hours ago" / "a few minutes ago"
+    return ""
 
 
 async def _delay(page: Page, lo: int, hi: int) -> None:
@@ -564,10 +599,20 @@ class DiceScraper:
         Capped at max_enrich visits to keep run times reasonable.
         Uses regex extraction from page text — more reliable than CSS selectors
         since recruiter info appears inconsistently across Dice job postings.
+        A phone comes only from a tel: link or from page text where a contact cue
+        word ("call", "phone", "mobile", …) sits right before the number.
         """
         import re as _re
 
-        _PHONE_RE   = _re.compile(r'(?:\+?1[\s\-.]?)?\(?[2-9]\d{2}\)?[\s\-.]?\d{3}[\s\-.]?\d{4}')
+        # A phone is taken from page text only when a contact cue word sits right
+        # before it (as naukri_agent._PHONE_IN_TEXT_RE) — never a bare 10-digit run
+        # (job ids, salaries, Dice's own numbers). Group 1 is the number.
+        _PHONE_RE   = _re.compile(
+            r'\b(?:call|contact|mobile|cell|phone|ph|tel|whats\s*app)\s*'
+            r'(?:no\.?|number|#)?\s*[:\-.]?\s*'
+            r'((?:\+?1[\s\-.]?)?\(?[2-9]\d{2}\)?[\s\-.]?\d{3}[\s\-.]?\d{4})\b',
+            _re.I,
+        )
         _LI_RE      = _re.compile(r'https?://(?:www\.)?linkedin\.com/in/([a-zA-Z0-9\-_%]+)/?')
 
         candidates = [j for j in jobs if j.job_url]
@@ -594,7 +639,10 @@ class DiceScraper:
                 email = email_href.replace("mailto:", "").strip() if email_href else None
 
                 phone_href = await _first_attr(self._page, _Sel.DETAIL_PHONE, "href")
-                phone = phone_href.replace("tel:", "").strip() if phone_href else None
+                phone = (
+                    phone_href[4:].strip() or None
+                    if phone_href.lower().startswith("tel:") else None
+                )
 
                 li_href = await _first_attr(self._page, _Sel.DETAIL_LINKEDIN, "href")
                 li_url  = li_href.split("?")[0] if li_href and "/in/" in li_href else None
@@ -616,7 +664,7 @@ class DiceScraper:
                         if not phone:
                             m = _PHONE_RE.search(page_text)
                             if m:
-                                phone = m.group().strip()
+                                phone = m.group(1).strip()
                         if not li_url:
                             m = _LI_RE.search(page_text)
                             if m:

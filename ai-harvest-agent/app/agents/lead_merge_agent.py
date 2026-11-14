@@ -149,7 +149,7 @@ class LeadMergeAgent:
     ) -> LeadRecord:
         """
         Fill missing fields in `record` using data from a Premium Naukri profile.
-        Returns the mutated record.
+        Returns the mutated record. A Naukri email is stored as PUBLIC (never VERIFIED).
         """
         # Email — Naukri contact is premium data
         if not record.official_email and naukri.email:
@@ -256,11 +256,11 @@ class LeadMergeAgent:
 
     @staticmethod
     def _classify_email(email: str, company: str) -> str:
-        """Heuristic: VERIFIED if email domain contains company name slug."""
+        """PUBLIC for a scraped email, NOT_FOUND when there is none.
+
+        Never VERIFIED: the company name appearing in the email domain is only a heuristic,
+        not verification. ``company`` is accepted for signature compatibility.
+        """
         if not email or "@" not in email:
             return "NOT_FOUND"
-        domain = email.split("@", 1)[-1].lower()
-        slug   = re.sub(r"[^a-z0-9]", "", company.lower())[:8]
-        if len(slug) > 3 and slug in domain:
-            return "VERIFIED"
         return "PUBLIC"

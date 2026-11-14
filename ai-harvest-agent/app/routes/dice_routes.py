@@ -141,6 +141,9 @@ async def run_dice_agent() -> Any:
     Trigger a Dice.com harvest run using the current harvest_config.json settings.
     Edit search filters via PUT /harvest-config or the Rule Engine UI.
     Returns: run_id, status, source, total_found, saved_to, jobs.
+
+    A harvest failure is not "0 results": it returns status "failed" and records the
+    run in harvest_runs as "failed" with the error.
     """
     config = _config_svc.load()
     f      = config.filters
@@ -160,6 +163,25 @@ async def run_dice_agent() -> Any:
             slow_mo  = config.browser.slow_mo_ms,
         )
 
+    async def _record_failed_run(error: str) -> None:
+        """Best-effort: write this run as a terminal "failed" row (no jobs) with the error."""
+        run_pk = await db_write(lambda db: HarvestRunService(db).create_run(
+            run_id           = run_id,
+            source           = "Dice",
+            sources          = ["Dice"],
+            filters_snapshot = f.model_dump(),
+            started_at       = datetime.now(timezone.utc),
+        ))
+        if not run_pk:
+            return
+        await db_write(lambda db: HarvestRunService(db).update_run(
+            run_pk,
+            status         = "failed",
+            completed_at   = datetime.now(timezone.utc),
+            error          = error,
+            combined_count = 0,
+        ))
+
     # Single-flight: reject if a harvest is already running (raises 409).
     async with run_guard.single_flight(run_id, "Dice"):
         try:
@@ -170,8 +192,11 @@ async def run_dice_agent() -> Any:
                 scraped = await _do_harvest()
 
         except Exception as exc:
+            # Browser launch failure, "Dice navigation failed" on page 1, … — not 0 results.
             log.exception("dice_harvest_error", error=str(exc))
-            return _err("Dice harvest failed", str(exc) or "Unexpected error during scraping")
+            reason = str(exc) or "Unexpected error during scraping"
+            await _record_failed_run(reason)
+            return _err("Dice harvest failed", reason)
 
     log.info("dice_jobs_extracted", total=len(scraped))
 

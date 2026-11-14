@@ -35,7 +35,10 @@ class DiceAgent:
     ) -> list[DiceScrapedJob]:
         """
         Open Dice.com with the persistent Chrome profile and harvest jobs.
-        Returns list[DiceScrapedJob]. Never raises — errors are logged and [] returned.
+        Returns list[DiceScrapedJob]. A failure (browser launch, "Dice navigation
+        failed" on page 1, …) is logged and re-raised so the caller records a failed
+        run instead of "0 results"; jobs collected before a mid-run failure are still
+        returned (DiceScraper.run keeps them).
         """
         from app.services.config_service import ConfigService
         chrome_profile = ConfigService().load().browser.chrome_profile
@@ -74,6 +77,7 @@ class DiceAgent:
             logger.info("agent_completed", source="dice", total=len(jobs))
             return jobs
         except Exception as exc:
+            # Propagate: a failure must not look like a successful 0-job run.
             logger.exception("agent_failed", source="dice", error=str(exc))
-            return []
+            raise
 

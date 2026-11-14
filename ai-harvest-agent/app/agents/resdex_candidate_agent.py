@@ -329,8 +329,13 @@ class ResdexCandidateAgent:
     """One Resdex advanced search on an already-open recruiter-profile page."""
 
     def __init__(self, page: Any) -> None:
-        """Wrap an already-open, logged-in recruiter-profile page; this class never logs in."""
+        """Wrap an already-open, logged-in recruiter-profile page; this class never logs in.
+
+        ``search_submitted`` is True once the current search() clicked Search (the
+        advSearch POST went out) — a retry after that is a new, billable search.
+        """
         self._page = page
+        self.search_submitted = False
 
     async def _click(self, element: Any) -> None:
         """Gradual pointer move + click (human_click); plain click fallback."""
@@ -461,9 +466,13 @@ class ResdexCandidateAgent:
 
     async def search(self, tier: ResdexTier) -> tuple[list[ResdexCard], int, dict[str, Any]]:
         """Run one search. Returns (cards, total_results, applied) where `applied`
-        records which filters actually made it into the form."""
+        records which filters actually made it into the form. Sets
+        ``search_submitted`` once the Search button was clicked (the advSearch POST
+        went out), so a caller retrying after a ResdexChallenge knows whether the
+        retry is a second submitted search."""
         from app.config import get_settings
 
+        self.search_submitted = False
         page = self._page
         f = tier.filters or {}
         await self._open_form()
@@ -501,6 +510,7 @@ class ResdexCandidateAgent:
                 lambda r: _SEARCH_API in r.url and r.request.method == "POST", timeout=60_000,
             ) as resp_info:
                 await self._click(page.locator(_SEARCH_BTN).first)
+                self.search_submitted = True
             resp = await resp_info.value
         except Exception:
             await self._guard()   # a wall / login instead of the results call
@@ -691,7 +701,12 @@ async def run_resdex_batch(
 
     async def _search_tier(agent: ResdexCandidateAgent, page: Any, tier: ResdexTier):
         """agent.search with the challenge / login handling; a human-cleared
-        challenge retries the same search (same budget reservation)."""
+        challenge retries the same search. A challenge raised BEFORE Search was
+        clicked reuses the current budget reservation; one raised AFTER the advSearch
+        POST went out makes the retry a second submitted search, so it reserves again
+        first (counted in `used` / `searches_done`) and aborts the batch as
+        cap_reached when that reservation is refused."""
+        nonlocal used, searches_done
         challenges = 0
         while True:
             try:
@@ -704,7 +719,15 @@ async def run_resdex_batch(
                 if challenges > _MAX_CHALLENGE_RETRIES:
                     raise _BatchAbort(ResdexSearchStatus.ERROR,
                                       "Resdex challenge keeps reappearing") from None
+                submitted = bool(getattr(agent, "search_submitted", False))
                 await _await_human(page, str(exc))
+                if submitted:
+                    # The previous attempt already spent a Resdex search.
+                    if not await reserve():
+                        raise _BatchAbort(ResdexSearchStatus.CAP_REACHED,
+                                          "daily Resdex search cap reached") from None
+                    used += 1
+                    searches_done += 1
 
     try:
         async with recruiter_harvest_browser(headless=headless) as pbm:

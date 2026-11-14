@@ -1269,7 +1269,14 @@ class NaukriAgent:
         Browser per settings.naukri_browser_mode: "shared" → the configured
         persistent Chrome profile; "isolated" → a fresh guest context;
         "recruiter" → the logged-in Naukri recruiter profile (never falls back
-        to guest: an invalid session returns [])."""
+        to guest).
+
+        Raises instead of returning [] on a failure, so callers can tell it from
+        "0 results": NaukriRecruiterSessionError when the recruiter session is
+        invalid or the login window is open; NaukriStoppedEarly,
+        SearchFilterNotAppliedException, a browser-launch error or any other
+        error as-is (logged first). Jobs collected before a mid-run failure are
+        still returned (see _run)."""
         settings = get_settings()
         mode = settings.naukri_browser_mode
         logger.info(
@@ -1288,6 +1295,9 @@ class NaukriAgent:
             elif mode == "recruiter":
                 # Lazy: the recruiter-profile helpers live with the recruiter agent.
                 from app.agents.naukri_recruiter_agent import (
+                    LOGIN_WINDOW_OPEN_MSG,
+                    SESSION_EXPIRED_MSG,
+                    NaukriRecruiterSessionError,
                     check_recruiter_session,
                     login_window_open,
                     recruiter_harvest_browser,
@@ -1295,13 +1305,13 @@ class NaukriAgent:
                 if login_window_open():
                     # The profile is locked by the interactive login window.
                     logger.warning("naukri_recruiter_session_invalid", reason="login window open")
-                    return []
+                    raise NaukriRecruiterSessionError(LOGIN_WINDOW_OPEN_MSG)
                 async with recruiter_harvest_browser(headless=headless, slow_mo=slow_mo) as rbm:
                     page = await rbm.acquire_page(label="naukri")
                     ok, detail = await check_recruiter_session(page)
                     if not ok:
                         logger.warning("naukri_recruiter_session_invalid", reason=detail)
-                        return []
+                        raise NaukriRecruiterSessionError(SESSION_EXPIRED_MSG)
                     jobs = await self._run(page, filters)
             else:
                 from app.services.config_service import ConfigService
@@ -1316,8 +1326,9 @@ class NaukriAgent:
             logger.info("agent_completed", source="naukri", total=len(jobs))
             return jobs
         except Exception as exc:
+            # Propagate: a failure must not look like a successful 0-job run.
             logger.exception("agent_failed", source="naukri", error=str(exc))
-            return []
+            raise
 
     def get_token_usage(self) -> dict:
         """Cumulative token usage of this run's Naukri LLM enrichment calls

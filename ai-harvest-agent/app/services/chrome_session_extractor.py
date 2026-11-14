@@ -68,10 +68,33 @@ def _cdp_is_available(port: int = _CDP_PORT) -> bool:
         return False
 
 
+def _kill_chrome_for_profile(user_data_dir: Path) -> None:
+    """Force-stop only the chrome.exe processes launched with this ``--user-data-dir``.
+
+    Other Chrome windows (the user's own browser, a running harvest's Playwright
+    Chromium) are left alone. Windows only (PowerShell + CIM); errors are logged and
+    ignored, since a missing process is the normal case.
+    """
+    needle = f"--user-data-dir={user_data_dir}".lower().replace("'", "''")
+    ps_cmd = (
+        "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | "
+        f"Where-Object {{ $_.CommandLine -and $_.CommandLine.ToLower().Contains('{needle}') }} | "
+        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+    )
+    try:
+        subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
+                       capture_output=True, timeout=15)
+    except Exception as exc:
+        logger.warning("cdp_chrome_profile_kill_failed", error=str(exc))
+
+
 def start_cdp_chrome(user_data_dir: Path | str | None = None) -> dict[str, Any]:
     """
-    Kill any existing Chrome, start a fresh one with --remote-debugging-port=9222,
-    and wait for the CDP endpoint to become ready.
+    Stop any Chrome already using this profile, start a fresh one with
+    --remote-debugging-port=9222, and wait for the CDP endpoint to become ready.
+
+    Only Chrome processes launched with this ``user_data_dir`` are stopped; other
+    Chrome windows and a running harvest's browser are not touched.
 
     After calling this, the user should click "Open in Browser" in the Naukri Launcher.
     The Launcher's auto-login URL will open as a new tab in this CDP-enabled Chrome.
@@ -85,8 +108,8 @@ def start_cdp_chrome(user_data_dir: Path | str | None = None) -> dict[str, Any]:
     if not chrome:
         raise RuntimeError("Chrome executable not found")
 
-    # Kill any existing Chrome (clean slate)
-    subprocess.run(["taskkill", "/F", "/IM", "chrome.exe"], capture_output=True, timeout=5)
+    # Clean slate for THIS profile only (never kill every chrome.exe).
+    _kill_chrome_for_profile(user_data_dir)
     time.sleep(1.5)
 
     # Remove SingletonLock so Chrome starts cleanly

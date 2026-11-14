@@ -105,14 +105,17 @@ def humanize_key(key: str) -> str:
 def _metadata_lines(meta: Any) -> str:
     """Render a Demand job's ``metadata`` dict as "Label: value" lines, one per entry.
 
-    Only non-empty string values are kept (numbers and other types are dropped);
-    whitespace is collapsed. Returns "" when ``meta`` is not a dict.
+    Non-string values are stringified (``30`` → "30", a list → its items joined with
+    ", "); None and blank values are skipped; whitespace is collapsed. Returns "" when
+    ``meta`` is not a dict.
     """
     if not isinstance(meta, dict):
         return ""
     lines = []
     for k, v in meta.items():
-        value = " ".join(str(v or "").split()) if isinstance(v, str) else ""
+        if isinstance(v, (list, tuple)):
+            v = ", ".join(str(x) for x in v if x is not None)
+        value = " ".join(str(v).split()) if v is not None else ""
         label = humanize_key(k)
         if value and label:
             lines.append(f"{label}: {value}\n")
@@ -216,7 +219,9 @@ def ground_requirements(req: dict, job: dict) -> dict:
     job's title / skills / description / location; anything else is dropped. The
     posted title is always ``job_titles[0]``; other titles and skill variants are
     kept only as OR-alternatives of a grounded term (de-duplicated, ≤4 each).
-    Experience is clamped to 0..40 with min ≤ max; exclusions must be short."""
+    Placeholder locations ("Not Specified", "N/A", …) are dropped even when the job
+    text contains them. Experience is clamped to 0..40 with min ≤ max; exclusions
+    must be short."""
     req = req if isinstance(req, dict) else {}
     job = job or {}
     matcher = _job_matcher(job)
@@ -245,6 +250,8 @@ def ground_requirements(req: dict, job: dict) -> dict:
     loc_keys: set[str] = set()
     for loc in _str_list(req.get("locations")):
         k = term_key(loc)
+        if is_placeholder_location(loc):
+            continue                       # "Not Specified" etc. is no place to filter on
         if k and k not in loc_keys and matcher.contains(loc):
             loc_keys.add(k)
             locations.append(loc)
@@ -296,10 +303,25 @@ def parse_experience_range(text: str | None) -> tuple[int | None, int | None]:
     return None, None
 
 
+_PLACEHOLDER_LOCATIONS = frozenset({
+    "unknown", "unknown location", "location unknown", "not specified", "not mentioned",
+    "not stated", "not available", "not disclosed", "unspecified", "n/a", "na", "nil",
+    "none", "null", "tbd", "any", "anywhere", "-", "--",
+})
+
+
+def is_placeholder_location(text: str | None) -> bool:
+    """True for a filler location value ("Unknown Location", "Not Specified", "N/A", …)
+    that names no real place — it must never become a Resdex location filter."""
+    t = " ".join((text or "").lower().split()).strip(" .")
+    return t in _PLACEHOLDER_LOCATIONS
+
+
 def fallback_requirements(job: dict) -> dict:
     """No-LLM requirements from the posting's own fields: the first 4 listed skills
     are mandatory (priority by order), the next 4 optional, the posted title, the
-    experience range when the posting states one, and the location's city."""
+    experience range when the posting states one, and the location's city (none when
+    the location is a placeholder such as "Unknown Location" / "Not Specified" / "N/A")."""
     job = job or {}
     raw_skills = job.get("skills") or []
     if isinstance(raw_skills, str):
@@ -315,6 +337,8 @@ def fallback_requirements(job: dict) -> dict:
     title = _str(job.get("job_title"), 200)
     min_exp, max_exp = parse_experience_range(job.get("experience"))
     city = (job.get("location") or "").split(",")[0].strip()
+    if is_placeholder_location(city):
+        city = ""
     return {
         "mandatory_skills": [
             {"name": n, "variants": [], "priority": i} for i, n in enumerate(skills[:4], start=1)

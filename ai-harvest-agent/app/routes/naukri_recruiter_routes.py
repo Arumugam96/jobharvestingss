@@ -8,7 +8,8 @@ Naukri RECRUITER session routes (see app/agents/naukri_recruiter_agent.py).
   POST /naukri-recruiter/autologin  open a Launcher-issued naukri.com auto-login URL
 
 None of these type credentials or kill any Chrome; all use the dedicated
-recruiter profile (settings.naukri_recruiter_profile_dir).
+recruiter profile (settings.naukri_recruiter_profile_dir). They stay open to any
+signed-in user: the Demand page lets ordinary users reconnect the recruiter session.
 """
 from __future__ import annotations
 
