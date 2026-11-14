@@ -653,20 +653,32 @@ class OrchestratorAgent:
         """
         Legacy method used by /run-harvest and the APScheduler job.
         Returns (list[HarvestJob], source_label).
+
+        Each source fails on its own: an exception from one source is logged and the
+        other source's jobs are kept. Only when every enabled source raised is the first
+        error re-raised, so the caller still sees a total failure.
         """
         config      = self._config
         all_jobs:   list[HarvestJob] = []
         src_labels: list[str]        = []
+        errors:     list[Exception]  = []
+        attempted = 0
 
         if config.sources.linkedin:
             logger.info("orchestrator_dispatching", source="linkedin")
             session_path   = str(LINKEDIN_SESSION_FILE) if LINKEDIN_SESSION_FILE.exists() else None
             agent          = LinkedInAgent()
-            linkedin_scraped = await agent.harvest(
-                filters  = config.filters,
-                headless = config.browser.headless,
-                slow_mo  = config.browser.slow_mo_ms,
-            )
+            attempted += 1
+            try:
+                linkedin_scraped = await agent.harvest(
+                    filters  = config.filters,
+                    headless = config.browser.headless,
+                    slow_mo  = config.browser.slow_mo_ms,
+                )
+            except Exception as exc:
+                logger.exception("orchestrator_linkedin_error", error=str(exc))
+                errors.append(exc)
+                linkedin_scraped = []
             for j in linkedin_scraped:
                 all_jobs.append(HarvestJob(
                     title     = j.job_title,
@@ -684,11 +696,17 @@ class OrchestratorAgent:
             from app.agents.naukri_agent import NaukriAgent
             logger.info("orchestrator_dispatching", source="naukri")
             naukri_agent   = NaukriAgent()
-            naukri_scraped = await naukri_agent.harvest(
-                filters  = config.filters,
-                headless = config.browser.headless,
-                slow_mo  = config.browser.slow_mo_ms,
-            )
+            attempted += 1
+            try:
+                naukri_scraped = await naukri_agent.harvest(
+                    filters  = config.filters,
+                    headless = config.browser.headless,
+                    slow_mo  = config.browser.slow_mo_ms,
+                )
+            except Exception as exc:
+                logger.exception("orchestrator_naukri_error", error=str(exc))
+                errors.append(exc)
+                naukri_scraped = []
             for j in naukri_scraped:
                 all_jobs.append(HarvestJob(
                     title     = j.job_title,
@@ -701,6 +719,9 @@ class OrchestratorAgent:
                 ))
             src_labels.append("Naukri")
             logger.info("orchestrator_source_done", source="naukri", count=len(naukri_scraped))
+
+        if attempted and len(errors) == attempted:
+            raise errors[0]
 
         source_label = ", ".join(src_labels) if src_labels else "none"
         logger.info("orchestrator_complete", total=len(all_jobs), sources=source_label)

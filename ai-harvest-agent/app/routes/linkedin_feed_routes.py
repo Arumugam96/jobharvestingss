@@ -225,14 +225,17 @@ async def run_linkedin_feed_agent() -> Any:
 
     # Single-flight: the feed harvest drives the same Chrome profile as the job
     # harvest, so only one may run at a time. DB backstop, then atomic in-process claim.
+    # conflict_details hides another tenant's job_id/run_id (it only learns "busy").
     db_conflict = await run_guard.db_conflict()
     if db_conflict is not None:
-        raise JobAlreadyRunningError(db_conflict.get("job_id") or "", details=db_conflict)
+        shown = run_guard.conflict_details(db_conflict)
+        raise JobAlreadyRunningError(shown.get("job_id") or "", details=shown)
 
     job_id = uuid4().hex
     conflict = run_guard.try_begin(job_id, run_id, _SOURCE)
     if conflict is not None:
-        raise JobAlreadyRunningError(conflict.get("job_id") or "", details=conflict)
+        shown = run_guard.conflict_details(conflict)
+        raise JobAlreadyRunningError(shown.get("job_id") or "", details=shown)
 
     try:
         JobTracker.create(job_id, run_id)

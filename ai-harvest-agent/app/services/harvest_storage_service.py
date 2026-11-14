@@ -25,6 +25,10 @@ logger = structlog.get_logger(__name__)
 
 _BASE_PATH = Path("data/results/linkedin")
 
+# A run_id is a file stem (timestamp + slug): no separators, dots or drive letters,
+# so a URL-supplied id can't escape _BASE_PATH.
+_RUN_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
 
 class HarvestStorageService:
     """Save and retrieve LinkedIn harvest run results."""
@@ -90,8 +94,13 @@ class HarvestStorageService:
     # ── Read — single ─────────────────────────────────────────────────────────
 
     def get_result(self, run_id: str) -> dict | None:
-        """Load one saved run by its run_id. Returns None if not found."""
+        """Load one saved run by its run_id. Returns None if not found, or if run_id
+        is not a plain [A-Za-z0-9_-] stem / would resolve outside _BASE_PATH."""
+        if not _RUN_ID_RE.fullmatch(run_id or ""):
+            return None
         path = _BASE_PATH / f"{run_id}.json"
+        if not path.resolve().is_relative_to(_BASE_PATH.resolve()):
+            return None
         if not path.exists():
             return None
         try:

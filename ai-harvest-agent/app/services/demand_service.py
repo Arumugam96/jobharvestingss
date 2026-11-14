@@ -202,13 +202,17 @@ def require_resdex_ready() -> None:
 
 async def _harvest_conflict() -> dict | None:
     """Details of a running harvest (in-process first, then the DB backstop) for
-    the "A harvest is running" pop-up, or None."""
+    the "A harvest is running" pop-up, or None.
+
+    Another tenant's run is reported only as busy: its job_id/run_id/source come
+    back as None and no progress/message is added (see run_guard.conflict_details)."""
     conflict = run_guard.active_run() or await run_guard.db_conflict()
     if conflict is None:
         return None
-    info = {"job_id": conflict.get("job_id"), "run_id": conflict.get("run_id"),
-            "source": conflict.get("source")}
-    job_id = conflict.get("job_id")
+    details = run_guard.conflict_details(conflict)
+    info = {"job_id": details.get("job_id"), "run_id": details.get("run_id"),
+            "source": details.get("source")}
+    job_id = info["job_id"]
     if job_id:
         run = await db_read(lambda db: HarvestRunService(db).get_by_job_id(job_id))
         if run is not None:
@@ -699,9 +703,13 @@ async def _rerun_background(run_id: str, run_pk: str, job_id: str) -> None:
 
 def stop_batch(run_id: str) -> dict:
     """Cooperative stop of the running batch ``run_id`` (the shared stop signal —
-    finishes the current row; finished rows are kept, the rest end as stopped)."""
+    finishes the current row; finished rows are kept, the rest end as stopped).
+
+    Another tenant's batch is treated as not running, so a caller can neither stop
+    it nor learn that it exists (the all-access internal tenant may stop any)."""
     active = run_guard.active_run()
-    if not active or active.get("run_id") != run_id or active.get("source") != DEMAND_SOURCE:
+    if not active or active.get("run_id") != run_id or active.get("source") != DEMAND_SOURCE \
+            or not run_guard.visible_to_tenant(active, get_current_tenant_id()):
         return {"status": "idle", "message": "This batch is not running."}
     run_guard.request_stop()
     if active.get("job_id"):

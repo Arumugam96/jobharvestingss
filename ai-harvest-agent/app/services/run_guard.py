@@ -29,11 +29,13 @@ import structlog
 
 from app.config import get_settings
 from app.core.exceptions import DailyJobLimitExceededError, JobAlreadyRunningError
+from app.core.tenant_context import get_current_tenant_id, is_all_access
 from app.services.harvest_run_service import HarvestRunService, db_read
 
 logger = structlog.get_logger(__name__)
 
-# {"job_id", "run_id", "source"} while a run is in flight in THIS process; None otherwise.
+# {"job_id", "run_id", "source", "tenant_id"} while a run is in flight in THIS process;
+# None otherwise. tenant_id is the tenant that started the run (see visible_to_tenant).
 _active: dict | None = None
 
 # Cooperative-stop signal for the in-flight run. A user-triggered stop sets this;
@@ -67,6 +69,27 @@ def active_run() -> dict | None:
     return dict(_active) if _active else None
 
 
+def visible_to_tenant(info: dict | None, tenant_id: str | None) -> bool:
+    """True if a caller in `tenant_id` may see the details of / stop the run `info`.
+
+    The all-access internal tenant sees every run; a client tenant only a run its
+    own tenant started. A run with no recorded tenant counts as internal-owned."""
+    if not info:
+        return False
+    if is_all_access(tenant_id):
+        return True
+    return (info.get("tenant_id") or "internal") == tenant_id
+
+
+def conflict_details(info: dict) -> dict:
+    """Conflict info safe to return to the current caller (e.g. a 409's details):
+    the run's job_id/run_id/source when the caller may see that run (see
+    visible_to_tenant), all None for another tenant's run. tenant_id is never echoed."""
+    if visible_to_tenant(info, get_current_tenant_id()):
+        return {k: v for k, v in info.items() if k != "tenant_id"}
+    return {"job_id": None, "run_id": None, "source": None}
+
+
 async def check_conflict() -> dict | None:
     """Return conflict info if a harvest is already running (in-process marker
     first, then the DB backstop), else None.
@@ -87,7 +110,10 @@ async def db_conflict() -> dict | None:
     cross-process run, `try_begin()` closes the live-request race."""
     row = await db_read(lambda db: HarvestRunService(db).get_active_run())
     if row is not None:
-        return {"job_id": row.job_id, "run_id": row.run_id, "source": row.source}
+        return {
+            "job_id": row.job_id, "run_id": row.run_id, "source": row.source,
+            "tenant_id": getattr(row, "tenant_id", None),
+        }
     return None
 
 
@@ -111,8 +137,9 @@ async def daily_budget_conflict() -> dict | None:
 def try_begin(job_id: str | None, run_id: str, source: str | None) -> dict | None:
     """Atomically claim the in-process single-flight slot.
 
-    Returns None (and marks the run in-flight) if no run is active in THIS
-    process; otherwise returns the existing run's info and changes nothing.
+    Returns None (and marks the run in-flight, owned by the current context's
+    tenant) if no run is active in THIS process; otherwise returns the existing
+    run's info and changes nothing.
 
     Contains NO `await`, so the check and the set can't be interleaved by the
     event loop — this is what actually closes the double-click / two-tab start
@@ -123,20 +150,23 @@ def try_begin(job_id: str | None, run_id: str, source: str | None) -> dict | Non
     if _active is not None:
         return dict(_active)
     clear_stop()  # fresh run — discard any stop signal left over from a prior one
-    _active = {"job_id": job_id, "run_id": run_id, "source": source}
-    logger.info("run_guard_begin", job_id=job_id, run_id=run_id, source=source)
+    tenant_id = get_current_tenant_id()
+    _active = {"job_id": job_id, "run_id": run_id, "source": source, "tenant_id": tenant_id}
+    logger.info("run_guard_begin", job_id=job_id, run_id=run_id, source=source, tenant_id=tenant_id)
     return None
 
 
 def begin(job_id: str | None, run_id: str, source: str | None) -> None:
-    """Mark a run as in-flight in this process. Must be paired with end().
+    """Mark a run as in-flight in this process (owned by the current context's
+    tenant). Must be paired with end().
 
     Prefer `try_begin()` on the start path — it makes the check-and-set atomic.
     This unconditional setter remains for callers that have already established
     exclusivity by other means."""
     global _active
-    _active = {"job_id": job_id, "run_id": run_id, "source": source}
-    logger.info("run_guard_begin", job_id=job_id, run_id=run_id, source=source)
+    tenant_id = get_current_tenant_id()
+    _active = {"job_id": job_id, "run_id": run_id, "source": source, "tenant_id": tenant_id}
+    logger.info("run_guard_begin", job_id=job_id, run_id=run_id, source=source, tenant_id=tenant_id)
 
 
 def end() -> None:
@@ -151,8 +181,9 @@ def end() -> None:
 @asynccontextmanager
 async def single_flight(run_id: str, source: str | None, job_id: str | None = None):
     """Async context manager for a synchronous run (single-source routes, the
-    scheduler): raises JobAlreadyRunningError (HTTP 409) if a harvest is already
-    running, otherwise marks in-flight for the duration and releases on exit.
+    legacy POST /run-harvest): raises JobAlreadyRunningError (HTTP 409) if a
+    harvest is already running, otherwise marks in-flight for the duration and
+    releases on exit. The 409's details hide another tenant's run (conflict_details).
 
     The multi-source POST /run-harvest-agent can't use this — its run outlives
     the request in a background task — so it calls try_begin()/end() directly."""
@@ -166,10 +197,10 @@ async def single_flight(run_id: str, source: str | None, job_id: str | None = No
     # rest get 409.
     db = await db_conflict()
     if db is not None:
-        raise JobAlreadyRunningError(db.get("job_id") or "", details=db)
+        raise JobAlreadyRunningError("", details=conflict_details(db))
     conflict = try_begin(job_id, run_id, source)
     if conflict is not None:
-        raise JobAlreadyRunningError(conflict.get("job_id") or "", details=conflict)
+        raise JobAlreadyRunningError("", details=conflict_details(conflict))
     try:
         yield
     finally:

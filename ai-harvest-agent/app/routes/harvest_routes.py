@@ -8,8 +8,10 @@ Visible endpoints (Swagger)
   GET    /harvest-results/{run_id} retrieve one saved result
   GET    /harvest-config           get the current configuration
   PUT    /harvest-config           update configuration and re-apply schedule
+                                   (admin-only fields: notifications, browser, schedule,
+                                   sources.linkedin_account)
   GET    /harvest-schedule/status  get scheduler status
-  POST   /harvest-schedule/toggle  enable / disable the scheduler
+  POST   /harvest-schedule/toggle  enable / disable the scheduler (admins only)
 """
 from __future__ import annotations
 
@@ -18,11 +20,14 @@ from datetime import datetime, timezone
 from typing import Any
 
 import structlog
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from app.agents.orchestrator_agent import OrchestratorAgent
+from app.core.dependencies import get_current_user, require_admin
 from app.core.proactor import needs_proactor, run_in_proactor
+from app.core.tenant_context import set_current_tenant
 from app.services import run_guard
+from app.models.auth import AuthenticatedUser
 from app.models.harvest_config import HarvestConfig
 from app.models.response_models import (
     HarvestFiltersSnapshot,
@@ -32,7 +37,7 @@ from app.models.response_models import (
     ResultsListResponse,
     ScheduleStatusResponse,
 )
-from app.services.config_service import ConfigService
+from app.services.config_service import ConfigService, _resolve_chrome_profile
 from app.services.harvest_storage_service import HarvestStorageService
 
 logger = structlog.get_logger(__name__)
@@ -65,6 +70,27 @@ def _get_scheduler(request: Request):
     return getattr(request.app.state, "scheduler", None)
 
 
+def _changed_admin_fields(new: HarvestConfig, stored: HarvestConfig) -> list[str]:
+    """Admin-only config fields that differ between `new` and `stored` (both already
+    validated/normalized; new.browser.chrome_profile is resolved like
+    ConfigService.load resolves the stored one, so a UI round-trip compares equal)."""
+    new_browser = new.browser.model_copy(
+        update={"chrome_profile": _resolve_chrome_profile(new.browser.chrome_profile)},
+    )
+    pairs = {
+        "notifications":            (new.notifications, stored.notifications),
+        "browser":                  (new_browser, stored.browser),
+        "schedule":                 (new.schedule, stored.schedule),
+        "sources.linkedin_account": (new.sources.linkedin_account,
+                                     stored.sources.linkedin_account),
+    }
+    return [
+        name for name, (a, b) in pairs.items()
+        if (a.model_dump() if hasattr(a, "model_dump") else a)
+        != (b.model_dump() if hasattr(b, "model_dump") else b)
+    ]
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # POST /run-harvest
 # ══════════════════════════════════════════════════════════════════════════════
@@ -74,6 +100,10 @@ async def run_harvest() -> Any:
     """
     Trigger a harvest run using the current harvest_config.json settings.
     Edit filters via PUT /harvest-config or the Rule Engine UI.
+
+    Holds the process-wide single-flight guard for the scrape (it drives the same
+    Chrome profile as every other harvest): 409 while another run is active,
+    429 once the global daily job cap is reached.
     """
     config = _config_svc.load()
 
@@ -94,16 +124,19 @@ async def run_harvest() -> Any:
     # On Windows with --reload, uvicorn forces SelectorEventLoop which cannot
     # spawn subprocesses.  run_in_proactor() moves Playwright into a thread
     # with its own ProactorEventLoop so Chromium can launch normally.
-    try:
-        orch = OrchestratorAgent(config)
-        if needs_proactor():
-            log.debug("using_proactor_thread")
-            jobs, src_label = await run_in_proactor(orch.run)
-        else:
-            jobs, src_label = await orch.run()
-    except Exception as exc:
-        log.exception("harvest_run_error", error=str(exc))
-        return _err("Harvest failed", str(exc) or "Unexpected error during scraping")
+    # single_flight raises JobAlreadyRunningError (409) / DailyJobLimitExceededError
+    # (429) before the try, so those reach the client instead of _err().
+    async with run_guard.single_flight(run_id, None):
+        try:
+            orch = OrchestratorAgent(config)
+            if needs_proactor():
+                log.debug("using_proactor_thread")
+                jobs, src_label = await run_in_proactor(orch.run)
+            else:
+                jobs, src_label = await orch.run()
+        except Exception as exc:
+            log.exception("harvest_run_error", error=str(exc))
+            return _err("Harvest failed", str(exc) or "Unexpected error during scraping")
 
     log.info("harvest_run_complete", total=len(jobs))
 
@@ -198,11 +231,29 @@ async def get_harvest_config() -> HarvestConfig:
 # ══════════════════════════════════════════════════════════════════════════════
 
 @router.put("/harvest-config", response_model=HarvestConfig, status_code=status.HTTP_200_OK)
-async def update_harvest_config(config: HarvestConfig, request: Request) -> HarvestConfig:
+async def update_harvest_config(
+    config: HarvestConfig,
+    request: Request,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> HarvestConfig:
     """
     Save updated configuration to harvest_config.json.
     If schedule.enabled changes, the scheduler is updated immediately.
+
+    Any user may save (the Rule Engine saves before every run), but only admins
+    may change notifications, browser, schedule or sources.linkedin_account: this
+    one global config holds every tenant's report recipients, the Chrome profile
+    path and the LinkedIn account. A non-admin save that changes any of them gets
+    403 naming the fields. Unsafe chrome_profile / linkedin_account /
+    schedule.tenant_id values are rejected with 422 by the HarvestConfig validators.
     """
+    if not current_user.is_admin:
+        changed = _changed_admin_fields(config, _config_svc.load())
+        if changed:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Only admins can change: {', '.join(changed)}",
+            )
     _config_svc.save(config)
 
     # Re-apply scheduler if available
@@ -237,9 +288,12 @@ async def get_schedule_status(request: Request) -> ScheduleStatusResponse:
 # POST /harvest-schedule/toggle
 # ══════════════════════════════════════════════════════════════════════════════
 
-@router.post("/harvest-schedule/toggle", status_code=status.HTTP_200_OK)
+@router.post(
+    "/harvest-schedule/toggle", status_code=status.HTTP_200_OK,
+    dependencies=[Depends(require_admin)],
+)
 async def toggle_schedule(request: Request) -> Any:
-    """Enable or disable the automatic harvest schedule (toggles current state)."""
+    """Enable or disable the automatic harvest schedule (toggles current state). Admins only."""
     config          = _config_svc.load()
     config.schedule.enabled = not config.schedule.enabled
     _config_svc.save(config)
@@ -280,13 +334,17 @@ async def _apply_schedule(scheduler, config: HarvestConfig) -> None:
     async def _auto_harvest() -> None:
         """Scheduled tick: run one unattended harvest with the current config.
 
-        Reloads the config each time, then skips (logging why) when no source is enabled, the global
-        daily cap is reached, or another run is active. Otherwise claims the single-flight slot,
-        creates the JobTracker entry and harvest_run row, and awaits the shared persisted pipeline
-        with wait_for_login=False. Releases the slot itself only if setup fails before that
-        hand-off.
+        Reloads the config each time and binds the tick's tenant context to
+        schedule.tenant_id (unset = internal, the pre-existing behaviour) so the run row
+        and its jobs are owned by that tenant. Then skips (logging why) when no source is
+        enabled, the global daily cap is reached, or another run is active. Otherwise claims
+        the single-flight slot, creates the JobTracker entry and harvest_run row, and awaits
+        the shared persisted pipeline with wait_for_login=False. Releases the slot itself only
+        if setup fails before that hand-off.
         """
         cfg     = _config_svc.load()
+        # A scheduler tick runs outside any request, so nothing else sets the tenant.
+        set_current_tenant(cfg.schedule.tenant_id)
         run_id  = _make_run_id(cfg.filters.keyword, cfg.filters.location)
         now_iso = datetime.now(timezone.utc).isoformat()
 
