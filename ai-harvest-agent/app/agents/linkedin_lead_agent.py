@@ -35,6 +35,7 @@ from typing import Any
 
 import structlog
 
+from app.core.contact_normalize import normalize_email
 from app.scrapers.page_eval import page_evaluate
 from app.models.lead_models import LinkedInPost
 
@@ -45,11 +46,13 @@ logger = structlog.get_logger(__name__)
 _EMAIL_RE = re.compile(
     r'\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b'
 )
+# Digit boundaries on both ends: a 10-digit run inside a longer ID/number must
+# never be read as a phone.
 _PHONE_RE = re.compile(
-    r'(?:'
+    r'(?<![\d+])(?:'
     r'(?:\+91|0091|91)?[\s\-]?[6-9]\d{9}'   # India mobile (10 digits, starts 6-9)
     r'|(?:\+[1-9]\d{6,14})'                   # International E.164
-    r')'
+    r')(?!\d)'
 )
 
 # Hiring-intent keywords used to filter posts that are actually job posts
@@ -71,6 +74,15 @@ def _extract_email_from_text(text: str) -> str:
     """Return the first email found in post text, or empty string."""
     m = _EMAIL_RE.search(text)
     return m.group(0) if m else ""
+
+
+def _clean_mailto(value: str | None) -> str:
+    """The address of a ``mailto:`` href: prefix and ``?subject=…`` query dropped,
+    URL-decoded and stripped. "" when empty."""
+    addr = str(value or "").strip()
+    if addr.lower().startswith("mailto:"):
+        addr = addr[7:]
+    return urllib.parse.unquote(addr.split("?", 1)[0]).strip()
 
 
 def _extract_phone_from_text(text: str) -> str:
@@ -214,8 +226,10 @@ class LinkedInLeadAgent:
                 headline   = raw.get("author_headline", "")
                 designation, company = _parse_company_from_headline(headline)
 
-                # Prefer mailto: email surfaced directly from DOM; fall back to text extraction
-                mailto_email = raw.get("raw_email", "").strip()
+                # Prefer mailto: email surfaced directly from DOM; fall back to text
+                # extraction. Either way only a well-formed, unmasked address is kept.
+                mailto_email = normalize_email(_clean_mailto(raw.get("raw_email"))) or ""
+                text_email = normalize_email(_extract_email_from_text(post_text)) or ""
                 post = LinkedInPost(
                     post_url           = raw.get("post_url", ""),
                     author_name        = raw.get("author_name", "").strip(),
@@ -224,7 +238,7 @@ class LinkedInLeadAgent:
                     author_company     = company or raw.get("author_company", ""),
                     post_content       = post_text,
                     post_date          = raw.get("post_date", ""),
-                    raw_email          = mailto_email or _extract_email_from_text(post_text),
+                    raw_email          = mailto_email or text_email,
                     raw_phone          = _extract_phone_from_text(post_text),
                 )
 
@@ -514,7 +528,9 @@ class LinkedInLeadAgent:
                         var mailtoLinks = Array.from(el.querySelectorAll('a[href^="mailto:"]'));
                         var rawEmail = '';
                         if (mailtoLinks.length > 0) {
-                            rawEmail = (mailtoLinks[0].href || '').replace('mailto:', '').trim();
+                            rawEmail = (mailtoLinks[0].href || '').replace(/^mailto:/i, '')
+                                .split('?')[0].trim();
+                            try { rawEmail = decodeURIComponent(rawEmail).trim(); } catch (e) {}
                         }
 
                         if (authorName || profileUrl) {

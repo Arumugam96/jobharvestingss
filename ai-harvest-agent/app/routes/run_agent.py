@@ -12,10 +12,11 @@ from pathlib import Path
 from typing import Any
 
 import structlog
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from app.core.dependencies import require_admin
 from app.core.proactor import needs_proactor, run_in_proactor
 from app.models.harvest_config import FiltersConfig
 from app.services.config_service import ConfigService
@@ -295,7 +296,11 @@ async def get_result(run_id: str) -> dict:
 # POST /linkedin-save-session  — manual login + session persistence
 # ══════════════════════════════════════════════════════════════════════════════
 
-@router.post("/linkedin-save-session", status_code=status.HTTP_200_OK)
+@router.post(
+    "/linkedin-save-session",
+    status_code=status.HTTP_200_OK,
+    dependencies=[Depends(require_admin)],
+)
 async def save_linkedin_session() -> Any:
     """
     Opens a visible Chromium browser window on your desktop.
@@ -303,23 +308,43 @@ async def save_linkedin_session() -> Any:
     The session cookies are saved to data/config/linkedin_session.json
     and reused by all future /run-linkedin-agent calls — no re-login needed.
 
-    Times out after 5 minutes if login is not completed.
+    Admins only (403 otherwise). Times out after 10 minutes if login is not completed.
     """
     from playwright.async_api import async_playwright
 
     async def _do_manual_login() -> str:
-        """Log in to LinkedIn in a visible browser and save its storage state to the session file.
+        """Start Playwright + a visible Chromium, run the login flow, always close both.
+
+        The browser and driver are closed in `finally`, so an exception mid-login (or the
+        timeout) never leaks them. Returns the saved session file's path; errors propagate.
+        """
+        pw      = await async_playwright().start()
+        browser = None
+        try:
+            browser = await pw.chromium.launch(headless=False, args=_LAUNCH_ARGS)
+            return await _login_and_save(browser)
+        finally:
+            if browser is not None:
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+            try:
+                await pw.stop()
+            except Exception:
+                pass
+
+    async def _login_and_save(browser: Any) -> str:
+        """Log in to LinkedIn in `browser` and save its storage state to the session file.
 
         Auto-fills LINKEDIN_EMAIL / LINKEDIN_PASSWORD from settings and clicks Sign in, then polls
         every 2 s for up to 10 minutes until the URL leaves the login/checkpoint pages (OTP or MFA
         are completed by a human). Returns the saved file's path. On timeout raises RuntimeError,
-        prefixed "mfa_timeout:" when stuck on an MFA page.
+        prefixed "mfa_timeout:" when stuck on an MFA page. Closing the browser is the caller's job.
         """
         from app.config import get_settings
         cfg = get_settings()
 
-        pw      = await async_playwright().start()
-        browser = await pw.chromium.launch(headless=False, args=_LAUNCH_ARGS)
         context = await browser.new_context(
             viewport         = {"width": 1366, "height": 900},
             user_agent       = _USER_AGENT,
@@ -433,8 +458,6 @@ async def save_linkedin_session() -> Any:
             # Determine what state we timed out at so we can return a structured error
             final_url    = page.url
             timed_out_at = "mfa" if any(p in final_url for p in _MFA_PATHS) else "login"
-            await browser.close()
-            await pw.stop()
             if timed_out_at == "mfa":
                 raise RuntimeError("mfa_timeout: LinkedIn MFA was not completed within 10 minutes")
             raise RuntimeError("Login timed out after 10 minutes — please try again")
@@ -444,8 +467,6 @@ async def save_linkedin_session() -> Any:
         await context.storage_state(path=str(LINKEDIN_SESSION_FILE))
         logger.info("linkedin_session_saved", path=str(LINKEDIN_SESSION_FILE))
 
-        await browser.close()
-        await pw.stop()
         return str(LINKEDIN_SESSION_FILE.resolve())
 
     try:

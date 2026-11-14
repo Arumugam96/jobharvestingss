@@ -896,26 +896,32 @@ class LinkedInScraper:
     async def __aenter__(self) -> "LinkedInScraper":
         """Launch Chromium, open a stealth-patched context and create the description page pool.
 
-        Creates a temp screenshot directory first when `screenshot_on_error` is set.
+        Creates a temp screenshot directory first when `screenshot_on_error` is set. If any
+        step after the driver starts fails, whatever was opened is closed before re-raising.
         """
         if self._ss_errors:
             self._ss_dir = Path(tempfile.mkdtemp(prefix="linkedin_scraper_"))
 
         self._pw = await async_playwright().start()
 
-        self._browser = await self._pw.chromium.launch(
-            headless = self._config.headless,
-            slow_mo  = self._config.slow_mo_ms,
-            args     = _Stealth.launch_args(),
-            ignore_default_args = IGNORE_DEFAULT_ARGS,
-        )
+        try:
+            self._browser = await self._pw.chromium.launch(
+                headless = self._config.headless,
+                slow_mo  = self._config.slow_mo_ms,
+                args     = _Stealth.launch_args(),
+                ignore_default_args = IGNORE_DEFAULT_ARGS,
+            )
 
-        self._context = await self._browser.new_context(
-            **_Stealth.context_kwargs(self._config.headless)
-        )
+            self._context = await self._browser.new_context(
+                **_Stealth.context_kwargs(self._config.headless)
+            )
 
-        # Apply stealth patches to every page that opens in this context
-        await _Stealth.apply(self._context)
+            # Apply stealth patches to every page that opens in this context
+            await _Stealth.apply(self._context)
+        except Exception:
+            # __aexit__ never runs when __aenter__ raises — don't leak Chromium/driver.
+            await self.__aexit__(None, None, None)
+            raise
 
         # Create the description page pool
         pool_size    = self._config.description_concurrency
@@ -930,15 +936,23 @@ class LinkedInScraper:
         return self
 
     async def __aexit__(self, *_) -> None:
-        """Close the page pool, context, browser and Playwright driver."""
-        if self._pool:
-            await self._pool.close_all()
-        if self._context:
-            await self._context.close()
-        if self._browser:
-            await self._browser.close()
-        if self._pw:
-            await self._pw.stop()
+        """Close the page pool, context, browser and Playwright driver.
+
+        Each step is independent: a failure in one is logged and the rest still run.
+        """
+        steps = (
+            ("pool", self._pool.close_all if self._pool else None),
+            ("context", self._context.close if self._context else None),
+            ("browser", self._browser.close if self._browser else None),
+            ("playwright", self._pw.stop if self._pw else None),
+        )
+        for name, close in steps:
+            if close is None:
+                continue
+            try:
+                await close()
+            except Exception as exc:
+                logger.debug("scraper_close_failed", step=name, error=str(exc))
         logger.info("scraper_stopped")
 
     # ── Phase 1: Search ───────────────────────────────────────────────────────
@@ -1063,10 +1077,10 @@ class LinkedInScraper:
         sem = asyncio.Semaphore(concurrency)
 
         async def _fetch_one(card: LinkedInJobCard) -> tuple[LinkedInJobCard, str | None]:
-            """Fetch one card's detail page under the concurrency semaphore; None without a URL.
+            """Fetch one card's description under the concurrency semaphore.
 
-            Note: fetch_description returns a (description, contact) tuple, and that tuple is what
-            gets paired with the card here, despite the `str | None` annotation.
+            Returns (card, description text | None) — fetch_description returns str | None;
+            None also when the card has no URL.
             """
             async with sem:
                 desc = await self.fetch_description(card.job_url) if card.job_url else None

@@ -14,6 +14,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Literal
+from urllib.parse import quote
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
@@ -110,8 +111,10 @@ class LinkedInSearchConfig(BaseModel):
         """Build the LinkedIn jobs-search URL from this config's keyword and filters.
 
         Empty filter mappings are omitted; results are always sorted by date (sortBy=DD).
+        Keywords and location are fully percent-encoded, so '#', '&' and '+' (C#, R&D,
+        C++) stay part of the value instead of breaking the query.
         """
-        params: list[str] = [f"keywords={self.keywords.replace(' ', '%20')}"]
+        params: list[str] = [f"keywords={quote(self.keywords, safe='')}"]
 
         if tpr := DATE_FILTER_MAP[self.date_posted]:
             params.append(f"f_TPR={tpr}")
@@ -123,7 +126,7 @@ class LinkedInSearchConfig(BaseModel):
             params.append(f"f_JT={jt}")
 
         if self.location:
-            params.append(f"location={self.location.replace(' ', '%20')}")
+            params.append(f"location={quote(self.location, safe='')}")
 
         params += ["position=1", "pageNum=0", "sortBy=DD"]
         return "https://www.linkedin.com/jobs/search/?" + "&".join(params)

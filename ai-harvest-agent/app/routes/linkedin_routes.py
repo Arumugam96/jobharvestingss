@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import structlog
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -26,6 +26,7 @@ from app.agents.linkedin_agent import (
     LinkedInLoginError,
     LinkedInScrapedJob,
 )
+from app.core.dependencies import require_admin
 from app.core.proactor import needs_proactor, run_in_proactor
 from app.models.harvest_run import HarvestRunORM, ScrapedJobORM
 from app.services import run_guard
@@ -312,10 +313,17 @@ async def run_linkedin_agent() -> Any:
 # POST /linkedin-setup-session
 # ══════════════════════════════════════════════════════════════════════════════
 
-@router.post("/linkedin-setup-session", status_code=status.HTTP_200_OK)
+@router.post(
+    "/linkedin-setup-session",
+    status_code=status.HTTP_200_OK,
+    dependencies=[Depends(require_admin)],
+)
 async def setup_linkedin_session(body: SetupSessionRequest | None = None) -> Any:
     """
     Opens Chrome with the dedicated harvest agent profile directory.
+
+    **Admins only** (403 otherwise): it drives the shared internal browser and
+    replaces the account's LinkedIn session for every tenant.
 
     **Account**: `account` in the request body ("1" or "2") selects which
     LinkedIn identity to log in as. Each account uses its own isolated Chrome
@@ -517,9 +525,11 @@ async def linkedin_auth_status() -> Any:
     """
     Check current LinkedIn session state.
 
-    Uses the saved session file (data/sessions/linkedin_session.json) with a
-    non-persistent browser — avoids locking the Chrome profile directory so
-    POST /linkedin-setup-session can always launch cleanly.
+    Uses the saved session file of the configured LinkedIn account
+    (harvest_config sources.linkedin_account) with a non-persistent browser —
+    avoids locking the Chrome profile directory so POST /linkedin-setup-session
+    can always launch cleanly. "logged_in" requires both a non-gated URL and the
+    li_at session cookie (the same check setup-session uses).
 
     Returns one of:
       `{"status": "logged_in"}`        — session is valid, harvesting can start
@@ -531,7 +541,8 @@ async def linkedin_auth_status() -> Any:
     from app.scrapers.browser_manager import BrowserManager
     from app.services.session_manager import SessionManager
 
-    sm = SessionManager("linkedin")
+    account = str(_config_svc.load().sources.linkedin_account or "1")
+    sm = SessionManager("linkedin", account)
 
     if not sm.session_exists():
         logger.info("linkedin_auth_status_no_session")
@@ -544,6 +555,7 @@ async def linkedin_auth_status() -> Any:
         # Use non-persistent BrowserManager with session file — never locks Chrome profile
         """Open /feed/ headless with the saved session file and classify where LinkedIn lands.
 
+        A non-gated URL without the li_at cookie counts as "login_required".
         Returns `{"status", "url", "message"}`, or `{"status": "error"}` if navigation fails.
         """
         async with BrowserManager(
@@ -560,7 +572,14 @@ async def linkedin_auth_status() -> Any:
                 await page.wait_for_timeout(2_000)
                 url   = page.url
                 state = _detect_auth_state(url)
-                logger.info("linkedin_auth_status_checked", state=state, url=url[:80])
+                if state == "logged_in":
+                    # URL alone can be a false positive (cached shell, guest page) —
+                    # require the li_at auth cookie, as /linkedin-setup-session does.
+                    cookies = await page.context.cookies()
+                    if not any(c["name"] == "li_at" for c in cookies):
+                        state = "login_required"
+                logger.info("linkedin_auth_status_checked", state=state, url=url[:80],
+                            account=account)
                 result: dict = {"status": state, "url": url}
                 if state == "logged_in":
                     result["message"] = "Session valid — harvest agent can start immediately."

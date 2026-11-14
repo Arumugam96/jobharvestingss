@@ -32,7 +32,7 @@ import asyncio
 import random
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -231,7 +231,7 @@ class _S:
 # ── LinkedIn filter URL param maps ────────────────────────────────────────────
 _WORK_MODE_MAP: dict[str, str] = {"Remote": "2", "Hybrid": "3", "Onsite": "1", "Any": ""}
 _JOB_TYPE_MAP:  dict[str, str] = {"Contract": "C", "Permanent": "F", "Part-time": "P", "Any": ""}
-_DATE_MAP:      dict[int, str] = {24: "r86400", 168: "r604800", 720: "r2592000"}
+# Posted-within window: f_TPR=r<hours*3600> for any positive window (_build_filtered_url).
 
 _STEALTH: list[str] = [
     "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});",
@@ -293,17 +293,48 @@ def _infer_work_mode(location: str) -> str:
     return "not_specified"
 
 
+# "3 days ago", "30+ days ago", "2 weeks ago", "1 month ago", "5 hours ago", …
+_POSTED_RELATIVE_RE = re.compile(
+    r"(\d+)\+?\s*(seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?|months?|years?)\b",
+    re.IGNORECASE,
+)
+_POSTED_UNIT_DAYS = {"s": 0, "m": 0, "h": 0, "d": 1, "w": 7, "mo": 30, "y": 365}
+
+
 def _format_posted(raw: str) -> str:
-    """Normalise posted date to YYYY-MM-DD. Handles ISO datetime and relative text."""
+    """Normalise a posted label to YYYY-MM-DD, or "" when it can't be resolved.
+
+    Handles ISO dates/datetimes and relative text: "just now"/"today", "yesterday",
+    "N seconds/minutes/hours ago" (today), "N days ago", "N+ days ago" (lower bound),
+    weeks, months (30 days) and years (365 days). Anything else returns "" rather
+    than pretending the job was posted today.
+    """
+    raw = (raw or "").strip()
     if not raw:
-        return datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    raw = raw.strip()
-    if "T" in raw and len(raw) >= 10:
-        return raw[:10]
+        return ""
     if re.match(r"\d{4}-\d{2}-\d{2}", raw):
         return raw[:10]
-    # Relative text like "2 days ago", "1 week ago" — use today
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = datetime.now(timezone.utc)
+    low = raw.lower()
+    if any(k in low for k in ("just now", "moments ago", "today")):
+        return today.strftime("%Y-%m-%d")
+    if "yesterday" in low:
+        return (today - timedelta(days=1)).strftime("%Y-%m-%d")
+    m = _POSTED_RELATIVE_RE.search(low)
+    if not m:
+        return ""
+    unit = m.group(2)
+    key = "mo" if unit.startswith("mo") else ("m" if unit.startswith("mi") else unit[0])
+    return (today - timedelta(days=int(m.group(1)) * _POSTED_UNIT_DAYS[key])).strftime("%Y-%m-%d")
+
+
+def _mask_email(email: str) -> str:
+    """Log-safe form of an account email: first character of the local part, then
+    "***@" and the domain ("j***@acme.com"); "***" when it has no "@"."""
+    local, sep, domain = (email or "").partition("@")
+    if not sep:
+        return "***" if email else ""
+    return f"{local[:1]}***@{domain}"
 
 
 async def _delay(page: Page, lo: int, hi: int) -> None:
@@ -762,7 +793,10 @@ class LinkedInFormScraper:
         work_mode:           str,
         search_window_hours: int,
     ) -> str:
-        """Build a LinkedIn Jobs search URL with all active filter params."""
+        """Build a LinkedIn Jobs search URL with all active filter params.
+
+        Any positive search_window_hours becomes f_TPR=r<seconds> (24/48/72/168/720 h).
+        """
         from urllib.parse import urlencode
         params: dict[str, str] = {
             "keywords": keywords,
@@ -779,7 +813,7 @@ class LinkedInFormScraper:
             params["geoId"] = geo_id
         wt  = _WORK_MODE_MAP.get(work_mode, "")
         jt  = _JOB_TYPE_MAP.get(job_type, "")
-        tpr = _DATE_MAP.get(search_window_hours, "")
+        tpr = f"r{int(search_window_hours) * 3600}" if (search_window_hours or 0) > 0 else ""
         if wt:  params["f_WT"]  = wt
         if jt:  params["f_JT"]  = jt
         if tpr: params["f_TPR"] = tpr
@@ -788,8 +822,9 @@ class LinkedInFormScraper:
     # ── Login ──────────────────────────────────────────────────────────────────
 
     async def _login(self, page: Page) -> None:
-        """Authenticate with LinkedIn credentials from settings."""
-        logger.info("linkedin_login_started", email=self._email)
+        """Authenticate with LinkedIn credentials from settings (the account email is logged
+        masked only)."""
+        logger.info("linkedin_login_started", email=_mask_email(self._email))
 
         await page.goto(
             "https://www.linkedin.com/login",

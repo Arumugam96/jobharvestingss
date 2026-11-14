@@ -76,7 +76,7 @@ def get_pipeline_search_only(
     """
     Phase-1-only pipeline (no Gemini).
     GeminiService is intentionally omitted (defaults to None inside the service).
-    No GEMINI_API_KEY required for this dependency.
+    No ANTHROPIC_API_KEY required for this dependency.
     """
     return LinkedInPipelineService(settings=settings, gemini=None)
 
@@ -98,7 +98,7 @@ No detail pages are visited and Gemini is **not** called, so this is fast
 (~10 s) and free.  Use it to validate your search config before running the
 full harvest.
 
-`GEMINI_API_KEY` is **not** required for this endpoint.
+`ANTHROPIC_API_KEY` is **not** required for this endpoint.
 """,
 )
 async def linkedin_search(
@@ -152,11 +152,11 @@ wall-clock time ≈ slowest individual job × a few, not the sum of all jobs.
 are backfilled automatically.  `effective_*` properties on each job reflect
 the merged result.
 
-`GEMINI_API_KEY` is required.  Use `POST /search` to preview without it.
+`ANTHROPIC_API_KEY` is required.  Use `POST /search` to preview without it.
 """,
     responses={
         200: {"description": "Pipeline complete — check `errors` field for partial failures"},
-        503: {"description": "GEMINI_API_KEY not configured"},
+        503: {"description": "ANTHROPIC_API_KEY not configured"},
     },
 )
 async def linkedin_harvest(
