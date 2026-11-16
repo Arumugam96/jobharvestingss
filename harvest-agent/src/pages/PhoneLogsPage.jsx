@@ -85,7 +85,9 @@ export default function PhoneLogsPage() {
 
   const items = data?.items || [];
   const total = data?.total || 0;
-  const summary = data?.summary || { total: 0, answered: 0, unanswered: 0, assigned_jobs: 0 };
+  const summary = data?.summary || {
+    total: 0, answered: 0, unanswered: 0, assigned_jobs: 0, called_assigned_jobs: 0, total_phones: 0,
+  };
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
   return (
@@ -106,10 +108,13 @@ export default function PhoneLogsPage() {
         {error && <div className="ha-errbanner">{error}</div>}
 
         <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
+          <StatCard value={summary.total_phones ?? 0} label="Total phones" color="#0891B2"
+            sub="Unique across jobs + recruiters" />
           <StatCard value={summary.total} label="Total calls" color={C.primary} />
           <StatCard value={summary.answered} label="Answered" color="#047857" />
           <StatCard value={summary.unanswered} label="Unanswered" color="#DC2626" />
-          <StatCard value={summary.assigned_jobs} label="Self-assigned jobs" color="#7C3AED" />
+          <StatCard value={summary.assigned_jobs} label="Self-assigned jobs" color="#7C3AED"
+            sub={`${summary.called_assigned_jobs ?? 0} called`} />
         </div>
 
         <div className="ha-card ha-filterbar" style={{ padding: "11px 14px", gridTemplateColumns: "repeat(4, minmax(0, 1fr))" }}>

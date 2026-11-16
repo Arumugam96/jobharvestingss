@@ -44,7 +44,7 @@ Output: a 19-column Excel report per recruiter with verified contact details, se
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                        FastAPI Server                        │
-│                     http://localhost:8001                    │
+│                     http://localhost:8000                    │
 ├──────────────────────────┬──────────────────────────────────┤
 │     Harvest Pipeline     │     Lead Intelligence Pipeline    │
 │                          │                                   │
@@ -209,7 +209,7 @@ Copy `.env.example` to `.env` and configure:
 | `APOLLO_RECHECK_DAYS` | No | Per-profile cooldown (default `30`) before re-querying Apollo for the same recruiter, to conserve credits. |
 | `APP_SECRET_KEY` | Yes | 32+ char random string for internal signing |
 | `FASTAPI_HOST` | No | Server bind host (default: `0.0.0.0`) |
-| `FASTAPI_PORT` | No | Server port (default: `8001`) |
+| `FASTAPI_PORT` | No | Server port (default: `8000`) |
 | `CORS_ORIGINS` | No | Allowed CORS origins (comma-separated) |
 | `PLAYWRIGHT_HEADLESS` | No | Run browser headless (default: `true`) |
 | `PLAYWRIGHT_POOL_SIZE` | No | Browser pool size (default: `3`) |
@@ -226,14 +226,14 @@ Copy `.env.example` to `.env` and configure:
 python run.py
 
 # Or directly with uvicorn
-.venv\Scripts\uvicorn.exe app.main:app --host 0.0.0.0 --port 8001
+.venv\Scripts\uvicorn.exe app.main:app --host 0.0.0.0 --port 8000
 
 # PowerShell convenience scripts
 .\run_harvest.ps1      # Fire a harvest run
 .\run_prospect.ps1     # Fire a prospect intelligence run
 ```
 
-The server starts at `http://localhost:8001`.
+The server starts at `http://localhost:8000`.
 
 ---
 
@@ -242,13 +242,13 @@ The server starts at `http://localhost:8001`.
 Interactive Swagger UI with Try It Out enabled:
 
 ```
-http://localhost:8001/docs
+http://localhost:8000/docs
 ```
 
 OpenAPI JSON spec (for client code generation):
 
 ```
-http://localhost:8001/openapi.json
+http://localhost:8000/openapi.json
 ```
 
 ---

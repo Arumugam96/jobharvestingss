@@ -553,6 +553,42 @@ async def history(db: AsyncSession, job_id: str) -> list[dict[str, Any]]:
 LOG_ASSIGNMENTS = ("assigned", "unassigned")
 
 
+def _phone_dedup_key(raw: str | None) -> str:
+    """Trailing 10 digits of a number (all its digits when shorter), so "+91 98400 12345"
+    and "9840012345" count once. Same rule as phone_insights_service._norm_phone."""
+    digits = re.sub(r"\D", "", raw or "")
+    return digits[-10:] if len(digits) >= 10 else digits
+
+
+async def count_distinct_phones(db: AsyncSession) -> int:
+    """Unique phone numbers the tenant holds across scraped_jobs (poster number +
+    company HR contact number) and recruiters. A number present in both tables, or
+    formatted differently, counts once."""
+    keys: set[str] = set()
+    for col, model in ((ScrapedJobORM.contact_number, ScrapedJobORM),
+                       (ScrapedJobORM.company_contact_phone, ScrapedJobORM),
+                       (RecruiterORM.contact_number, RecruiterORM)):
+        stmt = apply_tenant(
+            select(col).where(col.is_not(None), col != "").distinct(), model.tenant_id,
+        )
+        for (raw,) in (await db.execute(stmt)).all():
+            key = _phone_dedup_key(raw)
+            if key:
+                keys.add(key)
+    return len(keys)
+
+
+async def count_assigned_jobs(db: AsyncSession) -> int:
+    """Jobs currently self-assigned in the tenant, whether or not anyone has called them."""
+    stmt = apply_tenant(
+        select(func.count(ScrapedJobORM.id)).where(
+            ScrapedJobORM.assigned_to_email.is_not(None), ScrapedJobORM.assigned_to_email != "",
+        ),
+        ScrapedJobORM.tenant_id,
+    )
+    return int((await db.execute(stmt)).scalar_one() or 0)
+
+
 async def list_logs(
     db: AsyncSession,
     *,
@@ -565,8 +601,11 @@ async def list_logs(
 ) -> dict[str, Any]:
     """Every non-cleared call in the tenant, newest first, with its job's title,
     company and assignee (the admin Phone logs page). Jobs since deleted still
-    list (outer join) and count as unassigned. `summary` applies every filter
-    except `status`, so the answered / unanswered split stays visible."""
+    list (outer join) and count as unassigned. `summary`'s call counts apply every
+    filter except `status`, so the answered / unanswered split stays visible.
+    `summary.assigned_jobs` (every job currently self-assigned, called or not),
+    `called_assigned_jobs` (those with a call matching the filters) and
+    `total_phones` (unique numbers across jobs + recruiters) describe the workspace."""
     is_assigned = and_(ScrapedJobORM.assigned_to_email.is_not(None),
                        ScrapedJobORM.assigned_to_email != "")
     conds: list = [PhoneCallLogORM.cleared_at.is_(None)]
@@ -599,9 +638,11 @@ async def list_logs(
     by_status = dict((await db.execute(scoped(
         select(PhoneCallLogORM.call_status, func.count(PhoneCallLogORM.id))
     ).group_by(PhoneCallLogORM.call_status))).all())
-    assigned_jobs = (await db.execute(scoped(
+    called_assigned_jobs = (await db.execute(scoped(
         select(func.count(func.distinct(PhoneCallLogORM.job_id))), is_assigned,
     ))).scalar_one()
+    assigned_jobs = await count_assigned_jobs(db)
+    total_phones = await count_distinct_phones(db)
     answered, unanswered = int(by_status.get("answered", 0)), int(by_status.get("unanswered", 0))
 
     status_cond = [PhoneCallLogORM.call_status == status] if status in CALL_STATUSES else []
@@ -637,7 +678,9 @@ async def list_logs(
         "page": page,
         "page_size": page_size,
         "summary": {"total": answered + unanswered, "answered": answered,
-                    "unanswered": unanswered, "assigned_jobs": int(assigned_jobs or 0)},
+                    "unanswered": unanswered, "assigned_jobs": assigned_jobs,
+                    "called_assigned_jobs": int(called_assigned_jobs or 0),
+                    "total_phones": total_phones},
     }
 
 

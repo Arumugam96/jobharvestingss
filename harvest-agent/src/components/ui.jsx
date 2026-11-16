@@ -72,13 +72,14 @@ const hexToTint = (hex, a) => {
 };
 
 /** Glass stat tile (big value + label), tinted from the `color` hex. */
-export const StatCard = ({ value, label, color }) => (
+export const StatCard = ({ value, label, color, sub }) => (
   <div
     className="ha-card ha-statcard"
     style={{ flex: 1, minWidth: 150, padding: "9px 16px", "--tint": hexToTint(color, 0.13), "--tint2": hexToTint(color, 0.04) }}
   >
     <div className="ha-statnum" style={{ color }}>{value}</div>
     <div className="ha-statlbl">{label}</div>
+    {sub && <div className="ha-statlbl" style={{ fontSize: 11.5, opacity: 0.8 }}>{sub}</div>}
   </div>
 );
 

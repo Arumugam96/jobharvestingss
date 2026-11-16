@@ -106,11 +106,6 @@ async def _reclaim_stale_chrome_lock(profile_dir: Path) -> None:
     alone); where /proc isn't available nothing is killed, only logged.
     """
     lock_path = profile_dir / "SingletonLock"
-    # Path.exists() follows the symlink and checks whether its TARGET exists
-    # on disk — but SingletonLock's target is just an encoded "hostname-pid"
-    # string, never a real path, so exists() is always False here and this
-    # function silently no-ops on every call. os.path.lexists() checks for
-    # the symlink itself instead.
     if not os.path.lexists(lock_path):
         return
 
@@ -165,13 +160,11 @@ async def _reclaim_stale_chrome_lock(profile_dir: Path) -> None:
 # reasonably current — a stale major (the old value was Chrome/124) is itself a
 # weak bot signal, and a UA that lags the real engine mismatches the Sec-CH-UA
 # client hints Chromium reports.
-_USER_AGENT_FALLBACK = (
+_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/140.0.0.0 Safari/537.36"
 )
-# Back-compat alias — kept for any external importer of the old name.
-_USER_AGENT = _USER_AGENT_FALLBACK
 
 _UA_TEMPLATE = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -184,13 +177,13 @@ def _build_user_agent(version: str | None) -> str:
     """Build a Windows-Chrome UA whose MAJOR version matches the live Chromium
     engine (Playwright's ``browser.version``, e.g. "140.0.7259.5"), so the UA
     agrees with the Sec-CH-UA client hints Chromium reports and never leaks a
-    "HeadlessChrome" marker. Falls back to _USER_AGENT_FALLBACK when the version
+    "HeadlessChrome" marker. Falls back to _USER_AGENT when the version
     isn't a parseable number."""
     if version:
         major = version.split(".", 1)[0].strip()
         if major.isdigit():
             return _UA_TEMPLATE.format(major=major)
-    return _USER_AGENT_FALLBACK
+    return _USER_AGENT
 
 
 # Base viewport; jittered per context (see _jittered_viewport) so runs aren't a
@@ -498,11 +491,6 @@ class PersistentBrowserManager:
         self._profile_dir: Path              = Path(profile_dir)
         self._headless:    bool              = headless
         self._slow_mo:     int               = slow_mo
-        # Context locale / timezone. Defaults keep the LinkedIn profile's
-        # long-standing fingerprint; the Naukri recruiter browser passes
-        # en-IN / Asia/Kolkata like a real Indian visitor. A non-default locale
-        # also drives navigator.languages + Accept-Language (stealth_scripts /
-        # accept_language_header); en-US keeps the historic hard-coded list.
         self._locale:      str               = locale
         self._timezone_id: str               = timezone_id
         # "chromium" (default) → Playwright's full bundled Chromium, in its new
@@ -591,22 +579,12 @@ class PersistentBrowserManager:
                 headless            = self._headless,
                 slow_mo             = self._slow_mo,
                 ignore_default_args = IGNORE_DEFAULT_ARGS,
+                # Shared flags + the two that only matter for a persistent
+                # profile (suppress first-run / default-browser prompts).
                 args                = [
-                    "--disable-blink-features=AutomationControlled",
+                    *_LAUNCH_ARGS,
                     "--no-first-run",
                     "--no-default-browser-check",
-                    "--disable-infobars",
-                    "--test-type",   # hides the bad-flags bar — see _LAUNCH_ARGS
-                    "--disable-background-timer-throttling",
-                    "--disable-backgrounding-occluded-windows",
-                    "--disable-renderer-backgrounding",
-                    "--no-sandbox",
-                    "--disable-setuid-sandbox",
-                    "--disable-dev-shm-usage",
-                    # See _LAUNCH_ARGS above — avoids headed Chromium crashing/
-                    # rendering black under Xvfb's lack of a real GPU. Do NOT
-                    # add --disable-software-rasterizer alongside this.
-                    "--disable-gpu",
                 ],
                 ignore_https_errors = True,
                 viewport            = _jittered_viewport(),
