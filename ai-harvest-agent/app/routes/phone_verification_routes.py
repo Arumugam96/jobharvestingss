@@ -222,6 +222,8 @@ async def latest_phone_verifications(
 async def phone_call_logs(
     status_filter: str = Query(default="", alias="status", pattern="^(|answered|unanswered)$"),
     assignment: str = Query(default="", pattern="^(|assigned|unassigned)$"),
+    reminder: str = Query(
+        default="", pattern="^(|none|scheduled|delivered|dismissed|called_again|cancelled)$"),
     days: int = Query(default=0, ge=0, le=3650, description="Only calls from the last N days; 0 = all."),
     q: str = Query(default="", max_length=200),
     page: int = Query(default=1, ge=1),
@@ -231,12 +233,13 @@ async def phone_call_logs(
 ) -> dict:
     """Admin Phone logs page: every non-cleared call in the tenant, newest first, paginated.
 
-    Filters: `status` (answered/unanswered), `assignment` (assigned/unassigned), `days` (0 = all
-    time) and free-text `q`. Requires the admin role.
+    Filters: `status` (answered/unanswered), `assignment` (assigned/unassigned), `reminder`
+    (a REMINDER_STATES value), `days` (0 = all time) and free-text `q`. Requires the admin role.
     """
     since = datetime.now(timezone.utc) - timedelta(days=days) if days else None
-    return await pvs.list_logs(db, status=status_filter, assignment=assignment, q=q,
-                               since=since, page=page, page_size=page_size)
+    return await pvs.list_logs(db, status=status_filter, assignment=assignment,
+                               reminder=reminder, q=q, since=since, page=page,
+                               page_size=page_size)
 
 
 @router.get("/phone-verifications/logs/phones",

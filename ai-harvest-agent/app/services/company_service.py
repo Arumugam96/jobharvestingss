@@ -12,13 +12,13 @@ caches the result here, once per unique company. HarvestRunService.bulk_insert_s
 then fills EVERY job of that company from this cache, recruiter or not.
 
 This module owns only the cache mechanics — the normalized dedup key, batch read,
-upsert (non-empty-wins merge), and the recheck-cooldown predicate. The actual
+upsert (non-empty-wins merge), and the enrich-once predicate. The actual
 Apollo/LinkedIn fetching lives in the agent.
 """
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -68,7 +68,7 @@ async def record_apollo_org(
     company_industry: str = "",
 ) -> None:
     """Cache one Apollo organization resolve attempt — ``org_id`` "" records a miss.
-    Always stamps apollo_org_resolved_at (the miss cooldown); the org's details ride
+    Always stamps apollo_org_resolved_at (a miss is never retried); the org's details ride
     along for free and fill the same non-empty-wins fields as the company pass. Does
     NOT touch apollo_enriched_at — that is the company pass's own cooldown clock."""
     row = await _get_or_create_company(db, company_key, company_name)
@@ -83,17 +83,13 @@ async def record_apollo_org(
     await db.flush()
 
 
-def apollo_org_resolve_due(row: CompanyORM | None, recheck_days: int) -> bool:
-    """A paid Apollo org lookup is due unless the org id is already cached, or the
-    last attempt (a miss) was within the recheck cooldown."""
-    if row is not None and row.apollo_org_id:
-        return False
-    last = row.apollo_org_resolved_at if row is not None else None
-    if last is None:
+def apollo_org_resolve_due(row: CompanyORM | None) -> bool:
+    """A paid Apollo org lookup is due only for a company never resolved before — a
+    cached org id is reused and a cached miss is never retried (no re-sweeps of old
+    data; only new companies are looked up)."""
+    if row is None:
         return True
-    if last.tzinfo is None:
-        last = last.replace(tzinfo=timezone.utc)
-    return (datetime.now(timezone.utc) - last) >= timedelta(days=recheck_days)
+    return not row.apollo_org_id and row.apollo_org_resolved_at is None
 
 
 async def upsert_company_enrichment(
@@ -127,21 +123,16 @@ async def upsert_company_enrichment(
     if apollo_attempted:
         row.apollo_attempted = True
     # Stamp every enrichment attempt (any stage, not just Apollo) so
-    # company_needs_enrichment's cooldown gates re-runs even when nothing was found.
+    # company_needs_enrichment never re-runs it, even when nothing was found.
     row.apollo_enriched_at = now
     await db.flush()
 
 
-def company_needs_enrichment(row: CompanyORM | None, recheck_days: int) -> bool:
-    """A company needs (re)enrichment unless it already holds BOTH a size and an HQ
-    country. A row with only one of them is retried once its cooldown elapses (the
-    cooldown clock is apollo_enriched_at, set whenever Apollo was attempted); a row
-    never attempted (or with no stamp) is always eligible."""
+def company_needs_enrichment(row: CompanyORM | None) -> bool:
+    """A company needs enrichment only if it has never been through the company pass
+    (no apollo_enriched_at stamp) and doesn't already hold BOTH a size and an HQ
+    country. A company already attempted is never re-enriched, even when the attempt
+    filled only one field or nothing — no re-sweeps of old data."""
     if row is not None and row.company_size and row.company_country:
         return False  # already have both — nothing more to fetch
-    if row is None or row.apollo_enriched_at is None:
-        return True
-    last = row.apollo_enriched_at
-    if last.tzinfo is None:
-        last = last.replace(tzinfo=timezone.utc)
-    return (datetime.now(timezone.utc) - last) >= timedelta(days=recheck_days)
+    return row is None or row.apollo_enriched_at is None

@@ -333,15 +333,15 @@ class CompanyORM(Base):
     company_state: Mapped[str] = mapped_column(String(120), nullable=False, default="")
     company_industry: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     # True once Apollo was actually queried for this company (hit or miss) — with
-    # apollo_enriched_at, powers the recheck cooldown so misses aren't retried
-    # every run either.
+    # apollo_enriched_at, powers the once-only rule so a miss is never retried
+    # on a later run.
     apollo_attempted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     apollo_enriched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Apollo organization id (company_enrichment_service.resolve_apollo_org) — resolving
     # it costs a credit (organizations/enrich, mixed_companies/search), so it's cached
     # here once and reused by every location / run / feature that searches this
     # company's people. apollo_org_resolved_at stamps every resolve attempt (hit or
-    # miss) so a company Apollo doesn't know isn't re-billed within apollo_recheck_days.
+    # miss) so a company Apollo doesn't know is never re-billed.
     apollo_org_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     apollo_org_resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -363,8 +363,8 @@ class CompanyLocationContactORM(Base):
     (bulk_insert_scraped_jobs), analogous to how CompanyORM feeds size/HQ location.
 
     Caches both hits and negatives: hr_contact_attempted_at stamps every real search
-    so the apollo_recheck_days cooldown prevents re-billing a (company, location) that
-    recently returned nothing. A cap-deferred search (daily budget exhausted) writes
+    so the search-once rule prevents re-billing a (company, location) that
+    returned nothing. A cap-deferred search (daily budget exhausted) writes
     NO row, so it is retried the next day. Global (not tenant-scoped), mirroring
     CompanyORM — the contact is a public fact about a company location and the Apollo
     API key is account-wide.
@@ -387,8 +387,8 @@ class CompanyLocationContactORM(Base):
     hr_contact_email: Mapped[str] = mapped_column(String(320), nullable=False, default="")
     hr_contact_phone: Mapped[str] = mapped_column(String(50), nullable=False, default="")
     # True once Apollo was actually searched for this (company, location) — with
-    # hr_contact_attempted_at, powers the recheck cooldown so negatives aren't
-    # re-searched every run.
+    # hr_contact_attempted_at, powers the once-only rule so a negative is never
+    # re-searched.
     apollo_attempted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     hr_contact_attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

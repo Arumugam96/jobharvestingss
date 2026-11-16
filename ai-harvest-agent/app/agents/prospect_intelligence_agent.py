@@ -1386,7 +1386,7 @@ class ProspectIntelligenceAgent:
                 recruiter_id: str | None = None
                 apollo_last = None
                 # Warm the shared recruiter cache: resolve/create the row so the
-                # Apollo recheck cooldown is honored across all three pipelines.
+                # Apollo once-per-profile rule is honored across all three pipelines.
                 try:
                     async with session_factory() as db:
                         recruiter = await upsert_recruiter(

@@ -121,8 +121,8 @@ class RecruiterRecord:
     # (_load_recruiters_from_harvest); _persist_enrichment resolves/creates the
     # row by identity in that case instead.
     recruiter_id:      str  = ""
-    # Last Apollo lookup timestamp (from the DB row) — feeds the Apollo recheck
-    # cooldown. apollo_attempted/apollo_source are set during enrichment and read
+    # Last Apollo lookup timestamp (from the DB row) — feeds the Apollo once-only
+    # rule. apollo_attempted/apollo_source are set during enrichment and read
     # by _persist_enrichment to record provenance on the row.
     apollo_enriched_at: datetime | None = None
     apollo_attempted:  bool = False

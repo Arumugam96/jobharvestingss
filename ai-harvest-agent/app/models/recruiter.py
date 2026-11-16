@@ -90,9 +90,9 @@ class RecruiterORM(Base):
     # its original provenance; and `requested_by` records which user asked for it.
     source_label: Mapped[str] = mapped_column(String(60), nullable=False, default="")
     requested_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
-    # Timestamp of the last Apollo lookup *attempt* (hit or miss) — the recheck
-    # cooldown (settings.apollo_recheck_days) reads this to avoid re-billing the
-    # same profile every run. Stays null until Apollo is first tried.
+    # Timestamp of the last Apollo lookup *attempt* (hit or miss) — the
+    # once-only rule (apollo_contact_fallback) reads this to never re-bill the
+    # same profile. Stays null until Apollo is first tried.
     apollo_enriched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # CRM/lead-pipeline status (e.g. "New", "Contacted", "Qualified") — set by
     # whatever downstream CRM sync exists; this table doesn't manage its

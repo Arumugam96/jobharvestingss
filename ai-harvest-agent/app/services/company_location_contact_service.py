@@ -7,7 +7,7 @@ never by company alone, and the Apollo people search is ALWAYS location-constrai
 no company-wide fallback.
 
 This module owns:
-  * the CompanyLocationContactORM cache (find/upsert + the recheck-cooldown predicate),
+  * the CompanyLocationContactORM cache (find/upsert + the search-once predicate),
   * the HR shortlist behind it (CompanyLocationCandidateORM) and the outreach rotation
     over that shortlist, and
   * ``discover_company_location_contacts`` — a best-effort, browser-free post-harvest pass
@@ -17,7 +17,7 @@ This module owns:
 
 Rotation (one person per company+location per day, so nobody is flooded):
   * the shortlist is the top company_contact_shortlist_size HR people from Apollo's FREE
-    people search, refreshed every apollo_recheck_days; resolving the company to an
+    people search, run once per (company, location) and never refreshed; resolving the company to an
     Apollo org costs a credit but is cached per company (resolve_apollo_org), not per
     location;
   * the pick is the person AFTER the one emailed most recently, in rank order, wrapping
@@ -36,7 +36,7 @@ CompanyORM feeds company size/HQ — so the original poster fields are never tou
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import structlog
 from sqlalchemy import select
@@ -109,7 +109,7 @@ async def upsert_location_contact(
 ) -> CompanyLocationContactORM:
     """Insert-or-update one (company, location) contact cache row. Non-empty-wins merge
     (never erases a previous hit with a later miss); stamps hr_contact_attempted_at on
-    every real attempt so the recheck cooldown can gate re-searches of negatives too.
+    every real attempt so a pair is never re-searched, negatives included.
     Returns the row."""
     now = datetime.now(timezone.utc)
     row = (await db.execute(
@@ -154,20 +154,13 @@ async def upsert_location_contact(
     return row
 
 
-def location_contact_needs_search(
-    row: CompanyLocationContactORM | None, recheck_days: int
-) -> bool:
-    """A (company, location) needs an Apollo search unless it already holds a cached HR
-    email, or it was searched within the recheck cooldown (so recent negatives aren't
-    re-billed). A row never attempted (or with no stamp) is always eligible."""
+def location_contact_needs_search(row: CompanyLocationContactORM | None) -> bool:
+    """A (company, location) needs an Apollo search only if it has never been searched
+    (no hr_contact_attempted_at) and holds no cached HR email. A pair already searched
+    is never re-searched, hit or miss — no re-sweeps of old data."""
     if row is not None and row.hr_contact_email:
         return False  # already have a usable contact — reuse it
-    if row is None or row.hr_contact_attempted_at is None:
-        return True
-    last = row.hr_contact_attempted_at
-    if last.tzinfo is None:
-        last = last.replace(tzinfo=timezone.utc)
-    return (datetime.now(timezone.utc) - last) >= timedelta(days=recheck_days)
+    return row is None or row.hr_contact_attempted_at is None
 
 
 # ── HR shortlist + rotation ─────────────────────────────────────────────────────
@@ -179,11 +172,10 @@ def _aware(dt: datetime | None) -> datetime | None:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
-def shortlist_is_stale(row: CompanyLocationContactORM | None, recheck_days: int) -> bool:
-    """The (free) Apollo shortlist search is due: never searched, or last searched
-    ``recheck_days`` or more ago (people leave / join)."""
-    last = _aware(row.hr_contact_attempted_at) if row is not None else None
-    return last is None or (datetime.now(timezone.utc) - last) >= timedelta(days=recheck_days)
+def shortlist_never_searched(row: CompanyLocationContactORM | None) -> bool:
+    """The Apollo shortlist search is due only for a (company, location) never searched
+    before. An existing shortlist is never refreshed — old data is not re-enriched."""
+    return row is None or row.hr_contact_attempted_at is None
 
 
 async def get_candidates(
@@ -466,9 +458,9 @@ async def discover_company_location_contacts(
             try:
                 async with session_factory() as db:
                     candidates = await get_candidates(db, ckey, lkey)
-                    # A pre-shortlist cache row (an email, no candidates) is migrated now.
-                    legacy = row is not None and bool(row.hr_contact_email) and not candidates
-                    due = shortlist_is_stale(row, settings.apollo_recheck_days) or legacy
+                    # Only a never-searched pair is searched; existing pairs (incl. old
+                    # pre-shortlist rows) are never re-searched.
+                    due = shortlist_never_searched(row)
                     if due and counts["searched"] >= _COMPANY_CONTACT_CAP:
                         logger.info("company_location_contact_cap_reached", cap=_COMPANY_CONTACT_CAP)
                         due = False
@@ -493,7 +485,7 @@ async def discover_company_location_contacts(
                             candidates = await save_shortlist(db, ckey, lkey, shortlist.people)
                     if not candidates and not searched:
                         if not cap_deferred:
-                            counts["skipped_cooldown"] += 1   # recent empty search — wait it out
+                            counts["skipped_cooldown"] += 1   # already searched, empty — never re-searched
                         continue
 
                     pick, revealed, cap_hit = await pick_rotation_contact(

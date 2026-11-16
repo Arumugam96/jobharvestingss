@@ -9,7 +9,7 @@ credit-conservation rules live in exactly one spot:
   * email only — phones are never requested here (they're requested after a sent
     outreach email: app/services/outreach_phone_service.py);
   * skip if Apollo was EVER tried for this profile (apollo_enriched_at set) — no
-    re-sweeps. (Company / company-location lookups still use apollo_recheck_days.)
+    re-sweeps. Company and company-location lookups follow the same once-only rule.
     A daily-cap denial or a transient Apollo outage is NOT a try (attempted=False).
 
 The helper only *decides + calls* Apollo and returns what it found. Persistence
@@ -20,7 +20,7 @@ the cooldown timestamp.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import structlog
 
@@ -201,7 +201,7 @@ async def apollo_contact_fallback(
 # location-specific HR/recruiting contact for the job's (company, location) via
 # Apollo — company → organization → HR people filtered by person_locations → reveal
 # the first available email. ALWAYS location-constrained; there is NO company-wide
-# fallback. Credit discipline (recheck cooldown + the global daily cap) lives here,
+# fallback. Credit discipline (search-once + the global daily cap) lives here,
 # same as apollo_contact_fallback above.
 
 
@@ -234,8 +234,8 @@ async def apollo_company_contact_fallback(
     """Find the best location-specific HR/recruiting contact for a (company, location).
 
     ``location_terms`` is REQUIRED (the Apollo person_locations filter) — an empty value
-    returns a skip rather than running an unconstrained, company-wide search. Honors the
-    ``apollo_recheck_days`` cooldown vs ``attempted_at`` and the global daily credit cap.
+    returns a skip rather than running an unconstrained, company-wide search. Skips any
+    pair already tried (``attempted_at`` set) and honors the global daily credit cap.
     When the cap blocks the search, returns ``cap_reached=True, attempted=False`` so the
     caller caches NOTHING and retries the next day (a cap denial is not a negative). A
     clean search that finds no email returns ``attempted=True`` (a cacheable negative).
@@ -246,12 +246,12 @@ async def apollo_company_contact_fallback(
     titles = titles or HR_TITLES
     reveal_cap = settings.company_contact_reveal_cap if reveal_cap is None else reveal_cap
 
-    # Recheck cooldown — don't re-search a (company, location) tried recently. The
+    # Search once — never re-search a (company, location) already tried. The
     # caller normally gates on this too (via the cache row), but enforce it here so the
     # helper is safe to call directly.
     last = _aware_utc(attempted_at)
-    if last is not None and (datetime.now(timezone.utc) - last) < timedelta(days=settings.apollo_recheck_days):
-        logger.info("apollo_company_contact_skip_cooldown", company=company_name, age_days=(datetime.now(timezone.utc) - last).days)
+    if last is not None:
+        logger.info("apollo_company_contact_skip_already_tried", company=company_name, age_days=(datetime.now(timezone.utc) - last).days)
         return _COMPANY_CONTACT_SKIP
 
     from app.services import apollo_budget

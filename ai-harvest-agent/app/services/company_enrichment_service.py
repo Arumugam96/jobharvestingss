@@ -98,8 +98,8 @@ async def resolve_apollo_org(
 
     Resolving costs a credit (organizations/enrich by domain, then
     mixed_companies/search by name when that finds no id), so the result is cached on
-    CompanyORM by company key and reused by every location, run and feature: a hit
-    forever, a miss for apollo_recheck_days. Both lookups reserve against the daily
+    CompanyORM by company key and reused by every location, run and feature — a hit
+    and a miss alike, forever (a company is resolved at most once). Both lookups reserve against the daily
     cap inside ApolloClient; a cap denial returns ``cap_reached`` and caches nothing.
 
     ``domain`` is the caller's known domain. When it disagrees with the cached row's
@@ -130,7 +130,7 @@ async def resolve_apollo_org(
         except Exception as exc:
             logger.warning("apollo_org_cache_read_failed", company=company_name, error=str(exc))
     domain_conflict = bool(row is not None and dom and row.domain and row.domain.lower() != dom)
-    if row is not None and not domain_conflict and not apollo_org_resolve_due(row, settings.apollo_recheck_days):
+    if row is not None and not domain_conflict and not apollo_org_resolve_due(row):
         logger.info("apollo_org_cache_hit", company=company_name, found=bool(row.apollo_org_id))
         if not row.apollo_org_id:
             return OrgResolution()
@@ -267,9 +267,9 @@ async def enrich_companies(
     UnifiedJob — read via getattr: company / company_url / company_size).
 
     Runs once per unique company (placeholder names like "Unknown Company" are
-    skipped), honours the recheck cooldown (settings.apollo_recheck_days — a company
-    already holding size + country is skipped), the per-run `cap`, and a cooperative
-    stop. Writes ONLY the CompanyORM cache. Best-effort; returns a counts summary."""
+    skipped), enriches only companies never attempted before (old data is never
+    re-enriched; a company already holding size + country is skipped), the per-run
+    `cap`, and a cooperative stop. Writes ONLY the CompanyORM cache. Best-effort; returns a counts summary."""
     from app.services.company_service import (
         company_needs_enrichment,
         get_companies_by_keys,
@@ -306,8 +306,7 @@ async def enrich_companies(
     session_factory = get_session_factory(settings)
     async with session_factory() as db:
         cached = await get_companies_by_keys(db, set(keys))
-    keys = [k for k in keys
-            if company_needs_enrichment(cached.get(k), settings.apollo_recheck_days)]
+    keys = [k for k in keys if company_needs_enrichment(cached.get(k))]
     if not keys:
         return {"companies": 0, "enriched": 0}
 

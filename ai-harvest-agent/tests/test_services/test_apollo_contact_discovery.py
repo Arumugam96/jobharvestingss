@@ -39,7 +39,7 @@ def _fake_settings(**over):
         apollo_base_url="https://api.apollo.io/api/v1",
         apollo_timeout_s=5.0,
         apollo_webhook_url="",
-        apollo_recheck_days=30,
+       
         company_contact_reveal_cap=5,
         company_contact_fallback=True,
     )
@@ -240,14 +240,14 @@ async def test_fallback_requires_location_terms(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_fallback_honours_cooldown(monkeypatch) -> None:
+async def test_fallback_never_retries_an_attempted_pair(monkeypatch) -> None:
     from app.services.apollo_enrichment import apollo_company_contact_fallback
-    recent = datetime.now(timezone.utc) - timedelta(days=1)
-    res = await apollo_company_contact_fallback(
-        settings=_fake_settings(apollo_recheck_days=30),
-        company_name="Acme", location_terms="India", attempted_at=recent,
-    )
-    assert res.attempted is False
+    for age in (1, 400):  # recent or ancient — an attempted pair is never re-searched
+        res = await apollo_company_contact_fallback(
+            settings=_fake_settings(), company_name="Acme", location_terms="India",
+            attempted_at=datetime.now(timezone.utc) - timedelta(days=age),
+        )
+        assert res.attempted is False
 
 
 @pytest.mark.asyncio
@@ -314,7 +314,7 @@ async def test_cache_upsert_and_needs_search(db_session) -> None:
         location_contact_needs_search,
         upsert_location_contact,
     )
-    assert location_contact_needs_search(None, 30) is True
+    assert location_contact_needs_search(None) is True
 
     await upsert_location_contact(
         db_session, company_key="crudco", location_key="bengaluru|karnataka|india",
@@ -330,11 +330,11 @@ async def test_cache_upsert_and_needs_search(db_session) -> None:
     row = rows[("crudco", "bengaluru|karnataka|india")]
     assert row.hr_contact_email == "a@crudco.com"
     # Has an email => never re-search.
-    assert location_contact_needs_search(row, 30) is False
+    assert location_contact_needs_search(row) is False
 
 
 @pytest.mark.asyncio
-async def test_cache_negative_respects_cooldown(db_session) -> None:
+async def test_cache_negative_is_never_researched(db_session) -> None:
     from app.services.company_location_contact_service import (
         get_location_contacts,
         location_contact_needs_search,
@@ -350,10 +350,10 @@ async def test_cache_negative_respects_cooldown(db_session) -> None:
     row = (await get_location_contacts(db_session, {("crudbeta", "chennai|tamil nadu|india")}))[
         ("crudbeta", "chennai|tamil nadu|india")
     ]
-    # Freshly attempted negative -> within cooldown -> don't re-search.
-    assert location_contact_needs_search(row, 30) is False
-    # ...but eligible again once the cooldown has elapsed.
-    assert location_contact_needs_search(row, 0) is True
+    # An attempted negative is never re-searched, however old.
+    assert location_contact_needs_search(row) is False
+    row.hr_contact_attempted_at = row.hr_contact_attempted_at - timedelta(days=400)
+    assert location_contact_needs_search(row) is False
 
 
 @pytest.mark.asyncio

@@ -46,6 +46,7 @@ from fastapi import HTTPException
 from fastapi import status as http_status
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.config import get_settings
 from app.core.tenant_context import apply_tenant, get_current_tenant_id
@@ -699,23 +700,76 @@ async def list_assigned_jobs(
     return {"items": items, "total": int(total or 0), "page": page, "page_size": page_size}
 
 
+# A call's reminder, as the Phone logs page shows it. There is no delivery record:
+# a reminder reaches the caller's bell once due (due_followups), so "delivered"
+# means "due and still open". A closed reminder was either dismissed by the caller
+# or closed by a newer call on the same job + number (log_call stamps the old row's
+# follow_up_done_at with the new row's created_at) — "cancelled" when that call
+# came before the reminder fell due.
+REMINDER_STATES = ("none", "scheduled", "delivered", "dismissed", "called_again", "cancelled")
+
+
+def _closed_by_call():
+    """SQL EXISTS: a newer call on the same job + number closed this row's reminder."""
+    newer = aliased(PhoneCallLogORM)
+    return select(newer.id).where(
+        newer.job_id == PhoneCallLogORM.job_id,
+        newer.phone == PhoneCallLogORM.phone,
+        newer.id != PhoneCallLogORM.id,
+        newer.created_at == PhoneCallLogORM.follow_up_done_at,
+    ).exists()
+
+
+def _reminder_cond(state: str, now: datetime):
+    """SQL condition selecting calls whose reminder is in ``state`` (REMINDER_STATES)."""
+    L = PhoneCallLogORM
+    due, done = L.follow_up_due_at, L.follow_up_done_at
+    return {
+        "none": due.is_(None),
+        "scheduled": and_(due.is_not(None), done.is_(None), due > now),
+        "delivered": and_(due.is_not(None), done.is_(None), due <= now),
+        "dismissed": and_(due.is_not(None), done.is_not(None), ~_closed_by_call()),
+        "called_again": and_(due.is_not(None), done.is_not(None), done >= due, _closed_by_call()),
+        "cancelled": and_(due.is_not(None), done.is_not(None), done < due, _closed_by_call()),
+    }[state]
+
+
+def _reminder_view(due: datetime | None, done: datetime | None, closed_by_call: bool,
+                   now: datetime) -> dict[str, Any]:
+    """{state, at}: the reminder's state and the one time the page shows for it —
+    the due time while open, the close time once closed."""
+    due, done = _aware(due), _aware(done)
+    if due is None:
+        state, at = "none", None
+    elif done is None:
+        state, at = ("scheduled" if due > now else "delivered"), due
+    elif not closed_by_call:
+        state, at = "dismissed", done
+    else:
+        state, at = ("cancelled" if done < due else "called_again"), done
+    return {"state": state, "at": _iso(at), "due_at": _iso(due), "closed_at": _iso(done)}
+
+
 async def list_logs(
     db: AsyncSession,
     *,
     status: str = "",
     assignment: str = "",
+    reminder: str = "",
     q: str = "",
     since: datetime | None = None,
     page: int = 1,
     page_size: int = 50,
 ) -> dict[str, Any]:
     """Every non-cleared call in the tenant, newest first, with its job's title,
-    company and assignee (the admin Phone logs page). Jobs since deleted still
-    list (outer join) and count as unassigned. `summary`'s call counts apply every
-    filter except `status`, so the answered / unanswered split stays visible.
+    company and assignee, its outcome and its reminder (the admin Phone logs page).
+    Jobs since deleted still list (outer join) and count as unassigned. `summary`'s
+    call counts apply every filter except `status` and `reminder`, so the
+    answered / unanswered split stays visible.
     `summary.assigned_jobs` (every job currently self-assigned, called or not),
     `called_assigned_jobs` (those with a call matching the filters) and
     `total_phones` (phone_inventory's size) describe the workspace."""
+    now = _now()
     is_assigned = and_(ScrapedJobORM.assigned_to_email.is_not(None),
                        ScrapedJobORM.assigned_to_email != "")
     conds: list = [PhoneCallLogORM.cleared_at.is_(None)]
@@ -755,27 +809,39 @@ async def list_logs(
     total_phones = len(await phone_inventory(db))
     answered, unanswered = int(by_status.get("answered", 0)), int(by_status.get("unanswered", 0))
 
-    status_cond = [PhoneCallLogORM.call_status == status] if status in CALL_STATUSES else []
-    total = answered if status == "answered" else unanswered if status == "unanswered" else answered + unanswered
+    row_conds = [PhoneCallLogORM.call_status == status] if status in CALL_STATUSES else []
+    if reminder in REMINDER_STATES:
+        row_conds.append(_reminder_cond(reminder, now))
+    total = (await db.execute(scoped(
+        select(func.count(PhoneCallLogORM.id)), *row_conds))).scalar_one()
     page = max(1, int(page))
     page_size = max(1, int(page_size))
+    L = PhoneCallLogORM
     rows = (await db.execute(scoped(
-        select(PhoneCallLogORM.id, PhoneCallLogORM.job_id, PhoneCallLogORM.call_status,
-               PhoneCallLogORM.phone, PhoneCallLogORM.contact_name, PhoneCallLogORM.remarks,
-               PhoneCallLogORM.created_at, ScrapedJobORM.job_title, ScrapedJobORM.company,
+        select(L.id, L.job_id, L.call_status, L.call_outcome, L.outcome_details, L.phone,
+               L.contact_name, L.remarks, L.created_at, L.called_by_email, L.called_by_name,
+               L.follow_up_due_at, L.follow_up_done_at,
+               _closed_by_call().label("closed_by_call"),
+               ScrapedJobORM.job_title, ScrapedJobORM.company,
                ScrapedJobORM.assigned_to_email, ScrapedJobORM.assigned_to_name),
-        *status_cond,
-    ).order_by(PhoneCallLogORM.created_at.desc(), PhoneCallLogORM.id.desc())
+        *row_conds,
+    ).order_by(L.created_at.desc(), L.id.desc())
      .offset((page - 1) * page_size).limit(page_size))).all()
 
     items = [{
         "id": r.id,
         "job_id": r.job_id,
         "status": r.call_status,
+        "outcome": r.call_outcome or "",
+        "details": _loads(r.outcome_details, {}),
         "phone": r.phone,
         "contact_name": r.contact_name or "",
         "remarks": r.remarks or "",
         "called_at": _iso(r.created_at),
+        "called_by": {"email": r.called_by_email,
+                      "name": r.called_by_name or display_name_from_email(r.called_by_email)},
+        "reminder": _reminder_view(r.follow_up_due_at, r.follow_up_done_at,
+                                   bool(r.closed_by_call), now),
         "job_title": r.job_title or "",
         "company": r.company or "",
         "assigned_to": ({"email": r.assigned_to_email,
@@ -784,7 +850,7 @@ async def list_logs(
     } for r in rows]
     return {
         "items": items,
-        "total": total,
+        "total": int(total or 0),
         "page": page,
         "page_size": page_size,
         "summary": {"total": answered + unanswered, "answered": answered,

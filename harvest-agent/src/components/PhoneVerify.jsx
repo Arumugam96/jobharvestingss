@@ -55,6 +55,37 @@ const OUTCOMES = {
 /** The OUTCOMES entry for a call's status + outcome, or null when either is unset/unknown. */
 const outcomeOf = (call) => (call?.status && call?.outcome ? OUTCOMES[call.status]?.find((o) => o.v === call.outcome) : null);
 
+/** { label, tone } for a logged call's outcome (tone: good | info | warn | bad), or null
+ * when the call has none (calls logged before outcomes existed). Used by Phone logs. */
+export const outcomeInfo = (status, outcome) => {
+  const o = outcomeOf({ status, outcome });
+  return o ? { label: o.l, tone: o.tone } : null;
+};
+
+/** One-line summary of a call's outcome details (next steps, reason, referral, retry…);
+ * "" when there are none. Mirrors the fields OutcomePanel collects. */
+export function outcomeDetailText(d) {
+  if (!d || typeof d !== "object") return "";
+  const list = (v) => (Array.isArray(v) ? v.filter(Boolean).join(", ") : "");
+  const referral = [d.referredName, d.referredTeam].filter(Boolean).join(", ");
+  return [
+    list(d.nextSteps) && `Next: ${list(d.nextSteps)}`,
+    d.requirement && `Requirement: ${d.requirement}`,
+    d.window && `Call back: ${d.window}`,
+    d.sendTo && `Send to: ${d.sendTo}`,
+    list(d.sendWhat) && `Share: ${list(d.sendWhat)}`,
+    d.reason && `Reason: ${d.reason}`,
+    d.revisit && `Revisit: ${d.revisit}`,
+    d.markInvalid && "Marked invalid",
+    d.correctNumber && `Correct number: ${d.correctNumber}`,
+    d.reenrich && "Re-enrich requested",
+    referral && `Referred to: ${referral}${d.referredPhone ? ` (${d.referredPhone})` : ""}`,
+    d.language && `Language: ${d.language}`,
+    d.reassign && "Released for reassignment",
+    d.preset && `Retry: ${d.preset}`,
+  ].filter(Boolean).join(" · ");
+}
+
 const REASONS = ["Not hiring contract roles right now", "Requirement already closed", "Rate / budget mismatch",
   "Works with an empanelled vendor only", "No vendor empanelment open", "Hiring handled by another team"];
 const NEXT_STEPS = ["Share JD", "Schedule call", "Send profiles", "Rate card"];

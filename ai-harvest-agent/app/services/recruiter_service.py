@@ -279,7 +279,7 @@ async def save_enrichment(
     if verified:
         recruiter.last_verified = now
     if apollo_attempted:
-        # Stamp every Apollo attempt (hit or miss) so the recheck cooldown can
+        # Stamp every Apollo attempt (hit or miss) so the once-only rule can
         # skip this profile on subsequent runs.
         recruiter.apollo_enriched_at = now
     if apollo_person_id and not recruiter.apollo_person_id:

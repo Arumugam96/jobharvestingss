@@ -112,7 +112,6 @@ class Settings(BaseSettings):
     # A phone request with no delivery after this long is marked expired (NOT_FOUND);
     # a late delivery still lands and is charged.
     apollo_phone_pending_ttl_minutes: int = 60
-    apollo_recheck_days: int = 30
     apollo_enrich_company: bool = True
     # Account-wide ceiling on Apollo credit-calls per UTC day (every caller counts).
     apollo_daily_cap: int = 100

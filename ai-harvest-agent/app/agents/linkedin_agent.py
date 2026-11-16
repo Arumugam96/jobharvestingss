@@ -1822,8 +1822,8 @@ class LinkedInAgent:
         fresh tab that's always closed.
 
         A recruiter visited on any previous run (recruiter.last_enriched_at is
-        not None) is NOT re-opened — later runs re-check contact info only via
-        Apollo, which self-gates on settings.apollo_recheck_days. This is the
+        not None) is NOT re-opened — a later run can still try Apollo for it, but
+        only if Apollo has never been asked about that profile. This is the
         primary safeguard against LinkedIn restricting the account for "high
         volume of profile data": the dominant cause was re-visiting the same
         NOT_FOUND profiles on every run. A human-like randomized pause
@@ -1904,13 +1904,13 @@ class LinkedInAgent:
                     recruiter_id  = recruiter.id
                     already_email = recruiter.email_status in ("VERIFIED", "PUBLIC")
                     already_phone = recruiter.phone_status in ("VERIFIED", "PUBLIC")
-                    apollo_last   = recruiter.apollo_enriched_at  # for the Apollo recheck cooldown
+                    apollo_last   = recruiter.apollo_enriched_at  # set → Apollo already tried, never again
                     # last_enriched_at is stamped after every pass that actually
                     # opened the profile (save_enrichment below; reset when no
                     # visit happened), so a non-null value means this /in/ page
                     # was already opened on a previous run. We open each
-                    # profile AT MOST ONCE, ever — later runs re-check contact info
-                    # only via Apollo (self-gated on apollo_recheck_days).
+                    # profile AT MOST ONCE, ever — later runs can only try Apollo,
+                    # and only if Apollo was never asked about this profile.
                     ever_visited  = recruiter.last_enriched_at is not None
                     await db.commit()
             except Exception as exc:
@@ -1988,8 +1988,8 @@ class LinkedInAgent:
                         pass
 
             # ── Apollo fallback — reachable on the first visit AND on later runs
-            # for an already-visited recruiter (self-gates on apollo_recheck_days
-            # via apollo_last). `already_*` reflect what we already hold in the DB
+            # for an already-visited recruiter Apollo has never been asked about
+            # (apollo_last unset). `already_*` reflect what we already hold in the DB
             # so Apollo never re-searches a field we already have.
             try:
                 if not (already_email or contact_info.get("email")):

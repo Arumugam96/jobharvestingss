@@ -248,8 +248,11 @@ export function getPhoneCallHistory(jobId) {
 }
 
 /** GET /phone-verifications/logs — every logged call in the tenant (admins only).
- * params: { status, assignment, days, q, page, page_size }.
- * Returns { items, total, page, page_size, summary: {total, answered, unanswered, assigned_jobs} }. */
+ * params: { status, assignment, reminder, days, q, page, page_size }
+ * (reminder: none | scheduled | delivered | dismissed | called_again | cancelled).
+ * Returns { items: [{..., outcome, details, called_by, reminder: {state, at, due_at, closed_at}}],
+ * total, page, page_size, summary: {total, answered, unanswered, assigned_jobs,
+ * called_assigned_jobs, total_phones} }. */
 export function getPhoneLogs(params = {}) {
   return request(`/phone-verifications/logs${qs(params)}`);
 }

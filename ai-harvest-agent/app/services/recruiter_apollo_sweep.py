@@ -7,7 +7,7 @@ email and asks Apollo (by LinkedIn URL) for their contact, writing the result
 back onto the recruiters table.
 
 Reuses the exact pieces the harvest already uses — apollo_contact_fallback (the
-one place credit-conservation lives: gate + recheck cooldown) and
+one place credit-conservation lives: gate + once-only rule) and
 save_enrichment — so there is no new Apollo logic here, only the batching. The
 Apollo email/phone → save_enrichment field mapping mirrors the inline pass in
 linkedin_agent._enrich_recruiters.
@@ -33,7 +33,7 @@ async def run_apollo_recruiter_sweep(limit: int | None = None) -> dict[str, int]
 
     Returns a summary dict {candidates, attempted, emails_found, skipped}:
       • candidates    — recruiters selected (missing email, has LinkedIn URL)
-      • attempted     — Apollo calls actually issued (gate + cooldown passed)
+      • attempted     — Apollo calls actually issued (gate + once-only rule passed)
       • emails_found  — of those, how many returned an email
       • skipped       — no-op'd by apollo_contact_fallback (unconfigured / already
                         tried / cap denied / transient error); not stamped as tried
@@ -96,7 +96,7 @@ async def run_apollo_recruiter_sweep(limit: int | None = None) -> dict[str, int]
             summary["emails_found"] += 1
 
         # Persist the attempt (hit or miss). apollo_attempted stamps
-        # apollo_enriched_at so the cooldown backs us off this profile next run,
+        # apollo_enriched_at so Apollo is never asked about this profile again,
         # even when Apollo returned nothing. Field mapping copies the inline pass
         # in linkedin_agent._enrich_recruiters (save_enrichment call).
         found_email = bool(res.email)

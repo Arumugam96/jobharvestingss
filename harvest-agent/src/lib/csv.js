@@ -1,4 +1,4 @@
-/* CSV cell escaping for client-side exports (JobsPage). */
+/* CSV helpers for client-side exports (JobsPage, PhoneLogsPage). */
 
 // A cell starting with one of these is evaluated as a formula by Excel / Sheets /
 // LibreOffice ("CSV injection"), e.g. =HYPERLINK(...) or a DDE payload.
@@ -19,4 +19,41 @@ export function csvCell(value) {
   let s = String(value);
   if (FORMULA_START.test(s) && !PHONE_LIKE.test(s)) s = "'" + s;
   return '"' + s.replace(/"/g, '""') + '"';
+}
+
+/**
+ * Save a CSV file in the browser (UTF-8 with BOM so Excel reads non-ASCII names).
+ * @param {string} filename
+ * @param {string[]} head column titles
+ * @param {Array<Array<*>>} rows cell values (null/undefined → empty)
+ */
+export function downloadCsv(filename, head, rows) {
+  const line = (cells) => cells.map((v) => csvCell(v == null ? "" : v)).join(",");
+  const blob = new Blob(["﻿" + [line(head), ...rows.map(line)].join("\r\n")], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+/**
+ * Every item of a paginated list endpoint ({ items, total }), fetched page by page.
+ * @param {Function} fetcher (params) => Promise<{items, total}>
+ * @param {object} params filters (page / page_size are set here)
+ * @param {number} [maxPages=100] safety cap (100 × 200 = 20k rows)
+ */
+export async function fetchAllPages(fetcher, params, maxPages = 100) {
+  const pageSize = 200;
+  let all = [];
+  for (let page = 1; page <= maxPages; page += 1) {
+    const res = await fetcher({ ...params, page, page_size: pageSize });
+    const items = res?.items || [];
+    all = all.concat(items);
+    if (!items.length || all.length >= (res?.total ?? 0)) break;
+  }
+  return all;
 }
