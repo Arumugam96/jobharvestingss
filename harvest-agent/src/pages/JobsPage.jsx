@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
-import { Download, ChevronDown, Wrench, ArrowLeft } from "lucide-react";
+import { Wrench, ArrowLeft } from "lucide-react";
 import { getJobs, getJobsFacets, ApiError, downloadJsonUrl, downloadExcelUrl } from "../api";
 import { C } from "../theme";
 import { Select, StatCard } from "../components/ui";
+import ExportButton from "../components/ExportButton";
 import JobsTable, { PAGE_SIZE_OPTIONS } from "../components/JobsTable";
 import { mapApiJob, fetchAllJobs, jobContact, pocKindLabel, partSourceLabel } from "../lib/jobsData";
 import { csvCell } from "../lib/csv";
@@ -62,8 +63,6 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
   const [facets, setFacets] = useState(cache?.facets || null);
   const [exporting, setExporting] = useState(false);
   const [exportFormat, setExportFormat] = useState("csv");
-  const [formatOpen, setFormatOpen] = useState(false);
-  const formatRef = useRef(null);
   // Monotonic request counter — a response only lands if no newer request has
   // started since (fast typing / rapid filter clicks can overlap fetches).
   const seqRef = useRef(0);
@@ -150,15 +149,6 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
   );
 
   const stats = facets?.stats || {};
-
-  // Close format dropdown on outside click.
-  useEffect(() => {
-    if (!formatOpen) return;
-    /** Close the format menu when a mousedown lands outside it. */
-    const close = (e) => { if (formatRef.current && !formatRef.current.contains(e.target)) setFormatOpen(false); };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
-  }, [formatOpen]);
 
   /** Export in the selected format: JSON / Excel navigate to the backend download URLs; CSV is
    * built client-side by exportCsv(). */
@@ -250,53 +240,7 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
             </button>
           )}
           {!library && (
-            <div ref={formatRef} style={{ position: "relative", display: "inline-flex", borderRadius: 8, border: `1px solid ${C.primary}` }}>
-              <button
-                className="ha-btn ha-btn-primary"
-                style={{ border: "none", borderRadius: "7px 0 0 7px", borderRight: "1px solid rgba(255,255,255,.25)" }}
-                onClick={doExport}
-                disabled={exporting}
-              >
-                <Download size={16} /> {exporting ? "Exporting…" : "Export"}
-              </button>
-              <button
-                style={{
-                  display: "inline-flex", alignItems: "center", gap: 4,
-                  background: C.primary, color: "#fff", border: "none",
-                  borderRadius: "0 7px 7px 0",
-                  padding: "7px 12px", fontSize: 13, fontWeight: 500,
-                  cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap",
-                }}
-                onClick={() => setFormatOpen((v) => !v)}
-                aria-expanded={formatOpen}
-              >
-                {exportFormat === "csv" ? "CSV" : exportFormat === "excel" ? "Excel" : "JSON"}
-                <ChevronDown size={14} style={{ transition: "transform .2s", transform: formatOpen ? "rotate(180deg)" : "none" }} />
-              </button>
-              {formatOpen && (
-                <div style={{
-                  position: "absolute", top: "100%", right: 0, marginTop: 4,
-                  minWidth: 140, background: "#fff", border: `1px solid ${C.border}`,
-                  borderRadius: 8, boxShadow: "0 8px 24px -6px rgba(15,23,42,.18)",
-                  zIndex: 10, overflow: "hidden",
-                }}>
-                  {["csv", "excel", "json"].map((fmt) => (
-                    <button
-                      key={fmt}
-                      onClick={() => { setExportFormat(fmt); setFormatOpen(false); }}
-                      style={{
-                        display: "flex", alignItems: "center", gap: 8, width: "100%",
-                        padding: "9px 14px", border: "none", background: exportFormat === fmt ? `color-mix(in srgb, ${C.primary} 8%, transparent)` : "transparent",
-                        color: C.text, fontSize: 13, fontWeight: 500, cursor: "pointer",
-                        fontFamily: "inherit", textAlign: "left",
-                      }}
-                    >
-                      {fmt === "csv" ? "CSV" : fmt === "excel" ? "Excel" : "JSON"}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
+            <ExportButton format={exportFormat} onFormatChange={setExportFormat} onExport={doExport} exporting={exporting} />
           )}
         </div>
       </div>

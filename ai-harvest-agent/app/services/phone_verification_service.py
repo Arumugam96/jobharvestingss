@@ -860,6 +860,50 @@ async def list_logs(
     }
 
 
+EXPORT_MAX_ROWS = 50_000
+EXPORT_MAX_COLS = 40
+_XLSX_FORMULA_START = re.compile(r"^[=+\-@\t\r]")
+_XLSX_PHONE_LIKE = re.compile(r"^[+-]?[0-9 ().-]*[0-9][0-9 ().-]*$")
+
+
+def rows_to_xlsx(sheet: str, head: list[str], rows: list[list[Any]]) -> bytes:
+    """One-sheet .xlsx of `head` + `rows` (the Phone logs page's Excel export — the page
+    builds the same columns it puts in its CSV). Text that a spreadsheet would run as a
+    formula gets a leading "'" (same rule as harvest-agent/src/lib/csv.js), phone-like
+    values excepted. Header bold and frozen; columns sized to their content."""
+    from io import BytesIO
+
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+
+    def cell(value: Any) -> Any:
+        """Cell value: numbers/bools as-is, everything else as neutralised text."""
+        if value is None:
+            return ""
+        if isinstance(value, (int, float, bool)):
+            return value
+        text = str(value)
+        if _XLSX_FORMULA_START.match(text) and not _XLSX_PHONE_LIKE.match(text):
+            text = "'" + text
+        return text
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = (re.sub(r"[\[\]:*?/\\]", " ", sheet or "Sheet").strip() or "Sheet")[:31]
+    ws.append([cell(h) for h in head])
+    for c in ws[1]:
+        c.font = Font(bold=True)
+    for row in rows:
+        ws.append([cell(v) for v in row])
+    ws.freeze_panes = "A2"
+    for col in ws.columns:
+        width = max((len(str(c.value or "")) for c in col[:500]), default=8)
+        ws.column_dimensions[col[0].column_letter].width = min(max(width + 2, 10), 60)
+    out = BytesIO()
+    wb.save(out)
+    return out.getvalue()
+
+
 async def relink_job_ids(db: AsyncSession, mapping: dict[str, str]) -> None:
     """Re-point call logs from old scraped_jobs ids to new ones after a run
     reconcile rewrote the run's rows. Does NOT commit — the caller owns the

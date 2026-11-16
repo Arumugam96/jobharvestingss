@@ -29,7 +29,22 @@ export function csvCell(value) {
  */
 export function downloadCsv(filename, head, rows) {
   const line = (cells) => cells.map((v) => csvCell(v == null ? "" : v)).join(",");
-  const blob = new Blob(["﻿" + [line(head), ...rows.map(line)].join("\r\n")], { type: "text/csv;charset=utf-8;" });
+  saveBlob(filename, new Blob(["﻿" + [line(head), ...rows.map(line)].join("\r\n")], { type: "text/csv;charset=utf-8;" }));
+}
+
+/**
+ * Save rows as a JSON array of objects keyed by the column titles.
+ * @param {string} filename
+ * @param {string[]} head column titles (the object keys)
+ * @param {Array<Array<*>>} rows cell values
+ */
+export function downloadJson(filename, head, rows) {
+  const items = rows.map((r) => Object.fromEntries(head.map((h, i) => [h, r[i] ?? ""])));
+  saveBlob(filename, new Blob([JSON.stringify(items, null, 2)], { type: "application/json" }));
+}
+
+/** Hand a Blob to the browser as a file download. */
+export function saveBlob(filename, blob) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;

@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { Download, Lock, RefreshCw, Search } from "lucide-react";
-import { getPhoneLogs, getPhoneInventory, getAssignedJobs } from "../api";
+import { Lock, RefreshCw, Search } from "lucide-react";
+import { getPhoneLogs, getPhoneInventory, getAssignedJobs, exportPhoneLogsXlsx } from "../api";
 import { C } from "../theme";
 import { StatCard, Select, PlainHeader } from "../components/ui";
+import ExportButton from "../components/ExportButton";
 import { PHONE_STATUSES, outcomeInfo, outcomeDetailText } from "../components/PhoneVerify";
-import { downloadCsv, fetchAllPages } from "../lib/csv";
+import { downloadCsv, downloadJson, saveBlob, fetchAllPages } from "../lib/csv";
 
 /* Admin-only Phone logs: every call logged in the tenant, including jobs
  * self-assigned by someone else (GET /phone-verifications/logs — the backend
@@ -13,7 +14,9 @@ import { downloadCsv, fetchAllPages } from "../lib/csv";
  * The tiles double as view switches: the call tiles show the call log (filtered by
  * status), "Total phones" lists every number held (/logs/phones) and
  * "Self-assigned jobs" lists every assigned job, called or not (/logs/assigned-jobs).
- * "Download CSV" exports whichever list is on screen: every page, with its filters. */
+ * "Export" (CSV / Excel / JSON, the Harvested Jobs button) saves whichever list is on
+ * screen: every page, with its filters. Each view builds { name, sheet, head, rows };
+ * Excel goes through POST /phone-verifications/logs/xlsx with those same rows. */
 
 const PAGE_SIZE = 50;
 const STATUS_OPTIONS = [
@@ -219,9 +222,11 @@ function PhonesPanel({ reloadKey, exportRef }) {
   ];
   exportRef.current = async () => {
     const all = await fetchAllPages(getPhoneInventory, { source, q });
-    downloadCsv(`phone-contacts${source ? `-${source}` : ""}-${today()}.csv`,
-      ["Phone", "Source", "Name", "Job title", "Company", "Added"],
-      all.map((r) => [r.phone, PHONE_SOURCES[r.source]?.label || r.source, r.name, r.job_title, r.company, fmtTime(r.added_at)]));
+    return {
+      name: `phone-contacts${source ? `-${source}` : ""}-${today()}`, sheet: "Contacts",
+      head: ["Phone", "Source", "Name", "Job title", "Company", "Added"],
+      rows: all.map((r) => [r.phone, PHONE_SOURCES[r.source]?.label || r.source, r.name, r.job_title, r.company, fmtTime(r.added_at)]),
+    };
   };
 
   return (
@@ -280,12 +285,14 @@ function AssignedJobsPanel({ reloadKey, exportRef }) {
   const items = data?.items || [];
   exportRef.current = async () => {
     const all = await fetchAllPages(getAssignedJobs, { q });
-    downloadCsv(`self-assigned-jobs-${today()}.csv`,
-      ["Job title", "Company", "Assigned to", "Assigned on", "Phone", "Calls", "Last call status", "Last call outcome", "Last call at"],
-      all.map((r) => [r.job_title, r.company, r.assigned_to?.name, fmtTime(r.assigned_at), r.phone, r.calls,
+    return {
+      name: `self-assigned-jobs-${today()}`, sheet: "Self-assigned jobs",
+      head: ["Job title", "Company", "Assigned to", "Assigned on", "Phone", "Calls", "Last call status", "Last call outcome", "Last call at"],
+      rows: all.map((r) => [r.job_title, r.company, r.assigned_to?.name, fmtTime(r.assigned_at), r.phone, r.calls,
         r.last_call ? statusLabel(r.last_call.status) : "Not called yet",
         r.last_call ? outcomeInfo(r.last_call.status, r.last_call.outcome)?.label || "" : "",
-        r.last_call ? fmtTime(r.last_call.called_at) : ""]));
+        r.last_call ? fmtTime(r.last_call.called_at) : ""]),
+    };
   };
 
   return (
@@ -356,6 +363,7 @@ export default function PhoneLogsPage() {
   const [error, setError] = useState("");
   const [reloadKey, setReloadKey] = useState(0);
   const [exporting, setExporting] = useState(false);
+  const [exportFormat, setExportFormat] = useState("csv");
   const exportRef = useRef(null); // the on-screen list's CSV exporter (set by the active view)
 
   /** Update one filter and jump back to page 1. */
@@ -384,24 +392,29 @@ export default function PhoneLogsPage() {
     exportRef.current = async () => {
       const all = await fetchAllPages(getPhoneLogs, { ...filters, q });
       const days = filters.days === "0" ? "all-time" : `last-${filters.days}-days`;
-      downloadCsv(`phone-logs-${filters.status || "all"}-${days}-${today()}.csv`,
-        ["Status", "Call outcome", "Outcome details", "Job title", "Company", "Phone", "POC", "Called by",
+      return {
+        name: `phone-logs-${filters.status || "all"}-${days}-${today()}`, sheet: "Phone logs",
+        head: ["Status", "Call outcome", "Outcome details", "Job title", "Company", "Phone", "POC", "Called by",
           "Assigned to", "Remarks", "Called at", "Reminder", "Reminder time"],
-        all.map((r) => [statusLabel(r.status), outcomeInfo(r.status, r.outcome)?.label || "", outcomeDetailText(r.details),
+        rows: all.map((r) => [statusLabel(r.status), outcomeInfo(r.status, r.outcome)?.label || "", outcomeDetailText(r.details),
           r.job_title, r.company, r.phone, r.contact_name, r.called_by?.name, r.assigned_to?.name || "", r.remarks,
           fmtTime(r.called_at), REMINDERS[r.reminder?.state]?.label || "No reminder",
-          r.reminder?.at ? fmtTime(r.reminder.at) : ""]));
+          r.reminder?.at ? fmtTime(r.reminder.at) : ""]),
+      };
     };
   }
 
-  /** Download the list on screen (every page, current filters) as CSV. */
-  const exportCsv = async () => {
-    if (!exportRef.current) return;
+  /** Save the list on screen (every page, current filters) in the selected format. */
+  const doExport = async () => {
+    if (!exportRef.current || exporting) return;
     setExporting(true);
     try {
-      await exportRef.current();
+      const { name, sheet, head, rows } = await exportRef.current();
+      if (exportFormat === "json") downloadJson(`${name}.json`, head, rows);
+      else if (exportFormat === "excel") saveBlob(`${name}.xlsx`, await exportPhoneLogsXlsx({ sheet, filename: `${name}.xlsx`, head, rows }));
+      else downloadCsv(`${name}.csv`, head, rows);
     } catch (err) {
-      setError(err?.message || "Couldn't build the CSV. Try again.");
+      setError(err?.message || "Couldn't build the export. Try again.");
     } finally {
       setExporting(false);
     }
@@ -415,9 +428,8 @@ export default function PhoneLogsPage() {
           <p className="ha-sub">Every logged call in this workspace, including jobs self-assigned by others. Visible to admins only.</p>
         </div>
         <div className="ha-pagehead-actions">
-          <button className="ha-btn ha-btn-secondary" onClick={exportCsv} disabled={exporting} title="Download the list below, with its filters, as CSV">
-            <Download size={16} className={exporting ? "ha-spin" : ""} /> {exporting ? "Preparing…" : "Download CSV"}
-          </button>
+          <ExportButton format={exportFormat} onFormatChange={setExportFormat} onExport={doExport} exporting={exporting}
+            title="Export the list below, with its filters" />
           <button className="ha-btn ha-btn-secondary" onClick={() => setReloadKey((k) => k + 1)} disabled={loading} title="Refresh">
             <RefreshCw size={16} className={loading ? "ha-spin" : ""} /> Refresh
           </button>

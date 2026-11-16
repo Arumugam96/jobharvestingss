@@ -11,6 +11,7 @@ GET    /phone-verifications/latest?job_ids=   — newest call per visible job (b
 GET    /phone-verifications/logs              — every call in the tenant (admins only)
 GET    /phone-verifications/logs/phones       — every phone number held (admins only)
 GET    /phone-verifications/logs/assigned-jobs — every self-assigned job (admins only)
+POST   /phone-verifications/logs/xlsx         — the page's export rows as .xlsx (admins only)
 GET    /phone-verifications/flags?phones=     — invalid / do-not-call / warm per number
 GET    /phone-verifications/follow-ups        — the caller's due follow-up reminders
 POST   /phone-verifications/follow-ups/{id}/done — dismiss one reminder
@@ -24,11 +25,12 @@ phone_verification_service.flag_view (keyed by the number as given).
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -269,6 +271,35 @@ async def assigned_jobs_list(
     """The Phone logs "Self-assigned jobs" drill-down: every currently assigned job,
     called or not, with its call count and latest call. Admins only."""
     return await pvs.list_assigned_jobs(db, q=q, page=page, page_size=page_size)
+
+
+class XlsxExportRequest(BaseModel):
+    sheet: str = Field(default="Phone logs", max_length=60)
+    filename: str = Field(default="phone-logs.xlsx", max_length=120)
+    head: list[str] = Field(..., min_length=1, max_length=pvs.EXPORT_MAX_COLS)
+    rows: list[list[Any]] = Field(default_factory=list, max_length=pvs.EXPORT_MAX_ROWS)
+
+
+@router.post("/phone-verifications/logs/xlsx",
+             summary="Phone logs list as an Excel file (admins only)",
+             response_class=Response,
+             responses={200: {"description": "Excel file download"}})
+async def phone_logs_xlsx(
+    body: XlsxExportRequest,
+    current_user: AuthenticatedUser = Depends(require_admin),
+) -> Response:
+    """The Phone logs page's Excel export: the page sends the rows it would put in its
+    CSV (the on-screen list, every page, with its filters) and gets them back as .xlsx."""
+    data = pvs.rows_to_xlsx(body.sheet, body.head, body.rows)
+    name = re.sub(r"[^A-Za-z0-9._-]", "-", body.filename) or "phone-logs.xlsx"
+    if not name.lower().endswith(".xlsx"):
+        name += ".xlsx"
+    logger.info("phone_logs_xlsx_export", user=current_user.email, rows=len(body.rows))
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{name}"'},
+    )
 
 
 @router.get("/phone-verifications/flags", summary="Call-learned flags per number")

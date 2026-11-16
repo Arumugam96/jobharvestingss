@@ -272,6 +272,24 @@ export function getAssignedJobs(params = {}) {
   return request(`/phone-verifications/logs/assigned-jobs${qs(params)}`);
 }
 
+/** POST /phone-verifications/logs/xlsx — turn export rows into an .xlsx file (admins only).
+ * body: { sheet, filename, head: [title], rows: [[cell]] }. Resolves to a Blob. */
+export async function exportPhoneLogsXlsx(body) {
+  const res = await fetch(`${API_BASE}/phone-verifications/logs/xlsx`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json", "X-Dev-Tenant": getDevTenant() },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    if (res.status === 401) window.dispatchEvent(new Event("auth:logout"));
+    let detail = "";
+    try { detail = (await res.json())?.detail; } catch { /* not JSON */ }
+    throw new ApiError(typeof detail === "string" && detail ? detail : `Excel export failed with status ${res.status}`, res.status, null);
+  }
+  return res.blob();
+}
+
 /** GET /phone-verifications/follow-ups — the current user's due follow-up calls.
  * Returns { due, items: [{...callView, type: "call_followup", contact_name, company, job_title}] }. */
 export function getCallFollowUps({ limit } = {}) {
