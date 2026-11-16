@@ -560,33 +560,143 @@ def _phone_dedup_key(raw: str | None) -> str:
     return digits[-10:] if len(digits) >= 10 else digits
 
 
-async def count_distinct_phones(db: AsyncSession) -> int:
-    """Unique phone numbers the tenant holds across scraped_jobs (poster number +
-    company HR contact number) and recruiters. A number present in both tables, or
-    formatted differently, counts once."""
-    keys: set[str] = set()
-    for col, model in ((ScrapedJobORM.contact_number, ScrapedJobORM),
-                       (ScrapedJobORM.company_contact_phone, ScrapedJobORM),
-                       (RecruiterORM.contact_number, RecruiterORM)):
-        stmt = apply_tenant(
-            select(col).where(col.is_not(None), col != "").distinct(), model.tenant_id,
-        )
-        for (raw,) in (await db.execute(stmt)).all():
-            key = _phone_dedup_key(raw)
-            if key:
-                keys.add(key)
-    return len(keys)
+PHONE_SOURCES = ("job", "company", "recruiter")
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def _filled(col):
+    """SQL condition: ``col`` is neither NULL nor empty."""
+    return and_(col.is_not(None), col != "")
+
+
+async def phone_inventory(db: AsyncSession) -> list[dict[str, Any]]:
+    """Every phone number the tenant holds, newest first: each scraped job's poster
+    number ("job") and company HR contact number ("company"), and each recruiter's
+    number ("recruiter"). Never deduplicated: every filled phone field is an entry,
+    so a number on both a job and its recruiter counts twice. Only values with no
+    digits ("n/a") are skipped."""
+    J, R = ScrapedJobORM, RecruiterORM
+    jobs = (await db.execute(apply_tenant(
+        select(J.id, J.job_title, J.company, J.contact_number, J.company_contact_phone,
+               J.job_poster_name, J.company_contact_name, J.recruiter_id, J.created_at)
+        .where(or_(_filled(J.contact_number), _filled(J.company_contact_phone))),
+        J.tenant_id,
+    ))).all()
+    entries: list[dict[str, Any]] = []
+    for j in jobs:
+        for phone, source, name in ((j.contact_number, "job", j.job_poster_name),
+                                    (j.company_contact_phone, "company", j.company_contact_name)):
+            if not _phone_dedup_key(phone):
+                continue
+            entries.append({"phone": phone.strip(), "source": source, "name": name or "",
+                            "company": j.company or "", "job_title": j.job_title or "",
+                            "job_id": j.id, "recruiter_id": j.recruiter_id,
+                            "added_at": _aware(j.created_at)})
+
+    recruiters = (await db.execute(apply_tenant(
+        select(R.id, R.person_name, R.company_name, R.contact_number, R.created_at)
+        .where(_filled(R.contact_number)),
+        R.tenant_id,
+    ))).all()
+    for rec in recruiters:
+        if not _phone_dedup_key(rec.contact_number):
+            continue
+        entries.append({"phone": rec.contact_number.strip(), "source": "recruiter",
+                        "name": rec.person_name or "", "company": rec.company_name or "",
+                        "job_title": "", "job_id": None, "recruiter_id": rec.id,
+                        "added_at": _aware(rec.created_at)})
+    entries.sort(key=lambda e: e["added_at"] or _EPOCH, reverse=True)
+    return entries
+
+
+async def list_phones(
+    db: AsyncSession, *, source: str = "", q: str = "", page: int = 1, page_size: int = 50,
+) -> dict[str, Any]:
+    """The Phone logs "Total phones" drill-down: phone_inventory filtered by `source`
+    and free-text `q` (number, name, company, job title), paginated. `by_source`
+    counts ignore both filters."""
+    entries = await phone_inventory(db)
+    by_source = dict.fromkeys(PHONE_SOURCES, 0)
+    for e in entries:
+        by_source[e["source"]] += 1
+    if source in PHONE_SOURCES:
+        entries = [e for e in entries if e["source"] == source]
+    term = (q or "").strip().lower()
+    if term:
+        digits = re.sub(r"\D", "", term)
+        entries = [e for e in entries if any(term in (e[k] or "").lower() for k in
+                                             ("phone", "name", "company", "job_title"))
+                   or (digits and digits in re.sub(r"\D", "", e["phone"]))]
+    page, page_size = max(1, int(page)), max(1, int(page_size))
+    start = (page - 1) * page_size
+    items = [{**e, "added_at": _iso(e["added_at"])} for e in entries[start:start + page_size]]
+    return {"items": items, "total": len(entries), "page": page, "page_size": page_size,
+            "by_source": by_source}
+
+
+def _is_assigned():
+    """SQL condition: the job is currently self-assigned to someone."""
+    return _filled(ScrapedJobORM.assigned_to_email)
 
 
 async def count_assigned_jobs(db: AsyncSession) -> int:
     """Jobs currently self-assigned in the tenant, whether or not anyone has called them."""
     stmt = apply_tenant(
-        select(func.count(ScrapedJobORM.id)).where(
-            ScrapedJobORM.assigned_to_email.is_not(None), ScrapedJobORM.assigned_to_email != "",
-        ),
-        ScrapedJobORM.tenant_id,
+        select(func.count(ScrapedJobORM.id)).where(_is_assigned()), ScrapedJobORM.tenant_id,
     )
     return int((await db.execute(stmt)).scalar_one() or 0)
+
+
+async def list_assigned_jobs(
+    db: AsyncSession, *, q: str = "", page: int = 1, page_size: int = 50,
+) -> dict[str, Any]:
+    """The Phone logs "Self-assigned jobs" drill-down: every job currently assigned in
+    the tenant (called or not), most recently assigned first, with its number, call
+    count and latest call. `q` matches job title, company and assignee."""
+    J, R = ScrapedJobORM, RecruiterORM
+    conds = [_is_assigned()]
+    term = (q or "").strip().lower()
+    if term:
+        like = f"%{term}%"
+        conds.append(or_(*(func.lower(col).like(like) for col in (
+            J.job_title, J.company, J.assigned_to_email, J.assigned_to_name))))
+    total = (await db.execute(apply_tenant(
+        select(func.count(J.id)).where(*conds), J.tenant_id))).scalar_one()
+    page, page_size = max(1, int(page)), max(1, int(page_size))
+    rows = (await db.execute(apply_tenant(
+        select(J.id, J.job_title, J.company, J.source, J.assigned_to_email, J.assigned_to_name,
+               J.assigned_at, J.assignment_note, J.contact_number, J.company_contact_phone,
+               R.contact_number.label("recruiter_phone"))
+        .outerjoin(R, R.id == J.recruiter_id)
+        .where(*conds)
+        .order_by(J.assigned_at.desc().nulls_last(), J.id)
+        .offset((page - 1) * page_size).limit(page_size),
+        J.tenant_id,
+    ))).all()
+    ids = [r.id for r in rows]
+    counts = await count_calls(db, ids)
+    latest = await latest_for_jobs(db, ids)
+    items = []
+    for r in rows:
+        call = latest.get(r.id)
+        items.append({
+            "job_id": r.id,
+            "job_title": r.job_title or "",
+            "company": r.company or "",
+            "source": r.source or "",
+            "assigned_to": {"email": r.assigned_to_email,
+                            "name": r.assigned_to_name
+                            or display_name_from_email(r.assigned_to_email)},
+            "assigned_at": _iso(r.assigned_at),
+            "note": r.assignment_note or "",
+            "phone": next((p.strip() for p in (r.contact_number, r.recruiter_phone,
+                                               r.company_contact_phone) if (p or "").strip()), ""),
+            "calls": counts.get(r.id, 0),
+            "last_call": ({"status": call["status"], "outcome": call["outcome"],
+                           "called_at": call["called_at"], "called_by": call["called_by"]}
+                          if call else None),
+        })
+    return {"items": items, "total": int(total or 0), "page": page, "page_size": page_size}
 
 
 async def list_logs(
@@ -605,7 +715,7 @@ async def list_logs(
     filter except `status`, so the answered / unanswered split stays visible.
     `summary.assigned_jobs` (every job currently self-assigned, called or not),
     `called_assigned_jobs` (those with a call matching the filters) and
-    `total_phones` (unique numbers across jobs + recruiters) describe the workspace."""
+    `total_phones` (phone_inventory's size) describe the workspace."""
     is_assigned = and_(ScrapedJobORM.assigned_to_email.is_not(None),
                        ScrapedJobORM.assigned_to_email != "")
     conds: list = [PhoneCallLogORM.cleared_at.is_(None)]
@@ -642,7 +752,7 @@ async def list_logs(
         select(func.count(func.distinct(PhoneCallLogORM.job_id))), is_assigned,
     ))).scalar_one()
     assigned_jobs = await count_assigned_jobs(db)
-    total_phones = await count_distinct_phones(db)
+    total_phones = len(await phone_inventory(db))
     answered, unanswered = int(by_status.get("answered", 0)), int(by_status.get("unanswered", 0))
 
     status_cond = [PhoneCallLogORM.call_status == status] if status in CALL_STATUSES else []

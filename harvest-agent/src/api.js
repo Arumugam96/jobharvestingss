@@ -254,6 +254,21 @@ export function getPhoneLogs(params = {}) {
   return request(`/phone-verifications/logs${qs(params)}`);
 }
 
+/** GET /phone-verifications/logs/phones — every phone number held (admins only).
+ * params: { source: ""|"job"|"company"|"recruiter", q, page, page_size }.
+ * Returns { items: [{phone, source, name, company, job_title, job_id, recruiter_id, added_at}],
+ * total, page, page_size, by_source: {job, company, recruiter} }. */
+export function getPhoneInventory(params = {}) {
+  return request(`/phone-verifications/logs/phones${qs(params)}`);
+}
+
+/** GET /phone-verifications/logs/assigned-jobs — every self-assigned job, called or not
+ * (admins only). params: { q, page, page_size }. Returns { items: [{job_id, job_title,
+ * company, source, assigned_to, assigned_at, note, phone, calls, last_call}], total, page, page_size }. */
+export function getAssignedJobs(params = {}) {
+  return request(`/phone-verifications/logs/assigned-jobs${qs(params)}`);
+}
+
 /** GET /phone-verifications/follow-ups — the current user's due follow-up calls.
  * Returns { due, items: [{...callView, type: "call_followup", contact_name, company, job_title}] }. */
 export function getCallFollowUps({ limit } = {}) {

@@ -9,6 +9,8 @@ GET    /jobs/{id}/phone-verification/history  — every non-cleared call, newest
 GET    /phone-verifications/latest?job_ids=   — newest call per visible job (badges)
                                                + flags of those numbers
 GET    /phone-verifications/logs              — every call in the tenant (admins only)
+GET    /phone-verifications/logs/phones       — every phone number held (admins only)
+GET    /phone-verifications/logs/assigned-jobs — every self-assigned job (admins only)
 GET    /phone-verifications/flags?phones=     — invalid / do-not-call / warm per number
 GET    /phone-verifications/follow-ups        — the caller's due follow-up reminders
 POST   /phone-verifications/follow-ups/{id}/done — dismiss one reminder
@@ -235,6 +237,35 @@ async def phone_call_logs(
     since = datetime.now(timezone.utc) - timedelta(days=days) if days else None
     return await pvs.list_logs(db, status=status_filter, assignment=assignment, q=q,
                                since=since, page=page, page_size=page_size)
+
+
+@router.get("/phone-verifications/logs/phones",
+            summary="Every phone number in the tenant (admins only)")
+async def phone_inventory_list(
+    source: str = Query(default="", pattern="^(|job|company|recruiter)$"),
+    q: str = Query(default="", max_length=200),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=200),
+    current_user: AuthenticatedUser = Depends(require_admin),
+    db: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """The Phone logs "Total phones" drill-down: job poster, company HR and recruiter
+    numbers (see phone_verification_service.phone_inventory), paginated. Admins only."""
+    return await pvs.list_phones(db, source=source, q=q, page=page, page_size=page_size)
+
+
+@router.get("/phone-verifications/logs/assigned-jobs",
+            summary="Every self-assigned job in the tenant (admins only)")
+async def assigned_jobs_list(
+    q: str = Query(default="", max_length=200),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=200),
+    current_user: AuthenticatedUser = Depends(require_admin),
+    db: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """The Phone logs "Self-assigned jobs" drill-down: every currently assigned job,
+    called or not, with its call count and latest call. Admins only."""
+    return await pvs.list_assigned_jobs(db, q=q, page=page, page_size=page_size)
 
 
 @router.get("/phone-verifications/flags", summary="Call-learned flags per number")

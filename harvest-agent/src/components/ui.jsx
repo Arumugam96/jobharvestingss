@@ -72,16 +72,28 @@ const hexToTint = (hex, a) => {
 };
 
 /** Glass stat tile (big value + label), tinted from the `color` hex. */
-export const StatCard = ({ value, label, color, sub }) => (
-  <div
-    className="ha-card ha-statcard"
-    style={{ flex: 1, minWidth: 150, padding: "9px 16px", "--tint": hexToTint(color, 0.13), "--tint2": hexToTint(color, 0.04) }}
-  >
-    <div className="ha-statnum" style={{ color }}>{value}</div>
-    <div className="ha-statlbl">{label}</div>
-    {sub && <div className="ha-statlbl" style={{ fontSize: 11.5, opacity: 0.8 }}>{sub}</div>}
-  </div>
-);
+export const StatCard = ({ value, label, color, sub, onClick, active }) => {
+  const clickable = typeof onClick === "function";
+  return (
+    <div
+      className="ha-card ha-statcard"
+      role={clickable ? "button" : undefined}
+      tabIndex={clickable ? 0 : undefined}
+      aria-pressed={clickable ? !!active : undefined}
+      onClick={onClick}
+      onKeyDown={clickable ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(); } } : undefined}
+      style={{
+        flex: 1, minWidth: 150, padding: "9px 16px", "--tint": hexToTint(color, 0.13), "--tint2": hexToTint(color, 0.04),
+        ...(clickable && { cursor: "pointer" }),
+        ...(active && { boxShadow: `0 0 0 2px ${color}` }),
+      }}
+    >
+      <div className="ha-statnum" style={{ color }}>{value}</div>
+      <div className="ha-statlbl">{label}</div>
+      {sub && <div className="ha-statlbl" style={{ fontSize: 11.5, opacity: 0.8 }}>{sub}</div>}
+    </div>
+  );
+};
 
 /**
  * Sortable table header: clicking sorts by `col` ascending, or flips the direction when
