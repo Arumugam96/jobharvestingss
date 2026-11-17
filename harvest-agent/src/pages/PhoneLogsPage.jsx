@@ -118,6 +118,17 @@ function OutcomeCell({ status, outcome, details }) {
   );
 }
 
+/** The call's comments (remarks), cut to one line with an ellipsis; hovering shows the
+ * full text. Display only: exports read row.remarks directly, untruncated. */
+function CommentCell({ text }) {
+  if (!text) return <span style={{ color: "#94A3B8" }}>—</span>;
+  return (
+    <div title={text} style={{ maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: C.textSoft, cursor: "default" }}>
+      {text}
+    </div>
+  );
+}
+
 /** The reminder's state chip with its one time underneath. */
 function ReminderCell({ reminder }) {
   const r = REMINDERS[reminder?.state];
@@ -540,10 +551,10 @@ export default function PhoneLogsPage() {
       const who = assignee && logParams.assignee ? `-${String(assignee.name || assignee.email || assignee.id).toLowerCase().replace(/[^a-z0-9]+/g, "-")}` : "";
       return {
         name: `phone-logs-${filters.status || "all"}${who}-${days}-${today()}`, sheet: "Phone logs",
-        head: ["Status", "Call outcome", "Outcome details", "Job title", "Company", "Phone", "POC", "Called by",
-          "Assigned to", "Remarks", "Called at", "Reminder", "Reminder time"],
+        head: ["Status", "Call outcome", "Outcome details", "Comments", "Job title", "Company", "Phone", "POC", "Called by",
+          "Assigned to", "Called at", "Reminder", "Reminder time"],
         rows: all.map((r) => [statusLabel(r.status), outcomeInfo(r.status, r.outcome)?.label || "", outcomeDetailText(r.details),
-          r.job_title, r.company, r.phone, r.contact_name, r.owner?.name || r.called_by?.name, r.assigned_to?.name || "", r.remarks,
+          r.remarks || "", r.job_title, r.company, r.phone, r.contact_name, r.owner?.name || r.called_by?.name, r.assigned_to?.name || "",
           fmtTime(r.called_at), REMINDERS[r.reminder?.state]?.label || "No reminder",
           r.reminder?.at ? fmtTime(r.reminder.at) : ""]),
       };
@@ -629,9 +640,9 @@ export default function PhoneLogsPage() {
                       <PlainHeader label="Phone" width={140} />
                       <PlainHeader label="POC" width={130} />
                       <PlainHeader label="Call outcome" width={240} />
+                      <PlainHeader label="Comments" width={220} />
                       <PlainHeader label="Reminder" width={170} />
                       <PlainHeader label="Assigned to" width={140} />
-                      <PlainHeader label="Remarks" />
                       <PlainHeader label="Date" width={160} />
                     </tr>
                   </thead>
@@ -645,11 +656,9 @@ export default function PhoneLogsPage() {
                         <td className="ha-td" style={{ whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>{row.phone}</td>
                         <td className="ha-td" style={{ color: C.text }}>{row.contact_name || "—"}</td>
                         <td className="ha-td"><OutcomeCell status={row.status} outcome={row.outcome} details={row.details} /></td>
+                        <td className="ha-td"><CommentCell text={row.remarks} /></td>
                         <td className="ha-td"><ReminderCell reminder={row.reminder} /></td>
                         <td className="ha-td"><AssigneePill user={row.assigned_to} /></td>
-                        <td className="ha-td" style={{ color: C.textSoft, maxWidth: 260 }}>
-                          <div title={row.remarks} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.remarks || "—"}</div>
-                        </td>
                         <td className="ha-td" style={{ whiteSpace: "nowrap", color: C.textSoft }}>
                           {fmtTime(row.called_at)}
                           {!ownScope && (row.owner?.name || row.called_by?.name) && (
