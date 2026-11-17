@@ -37,6 +37,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import Response
 
 from app.core.company_size import band_to_tier
+from app.core.contact_keys import unique_contact_counts
 from app.core.dependencies import get_current_user
 from app.core.tenant_context import get_current_tenant_id, is_all_access
 from app.models.auth import AuthenticatedUser
@@ -522,6 +523,16 @@ async def job_facets(
                 "with_company_email": _count("email_company"),
                 "with_phone":         _count("mobile"),
                 "with_linkedin":      _count("linkedin"),
+                # Distinct contacts (a shared recruiter counts once) — same keys as the DB path.
+                **unique_contact_counts(
+                    {"emails": [j.get(k) for k in ("email_scraped", "email_recruiter",
+                                                   "email_id", "company_contact_email")],
+                     "phones": [j.get(k) for k in ("phone_scraped", "phone_recruiter",
+                                                   "contact_number", "company_contact_phone")],
+                     "linkedin": j.get("linkedin_profile_url"),
+                     "poc_name": c["poc_name"], "company": j.get("company")}
+                    for j, c in zip(jobs, contacts)
+                ),
             },
         }
 

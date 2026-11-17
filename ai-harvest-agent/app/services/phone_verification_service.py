@@ -49,8 +49,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from app.config import get_settings
+from app.core.contact_keys import phone_key
 from app.core.tenant_context import apply_tenant, get_current_tenant_id
-from app.models.auth import AuthenticatedUser
+from app.models.auth import BUSINESS_LEAD_ROLE, AuthenticatedUser, UserORM
 from app.models.harvest_run import ScrapedJobORM
 from app.models.phone_call_log import PhoneCallLogORM
 from app.models.phone_contact_flag import PhoneContactFlagORM
@@ -223,6 +224,7 @@ def call_view(row: PhoneCallLogORM, *, proof_src: bool = True) -> dict[str, Any]
             "name": row.called_by_name or display_name_from_email(row.called_by_email),
         },
         "called_at": _iso(row.created_at),
+        "owner_id": row.assigned_to_user_id,
     }
 
 
@@ -300,6 +302,11 @@ async def log_call(
 
     now = _now()
     await db.execute(_close_open_followups_stmt(job.id, phone, now))
+    # Logging a status claims the record for the caller, in this same transaction:
+    # the call row's owner is the authenticated user (never a client-supplied id),
+    # and a still-unassigned job is self-assigned to them.
+    owner_id = await _owner_id(db, user)
+    await _claim_job_if_unassigned(db, job, user, now)
 
     due = None
     if reminder_at is not None:
@@ -325,6 +332,7 @@ async def log_call(
         follow_up_due_at=due,
         called_by_email=user.email or "",
         called_by_name=display_name_from_email(user.email or ""),
+        assigned_to_user_id=owner_id,
         created_at=now,
         updated_at=now,
     )
@@ -335,6 +343,43 @@ async def log_call(
     await db.commit()
     await db.refresh(row)
     return row
+
+
+async def _owner_id(db: AsyncSession, user: AuthenticatedUser) -> str | None:
+    """users.id to own a new call row: the caller's id when they have a users row
+    (the auth-off dev user doesn't — its row stays unowned rather than break the FK)."""
+    if not user.id:
+        return None
+    return (await db.execute(
+        select(UserORM.id).where(UserORM.id == user.id)
+    )).scalar_one_or_none()
+
+
+async def _claim_job_if_unassigned(
+    db: AsyncSession, job: ScrapedJobORM, user: AuthenticatedUser, now: datetime,
+) -> None:
+    """Self-assign `job` to the caller when nobody holds it (same fields as
+    job_assignment_service.assign_job, without its commit). A conditional UPDATE, so a
+    teammate who claimed it a moment earlier keeps it; a job that is already assigned
+    is never reassigned."""
+    if not user.email:
+        return
+    result = await db.execute(apply_tenant(
+        update(ScrapedJobORM)
+        .where(ScrapedJobORM.id == job.id,
+               or_(ScrapedJobORM.assigned_to_email.is_(None),
+                   ScrapedJobORM.assigned_to_email == ""))
+        .values(assigned_to_email=user.email,
+                assigned_to_name=display_name_from_email(user.email),
+                assigned_at=now, assignment_note="")
+        .execution_options(synchronize_session=False),
+        ScrapedJobORM.tenant_id,
+    ))
+    if result.rowcount:
+        job.assigned_to_email = user.email
+        job.assigned_to_name = display_name_from_email(user.email)
+        job.assigned_at = now
+        job.assignment_note = ""
 
 
 # ── Outcome side effects ───────────────────────────────────────────────────────
@@ -554,11 +599,9 @@ async def history(db: AsyncSession, job_id: str) -> list[dict[str, Any]]:
 LOG_ASSIGNMENTS = ("assigned", "unassigned")
 
 
-def _phone_dedup_key(raw: str | None) -> str:
-    """Trailing 10 digits of a number (all its digits when shorter), so "+91 98400 12345"
-    and "9840012345" count once. Same rule as phone_insights_service._norm_phone."""
-    digits = re.sub(r"\D", "", raw or "")
-    return digits[-10:] if len(digits) >= 10 else digits
+# Trailing 10 digits, so "+91 98400 12345" and "9840012345" are one contact — the
+# shared unique-contact key (app.core.contact_keys), also used by the jobs pages.
+_phone_dedup_key = phone_key
 
 
 PHONE_SOURCES = ("job", "company", "recruiter")
@@ -573,9 +616,10 @@ def _filled(col):
 async def phone_inventory(db: AsyncSession) -> list[dict[str, Any]]:
     """Every phone number the tenant holds, newest first: each scraped job's poster
     number ("job") and company HR contact number ("company"), and each recruiter's
-    number ("recruiter"). Never deduplicated: every filled phone field is an entry,
-    so a number on both a job and its recruiter counts twice. Only values with no
-    digits ("n/a") are skipped."""
+    number ("recruiter"). Not deduplicated here: every filled phone field is an
+    entry, so a number on both a job and its recruiter is two entries —
+    unique_phones() groups them into contacts. Only values with no digits ("n/a")
+    are skipped."""
     J, R = ScrapedJobORM, RecruiterORM
     jobs = (await db.execute(apply_tenant(
         select(J.id, J.job_title, J.company, J.contact_number, J.company_contact_phone,
@@ -610,28 +654,57 @@ async def phone_inventory(db: AsyncSession) -> list[dict[str, Any]]:
     return entries
 
 
+def unique_phones(entries: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Group phone_inventory entries into contacts — one group per phone_key — in
+    the entries' order (newest first), each group's own entries newest first."""
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for e in entries:
+        groups.setdefault(phone_key(e["phone"]), []).append(e)
+    return list(groups.values())
+
+
+async def count_unique_phones(db: AsyncSession) -> int:
+    """The Phone logs "Total contacts" figure: distinct numbers the tenant holds."""
+    return len({phone_key(e["phone"]) for e in await phone_inventory(db)})
+
+
+def _entry_matches(e: dict[str, Any], term: str, digits: str) -> bool:
+    """Free-text match on an inventory entry's number, name, company or job title."""
+    return (any(term in (e[k] or "").lower() for k in ("phone", "name", "company", "job_title"))
+            or bool(digits and digits in re.sub(r"\D", "", e["phone"])))
+
+
 async def list_phones(
     db: AsyncSession, *, source: str = "", q: str = "", page: int = 1, page_size: int = 50,
 ) -> dict[str, Any]:
-    """The Phone logs "Total phones" drill-down: phone_inventory filtered by `source`
-    and free-text `q` (number, name, company, job title), paginated. `by_source`
-    counts ignore both filters."""
-    entries = await phone_inventory(db)
+    """The Phone logs "Total contacts" drill-down: one row per unique number
+    (phone_key), newest first. A number is shown by its newest entry (its newest
+    `source` entry when that filter is set) plus `occurrences` (how many job /
+    company / recruiter fields hold it), `jobs` (distinct jobs) and `sources`.
+    `source` keeps numbers held by that source; `q` matches any entry's number,
+    name, company or job title. `by_source` counts unique numbers per source and
+    ignores both filters — a number held by two sources counts under each."""
+    groups = unique_phones(await phone_inventory(db))
     by_source = dict.fromkeys(PHONE_SOURCES, 0)
-    for e in entries:
-        by_source[e["source"]] += 1
-    if source in PHONE_SOURCES:
-        entries = [e for e in entries if e["source"] == source]
+    for g in groups:
+        for s in {e["source"] for e in g}:
+            by_source[s] += 1
+    want = source if source in PHONE_SOURCES else ""
     term = (q or "").strip().lower()
-    if term:
-        digits = re.sub(r"\D", "", term)
-        entries = [e for e in entries if any(term in (e[k] or "").lower() for k in
-                                             ("phone", "name", "company", "job_title"))
-                   or (digits and digits in re.sub(r"\D", "", e["phone"]))]
+    digits = re.sub(r"\D", "", term)
+    rows = []
+    for g in groups:
+        shown = [e for e in g if e["source"] == want] if want else g
+        if not shown or (term and not any(_entry_matches(e, term, digits) for e in g)):
+            continue
+        rows.append({**shown[0],
+                     "occurrences": len(g),
+                     "jobs": len({e["job_id"] for e in g if e["job_id"]}),
+                     "sources": [s for s in PHONE_SOURCES if any(e["source"] == s for e in g)]})
     page, page_size = max(1, int(page)), max(1, int(page_size))
     start = (page - 1) * page_size
-    items = [{**e, "added_at": _iso(e["added_at"])} for e in entries[start:start + page_size]]
-    return {"items": items, "total": len(entries), "page": page, "page_size": page_size,
+    items = [{**r, "added_at": _iso(r["added_at"])} for r in rows[start:start + page_size]]
+    return {"items": items, "total": len(rows), "page": page, "page_size": page_size,
             "by_source": by_source}
 
 
@@ -640,10 +713,14 @@ def _is_assigned():
     return _filled(ScrapedJobORM.assigned_to_email)
 
 
-async def count_assigned_jobs(db: AsyncSession) -> int:
-    """Jobs currently self-assigned in the tenant, whether or not anyone has called them."""
+async def count_assigned_jobs(db: AsyncSession, email: str | None = None) -> int:
+    """Jobs currently self-assigned in the tenant, whether or not anyone has called them
+    (only those assigned to `email` when given — a business lead's own count)."""
+    conds = [_is_assigned()]
+    if email is not None:
+        conds.append(func.lower(ScrapedJobORM.assigned_to_email) == email.lower())
     stmt = apply_tenant(
-        select(func.count(ScrapedJobORM.id)).where(_is_assigned()), ScrapedJobORM.tenant_id,
+        select(func.count(ScrapedJobORM.id)).where(*conds), ScrapedJobORM.tenant_id,
     )
     return int((await db.execute(stmt)).scalar_one() or 0)
 
@@ -760,6 +837,8 @@ async def list_logs(
     since: datetime | None = None,
     page: int = 1,
     page_size: int = 50,
+    owner_id: str | None = None,
+    own_email: str | None = None,
 ) -> dict[str, Any]:
     """Every non-cleared call in the tenant, newest first, with its job's title,
     company and assignee, its outcome and its reminder (the admin Phone logs page).
@@ -768,11 +847,18 @@ async def list_logs(
     answered / unanswered split stays visible.
     `summary.assigned_jobs` (every job currently self-assigned, called or not),
     `called_assigned_jobs` (those with a call matching the filters) and
-    `total_phones` (phone_inventory's size) describe the workspace."""
+    `total_phones` (distinct numbers held — count_unique_phones) describe the workspace.
+
+    `owner_id` keeps only the calls owned by that user (assigned_to_user_id) — the
+    admin's assignee filter, or the forced scope of a business lead. `own_email`
+    marks the business-lead view: `assigned_jobs` then counts only their own
+    self-assigned jobs and `total_phones` (a workspace-wide figure) is None."""
     now = _now()
     is_assigned = and_(ScrapedJobORM.assigned_to_email.is_not(None),
                        ScrapedJobORM.assigned_to_email != "")
     conds: list = [PhoneCallLogORM.cleared_at.is_(None)]
+    if owner_id is not None:
+        conds.append(PhoneCallLogORM.assigned_to_user_id == owner_id)
     if since is not None:
         conds.append(PhoneCallLogORM.created_at >= since)
     if assignment == "assigned":
@@ -795,6 +881,7 @@ async def list_logs(
         return apply_tenant(
             stmt.select_from(PhoneCallLogORM)
             .outerjoin(ScrapedJobORM, ScrapedJobORM.id == PhoneCallLogORM.job_id)
+            .outerjoin(UserORM, UserORM.id == PhoneCallLogORM.assigned_to_user_id)
             .where(*conds, *extra),
             PhoneCallLogORM.tenant_id,
         )
@@ -805,8 +892,8 @@ async def list_logs(
     called_assigned_jobs = (await db.execute(scoped(
         select(func.count(func.distinct(PhoneCallLogORM.job_id))), is_assigned,
     ))).scalar_one()
-    assigned_jobs = await count_assigned_jobs(db)
-    total_phones = len(await phone_inventory(db))
+    assigned_jobs = await count_assigned_jobs(db, own_email)
+    total_phones = None if own_email is not None else await count_unique_phones(db)
     answered, unanswered = int(by_status.get("answered", 0)), int(by_status.get("unanswered", 0))
 
     row_conds = [PhoneCallLogORM.call_status == status] if status in CALL_STATUSES else []
@@ -823,7 +910,8 @@ async def list_logs(
                L.follow_up_due_at, L.follow_up_done_at,
                _closed_by_call().label("closed_by_call"),
                ScrapedJobORM.job_title, ScrapedJobORM.company,
-               ScrapedJobORM.assigned_to_email, ScrapedJobORM.assigned_to_name),
+               ScrapedJobORM.assigned_to_email, ScrapedJobORM.assigned_to_name,
+               L.assigned_to_user_id, UserORM.email.label("owner_email")),
         *row_conds,
     ).order_by(L.created_at.desc(), L.id.desc())
      .offset((page - 1) * page_size).limit(page_size))).all()
@@ -847,6 +935,9 @@ async def list_logs(
         "assigned_to": ({"email": r.assigned_to_email,
                          "name": r.assigned_to_name or display_name_from_email(r.assigned_to_email)}
                         if r.assigned_to_email else None),
+        "owner": ({"id": r.assigned_to_user_id, "email": r.owner_email,
+                   "name": display_name_from_email(r.owner_email)}
+                  if r.assigned_to_user_id and r.owner_email else None),
     } for r in rows]
     return {
         "items": items,
@@ -857,7 +948,28 @@ async def list_logs(
                     "unanswered": unanswered, "assigned_jobs": assigned_jobs,
                     "called_assigned_jobs": int(called_assigned_jobs or 0),
                     "total_phones": total_phones},
+        "scope": "own" if own_email is not None else "all",
     }
+
+
+async def list_assignees(db: AsyncSession, q: str = "", limit: int = 200) -> list[dict[str, Any]]:
+    """Business leads the admin's Phone logs Assignee filter offers: active users with
+    the business_lead role in the tenant scope, matching `q` on email / derived name,
+    sorted by name. Only id, name and email are exposed."""
+    stmt = apply_tenant(
+        select(UserORM.id, UserORM.email)
+        .where(UserORM.role == BUSINESS_LEAD_ROLE, UserORM.is_active.is_(True)),
+        UserORM.tenant_id,
+    )
+    term = (q or "").strip().lower()
+    out = []
+    for uid, email in (await db.execute(stmt)).all():
+        name = display_name_from_email(email)
+        if term and term not in (email or "").lower() and term not in name.lower():
+            continue
+        out.append({"id": uid, "name": name, "email": email})
+    out.sort(key=lambda a: (a["name"].lower(), a["email"]))
+    return out[:limit]
 
 
 EXPORT_MAX_ROWS = 50_000

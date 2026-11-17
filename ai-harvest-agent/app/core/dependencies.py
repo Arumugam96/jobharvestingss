@@ -199,6 +199,18 @@ async def require_admin(
     return current_user
 
 
+async def require_phone_logs_access(
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> AuthenticatedUser:
+    """Like get_current_user, but 403 unless the user may open the Phone logs page:
+    admins (every log) or business leads (only the logs they own — the route scopes
+    them; see phone_verification_service.logs_owner_scope)."""
+    if not (current_user.is_admin or current_user.is_business_lead):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Admins and business leads only")
+    return current_user
+
+
 async def get_current_tenant(
     current_user: AuthenticatedUser = Depends(get_current_user),
 ) -> str:

@@ -122,12 +122,20 @@ export function logout() {
   return request("/auth/logout", { method: "POST" });
 }
 
-/** GET /auth/users — users and their roles (admins only). Returns { items: [{id, email, tenant_id, role, is_active, created_at}] }. */
+/** GET /auth/users — users and their roles (admins only). Returns { items: [{id, email, tenant_id, role, role_label, is_active, created_at}] }. */
 export function listUsers() {
   return request("/auth/users");
 }
 
-/** PATCH /auth/users/{id}/role — set a user's role, "user" | "admin" (admins only). */
+/** GET /auth/roles — every assignable role (admins only).
+ * Returns { items: [{id, name, label, description}] }; `name` is the key sent to setUserRole. */
+export function getRoles() {
+  return request("/auth/roles");
+}
+
+/** PATCH /auth/users/{id}/role — set a user's role to any GET /auth/roles `name`
+ * ("user" | "admin" | "business_lead"; admins only). Returns the updated user (same shape
+ * as a listUsers item). 400 for your own role, 404 unknown user, 422 unknown role. */
 export function setUserRole(userId, role) {
   return request(`/auth/users/${encodeURIComponent(userId)}/role`, {
     method: "PATCH",
@@ -247,14 +255,24 @@ export function getPhoneCallHistory(jobId) {
   return request(`/jobs/${encodeURIComponent(jobId)}/phone-verification/history`);
 }
 
-/** GET /phone-verifications/logs — every logged call in the tenant (admins only).
- * params: { status, assignment, reminder, days, q, page, page_size }
+/** GET /phone-verifications/logs — logged calls (admins and business leads). Admins see
+ * every call in the tenant; a business lead only their own (the backend forces it).
+ * params: { status, assignment, reminder, days, q, page, page_size, assignee }
+ * (assignee: a user id — admin only; never send it for a business lead, it 403s).
  * (reminder: none | scheduled | delivered | dismissed | called_again | cancelled).
- * Returns { items: [{..., outcome, details, called_by, reminder: {state, at, due_at, closed_at}}],
- * total, page, page_size, summary: {total, answered, unanswered, assigned_jobs,
- * called_assigned_jobs, total_phones} }. */
+ * Returns { items: [{..., outcome, details, called_by, owner: {id, name, email}|null,
+ * reminder: {state, at, due_at, closed_at}}], total, page, page_size, scope: "all"|"own",
+ * summary: {total, answered, unanswered, assigned_jobs, called_assigned_jobs, total_phones} }
+ * (for scope "own", total_phones is null and assigned_jobs counts only the caller's jobs). */
 export function getPhoneLogs(params = {}) {
   return request(`/phone-verifications/logs${qs(params)}`);
+}
+
+/** GET /phone-verifications/assignees?q=… — business leads to filter Phone logs by
+ * (admins only), sorted by name; `q` searches name/email server-side.
+ * Returns { items: [{id, name, email}] }. */
+export function getPhoneLogAssignees(q = "") {
+  return request(`/phone-verifications/assignees${qs({ q })}`);
 }
 
 /** GET /phone-verifications/logs/phones — every phone number held (admins only).
@@ -272,7 +290,8 @@ export function getAssignedJobs(params = {}) {
   return request(`/phone-verifications/logs/assigned-jobs${qs(params)}`);
 }
 
-/** POST /phone-verifications/logs/xlsx — turn export rows into an .xlsx file (admins only).
+/** POST /phone-verifications/logs/xlsx — turn export rows into an .xlsx file (admins and
+ * business leads).
  * body: { sheet, filename, head: [title], rows: [[cell]] }. Resolves to a Blob. */
 export async function exportPhoneLogsXlsx(body) {
   const res = await fetch(`${API_BASE}/phone-verifications/logs/xlsx`, {

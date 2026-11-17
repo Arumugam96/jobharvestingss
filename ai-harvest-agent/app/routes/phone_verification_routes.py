@@ -8,10 +8,12 @@ DELETE /jobs/{id}/phone-verification?phone=   — "Clear status" for that number
 GET    /jobs/{id}/phone-verification/history  — every non-cleared call, newest first
 GET    /phone-verifications/latest?job_ids=   — newest call per visible job (badges)
                                                + flags of those numbers
-GET    /phone-verifications/logs              — every call in the tenant (admins only)
+GET    /phone-verifications/logs              — every call in the tenant (admins; filter by
+                                               assignee) or a business lead's own calls
+GET    /phone-verifications/assignees         — business leads for the assignee filter (admins)
 GET    /phone-verifications/logs/phones       — every phone number held (admins only)
 GET    /phone-verifications/logs/assigned-jobs — every self-assigned job (admins only)
-POST   /phone-verifications/logs/xlsx         — the page's export rows as .xlsx (admins only)
+POST   /phone-verifications/logs/xlsx         — the page's export rows as .xlsx (admins + leads)
 GET    /phone-verifications/flags?phones=     — invalid / do-not-call / warm per number
 GET    /phone-verifications/follow-ups        — the caller's due follow-up reminders
 POST   /phone-verifications/follow-ups/{id}/done — dismiss one reminder
@@ -22,6 +24,11 @@ when the job is assigned to someone else); /latest omits such jobs except for
 admins, who get read-only visibility of them. Call views
 are documented on phone_verification_service.call_view, number flags on
 phone_verification_service.flag_view (keyed by the number as given).
+
+Ownership: logging a call stamps the row's owner (assigned_to_user_id) with the
+authenticated caller and self-assigns a still-unassigned job to them — the client
+never supplies an assignee. Business leads read only the logs they own; the scope
+is applied in SQL here (logs_owner_scope), not in the UI.
 """
 from __future__ import annotations
 
@@ -35,7 +42,12 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.dependencies import get_current_user, get_db_session, require_admin
+from app.core.dependencies import (
+    get_current_user,
+    get_db_session,
+    require_admin,
+    require_phone_logs_access,
+)
 from app.core.tenant_context import apply_tenant
 from app.models.auth import AuthenticatedUser
 from app.models.harvest_run import ScrapedJobORM
@@ -220,7 +232,25 @@ async def latest_phone_verifications(
     return {"items": items, "flags": flags}
 
 
-@router.get("/phone-verifications/logs", summary="Every logged call in the tenant (admins only)")
+def logs_owner_scope(user: AuthenticatedUser, assignee: str) -> tuple[str | None, str | None]:
+    """(owner_id, own_email) for list_logs from the caller's role.
+
+    Admins see everything, narrowed to one owner when `assignee` is given. Business
+    leads are always pinned to their own rows; asking for anyone else's is a 403, so a
+    tampered URL can't widen the scope.
+    """
+    # A direct (non-HTTP) call gets the Query() default object, not a str.
+    assignee = assignee.strip() if isinstance(assignee, str) else ""
+    if user.is_admin:
+        return (assignee or None), None
+    if assignee and assignee != user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="You can only view your own phone logs.")
+    return user.id, (user.email or "")
+
+
+@router.get("/phone-verifications/logs",
+            summary="Logged calls: all (admins) or your own (business leads)")
 async def phone_call_logs(
     status_filter: str = Query(default="", alias="status", pattern="^(|answered|unanswered)$"),
     assignment: str = Query(default="", pattern="^(|assigned|unassigned)$"),
@@ -228,24 +258,43 @@ async def phone_call_logs(
         default="", pattern="^(|none|scheduled|delivered|dismissed|called_again|cancelled)$"),
     days: int = Query(default=0, ge=0, le=3650, description="Only calls from the last N days; 0 = all."),
     q: str = Query(default="", max_length=200),
+    assignee: str = Query(default="", max_length=36,
+                          description="Owner user id (admins only; a business lead is "
+                                      "always scoped to their own calls)."),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=200),
-    current_user: AuthenticatedUser = Depends(require_admin),
+    current_user: AuthenticatedUser = Depends(require_phone_logs_access),
     db: AsyncSession = Depends(get_db_session),
 ) -> dict:
-    """Admin Phone logs page: every non-cleared call in the tenant, newest first, paginated.
+    """Phone logs page: non-cleared calls, newest first, paginated.
 
-    Filters: `status` (answered/unanswered), `assignment` (assigned/unassigned), `reminder`
-    (a REMINDER_STATES value), `days` (0 = all time) and free-text `q`. Requires the admin role.
+    Admins get every call in the tenant (optionally only those owned by `assignee`);
+    business leads get only the calls they own (`scope: "own"`) — 403 if they pass another
+    user's `assignee`. Filters: `status` (answered/unanswered), `assignment`
+    (assigned/unassigned), `reminder` (a REMINDER_STATES value), `days` (0 = all time) and
+    free-text `q`. Other roles get 403.
     """
+    owner_id, own_email = logs_owner_scope(current_user, assignee)
     since = datetime.now(timezone.utc) - timedelta(days=days) if days else None
     return await pvs.list_logs(db, status=status_filter, assignment=assignment,
                                reminder=reminder, q=q, since=since, page=page,
-                               page_size=page_size)
+                               page_size=page_size, owner_id=owner_id, own_email=own_email)
+
+
+@router.get("/phone-verifications/assignees",
+            summary="Business leads for the Phone logs assignee filter (admins only)")
+async def phone_log_assignees(
+    q: str = Query(default="", max_length=200, description="Search by name or email."),
+    current_user: AuthenticatedUser = Depends(require_admin),
+    db: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """`{"items": [{id, name, email}]}` — active business-lead users in the caller's tenant
+    scope, sorted by name. Admins only."""
+    return {"items": await pvs.list_assignees(db, q)}
 
 
 @router.get("/phone-verifications/logs/phones",
-            summary="Every phone number in the tenant (admins only)")
+            summary="Every unique phone number in the tenant (admins only)")
 async def phone_inventory_list(
     source: str = Query(default="", pattern="^(|job|company|recruiter)$"),
     q: str = Query(default="", max_length=200),
@@ -254,8 +303,9 @@ async def phone_inventory_list(
     current_user: AuthenticatedUser = Depends(require_admin),
     db: AsyncSession = Depends(get_db_session),
 ) -> dict:
-    """The Phone logs "Total phones" drill-down: job poster, company HR and recruiter
-    numbers (see phone_verification_service.phone_inventory), paginated. Admins only."""
+    """The Phone logs "Total contacts" drill-down: one row per unique number across job
+    poster, company HR and recruiter fields (see phone_verification_service.list_phones),
+    paginated. Admins only."""
     return await pvs.list_phones(db, source=source, q=q, page=page, page_size=page_size)
 
 
@@ -281,15 +331,16 @@ class XlsxExportRequest(BaseModel):
 
 
 @router.post("/phone-verifications/logs/xlsx",
-             summary="Phone logs list as an Excel file (admins only)",
+             summary="Phone logs list as an Excel file (admins and business leads)",
              response_class=Response,
              responses={200: {"description": "Excel file download"}})
 async def phone_logs_xlsx(
     body: XlsxExportRequest,
-    current_user: AuthenticatedUser = Depends(require_admin),
+    current_user: AuthenticatedUser = Depends(require_phone_logs_access),
 ) -> Response:
     """The Phone logs page's Excel export: the page sends the rows it would put in its
-    CSV (the on-screen list, every page, with its filters) and gets them back as .xlsx."""
+    CSV (the on-screen list, every page, with its filters) and gets them back as .xlsx.
+    It only re-formats rows the caller sent, so a business lead can export their own."""
     data = pvs.rows_to_xlsx(body.sheet, body.head, body.rows)
     name = re.sub(r"[^A-Za-z0-9._-]", "-", body.filename) or "phone-logs.xlsx"
     if not name.lower().endswith(".xlsx"):

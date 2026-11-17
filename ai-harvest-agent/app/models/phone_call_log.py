@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Index, Integer, String, Text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.harvest import Base  # shared metadata — one create_all() for all tables
@@ -64,6 +64,13 @@ class PhoneCallLogORM(Base):
 
     called_by_email: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     called_by_name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    # users.id of the record's owner — always the authenticated caller, set server-side
+    # in log_call (never taken from the request). Business leads see only their own
+    # rows on the Phone logs page; admins filter by it. NULL for the auth-off dev user
+    # and for legacy rows whose caller email matched no user.
+    assigned_to_user_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
 
     # "Clear status" soft-delete.
     cleared_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

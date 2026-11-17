@@ -171,7 +171,7 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
       const { rows } = await fetchAllJobs(filterParams);
       // Contact columns come from jobContact() — the same values the table cells
       // show, incl. the Company-tagged contact, for every source.
-      const header = ["Job title", "Company", "Source", "Filter status", "Filter reason", "POC", "POC type", "Posted date", "Email", "Email source", "Mobile", "Mobile source", "WhatsApp", "LinkedIn", "Job description"];
+      const header = ["Job title", "Company", "Source", "Filter status", "Filter reason", "POC", "POC type", "Posted date", "Email", "Email source", "Mobile", "Mobile source", "Contact", "LinkedIn", "Job description"];
       const lines = rows.map((j) => {
         const c = jobContact(j);
         return [
@@ -289,9 +289,10 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
 
         <div style={{ display: "flex", justifyContent: "space-between", padding: "0 4px", fontSize: 12, color: C.textSoft }}>
           <span>Showing {pageJobs.length} of {pageTotal} matching posting{pageTotal === 1 ? "" : "s"} · {stats.qualified || 0} qualified · {stats.flagged || 0} flagged</span>
-          {/* with_email/with_phone include the Company-tagged contact (GET /jobs/facets). */}
-          <span title={`Email: ${stats.with_poster_email || 0} job/recruiter · ${stats.with_company_email || 0} company contact`}>
-            {stats.with_email || 0} email · {stats.with_phone || 0} WhatsApp · {stats.with_linkedin || 0} LinkedIn
+          {/* unique_* = distinct contacts (a recruiter on many jobs counts once);
+              with_* = jobs that have the channel (GET /jobs/facets). */}
+          <span title={`Unique contacts. Jobs with: ${stats.with_email || 0} email (${stats.with_poster_email || 0} job/recruiter · ${stats.with_company_email || 0} company contact) · ${stats.with_phone || 0} phone · ${stats.with_linkedin || 0} LinkedIn`}>
+            {stats.unique_emails ?? stats.with_email ?? 0} email · {stats.unique_phones ?? stats.with_phone ?? 0} Contacts · {stats.unique_linkedin ?? stats.with_linkedin ?? 0} LinkedIn
           </span>
         </div>
       </div>

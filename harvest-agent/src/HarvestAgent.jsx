@@ -43,6 +43,14 @@ function AdminGate({ children }) {
   return children;
 }
 
+/* Phone logs: admins see every call, Business Leads only their own
+ * (the backend scopes the rows); everyone else is redirected to /jobs. */
+function PhoneLogsGate({ children }) {
+  const { canViewPhoneLogs } = useTenant();
+  if (!canViewPhoneLogs) return <Navigate to="/jobs" replace />;
+  return children;
+}
+
 // Map the current pathname to the Sidebar's active nav key.
 function activeKeyFromPath(pathname) {
   if (pathname.startsWith("/rules")) return "rules";
@@ -293,7 +301,7 @@ export default function HarvestAgent({ onLogout }) {
           {/* Demand Search — landing, batch (?batch=) and job (?batch=&job=) views on
               one route: /demand/... itself is proxied to the API by nginx. */}
           <Route path="/demand" element={<FeatureGate feature="demand"><DemandSearchPage /></FeatureGate>} />
-          <Route path="/phone-logs" element={<AdminGate><PhoneLogsPage /></AdminGate>} />
+          <Route path="/phone-logs" element={<PhoneLogsGate><PhoneLogsPage /></PhoneLogsGate>} />
           <Route path="/user-roles" element={<AdminGate><UserRolesPage /></AdminGate>} />
           <Route path="*" element={<NotFound />} />
         </Route>

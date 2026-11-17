@@ -175,6 +175,16 @@ export default function JobsTable({
     const view = await logPhoneCall(modal.job.id, { ...call, phone_source: modal.phoneSource, contact_name: modal.pocName });
     setPhoneVerify((prev) => ({ ...prev, [modal.job.id]: callFromView(view) }));
     if (view?.flags) setPhoneFlags((prev) => ({ ...prev, [modal.phone]: view.flags }));
+    // Logging a call on an unassigned job self-assigns it to the caller server-side —
+    // show that chip now (use the server's assigned_to when it sends one).
+    const me = view?.assigned_to || (view?.called_by?.email
+      ? { email: view.called_by.email, name: view.called_by.name, assigned_at: view.called_at } : null);
+    if (me) {
+      setAssignOverrides((prev) => {
+        const current = modal.job.id in prev ? prev[modal.job.id] : modal.job.assignedTo;
+        return current ? prev : { ...prev, [modal.job.id]: me };
+      });
+    }
     // Language barrier + "Reassign recruiter" released the caller's lock server-side.
     if (call.outcome === "language_barrier" && call.details?.reassign) {
       setAssignOverrides((prev) => ({ ...prev, [modal.job.id]: null }));

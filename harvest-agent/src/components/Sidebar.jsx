@@ -88,7 +88,7 @@ let committedThisLoad = false;
  * @param {boolean} [props.railCollapsed] Keep the rail collapsed (peek only) on this page.
  */
 export default function Sidebar({ activePage, onNavigate = () => {}, jobsCount, runsCount, onLogout, railCollapsed = false }) {
-  const { tenant, theme, isClient, hasFeature, isAdmin, authBypass } = useTenant();
+  const { tenant, theme, isClient, hasFeature, isAdmin, canViewPhoneLogs, authBypass } = useTenant();
 
   // `committed` = the "keep the rail open" choice. Turned ON when the user clicks a
   // nav option (or the open button), OFF by the close button — so navigating keeps
@@ -190,11 +190,13 @@ export default function Sidebar({ activePage, onNavigate = () => {}, jobsCount, 
               <NavItem glyph={Send} active={activePage === "outreach"} onClick={() => go("outreach")}>Mail logs</NavItem>
             )}
           </div>
-          {isAdmin && (
+          {canViewPhoneLogs && (
             <div>
-              <div className="ha-navhead"><span>Admin</span></div>
+              <div className="ha-navhead"><span>{isAdmin ? "Admin" : "Business"}</span></div>
               <NavItem glyph={Phone} active={activePage === "phone-logs"} onClick={() => go("phone-logs")}>Phone logs</NavItem>
-              <NavItem glyph={ShieldCheck} active={activePage === "user-roles"} onClick={() => go("user-roles")}>User roles</NavItem>
+              {isAdmin && (
+                <NavItem glyph={ShieldCheck} active={activePage === "user-roles"} onClick={() => go("user-roles")}>User roles</NavItem>
+              )}
             </div>
           )}
           {showReports && (

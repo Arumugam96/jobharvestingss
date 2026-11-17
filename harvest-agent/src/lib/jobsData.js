@@ -113,6 +113,53 @@ export function jobContact(j) {
   return (j && j.contact) || deriveJobContact(j || {});
 }
 
+/* ── Unique contacts ───────────────────────────────────────────────────── */
+// Several jobs often share one contact (a recruiter with many postings), so the
+// header stats count distinct contacts, not jobs. Same keys as the backend's
+// app/core/contact_keys.py, so the run view, the Harvested Jobs footer and the
+// Phone logs "Total contacts" card all agree.
+
+/** Trailing 10 digits of a number (all digits when shorter); "" when it has none. */
+export const phoneKey = (v) => {
+  const d = clean(v).replace(/\D/g, "");
+  return d.length >= 10 ? d.slice(-10) : d;
+};
+const emailKey = (v) => clean(v).toLowerCase();
+const linkedinKey = (v) => {
+  const url = clean(v).toLowerCase().split("#")[0].split("?")[0].replace(/\/+$/, "").replace(/^https?:\/\//, "");
+  return url.startsWith("www.") ? url.slice(4) : url;
+};
+const pocKey = (name, company) => {
+  const n = clean(name).split(/\s+/).join(" ").toLowerCase();
+  return n ? `${n}|${clean(company === "—" ? "" : company).split(/\s+/).join(" ").toLowerCase()}` : "";
+};
+
+/**
+ * Distinct contacts across mapped job rows — every email/phone a row shows
+ * (job, recruiter and enriched company contact), not only the primary one:
+ *   { emails, phones, linkedin, pocs, companyEmails }
+ * (companyEmails = distinct emails held only as an enriched company contact).
+ */
+export function uniqueContactStats(rows) {
+  const emails = new Set(), posterEmails = new Set(), companyEmails = new Set();
+  const phones = new Set(), linkedin = new Set(), pocs = new Set();
+  for (const j of rows) {
+    const c = jobContact(j);
+    for (const p of c.emailParts) {
+      const k = emailKey(p.val);
+      if (!k) continue;
+      emails.add(k);
+      (p.variant === "company" ? companyEmails : posterEmails).add(k);
+    }
+    for (const p of c.phoneParts) { const k = phoneKey(p.val); if (k) phones.add(k); }
+    const li = linkedinKey(c.linkedin); if (li) linkedin.add(li);
+    const poc = pocKey(c.pocName, j.company); if (poc) pocs.add(poc);
+  }
+  let companyOnly = 0;
+  companyEmails.forEach((k) => { if (!posterEmails.has(k)) companyOnly += 1; });
+  return { emails: emails.size, phones: phones.size, linkedin: linkedin.size, pocs: pocs.size, companyEmails: companyOnly };
+}
+
 // CSV label for a POC kind / the source tag of a channel's primary value.
 export const pocKindLabel = (kind) => (kind === "poster" ? "Job poster" : kind === "company" ? "Enriched contact" : "—");
 /** Label ("Job" / "Recruiter" / …) of a channel's primary part; "—" when empty. */

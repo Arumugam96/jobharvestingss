@@ -31,6 +31,7 @@ from app.core.company_size import (
     normalize_company_size,
     parse_company_size_band,
 )
+from app.core.contact_keys import unique_contact_counts
 from app.core.contact_normalize import normalize_email, normalize_phone
 from app.core.dependencies import get_session_factory
 from app.core.job_url import normalize_job_url
@@ -1038,6 +1039,9 @@ class HarvestRunService:
     async def job_facets(self, demand: bool = False) -> dict[str, Any]:
         """Distinct dropdown values + whole-dataset stats for the jobs page.
 
+        Stats: ``with_*`` = jobs that have the channel (matches the contact
+        filter); ``unique_*`` = distinct contacts (app.core.contact_keys).
+
         GET /jobs is paginated server-side, so the UI can no longer derive its
         Company/Job/POC dropdown options or its header/footer stat counts from
         the loaded rows — this returns them across the entire scraped_jobs
@@ -1097,6 +1101,28 @@ class HarvestRunService:
                 "with_phone", "with_linkedin",
             )
         }
+        # with_* count JOBS that have a channel (they back the contact filter);
+        # unique_* count distinct CONTACTS — a recruiter on 40 jobs is one phone.
+        contact_rows = (await self._db.execute(apply_tenant(
+            select(
+                ScrapedJobORM.email_id, RecruiterORM.official_email_id,
+                ScrapedJobORM.company_contact_email,
+                ScrapedJobORM.contact_number, RecruiterORM.contact_number.label("rec_phone"),
+                ScrapedJobORM.company_contact_phone,
+                ScrapedJobORM.linkedin_profile_url,
+                poc_name_expr().label("poc_name"), ScrapedJobORM.company,
+            )
+            .select_from(ScrapedJobORM)
+            .outerjoin(RecruiterORM, ScrapedJobORM.recruiter_id == RecruiterORM.id)
+            .where(scope),
+            ScrapedJobORM.tenant_id,
+        ))).all()
+        stats.update(unique_contact_counts(
+            {"emails": (r.email_id, r.official_email_id, r.company_contact_email),
+             "phones": (r.contact_number, r.rec_phone, r.company_contact_phone),
+             "linkedin": r.linkedin_profile_url, "poc_name": r.poc_name, "company": r.company}
+            for r in contact_rows
+        ))
         return {
             "companies":         companies,
             "job_titles":        job_titles,

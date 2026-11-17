@@ -28,7 +28,8 @@ export const INTERNAL_TENANT = {
 
 const TenantContext = createContext({ tenant: INTERNAL_TENANT, role: "user" });
 
-// `role` is the signed-in user's role from /auth/me ("user" | "admin") — it
+// `role` is the signed-in user's role from /auth/me ("user" | "admin" |
+// "business_lead") — it
 // rides along with the slip so any component can gate admin-only UI.
 // `authBypass` is true when auth is disabled (frontend REACT_APP_AUTH_ENABLED=false
 // or the backend reporting AUTH_ENABLED=false via /auth/me's auth_bypass) — used to
@@ -43,7 +44,7 @@ export function TenantProvider({ tenant, role = "user", authBypass = false, chil
 
 /**
  * Read the tenant slip with derived helpers: `features`, `theme`, `isClient`,
- * `isAdmin`, `authBypass` and `hasFeature(key)` (clients need an explicit true;
+ * `isAdmin`, `isBusinessLead`, `canViewPhoneLogs`, `authBypass` and `hasFeature(key)` (clients need an explicit true;
  * internal tenants see a feature unless it is explicitly false).
  */
 export function useTenant() {
@@ -56,6 +57,9 @@ export function useTenant() {
     isClient: tenant.type === "client",
     // Presentation only — admin endpoints enforce the role server-side.
     isAdmin: role === "admin",
+    // Business Lead — sees Phone logs scoped to their own calls.
+    isBusinessLead: role === "business_lead",
+    canViewPhoneLogs: role === "admin" || role === "business_lead",
     authBypass,
     // Internal (or a missing features map) keeps today's full nav; clients see
     // only the flags their tenant config sets to true.

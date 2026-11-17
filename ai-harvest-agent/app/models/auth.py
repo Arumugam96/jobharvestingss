@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, field_validator
-from sqlalchemy import Boolean, DateTime, Index, Integer, String, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.validators import validate_company_email
@@ -18,10 +18,39 @@ class OTPPurpose:
 
 USER_ROLE = "user"
 ADMIN_ROLE = "admin"
-USER_ROLES = (USER_ROLE, ADMIN_ROLE)
+BUSINESS_LEAD_ROLE = "business_lead"
+USER_ROLES = (USER_ROLE, ADMIN_ROLE, BUSINESS_LEAD_ROLE)
+
+# The roles every database must hold (the `roles` table is the source of truth for
+# what may be assigned; these rows are upserted on boot by main._ensure_roles and by
+# alembic 0036). Keys are stored lower-case in users.role (FK → roles.name).
+SEED_ROLES: tuple[dict[str, str], ...] = (
+    {"name": ADMIN_ROLE, "label": "Admin",
+     "description": "Full access: every phone log, role management and admin tools."},
+    {"name": BUSINESS_LEAD_ROLE, "label": "Business Lead",
+     "description": "Calls recruiters and sees the phone logs of the calls they own."},
+    {"name": USER_ROLE, "label": "User",
+     "description": "Standard access to harvested jobs and outreach."},
+)
 
 
 # ── ORM Models ───────────────────────────────────────────────────────────────────
+
+class RoleORM(Base):
+    """An assignable user role. Global (not tenant-scoped): the same set of roles
+    exists in every workspace. users.role references `name`."""
+
+    __tablename__ = "roles"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(20), nullable=False, unique=True)
+    label: Mapped[str] = mapped_column(String(60), nullable=False, default="")
+    description: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
 
 class UserORM(Base):
     __tablename__ = "users"
@@ -31,9 +60,13 @@ class UserORM(Base):
     tenant_id: Mapped[str] = mapped_column(String(40), nullable=False, server_default="'internal'", index=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     is_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    # "user" | "admin" (USER_ROLES). Admins can read call logs on jobs self-assigned
-    # by others and manage roles; see app/core/dependencies.require_admin.
-    role: Mapped[str] = mapped_column(String(20), nullable=False, default="user", server_default="user")
+    # roles.name — "user" | "admin" | "business_lead" (SEED_ROLES). Admins read every
+    # call log and manage roles (app/core/dependencies.require_admin); business leads
+    # read the call logs they own (require_phone_logs_access).
+    role: Mapped[str] = mapped_column(
+        String(20), ForeignKey("roles.name", onupdate="CASCADE"),
+        nullable=False, default="user", server_default="user",
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -160,3 +193,18 @@ class AuthenticatedUser(BaseModel):
     def is_admin(self) -> bool:
         """True when the user's role is the admin role."""
         return self.role == ADMIN_ROLE
+
+    @property
+    def is_business_lead(self) -> bool:
+        """True when the user's role is the Business Lead role."""
+        return self.role == BUSINESS_LEAD_ROLE
+
+
+class RoleOut(BaseModel):
+    """GET /auth/roles item — what the User roles page's dropdown shows."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    label: str
+    description: str

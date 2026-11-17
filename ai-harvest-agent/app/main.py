@@ -421,6 +421,34 @@ def _ensure_phone_call_logs_columns(sync_conn) -> None:
         if name not in cols:
             sync_conn.execute(sa_text(ddl))
             logger.info("phone_call_logs_column_added", column=name)
+    _ensure_phone_call_logs_owner(sync_conn, cols)
+
+
+def _ensure_phone_call_logs_owner(sync_conn, cols: set[str]) -> None:
+    """phone_call_logs.assigned_to_user_id (FK users.id, indexed): the owner of each
+    call record. Added once to a pre-existing table and backfilled from called_by_email
+    (case-insensitive match to users.email); later boots skip. Mirrors alembic 0036."""
+    if "assigned_to_user_id" in cols:
+        return
+    sync_conn.execute(sa_text(
+        "ALTER TABLE phone_call_logs ADD COLUMN assigned_to_user_id VARCHAR(36) "
+        "REFERENCES users(id) ON DELETE SET NULL"
+    ))
+    sync_conn.execute(sa_text(
+        "CREATE INDEX IF NOT EXISTS ix_phone_call_logs_assigned_to_user_id "
+        "ON phone_call_logs (assigned_to_user_id)"
+    ))
+    filled = sync_conn.execute(sa_text(_PHONE_OWNER_BACKFILL)).rowcount
+    logger.info("phone_call_logs_column_added", column="assigned_to_user_id", backfilled=filled)
+
+
+# Owner of legacy call rows = the user whose email logged them (no match → NULL).
+_PHONE_OWNER_BACKFILL = (
+    "UPDATE phone_call_logs SET assigned_to_user_id = ("
+    " SELECT u.id FROM users u WHERE lower(u.email) = lower(phone_call_logs.called_by_email)"
+    " LIMIT 1) "
+    "WHERE assigned_to_user_id IS NULL AND called_by_email <> ''"
+)
 
 
 def _ensure_users_role_column(sync_conn) -> None:
@@ -436,6 +464,46 @@ def _ensure_users_role_column(sync_conn) -> None:
             "ALTER TABLE users ADD COLUMN role VARCHAR(20) NOT NULL DEFAULT 'user'"
         ))
         logger.info("users_column_added", column="role")
+
+
+def _ensure_roles(sync_conn) -> None:
+    """Seed the roles table (SEED_ROLES: admin / business_lead / user — label and
+    description re-synced every boot), normalise users.role to a lower-case seeded key
+    (an unknown hand-edited value falls back to "user"; "Admin " stays admin), then on
+    PostgreSQL add the users.role → roles.name FK to a pre-existing users table.
+    Idempotent. Mirrors alembic 0036."""
+    from app.models.auth import SEED_ROLES, USER_ROLE
+
+    inspector = sa_inspect(sync_conn)
+    tables = set(inspector.get_table_names())
+    if "roles" not in tables or "users" not in tables:
+        return
+    for r in SEED_ROLES:
+        updated = sync_conn.execute(sa_text(
+            "UPDATE roles SET label = :label, description = :description WHERE name = :name"
+        ), r).rowcount
+        if not updated:
+            sync_conn.execute(sa_text(
+                "INSERT INTO roles (name, label, description) VALUES (:name, :label, :description)"
+            ), r)
+            logger.info("role_seeded", role=r["name"])
+    sync_conn.execute(sa_text(
+        "UPDATE users SET role = lower(trim(role)) WHERE role <> lower(trim(role))"
+    ))
+    demoted = sync_conn.execute(sa_text(
+        "UPDATE users SET role = :fallback WHERE role NOT IN (SELECT name FROM roles)"
+    ), {"fallback": USER_ROLE}).rowcount
+    if demoted:
+        logger.warning("users_unknown_role_reset", count=demoted, role=USER_ROLE)
+    if sync_conn.dialect.name != "postgresql":
+        return
+    has_fk = any(fk.get("referred_table") == "roles" for fk in inspector.get_foreign_keys("users"))
+    if not has_fk:
+        sync_conn.execute(sa_text(
+            "ALTER TABLE users ADD CONSTRAINT fk_users_role_roles FOREIGN KEY (role) "
+            "REFERENCES roles (name) ON UPDATE CASCADE"
+        ))
+        logger.info("users_role_fk_added")
 
 
 def _ensure_resdex_searches_columns(sync_conn) -> None:
@@ -744,6 +812,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await conn.run_sync(_ensure_phone_call_logs_columns)
         # users gained role (user | admin) — same idempotent ADD COLUMN treatment.
         await conn.run_sync(_ensure_users_role_column)
+        # roles table (admin / business_lead / user) seeded, users.role normalised to a
+        # seeded key and tied to it with a FK — after the column exists, before any
+        # login can insert a user.
+        await conn.run_sync(_ensure_roles)
         # apollo_phone_requests gained purpose/source/linkedin_url and
         # apollo_webhook_events gained reprocessed_at/reprocess_note (harvest
         # enrichment phones + backfill) — same idempotent ADD COLUMN treatment.

@@ -6,7 +6,7 @@ import ThemeStyles from "../components/ThemeStyles";
 import { SourceChip, StatusPill, Select, fmtDate } from "../components/ui";
 import JobsTable, { PAGE_SIZE_OPTIONS } from "../components/JobsTable";
 import {
-  mapRun, fetchAllJobs, jobContact, pocKindLabel, partSourceLabel, fmtSeconds,
+  mapRun, fetchAllJobs, jobContact, pocKindLabel, partSourceLabel, fmtSeconds, uniqueContactStats,
 } from "../lib/jobsData";
 
 // Labels for the Run Detail classification cards / active-filter chip.
@@ -104,18 +104,22 @@ export default function RunDetailView({ runId, onBack, onView }) {
   }, [bucket]);
 
   // Header stats over the rows currently shown (card bucket + every table filter,
-  // incl. Source). Contact presence comes from jobContact() — the same values the
-  // POC/Email/Mobile cells render — so Naukri/Dice rows and Company-tagged
-  // contacts count exactly like LinkedIn poster contacts.
+  // incl. Source). POCs / emails / contacts (phones) are UNIQUE (uniqueContactStats:
+  // a recruiter on several jobs counts once); the jobs-with-channel counts stay
+  // available in each stat's tooltip.
   const jobStats = useMemo(() => {
     const contacts = filteredRows.map(jobContact);
+    const unique = uniqueContactStats(filteredRows);
     return {
       total: filteredRows.length,
       companies: new Set(filteredRows.map((j) => j.company).filter((c) => c && c !== "—")).size,
-      pocs: contacts.filter((c) => c.pocName).length,
-      emails: contacts.filter((c) => c.email).length,
-      companyEmails: contacts.filter((c) => c.emailKind === "company").length,
-      whatsapp: contacts.filter((c) => c.phone).length,
+      pocs: unique.pocs,
+      emails: unique.emails,
+      companyEmails: unique.companyEmails,
+      phones: unique.phones,
+      jobsWithPoc: contacts.filter((c) => c.pocName).length,
+      jobsWithEmail: contacts.filter((c) => c.email).length,
+      jobsWithPhone: contacts.filter((c) => c.phone).length,
     };
   }, [filteredRows]);
 
@@ -300,11 +304,15 @@ export default function RunDetailView({ runId, onBack, onView }) {
                   <div style={{ display: "flex", alignItems: "center", gap: 16, fontSize: 13, color: C.textSoft }}>
                     <span><b style={{ color: C.text }}>{jobStats.total}</b> jobs</span>
                     <span><b style={{ color: C.text }}>{jobStats.companies}</b> companies</span>
-                    <span><b style={{ color: C.text }}>{jobStats.pocs}</b> POCs</span>
-                    <span title={`${jobStats.emails - jobStats.companyEmails} job/recruiter · ${jobStats.companyEmails} company contact`}>
+                    <span title={`Unique POCs (name + company) · ${jobStats.jobsWithPoc} jobs have a POC`}>
+                      <b style={{ color: C.text }}>{jobStats.pocs}</b> POCs
+                    </span>
+                    <span title={`Unique email addresses: ${jobStats.emails - jobStats.companyEmails} job/recruiter · ${jobStats.companyEmails} company contact · ${jobStats.jobsWithEmail} jobs have an email`}>
                       <b style={{ color: C.text }}>{jobStats.emails}</b> emails
                     </span>
-                    <span><b style={{ color: C.text }}>{jobStats.whatsapp}</b> WhatsApp</span>
+                    <span title={`Unique phone numbers · ${jobStats.jobsWithPhone} jobs have a phone`}>
+                      <b style={{ color: C.text }}>{jobStats.phones}</b> Contacts
+                    </span>
                     <Select label="Rows per page" value={pageSizeSel} onChange={setPageSizeSel} options={PAGE_SIZE_OPTIONS} />
                     <button className="ha-btn ha-btn-primary" onClick={exportCsv} disabled={filteredRows.length === 0}>
                       <Download size={16} /> Export CSV
