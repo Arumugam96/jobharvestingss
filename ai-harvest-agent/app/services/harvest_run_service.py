@@ -31,7 +31,7 @@ from app.core.company_size import (
     normalize_company_size,
     parse_company_size_band,
 )
-from app.core.contact_keys import unique_contact_counts
+from app.core.contact_keys import phone_key, unique_contact_counts
 from app.core.contact_normalize import normalize_email, normalize_phone
 from app.core.dependencies import get_session_factory
 from app.core.job_url import normalize_job_url
@@ -1040,7 +1040,8 @@ class HarvestRunService:
         """Distinct dropdown values + whole-dataset stats for the jobs page.
 
         Stats: ``with_*`` = jobs that have the channel (matches the contact
-        filter); ``unique_*`` = distinct contacts (app.core.contact_keys).
+        filter); ``unique_*`` = distinct contacts (app.core.contact_keys);
+        ``phone_contacts`` = phone entries counted the Phone logs way, over these jobs.
 
         GET /jobs is paginated server-side, so the UI can no longer derive its
         Company/Job/POC dropdown options or its header/footer stat counts from
@@ -1109,7 +1110,7 @@ class HarvestRunService:
                 ScrapedJobORM.company_contact_email,
                 ScrapedJobORM.contact_number, RecruiterORM.contact_number.label("rec_phone"),
                 ScrapedJobORM.company_contact_phone,
-                ScrapedJobORM.linkedin_profile_url,
+                ScrapedJobORM.linkedin_profile_url, ScrapedJobORM.recruiter_id,
                 poc_name_expr().label("poc_name"), ScrapedJobORM.company,
             )
             .select_from(ScrapedJobORM)
@@ -1123,6 +1124,14 @@ class HarvestRunService:
              "linkedin": r.linkedin_profile_url, "poc_name": r.poc_name, "company": r.company}
             for r in contact_rows
         ))
+        # The footer's "Contacts" figure, counted like the Phone logs "Total contacts"
+        # card (phone_verification_service.phone_inventory) but over these jobs only:
+        # each job's own and company-HR number is an entry, each linked recruiter's
+        # number one entry however many jobs share it; values with no digits skipped.
+        job_entries = sum(1 for r in contact_rows
+                          for p in (r.contact_number, r.company_contact_phone) if phone_key(p))
+        recruiters = {r.recruiter_id for r in contact_rows if r.recruiter_id and phone_key(r.rec_phone)}
+        stats["phone_contacts"] = job_entries + len(recruiters)
         return {
             "companies":         companies,
             "job_titles":        job_titles,

@@ -289,10 +289,11 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
 
         <div style={{ display: "flex", justifyContent: "space-between", padding: "0 4px", fontSize: 12, color: C.textSoft }}>
           <span>Showing {pageJobs.length} of {pageTotal} matching posting{pageTotal === 1 ? "" : "s"} · {stats.qualified || 0} qualified · {stats.flagged || 0} flagged</span>
-          {/* unique_* = distinct contacts (a recruiter on many jobs counts once);
-              with_* = jobs that have the channel (GET /jobs/facets). */}
-          <span title={`Unique contacts. Jobs with: ${stats.with_email || 0} email (${stats.with_poster_email || 0} job/recruiter · ${stats.with_company_email || 0} company contact) · ${stats.with_phone || 0} phone · ${stats.with_linkedin || 0} LinkedIn`}>
-            {stats.unique_emails ?? stats.with_email ?? 0} email · {stats.unique_phones ?? stats.with_phone ?? 0} Contacts · {stats.unique_linkedin ?? stats.with_linkedin ?? 0} LinkedIn
+          {/* Contacts = phone_contacts, counted the same way as the Phone logs "Total
+              contacts" card, over these jobs; email/LinkedIn = unique_* (distinct
+              addresses / profiles); with_* = jobs that have the channel (GET /jobs/facets). */}
+          <span title={`Contacts = phone numbers on these jobs, counted like Phone logs → Total contacts. Jobs with: ${stats.with_email || 0} email (${stats.with_poster_email || 0} job/recruiter · ${stats.with_company_email || 0} company contact) · ${stats.with_phone || 0} phone · ${stats.with_linkedin || 0} LinkedIn`}>
+            {stats.unique_emails ?? stats.with_email ?? 0} email · {stats.phone_contacts ?? stats.unique_phones ?? stats.with_phone ?? 0} Contacts · {stats.unique_linkedin ?? stats.with_linkedin ?? 0} LinkedIn
           </span>
         </div>
       </div>

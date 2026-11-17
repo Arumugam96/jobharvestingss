@@ -70,8 +70,6 @@ const PHONE_SOURCES = {
   company: { label: "Company HR", color: "#B45309", bg: "#FFFBEB" },
   recruiter: { label: "Recruiter", color: "#7C3AED", bg: "#F5F3FF" },
 };
-/** Labels of every source holding an inventory row's number (older payloads: its own source). */
-const sourceLabels = (r) => (r.sources?.length ? r.sources : [r.source]).map((s) => PHONE_SOURCES[s]?.label || s);
 const EMPTY_CELL = { textAlign: "center", padding: "48px 16px", color: "#94A3B8" };
 const SUBLINE = { marginTop: 3, fontSize: 12, color: C.textSoft };
 const statusLabel = (s) => PHONE_STATUSES[s]?.label || s || "";
@@ -341,8 +339,7 @@ function usePagedFetch(fetcher, params, reloadKey, errorText) {
   return { data, loading, error };
 }
 
-/** "Total contacts" drill-down: one row per unique number across job poster /
- *  company HR / recruiter fields, with every source holding it and its job count. */
+/** "Total phones" drill-down: every job poster / company HR / recruiter number held. */
 function PhonesPanel({ reloadKey, exportRef }) {
   const [source, setSource] = useState("");
   const [page, setPage] = useState(1);
@@ -359,8 +356,8 @@ function PhonesPanel({ reloadKey, exportRef }) {
     const all = await fetchAllPages(getPhoneInventory, { source, q });
     return {
       name: `phone-contacts${source ? `-${source}` : ""}-${today()}`, sheet: "Contacts",
-      head: ["Phone", "Sources", "Jobs", "Name", "Job title", "Company", "Added"],
-      rows: all.map((r) => [r.phone, sourceLabels(r).join(", "), r.jobs ?? "", r.name, r.job_title, r.company, fmtTime(r.added_at)]),
+      head: ["Phone", "Source", "Name", "Job title", "Company", "Added"],
+      rows: all.map((r) => [r.phone, PHONE_SOURCES[r.source]?.label || r.source, r.name, r.job_title, r.company, fmtTime(r.added_at)]),
     };
   };
 
@@ -387,24 +384,14 @@ function PhonesPanel({ reloadKey, exportRef }) {
               {loading && !data && <tr><td className="ha-td" colSpan={5} style={EMPTY_CELL}>Loading phone numbers…</td></tr>}
               {!loading && items.length === 0 && <tr><td className="ha-td" colSpan={5} style={EMPTY_CELL}>No phone numbers match these filters.</td></tr>}
               {items.map((row, i) => {
-                const sources = row.sources?.length ? row.sources : [row.source];
+                const src = PHONE_SOURCES[row.source] || {};
                 return (
                   <tr key={`${row.source}-${row.job_id || row.recruiter_id}-${i}`} className="ha-row">
-                    <td className="ha-td" style={{ whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums", color: C.text }}>
-                      {row.phone}
-                      {row.jobs > 1 && <div style={SUBLINE} title="Distinct jobs that show this number">on {row.jobs} jobs</div>}
-                    </td>
+                    <td className="ha-td" style={{ whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums", color: C.text }}>{row.phone}</td>
                     <td className="ha-td">
-                      <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-                        {sources.map((s) => {
-                          const src = PHONE_SOURCES[s] || {};
-                          return (
-                            <span key={s} style={{ padding: "2px 9px", borderRadius: 6, fontSize: 12, fontWeight: 600, color: src.color, background: src.bg, whiteSpace: "nowrap" }}>
-                              {src.label || s}
-                            </span>
-                          );
-                        })}
-                      </div>
+                      <span style={{ padding: "2px 9px", borderRadius: 6, fontSize: 12, fontWeight: 600, color: src.color, background: src.bg, whiteSpace: "nowrap" }}>
+                        {src.label || row.source}
+                      </span>
                     </td>
                     <td className="ha-td" style={{ color: C.text }}>{row.name || "—"}</td>
                     <td className="ha-td"><JobCell title={row.job_title || (row.source === "recruiter" ? "" : "—")} company={row.company} /></td>
@@ -604,7 +591,7 @@ export default function PhoneLogsPage() {
 
         <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
           {!ownScope && summary.total_phones != null && (
-            <StatCard value={summary.total_phones} label="Total contacts" color="#0891B2" sub="unique numbers"
+            <StatCard value={summary.total_phones} label="Total contacts" color="#0891B2"
               onClick={() => setView("phones")} active={view === "phones"} />
           )}
           <StatCard value={summary.total} label="Total calls" color={C.primary}

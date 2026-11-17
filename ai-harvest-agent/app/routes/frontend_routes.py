@@ -37,7 +37,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import Response
 
 from app.core.company_size import band_to_tier
-from app.core.contact_keys import unique_contact_counts
+from app.core.contact_keys import phone_key, unique_contact_counts
 from app.core.dependencies import get_current_user
 from app.core.tenant_context import get_current_tenant_id, is_all_access
 from app.models.auth import AuthenticatedUser
@@ -533,6 +533,17 @@ async def job_facets(
                      "poc_name": c["poc_name"], "company": j.get("company")}
                     for j, c in zip(jobs, contacts)
                 ),
+                # Counted like the Phone logs "Total contacts" card (see the DB path);
+                # JSON rows carry no recruiter id, so a recruiter is its number. The
+                # job's own number is phone_scraped (contact_number is the merged
+                # job/recruiter value); older files without split fields use it as-is.
+                "phone_contacts": sum(
+                    1 for j in jobs
+                    for p in (j.get("phone_scraped") if ("phone_scraped" in j or "phone_recruiter" in j)
+                              else j.get("contact_number"),
+                              j.get("company_contact_phone"))
+                    if phone_key(p)
+                ) + len({phone_key(j.get("phone_recruiter")) for j in jobs} - {""}),
             },
         }
 

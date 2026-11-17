@@ -617,9 +617,9 @@ async def phone_inventory(db: AsyncSession) -> list[dict[str, Any]]:
     """Every phone number the tenant holds, newest first: each scraped job's poster
     number ("job") and company HR contact number ("company"), and each recruiter's
     number ("recruiter"). Not deduplicated here: every filled phone field is an
-    entry, so a number on both a job and its recruiter is two entries —
-    unique_phones() groups them into contacts. Only values with no digits ("n/a")
-    are skipped."""
+    entry, so a number on both a job and its recruiter is two entries. Only
+    values with no digits ("n/a") are skipped. Its size is the "Total contacts"
+    figure on Phone logs and the Harvested Jobs footer (count_phone_entries)."""
     J, R = ScrapedJobORM, RecruiterORM
     jobs = (await db.execute(apply_tenant(
         select(J.id, J.job_title, J.company, J.contact_number, J.company_contact_phone,
@@ -654,57 +654,34 @@ async def phone_inventory(db: AsyncSession) -> list[dict[str, Any]]:
     return entries
 
 
-def unique_phones(entries: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
-    """Group phone_inventory entries into contacts — one group per phone_key — in
-    the entries' order (newest first), each group's own entries newest first."""
-    groups: dict[str, list[dict[str, Any]]] = {}
-    for e in entries:
-        groups.setdefault(phone_key(e["phone"]), []).append(e)
-    return list(groups.values())
-
-
-async def count_unique_phones(db: AsyncSession) -> int:
-    """The Phone logs "Total contacts" figure: distinct numbers the tenant holds."""
-    return len({phone_key(e["phone"]) for e in await phone_inventory(db)})
-
-
-def _entry_matches(e: dict[str, Any], term: str, digits: str) -> bool:
-    """Free-text match on an inventory entry's number, name, company or job title."""
-    return (any(term in (e[k] or "").lower() for k in ("phone", "name", "company", "job_title"))
-            or bool(digits and digits in re.sub(r"\D", "", e["phone"])))
+async def count_phone_entries(db: AsyncSession) -> int:
+    """The "Total contacts" figure shared by Phone logs and the Harvested Jobs footer:
+    every phone entry the tenant holds (phone_inventory's size)."""
+    return len(await phone_inventory(db))
 
 
 async def list_phones(
     db: AsyncSession, *, source: str = "", q: str = "", page: int = 1, page_size: int = 50,
 ) -> dict[str, Any]:
-    """The Phone logs "Total contacts" drill-down: one row per unique number
-    (phone_key), newest first. A number is shown by its newest entry (its newest
-    `source` entry when that filter is set) plus `occurrences` (how many job /
-    company / recruiter fields hold it), `jobs` (distinct jobs) and `sources`.
-    `source` keeps numbers held by that source; `q` matches any entry's number,
-    name, company or job title. `by_source` counts unique numbers per source and
-    ignores both filters — a number held by two sources counts under each."""
-    groups = unique_phones(await phone_inventory(db))
+    """The Phone logs "Total contacts" drill-down: phone_inventory filtered by `source`
+    and free-text `q` (number, name, company, job title), paginated. `by_source`
+    counts ignore both filters."""
+    entries = await phone_inventory(db)
     by_source = dict.fromkeys(PHONE_SOURCES, 0)
-    for g in groups:
-        for s in {e["source"] for e in g}:
-            by_source[s] += 1
-    want = source if source in PHONE_SOURCES else ""
+    for e in entries:
+        by_source[e["source"]] += 1
+    if source in PHONE_SOURCES:
+        entries = [e for e in entries if e["source"] == source]
     term = (q or "").strip().lower()
-    digits = re.sub(r"\D", "", term)
-    rows = []
-    for g in groups:
-        shown = [e for e in g if e["source"] == want] if want else g
-        if not shown or (term and not any(_entry_matches(e, term, digits) for e in g)):
-            continue
-        rows.append({**shown[0],
-                     "occurrences": len(g),
-                     "jobs": len({e["job_id"] for e in g if e["job_id"]}),
-                     "sources": [s for s in PHONE_SOURCES if any(e["source"] == s for e in g)]})
+    if term:
+        digits = re.sub(r"\D", "", term)
+        entries = [e for e in entries if any(term in (e[k] or "").lower() for k in
+                                             ("phone", "name", "company", "job_title"))
+                   or (digits and digits in re.sub(r"\D", "", e["phone"]))]
     page, page_size = max(1, int(page)), max(1, int(page_size))
     start = (page - 1) * page_size
-    items = [{**r, "added_at": _iso(r["added_at"])} for r in rows[start:start + page_size]]
-    return {"items": items, "total": len(rows), "page": page, "page_size": page_size,
+    items = [{**e, "added_at": _iso(e["added_at"])} for e in entries[start:start + page_size]]
+    return {"items": items, "total": len(entries), "page": page, "page_size": page_size,
             "by_source": by_source}
 
 
@@ -847,7 +824,7 @@ async def list_logs(
     answered / unanswered split stays visible.
     `summary.assigned_jobs` (every job currently self-assigned, called or not),
     `called_assigned_jobs` (those with a call matching the filters) and
-    `total_phones` (distinct numbers held — count_unique_phones) describe the workspace.
+    `total_phones` (every phone entry held — count_phone_entries) describe the workspace.
 
     `owner_id` keeps only the calls owned by that user (assigned_to_user_id) — the
     admin's assignee filter, or the forced scope of a business lead. `own_email`
@@ -893,7 +870,7 @@ async def list_logs(
         select(func.count(func.distinct(PhoneCallLogORM.job_id))), is_assigned,
     ))).scalar_one()
     assigned_jobs = await count_assigned_jobs(db, own_email)
-    total_phones = None if own_email is not None else await count_unique_phones(db)
+    total_phones = None if own_email is not None else await count_phone_entries(db)
     answered, unanswered = int(by_status.get("answered", 0)), int(by_status.get("unanswered", 0))
 
     row_conds = [PhoneCallLogORM.call_status == status] if status in CALL_STATUSES else []

@@ -294,7 +294,7 @@ async def phone_log_assignees(
 
 
 @router.get("/phone-verifications/logs/phones",
-            summary="Every unique phone number in the tenant (admins only)")
+            summary="Every phone number in the tenant (admins only)")
 async def phone_inventory_list(
     source: str = Query(default="", pattern="^(|job|company|recruiter)$"),
     q: str = Query(default="", max_length=200),
@@ -303,9 +303,8 @@ async def phone_inventory_list(
     current_user: AuthenticatedUser = Depends(require_admin),
     db: AsyncSession = Depends(get_db_session),
 ) -> dict:
-    """The Phone logs "Total contacts" drill-down: one row per unique number across job
-    poster, company HR and recruiter fields (see phone_verification_service.list_phones),
-    paginated. Admins only."""
+    """The Phone logs "Total phones" drill-down: job poster, company HR and recruiter
+    numbers (see phone_verification_service.phone_inventory), paginated. Admins only."""
     return await pvs.list_phones(db, source=source, q=q, page=page, page_size=page_size)
 
 
