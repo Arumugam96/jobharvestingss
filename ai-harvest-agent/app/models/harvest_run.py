@@ -213,6 +213,11 @@ class ScrapedJobORM(Base):
     assigned_to_name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     assigned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     assignment_note: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # When the assignee dismissed this assignment's "still assigned after N days"
+    # reminder (app/services/assignment_reminder_service.py). NULL = not dismissed.
+    # Reset to NULL whenever the job is newly claimed, so each assignment gets one
+    # reminder, due at assigned_at + settings.assignment_reminder_days.
+    assignment_reminder_done_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     # Real scrape/collection instant (app-set in the orchestrator converters);
     # distinct from created_at, which is the batch-insert time. Nullable — NULL on

@@ -34,6 +34,9 @@ from app.core.company_size import (
 from app.core.contact_keys import phone_key, unique_contact_counts
 from app.core.contact_normalize import normalize_email, normalize_phone
 from app.core.dependencies import get_session_factory
+from app.core.job_type_class import (
+    JOB_TYPE_FILTER_VALUES, classify_job_type, job_type_class_expr, run_job_type_subquery,
+)
 from app.core.job_url import normalize_job_url
 from app.core.location import normalize_location_key, parse_location
 from app.core.tenant_context import apply_tenant, bind_session_tenant, get_current_tenant_id
@@ -584,7 +587,7 @@ class HarvestRunService:
 
     async def _snapshot_run_job_rows(self, run_pk: str) -> dict[str, dict[str, Any]]:
         """{normalized job_url: {"ids": [old row ids], "assignment": (email, name,
-        assigned_at, note) | None}} for a run's current rows. Scoped by run_id only,
+        assigned_at, note, reminder_done_at) | None}} for a run's current rows. Scoped by run_id only,
         exactly like delete_jobs_for_run. Blank job_urls can't be matched and are
         skipped. For a duplicated job_url every old id is kept (all relink to the
         one new row) and the first assigned row's claim wins."""
@@ -592,20 +595,20 @@ class HarvestRunService:
             select(
                 ScrapedJobORM.id, ScrapedJobORM.job_url, ScrapedJobORM.assigned_to_email,
                 ScrapedJobORM.assigned_to_name, ScrapedJobORM.assigned_at,
-                ScrapedJobORM.assignment_note,
+                ScrapedJobORM.assignment_note, ScrapedJobORM.assignment_reminder_done_at,
             )
             .where(ScrapedJobORM.run_id == run_pk)
             .order_by(ScrapedJobORM.assigned_at, ScrapedJobORM.id)
         )
         snapshot: dict[str, dict[str, Any]] = {}
-        for job_id, job_url, email, name, at, note in result.all():
+        for job_id, job_url, email, name, at, note, reminder_done in result.all():
             key = normalize_job_url(job_url)
             if not key:
                 continue
             slot = snapshot.setdefault(key, {"ids": [], "assignment": None})
             slot["ids"].append(job_id)
             if email and slot["assignment"] is None:
-                slot["assignment"] = (email, name or "", at, note or "")
+                slot["assignment"] = (email, name or "", at, note or "", reminder_done)
         return snapshot
 
     async def _carry_over_job_state(self, run_pk: str, old_rows: dict[str, dict[str, Any]]) -> None:
@@ -627,13 +630,14 @@ class HarvestRunService:
             slot = old_rows[key]
             mapping.update({old_id: new_id for old_id in slot["ids"] if old_id != new_id})
             if slot["assignment"] is not None:
-                email, name, at, note = slot["assignment"]
+                email, name, at, note, reminder_done = slot["assignment"]
                 await self._db.execute(
                     update(ScrapedJobORM)
                     .where(ScrapedJobORM.id == new_id)
                     .values(
                         assigned_to_email=email, assigned_to_name=name,
                         assigned_at=at, assignment_note=note,
+                        assignment_reminder_done_at=reminder_done,
                     )
                 )
         if mapping:
@@ -913,6 +917,7 @@ class HarvestRunService:
         source:        str | None = None,
         hiring_entity: str | None = None,
         work_mode:     str | None = None,
+        job_type:      str | None = None,
         date_from:     str | None = None,
         date_to:       str | None = None,
         run_id:        str | None = None,
@@ -1001,6 +1006,11 @@ class HarvestRunService:
             stmt = stmt.where(func.lower(ScrapedJobORM.hiring_entity) == hiring_entity.lower())
         if work_mode:
             stmt = stmt.where(func.lower(ScrapedJobORM.work_mode) == work_mode.lower())
+        if job_type in JOB_TYPE_FILTER_VALUES:
+            # Full-Time / Contractual / not specified, from the source's own label or
+            # the run's enforced search filter — see app/core/job_type_class.py.
+            want = "" if job_type == "not_specified" else job_type
+            stmt = stmt.where(job_type_class_expr(ScrapedJobORM, HarvestRunORM) == want)
         if date_from:
             stmt = stmt.where(func.substr(ScrapedJobORM.posted_date, 1, 10) >= date_from[:10])
         if date_to:
@@ -1033,8 +1043,15 @@ class HarvestRunService:
         )
         stmt = stmt.offset(max(0, page - 1) * page_size).limit(page_size)
 
+        # Each row also carries its run's search job_type, so scraped_job_view can
+        # report the same job_type_class the filter above matches on.
+        stmt = stmt.add_columns(run_job_type_subquery(ScrapedJobORM, HarvestRunORM))
         result = await self._db.execute(stmt)
-        return list(result.scalars()), total
+        jobs: list[ScrapedJobORM] = []
+        for job, run_jt in result.all():
+            job.run_search_job_type = run_jt or ""
+            jobs.append(job)
+        return jobs, total
 
     async def job_facets(self, demand: bool = False) -> dict[str, Any]:
         """Distinct dropdown values + whole-dataset stats for the jobs page.
@@ -1559,6 +1576,10 @@ def scraped_job_view(job: ScrapedJobORM) -> dict[str, Any]:
         "company_state":          job.company_state,
         "employment_type":        job.employment_type,
         "job_type":               job.job_type,
+        # "full_time" | "contract" | "other" | "" — the Job type filter's class.
+        # run_search_job_type is set by list_scraped_jobs; elsewhere it's label-only.
+        "job_type_class":         classify_job_type(
+            job.employment_type, job.source, getattr(job, "run_search_job_type", "")),
         "domain":                 job.domain,
         "hiring_entity":          job.hiring_entity,
         "is_gcc":                 job.is_gcc,

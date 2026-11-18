@@ -1,9 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { Bell, Reply, X, Check, PhoneCall } from "lucide-react";
+import { Bell, Reply, X, Check, PhoneCall, CalendarClock } from "lucide-react";
 import {
   getOutreachNotifications, markReplyRead, markAllRepliesRead,
   getCallFollowUps, markFollowUpDone, markAllFollowUpsDone,
+  getAssignmentReminders, dismissAssignmentReminders,
 } from "../api";
 import { fmtRel, avatarColor, initials } from "./outreachUi";
 
@@ -15,7 +16,11 @@ import { fmtRel, avatarColor, initials } from "./outreachUi";
  *     tenant has the outreach feature: `repliesEnabled`);
  *   • GET /phone-verifications/follow-ups — the current user's follow-up calls that
  *     are due (a call logged with a reminder, once its time passes).
- * Both are merged into one list (newest first) and rendered as:
+ *   • GET /jobs/assignment-reminders/summary — how many of the user's self-assigned
+ *     jobs are still theirs 7 days after the claim. Shown as ONE count row (a user can
+ *     claim 100 jobs a week), teal with a calendar icon; opening it dismisses them and
+ *     goes to My Workspace.
+ * All are merged into one list (newest first) and rendered as:
  *   • a floating bell with a badge (unread replies + due follow-ups); clicking opens
  *     a dropdown. A reply row deep-links to its thread (/mail/:outreach_id) and marks
  *     itself read; a follow-up row marks itself done and opens the job. "Mark all
@@ -35,6 +40,8 @@ const REPLY = "#4F46E5";
 const REPLY_SOFT = "#EEF0FF";
 const FU = "#B45309";
 const FU_SOFT = "#FFF7ED";
+const ASG = "#0F766E";
+const ASG_SOFT = "#F0FDFA";
 const TOAST_MS = 8_000;
 
 // Build the thread deep-link for a notification (same resolution the Mail-logs row
@@ -72,6 +79,10 @@ export default function NotificationBell({ repliesEnabled = true }) {
   const [repliesUnread, setRepliesUnread] = useState(0);
   const [followUps, setFollowUps] = useState([]);
   const [followUpsDue, setFollowUpsDue] = useState(0);
+  // Self-assignment reminders: just the count due, and the reminder age in days.
+  const [assignDue, setAssignDue] = useState(0);
+  const [assignDays, setAssignDays] = useState(7);
+  const assignSeenRef = useRef(null); // last polled count (null until the first poll)
   const [open, setOpen] = useState(false);
   const [toasts, setToasts] = useState([]); // [{...normalized item}]
 
@@ -94,9 +105,10 @@ export default function NotificationBell({ repliesEnabled = true }) {
   }, []);
 
   const poll = useCallback(async () => {
-    const [rep, fu] = await Promise.allSettled([
+    const [rep, fu, asg] = await Promise.allSettled([
       repliesEnabled ? getOutreachNotifications({ limit: 20 }) : Promise.resolve(null),
       getCallFollowUps({ limit: 20 }),
+      getAssignmentReminders(),
     ]);
     // A failed source keeps its last good state; try again next tick.
     let fresh = [];
@@ -111,6 +123,19 @@ export default function NotificationBell({ repliesEnabled = true }) {
       setFollowUps(next);
       setFollowUpsDue(fu.value.due || 0);
       fresh = fresh.concat(noteFresh("fu", next));
+    }
+    if (asg.status === "fulfilled" && asg.value) {
+      const due = asg.value.due || 0;
+      const days = asg.value.days || 7;
+      setAssignDue(due);
+      setAssignDays(days);
+      // One toast when the count GROWS after the first poll (never one per job).
+      const prev = assignSeenRef.current;
+      assignSeenRef.current = due;
+      if (prev !== null && due > prev) {
+        fresh.push({ type: "assign_reminder", key: `asg:${Date.now()}`, sortAt: new Date().toISOString(),
+          added: due - prev, due, days });
+      }
     }
     if (fresh.length) {
       fresh.sort((x, y) => ts(y.sortAt) - ts(x.sortAt));
@@ -131,11 +156,12 @@ export default function NotificationBell({ repliesEnabled = true }) {
     setRepliesUnread(0);
   }, [repliesEnabled]);
 
-  const items = useMemo(
-    () => [...replies, ...followUps].sort((x, y) => ts(y.sortAt) - ts(x.sortAt)),
-    [replies, followUps]
-  );
-  const unread = repliesUnread + followUpsDue;
+  const items = useMemo(() => {
+    const list = [...replies, ...followUps].sort((x, y) => ts(y.sortAt) - ts(x.sortAt));
+    // The self-assignment count row stays pinned on top while any are due.
+    return assignDue > 0 ? [{ type: "assign_reminder", key: "asg", due: assignDue, days: assignDays }, ...list] : list;
+  }, [replies, followUps, assignDue, assignDays]);
+  const unread = repliesUnread + followUpsDue + assignDue;
 
   // Auto-dismiss each toast after TOAST_MS.
   useEffect(() => {
@@ -177,6 +203,14 @@ export default function NotificationBell({ repliesEnabled = true }) {
   const openItem = useCallback(async (n) => {
     setOpen(false);
     dismissToast(n.key);
+    if (n.type === "assign_reminder") {
+      // Dismiss every due reminder, then show the user's assigned jobs.
+      setAssignDue(0);
+      assignSeenRef.current = 0;
+      try { await dismissAssignmentReminders(); } catch { /* best-effort */ }
+      navigate("/library");
+      return;
+    }
     if (n.type === "call_followup") {
       setFollowUps((cur) => cur.filter((x) => x.key !== n.key));
       setFollowUpsDue((d) => Math.max(0, d - 1));
@@ -202,9 +236,12 @@ export default function NotificationBell({ repliesEnabled = true }) {
     setRepliesUnread(0);
     setFollowUps([]);
     setFollowUpsDue(0);
+    setAssignDue(0);
+    assignSeenRef.current = 0;
     const [repliesRes] = await Promise.allSettled([
       repliesEnabled ? markAllRepliesRead() : Promise.resolve(),
       markAllFollowUpsDone(),
+      dismissAssignmentReminders(),
     ]);
     const left = repliesRes.status === "fulfilled" ? repliesRes.value?.unread : undefined;
     if (typeof left === "number" && left > 0) setRepliesUnread(left);
@@ -219,6 +256,28 @@ export default function NotificationBell({ repliesEnabled = true }) {
       {/* Toasts — newest on top, stacked just above the bell. */}
       <div className="rb-toasts">
         {toasts.map((t) => {
+          if (t.type === "assign_reminder") {
+            return (
+              <div key={t.key} className="rb-toast asg" role="status">
+                <span className="rb-toast-accent" />
+                <button className="rb-toast-x" onClick={() => dismissToast(t.key)} aria-label="Dismiss"><X size={14} /></button>
+                <div className="rb-toast-row">
+                  <span className="rb-toast-icon"><CalendarClock size={17} strokeWidth={2.3} /></span>
+                  <div style={{ minWidth: 0 }}>
+                    <div className="rb-toast-lab">Self-assigned jobs</div>
+                    <div className="rb-toast-name">
+                      {t.added} more job{t.added === 1 ? "" : "s"} reached {t.days} days
+                    </div>
+                  </div>
+                </div>
+                <div className="rb-toast-prev">{t.due} self-assigned job{t.due === 1 ? " is" : "s are"} still pending.</div>
+                <div className="rb-toast-acts">
+                  <button className="rb-btn rb-btn-primary" onClick={() => openItem(t)}>Open My Workspace</button>
+                  <button className="rb-btn rb-btn-ghost" onClick={() => dismissToast(t.key)}>Later</button>
+                </div>
+              </div>
+            );
+          }
           const fu = t.type === "call_followup";
           const preview = fu ? t.remarks : t.preview;
           return (
@@ -262,6 +321,23 @@ export default function NotificationBell({ repliesEnabled = true }) {
               {items.length === 0 ? (
                 <div className="rb-empty">You're all caught up.</div>
               ) : items.map((n) => {
+                if (n.type === "assign_reminder") {
+                  return (
+                    <button key={n.key} className="rb-item rb-item-asg" onClick={() => openItem(n)}
+                      title="Dismiss and open My Workspace">
+                      <span className="rb-av rb-av-asg">
+                        <CalendarClock size={16} />
+                        <span className="rb-dot" />
+                      </span>
+                      <span className="rb-item-txt">
+                        <span className="rb-item-top">
+                          <b>{n.due} self-assigned job{n.due === 1 ? "" : "s"}</b> still pending after {n.days} days
+                        </span>
+                        <span className="rb-item-meta">Open My Workspace to review them</span>
+                      </span>
+                    </button>
+                  );
+                }
                 if (n.type === "call_followup") {
                   const sub = [n.company, n.job_title].filter(Boolean).join(" · ");
                   return (
@@ -351,6 +427,10 @@ const CSS = `
 .rb-item-fu:hover{ background:#FFFBF5; }
 .rb-av-fu{ background:${FU_SOFT}; color:${FU}; border:1px solid #FED7AA; }
 .rb-av-fu .rb-dot{ background:${FU}; }
+.rb-item-asg{ background:linear-gradient(90deg, rgba(15,118,110,.07), transparent 55%); }
+.rb-item-asg:hover{ background:#F3FBFA; }
+.rb-av-asg{ background:${ASG_SOFT}; color:${ASG}; border:1px solid #99F6E4; }
+.rb-av-asg .rb-dot{ background:${ASG}; }
 
 .rb-toasts{ position:fixed; right:24px; bottom:88px; z-index:1100; display:flex; flex-direction:column; gap:12px;
   width:320px; max-width:calc(100vw - 48px); }
@@ -380,6 +460,13 @@ const CSS = `
 .rb-toast.fu .rb-toast-lab{ color:${FU}; }
 .rb-toast.fu .rb-btn-primary{ background:${FU}; }
 .rb-toast.fu .rb-btn-primary:hover{ background:#92400E; }
+
+.rb-toast.asg{ border-color:rgba(15,118,110,.3); box-shadow:0 22px 50px -16px rgba(15,23,42,.5), 0 0 0 4px rgba(15,118,110,.08); }
+.rb-toast.asg .rb-toast-accent{ background:${ASG}; }
+.rb-toast.asg .rb-toast-icon{ background:${ASG_SOFT}; color:${ASG}; }
+.rb-toast.asg .rb-toast-lab{ color:${ASG}; }
+.rb-toast.asg .rb-btn-primary{ background:${ASG}; }
+.rb-toast.asg .rb-btn-primary:hover{ background:#115E59; }
 
 .rb-toast.auto{ border-color:rgba(147,51,234,.28); box-shadow:0 22px 50px -16px rgba(15,23,42,.5), 0 0 0 4px rgba(147,51,234,.08); }
 .rb-toast.auto .rb-toast-accent{ background:#9333EA; }

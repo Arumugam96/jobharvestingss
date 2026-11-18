@@ -123,6 +123,8 @@ def _ensure_scraped_jobs_columns(sync_conn) -> None:
         ("assigned_to_name",  "ALTER TABLE scraped_jobs ADD COLUMN assigned_to_name VARCHAR(255) NOT NULL DEFAULT ''"),
         ("assigned_at",       f"ALTER TABLE scraped_jobs ADD COLUMN assigned_at {ts_type}"),
         ("assignment_note",   "ALTER TABLE scraped_jobs ADD COLUMN assignment_note TEXT NOT NULL DEFAULT ''"),
+        # Dismissal of the 7-day self-assignment reminder. Mirrored in alembic 0037.
+        ("assignment_reminder_done_at", f"ALTER TABLE scraped_jobs ADD COLUMN assignment_reminder_done_at {ts_type}"),
     ]
     for name, ddl in pending:
         if name not in existing_cols:

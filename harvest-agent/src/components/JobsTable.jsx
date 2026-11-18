@@ -55,6 +55,16 @@ const COMPANY_SIZE_FILTER_OPTIONS = [
   { value: "unknown", label: "Unknown" },
 ];
 
+// Job type filter: Full-Time vs Contractual from the source's own employment-type
+// label (or the run's enforced LinkedIn/Dice search filter) — never guessed from the
+// description. "not_specified" = no such data; part-time/internship rows show under All.
+const JOB_TYPE_FILTER_OPTIONS = [
+  { value: "all", label: "All job types" },
+  { value: "full_time", label: "Full-Time" },
+  { value: "contract", label: "Contractual" },
+  { value: "not_specified", label: "Not specified" },
+];
+
 /**
  * Shared jobs table used by both the Harvested Jobs page (JobsPage) and the
  * run-history per-run view (RunDetailView). Owns the Source/Company/Contact/Job/
@@ -141,8 +151,9 @@ export default function JobsTable({
           size: searchParams.get("size") || "all",
           country: searchParams.get("country") || "all",
           companyCountry: searchParams.get("companyCountry") || "all",
+          jobType: searchParams.get("jobType") || "all",
         }
-      : { source: lockedSource || "all", company: "all", contact: [], job: "all", poc: "all", size: "all", country: "all", companyCountry: "all" }
+      : { source: lockedSource || "all", company: "all", contact: [], job: "all", poc: "all", size: "all", country: "all", companyCountry: "all", jobType: "all" }
   );
   const [query, setQuery] = useState(() => (urlState ? searchParams.get("q") || "" : ""));
   const [sort, setSort] = useState(() =>
@@ -269,6 +280,10 @@ export default function JobsTable({
         const tier = j.companySizeTier || "";
         if (filters.size === "unknown" ? tier !== "" : tier !== filters.size) return false;
       }
+      if (filters.jobType && filters.jobType !== "all") {
+        const want = filters.jobType === "not_specified" ? "" : filters.jobType;
+        if ((j.jobTypeClass || "") !== want) return false;
+      }
       if (!jobMatchesContact(j, filters.contact)) return false;
       if (preFilter && !preFilter(j)) return false;
       if (query.trim()) {
@@ -337,6 +352,7 @@ export default function JobsTable({
       size_tier: filters.size && filters.size !== "all" ? filters.size : "",
       country: filters.country !== "all" ? filters.country : "",
       company_country: filters.companyCountry !== "all" ? filters.companyCountry : "",
+      job_type: filters.jobType && filters.jobType !== "all" ? filters.jobType : "",
       contact: filters.contact.join(","),
       ...(serverExtraParams || {}),
     });
@@ -364,6 +380,7 @@ export default function JobsTable({
     if (filters.size && filters.size !== "all") sp.set("size", filters.size);
     if (filters.country !== "all") sp.set("country", filters.country);
     if (filters.companyCountry !== "all") sp.set("companyCountry", filters.companyCountry);
+    if (filters.jobType && filters.jobType !== "all") sp.set("jobType", filters.jobType);
     if (query.trim()) sp.set("q", query.trim());
     if (sort.col !== "posted" || sort.dir !== "desc") { sp.set("sort", sort.col); sp.set("dir", sort.dir); }
     if (page > 1) sp.set("page", String(page));
@@ -428,7 +445,7 @@ export default function JobsTable({
 
   return (
     <>
-      <div className="ha-card ha-filterbar" style={{ padding: "11px 14px", gridTemplateColumns: "repeat(4, minmax(0, 1fr))" }}>
+      <div className="ha-card ha-filterbar" style={{ padding: "11px 14px", gridTemplateColumns: "repeat(5, minmax(0, 1fr))" }}>
         <Select label="Source" value={filters.source} onChange={(v) => setFilters((f) => ({ ...f, source: v }))}
           options={sourceOptions} />
         <SearchableSelect label="Company" value={filters.company} onChange={(v) => setFilters((f) => ({ ...f, company: v }))}
@@ -436,6 +453,8 @@ export default function JobsTable({
           loading={serverMode && !facets} />
         <Select label="Company size" value={filters.size || "all"} onChange={(v) => setFilters((f) => ({ ...f, size: v }))}
           options={COMPANY_SIZE_FILTER_OPTIONS} />
+        <Select label="Job type" value={filters.jobType || "all"} onChange={(v) => setFilters((f) => ({ ...f, jobType: v }))}
+          options={JOB_TYPE_FILTER_OPTIONS} />
         <SearchableSelect label="Company Location" variant="location" value={filters.companyCountry} onChange={(v) => setFilters((f) => ({ ...f, companyCountry: v }))}
           options={[{ value: "all", label: "All" }, ...companyCountries.map((c) => ({ value: c, label: c }))]}
           loading={serverMode && !facets} />

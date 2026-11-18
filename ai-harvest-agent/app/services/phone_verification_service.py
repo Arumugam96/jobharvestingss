@@ -371,7 +371,7 @@ async def _claim_job_if_unassigned(
                    ScrapedJobORM.assigned_to_email == ""))
         .values(assigned_to_email=user.email,
                 assigned_to_name=display_name_from_email(user.email),
-                assigned_at=now, assignment_note="")
+                assigned_at=now, assignment_note="", assignment_reminder_done_at=None)
         .execution_options(synchronize_session=False),
         ScrapedJobORM.tenant_id,
     ))
@@ -380,6 +380,7 @@ async def _claim_job_if_unassigned(
         job.assigned_to_name = display_name_from_email(user.email)
         job.assigned_at = now
         job.assignment_note = ""
+        job.assignment_reminder_done_at = None
 
 
 # ── Outcome side effects ───────────────────────────────────────────────────────
@@ -492,6 +493,7 @@ async def _apply_outcome_effects(
             job.assigned_to_name = ""
             job.assigned_at = None
             job.assignment_note = ""
+            job.assignment_reminder_done_at = None
 
 
 def flag_view(flag: PhoneContactFlagORM | None) -> dict[str, Any]:

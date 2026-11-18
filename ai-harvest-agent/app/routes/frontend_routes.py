@@ -38,6 +38,7 @@ from fastapi.responses import Response
 
 from app.core.company_size import band_to_tier
 from app.core.contact_keys import phone_key, unique_contact_counts
+from app.core.job_type_class import JOB_TYPE_FILTER_VALUES, classify_job_type
 from app.core.dependencies import get_current_user
 from app.core.tenant_context import get_current_tenant_id, is_all_access
 from app.models.auth import AuthenticatedUser
@@ -110,6 +111,8 @@ def _load_all_jobs() -> list[dict]:
         jobs = raw.get("jobs", [])
         for job in jobs:
             job["id"] = _job_id(job)
+            # Same field the DB path's scraped_job_view adds (label-only here).
+            job["job_type_class"] = classify_job_type(job.get("employment_type"), job.get("source"))
         return jobs
     except Exception as exc:
         logger.warning("jobs_load_error", error=str(exc))
@@ -198,6 +201,7 @@ def _apply_job_filters(jobs: list[dict], **f: Any) -> list[dict]:
     source        = (f.get("source")        or "").lower()
     hiring_entity = (f.get("hiring_entity") or "").lower()
     work_mode     = (f.get("work_mode")     or "").lower()
+    job_type      = f.get("job_type")       or ""
     run_id        = (f.get("run_id")        or "")
     date_from     = f.get("date_from")
     date_to       = f.get("date_to")
@@ -254,6 +258,13 @@ def _apply_job_filters(jobs: list[dict], **f: Any) -> list[dict]:
         result = [j for j in result if (j.get("hiring_entity") or "").lower() == hiring_entity]
     if work_mode:
         result = [j for j in result if (j.get("work_mode") or "").lower() == work_mode]
+    if job_type in JOB_TYPE_FILTER_VALUES:
+        # The JSON store has no run filters, so only the job's own label counts here.
+        want = "" if job_type == "not_specified" else job_type
+        result = [
+            j for j in result
+            if classify_job_type(j.get("employment_type"), j.get("source")) == want
+        ]
     if date_from:
         result = [j for j in result if _date_gte(j.get("posted_date"), date_from)]
     if date_to:
@@ -340,6 +351,7 @@ async def list_jobs(
     source:        str = Query("",                        description="Filter by source: LinkedIn | Naukri | Dice | Demand (Demand Search jobs are listed only when asked for)"),
     hiring_entity: str = Query("",                        description="Filter: Direct Client | GCC | Staffing Firm | Ambiguous"),
     work_mode:     str = Query("",                        description="Filter: Remote | Hybrid | Onsite"),
+    job_type:      str = Query("",                        description="Job type: full_time | contract | not_specified — from the source's own employment-type label, else the run's enforced LinkedIn/Dice search filter (no description guessing)"),
     run_id:        str = Query("",                        description="Filter to a single harvest run's jobs (display run id, e.g. 20260817_110703)"),
     date_from:     str = Query("",                        description="Filter jobs posted on or after this date (YYYY-MM-DD)"),
     date_to:       str = Query("",                        description="Filter jobs posted on or before this date (YYYY-MM-DD)"),
@@ -391,6 +403,7 @@ async def list_jobs(
             source        = source,
             hiring_entity = hiring_entity,
             work_mode     = work_mode,
+            job_type      = job_type,
             run_id        = run_id or None,
             date_from     = date_from or None,
             date_to       = date_to   or None,
@@ -414,6 +427,7 @@ async def list_jobs(
             source        = source        or None,
             hiring_entity = hiring_entity or None,
             work_mode     = work_mode     or None,
+            job_type      = job_type      or None,
             run_id        = run_id        or None,
             date_from     = date_from     or None,
             date_to       = date_to       or None,
@@ -455,6 +469,7 @@ async def list_jobs(
             "source":        source        or None,
             "hiring_entity": hiring_entity or None,
             "work_mode":     work_mode     or None,
+            "job_type":      job_type      or None,
             "run_id":        run_id        or None,
             "date_from":     date_from     or None,
             "date_to":       date_to       or None,

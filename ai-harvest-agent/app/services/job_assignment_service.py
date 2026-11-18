@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import HTTPException, status
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import case, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.tenant_context import apply_tenant
@@ -71,8 +71,11 @@ async def assign_job(db: AsyncSession, job_id: str, user: AuthenticatedUser, not
     """Claim `job_id` for `user` (or update the note if they already own it).
 
     A single conditional UPDATE, so two users clicking at once can't both win:
-    it only matches while the job is unassigned or already the caller's."""
+    it only matches while the job is unassigned or already the caller's. A new
+    claim stamps assigned_at and clears the reminder dismissal (a fresh 7-day
+    reminder); a note edit by the owner keeps both, so it never reschedules it."""
     note = (note or "").strip()[:NOTE_MAX_LEN]
+    new_claim = or_(ScrapedJobORM.assigned_to_email.is_(None), ScrapedJobORM.assigned_to_email == "")
     stmt = apply_tenant(
         update(ScrapedJobORM)
         .where(
@@ -85,8 +88,10 @@ async def assign_job(db: AsyncSession, job_id: str, user: AuthenticatedUser, not
         .values(
             assigned_to_email=user.email,
             assigned_to_name=display_name_from_email(user.email),
-            assigned_at=datetime.now(timezone.utc),
+            assigned_at=case((new_claim, datetime.now(timezone.utc)), else_=ScrapedJobORM.assigned_at),
             assignment_note=note,
+            assignment_reminder_done_at=case(
+                (new_claim, None), else_=ScrapedJobORM.assignment_reminder_done_at),
         ),
         ScrapedJobORM.tenant_id,
     )
@@ -124,6 +129,7 @@ async def unassign_job(db: AsyncSession, job_id: str, user: AuthenticatedUser) -
     job.assigned_to_name = ""
     job.assigned_at = None
     job.assignment_note = ""
+    job.assignment_reminder_done_at = None
     await db.commit()
     await db.refresh(job)
     return job

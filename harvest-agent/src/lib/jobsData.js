@@ -225,6 +225,9 @@ function mapApiJobFields(j) {
     experience: j.experience || "",
     skills: Array.isArray(j.skills) ? j.skills.filter(Boolean) : [],
     employmentType: j.employment_type || "",
+    // "full_time" | "contract" | "other" | "" (not specified) — the backend's Job type
+    // class (source label, else the run's enforced search filter); see job_type_class.py.
+    jobTypeClass: j.job_type_class || "",
     // Only a real web link is an apply link — Demand Search rows carry a synthetic
     // demand://jd/… key in job_url.
     applyLink: /^https?:\/\//i.test(j.job_url || "") ? j.job_url : "",

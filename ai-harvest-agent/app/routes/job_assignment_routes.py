@@ -6,6 +6,9 @@ Endpoints
 POST   /jobs/{id}/assign — claim the job for the current user (optional note);
                            409 if someone else already holds it
 DELETE /jobs/{id}/assign — release the job; only the assignee may do this
+GET    /jobs/assignment-reminders/summary — how many of my self-assigned jobs
+                           reached N days (default 7) without a dismissed reminder
+POST   /jobs/assignment-reminders/dismiss — dismiss every reminder due now
 
 Both return {"job_id", "assigned_to"} where assigned_to is
 {email, name, assigned_at, note} or null. See job_assignment_service.
@@ -19,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import get_current_user, get_db_session
 from app.models.auth import AuthenticatedUser
+from app.services.assignment_reminder_service import dismiss_due, due_summary
 from app.services.job_assignment_service import NOTE_MAX_LEN, assign_job, assignment_view, unassign_job
 
 logger = structlog.get_logger(__name__)
@@ -71,3 +75,33 @@ async def unassign_job_route(
     job = await unassign_job(db, job_id, current_user)
     logger.info("job_unassigned", job_id=job_id, user=current_user.email)
     return {"job_id": job_id, "assigned_to": assignment_view(job)}
+
+
+# Two path segments, so they never collide with GET /jobs/{job_id}.
+@router.get(
+    "/jobs/assignment-reminders/summary",
+    status_code=status.HTTP_200_OK,
+    summary="Count my self-assigned jobs due a reminder",
+)
+async def assignment_reminder_summary(
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """`{"due", "days", "oldest_assigned_at"}`: jobs still assigned to me `days` (default 7)
+    or more days after I claimed them, whose reminder I haven't dismissed. Polled by the bell."""
+    return await due_summary(db, current_user)
+
+
+@router.post(
+    "/jobs/assignment-reminders/dismiss",
+    status_code=status.HTTP_200_OK,
+    summary="Dismiss my due self-assignment reminders",
+)
+async def dismiss_assignment_reminders(
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """Close every reminder due now. Each assignment reminds once; a new claim starts a new one."""
+    updated = await dismiss_due(db, current_user)
+    logger.info("assignment_reminders_dismissed", user=current_user.email, updated=updated)
+    return {"updated": updated}

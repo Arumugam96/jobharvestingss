@@ -198,6 +198,18 @@ export function unassignJob(jobId) {
   return request(`/jobs/${encodeURIComponent(jobId)}/assign`, { method: "DELETE" });
 }
 
+/** GET /jobs/assignment-reminders/summary — how many of my self-assigned jobs are still
+ * mine `days` (default 7) after I claimed them, reminder not yet dismissed.
+ * Returns { due, days, oldest_assigned_at }. */
+export function getAssignmentReminders() {
+  return request("/jobs/assignment-reminders/summary");
+}
+
+/** POST /jobs/assignment-reminders/dismiss — dismiss every due self-assignment reminder. Returns { updated }. */
+export function dismissAssignmentReminders() {
+  return request("/jobs/assignment-reminders/dismiss", { method: "POST" });
+}
+
 // ── Phone call verification ────────────────────────────────────────────────────
 // A "call view" is { id, job_id, phone, phone_source, contact_name,
 // status: "answered"|"unanswered", outcome, details, proof: [{name, size, type, src}],

@@ -235,20 +235,17 @@ const styles = `
 
   .ha-sidebar{position:sticky;top:0;height:100vh;width:100%;z-index:50;box-sizing:border-box;
     display:flex;flex-direction:column;padding:10px;overflow-x:hidden;overflow-y:auto;
-    /* Thin, translucent scrollbar — overflow-y:auto means it only appears when the
-       nav is taller than the viewport. Standard props (Firefox / Chrome 121+). */
-    scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.22) transparent;
+    /* Scrolls (wheel / trackpad / touch / keyboard) but draws no scrollbar: a visible
+       one occupies the right edge, cutting the active "attached tab" off from the
+       page and breaking the seamless join. Standard prop for Firefox / Chrome 121+. */
+    scrollbar-width:none;
     background:
       radial-gradient(360px 240px at 50% -60px, rgba(255,255,255,.16), transparent 70%),
       linear-gradient(175deg, var(--sb1), var(--sb2) 90%);
     -webkit-backdrop-filter:blur(16px) saturate(140%);backdrop-filter:blur(16px) saturate(140%);
     font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;}
-  .ha-sidebar:hover{scrollbar-color:rgba(255,255,255,.38) transparent;}
   /* WebKit fallback (older Chrome / Safari). */
-  .ha-sidebar::-webkit-scrollbar{width:6px;}
-  .ha-sidebar::-webkit-scrollbar-track{background:transparent;}
-  .ha-sidebar::-webkit-scrollbar-thumb{background:rgba(255,255,255,.22);border-radius:999px;}
-  .ha-sidebar::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.38);}
+  .ha-sidebar::-webkit-scrollbar{display:none;}
   .ha-sidebar *{box-sizing:border-box;}
 
   .ha-sb-pin{position:absolute;top:10px;right:10px;z-index:2;display:grid;place-items:center;

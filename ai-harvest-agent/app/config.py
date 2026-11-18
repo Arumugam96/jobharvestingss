@@ -447,6 +447,9 @@ class Settings(BaseSettings):
     # ── Phone call verification (app/services/phone_verification_service.py) ─────
     # An Unanswered call with Follow-up on reminds the caller this many hours later.
     phone_followup_delay_hours: int = 24
+    # A self-assigned job reminds its assignee once, this many days after the claim
+    # (app/services/assignment_reminder_service.py).
+    assignment_reminder_days: int = 7
 
     # ── CORS ─────────────────────────────────────────────────────────────────────
     cors_origins: str = "http://localhost:3000,http://localhost:8080"
