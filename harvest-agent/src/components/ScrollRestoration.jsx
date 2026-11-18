@@ -23,7 +23,9 @@ import { useLocation, useNavigate, useNavigationType } from "react-router-dom";
 
 const STORAGE_KEY = "ha-scroll-positions:v1";
 const MAX_ENTRIES = 80;
-const RESTORE_MS = 1500;
+// Long enough for a list that has to be re-fetched (cache miss / slow API) to
+// land; any user scroll, click or key press ends the attempt earlier.
+const RESTORE_MS = 4000;
 // Scroll containers to track, besides the window: the shared table scroller,
 // the Recruiter Contact Finder page (its own 100vh scroller), and an opt-in hook.
 const SCROLLERS = ".ha-table-scroll, .rcf, [data-scroll-restore]";
@@ -158,17 +160,30 @@ export default function ScrollRestoration() {
 
   // Save continuously. A capturing listener on document also sees element
   // scrolls (scroll events don't bubble); rAF-throttled to one save per frame.
+  // A click / key press can navigate away before that frame runs, which would
+  // lose the last scroll — so any pending save is flushed synchronously on
+  // pointerdown / keydown (capture phase, i.e. before the app's own handlers).
   useEffect(() => {
     let raf = 0;
     const onScroll = () => {
       if (raf) return;
       raf = requestAnimationFrame(() => { raf = 0; save(locRef.current); });
     };
-    const onHide = () => persistNow();
+    const flush = () => {
+      if (!raf) return;
+      cancelAnimationFrame(raf);
+      raf = 0;
+      save(locRef.current);
+    };
+    const onHide = () => { flush(); persistNow(); };
     document.addEventListener("scroll", onScroll, { capture: true, passive: true });
+    window.addEventListener("pointerdown", flush, { capture: true, passive: true });
+    window.addEventListener("keydown", flush, { capture: true, passive: true });
     window.addEventListener("pagehide", onHide);
     return () => {
       document.removeEventListener("scroll", onScroll, { capture: true });
+      window.removeEventListener("pointerdown", flush, { capture: true });
+      window.removeEventListener("keydown", flush, { capture: true });
       window.removeEventListener("pagehide", onHide);
       cancelAnimationFrame(raf);
       persistNow();

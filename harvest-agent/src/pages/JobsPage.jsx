@@ -86,10 +86,14 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
   // started since (fast typing / rapid filter clicks can overlap fetches).
   const seqRef = useRef(0);
   const lastParamsRef = useRef(null);
-  // On a cache-seeded remount, keep the cached rows visible during the first
-  // (revalidating) fetch instead of flashing the loading state.
-  const seededRef = useRef(!!rowsSeed);
-  const firstFetchRef = useRef(false);
+  // On a cache-seeded remount, keep the cached rows visible while revalidating
+  // instead of flashing the loading state: a fetch for the SAME params the
+  // cached rows came from is quiet. Matched on the params themselves, not on
+  // "first fetch since mount" — StrictMode (dev) runs effects twice, and a
+  // run-once flag made the second, identical fetch blank the table, which
+  // broke Back's scroll restore (top first, then a late jump). The first
+  // fetch for different params clears it, so real filter changes still load.
+  const seedSigRef = useRef(rowsSeed?.paramsSig ?? null);
   // Stats fetch bookkeeping: own seq counter (stale-response guard), the
   // signature of the params last requested (a pure page/size/sort change keeps
   // it, so no refetch) and the pending debounce timer.
@@ -152,8 +156,9 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
     lastParamsRef.current = params;
     updateStats(params);
     const seq = ++seqRef.current;
-    const quiet = !firstFetchRef.current && seededRef.current;
-    firstFetchRef.current = true;
+    const paramsSig = JSON.stringify(params);
+    const quiet = seedSigRef.current !== null && paramsSig === seedSigRef.current;
+    if (!quiet) seedSigRef.current = null;
     setPageLoading(!quiet);
     setPageError("");
     // The URL search these params belong to. JobsTable syncs the URL in an
@@ -177,6 +182,7 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
         jobsViewRef.current = {
           ...(jobsViewRef.current || {}),
           search: requestSearch,
+          paramsSig,
           jobs: mapped,
           total: res.total || 0,
           dateFrom: params.date_from || "",
@@ -371,10 +377,11 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
             Counts follow the user's filters (GET /jobs/facets with the filter params;
             each bucket's own filter is left out so every card keeps its count). */}
         <style>{`
-          .ha-runstats.ha-jobstats{grid-template-columns:repeat(5,minmax(0,1fr));}
-          @media(max-width:900px){.ha-runstats.ha-jobstats{grid-template-columns:repeat(3,minmax(0,1fr));}}
+          .ha-runstats.ha-jobstats{grid-template-columns:repeat(4,minmax(0,1fr));}
           @media(max-width:520px){.ha-runstats.ha-jobstats{grid-template-columns:repeat(2,minmax(0,1fr));}}
         `}</style>
+        {/* One grid, 4 per row: the 5 clickable classification cards, then the 3
+            informational contact cards for the same filtered rows (2 rows × 4). */}
         <div className="ha-runstats ha-jobstats">
           {[
             { key: "all", value: stats.total || 0, label: demand ? "Total Demand jobs" : "Jobs found", color: C.accent },
@@ -395,14 +402,7 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
               </button>
             );
           })}
-        </div>
-        {/* Contact / filter-status counts for the same filtered rows (informational). */}
-        <div className="ha-runstats ha-jobstats">
           {[
-            { key: "qualified", value: stats.qualified || 0, label: "Qualified", color: "#059669",
-              title: "Jobs that passed the business filter" },
-            { key: "flagged", value: stats.flagged || 0, label: "Flagged", color: "#DC2626",
-              title: "Jobs flagged by the business filter" },
             { key: "emails", value: stats.unique_emails ?? stats.with_email ?? 0, label: "Emails", color: C.primary,
               title: `Distinct email addresses on these jobs. Jobs with email: ${stats.with_email || 0} (${stats.with_poster_email || 0} job/recruiter · ${stats.with_company_email || 0} company contact)` },
             { key: "contacts", value: stats.phone_contacts ?? stats.unique_phones ?? stats.with_phone ?? 0, label: "Contacts", color: C.secondary,
