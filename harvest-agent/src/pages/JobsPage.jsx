@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
-import { Wrench, ArrowLeft } from "lucide-react";
+import { Wrench, ArrowLeft, XCircle } from "lucide-react";
 import { getJobs, getJobsFacets, ApiError, downloadJsonUrl, downloadExcelUrl } from "../api";
 import { C } from "../theme";
-import { Select, StatCard } from "../components/ui";
+import { Select /* , StatCard */ } from "../components/ui";
 import ExportButton from "../components/ExportButton";
 import JobsTable, { PAGE_SIZE_OPTIONS } from "../components/JobsTable";
 import { mapApiJob, fetchAllJobs, jobContact, pocKindLabel, partSourceLabel } from "../lib/jobsData";
@@ -24,6 +24,16 @@ import { useTenant } from "../TenantContext";
 // New search | All jobs tabs) render at the top. It keeps its own view cache,
 // apart from Harvested Jobs'.
 const DEMAND_SOURCE = "Demand";
+
+// Classification stat cards (same set as Run Detail). Each bucket maps to the
+// GET /jobs server filter it applies; counts come from GET /jobs/facets stats.
+const BUCKETS = {
+  verified:  { label: "Verified contacts", color: "#059669",   params: { verification_status: "verified" } },
+  direct:    { label: "Direct clients",    color: C.primary,   params: { hiring_entity: "Direct Client" } },
+  gcc:       { label: "GCC companies",     color: C.secondary, params: { hiring_entity: "GCC" } },
+  staffing:  { label: "Staffing firms",    color: "#7C3AED",   params: { hiring_entity: "Staffing Firm" } },
+  ambiguous: { label: "Needs review",      color: "#D97706",   params: { hiring_entity: "Ambiguous" } },
+};
 
 /**
  * Harvested Jobs page (also reused as My Workspace and Demand Jobs): date range, stat cards and
@@ -56,6 +66,9 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
 
   const [startDate, setStartDate] = useState(rowsSeed?.dateFrom || "");
   const [endDate, setEndDate] = useState(rowsSeed?.dateTo || "");
+  // Active classification card ("all" | a BUCKETS key). Like the dates it lives in
+  // page state (not the URL), so it rides along in the view cache.
+  const [bucket, setBucket] = useState(rowsSeed?.bucket || "all");
   const [pageJobs, setPageJobs] = useState(rowsSeed?.jobs || []);
   const [pageTotal, setPageTotal] = useState(rowsSeed?.total || 0);
   const [pageLoading, setPageLoading] = useState(!rowsSeed);
@@ -104,6 +117,8 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
           total: res.total || 0,
           dateFrom: params.date_from || "",
           dateTo: params.date_to || "",
+          bucket: Object.keys(BUCKETS).find((k) =>
+            Object.entries(BUCKETS[k].params).every(([pk, pv]) => params[pk] === pv)) || "all",
         };
       }
     } catch (err) {
@@ -144,8 +159,9 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
       date_from: startDate, date_to: endDate,
       ...(demand ? { source: DEMAND_SOURCE } : {}),
       ...(library ? { assigned_to_me: true } : {}),
+      ...(BUCKETS[bucket]?.params || {}),
     }),
-    [startDate, endDate, demand, library]
+    [startDate, endDate, demand, library, bucket]
   );
 
   const stats = facets?.stats || {};
@@ -261,11 +277,46 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
             <Select label="Rows per page" value={pageSizeSel} onChange={onPageSizeChange} options={PAGE_SIZE_OPTIONS} />
           </div>
         </div>
+        {/* Previous stat cards — replaced by the clickable classification cards below.
         <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
           <StatCard value={stats.total || 0} label={demand ? "Total Demand jobs" : "Total harvested"} color={C.accent} />
           <StatCard value={stats.companies || 0} label="Companies sourced" color={C.primary} />
           <StatCard value={stats.pocs || 0} label="POCs identified" color={C.primary} />
         </div>
+        */}
+        {/* Classification cards (as on Run Detail): clicking one filters the jobs to
+            that bucket server-side (hiring_entity / verification_status); clicking it
+            again — or the chip — clears it. Counts are whole-dataset facet stats. */}
+        {/* All six on one row here (Run Detail keeps its 3×2 grid). */}
+        <div className="ha-runstats" style={{ gridTemplateColumns: "repeat(6, minmax(0, 1fr))" }}>
+          {[
+            { key: "all", value: stats.total || 0, label: demand ? "Total Demand jobs" : "Jobs found", color: C.accent },
+            ...Object.entries(BUCKETS).map(([key, b]) => ({ key, value: stats[key] || 0, label: b.label, color: b.color })),
+          ].map((card) => {
+            const active = bucket === card.key;
+            return (
+              <button
+                key={card.key}
+                type="button"
+                className={"ha-runstat ha-runstat-btn" + (active ? " ha-runstat-active" : "")}
+                aria-pressed={active}
+                title={card.key === "all" ? "Show all jobs" : `Filter jobs to ${card.label}`}
+                onClick={() => setBucket((b) => (b === card.key ? "all" : card.key))}
+                style={active ? { boxShadow: `inset 0 0 0 2px ${card.color}` } : undefined}
+              >
+                <b style={{ color: card.color }}>{card.value}</b><span>{card.label}</span>
+              </button>
+            );
+          })}
+        </div>
+        {bucket !== "all" && (
+          <div>
+            <button className="ha-pill" onClick={() => setBucket("all")} title="Clear card filter"
+              style={{ background: C.pale, color: C.secondary, border: "1px solid " + C.border, display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+              {BUCKETS[bucket].label} <XCircle size={12} />
+            </button>
+          </div>
+        )}
 
         <JobsTable
           jobs={pageJobs}

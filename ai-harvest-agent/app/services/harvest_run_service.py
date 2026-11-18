@@ -916,6 +916,7 @@ class HarvestRunService:
         company_country: str | None = None,
         source:        str | None = None,
         hiring_entity: str | None = None,
+        verification_status: str | None = None,
         work_mode:     str | None = None,
         job_type:      str | None = None,
         date_from:     str | None = None,
@@ -1004,6 +1005,10 @@ class HarvestRunService:
             stmt = stmt.where(_not_demand_job())  # Demand jobs only when asked for by name
         if hiring_entity:
             stmt = stmt.where(func.lower(ScrapedJobORM.hiring_entity) == hiring_entity.lower())
+        if verification_status:
+            stmt = stmt.where(
+                func.lower(ScrapedJobORM.verification_status) == verification_status.lower()
+            )
         if work_mode:
             stmt = stmt.where(func.lower(ScrapedJobORM.work_mode) == work_mode.lower())
         if job_type in JOB_TYPE_FILTER_VALUES:
@@ -1104,6 +1109,17 @@ class HarvestRunService:
                 _count_if(presence["email_company"]).label("with_company_email"),
                 _count_if(presence["mobile"]).label("with_phone"),
                 _count_if(presence["linkedin"]).label("with_linkedin"),
+                # Classification buckets for the Harvested Jobs stat cards — same
+                # predicates as the /jobs hiring_entity / verification_status filters.
+                _count_if(func.lower(ScrapedJobORM.verification_status) == "verified")
+                .label("verified"),
+                _count_if(func.lower(ScrapedJobORM.hiring_entity) == "direct client")
+                .label("direct"),
+                _count_if(func.lower(ScrapedJobORM.hiring_entity) == "gcc").label("gcc"),
+                _count_if(func.lower(ScrapedJobORM.hiring_entity) == "staffing firm")
+                .label("staffing"),
+                _count_if(func.lower(ScrapedJobORM.hiring_entity) == "ambiguous")
+                .label("ambiguous"),
             )
             .select_from(ScrapedJobORM)
             .outerjoin(RecruiterORM, ScrapedJobORM.recruiter_id == RecruiterORM.id)
@@ -1117,6 +1133,7 @@ class HarvestRunService:
                 "total", "companies", "pocs", "qualified", "flagged",
                 "with_email", "with_poster_email", "with_company_email",
                 "with_phone", "with_linkedin",
+                "verified", "direct", "gcc", "staffing", "ambiguous",
             )
         }
         # with_* count JOBS that have a channel (they back the contact filter);

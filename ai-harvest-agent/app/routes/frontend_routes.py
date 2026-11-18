@@ -200,6 +200,7 @@ def _apply_job_filters(jobs: list[dict], **f: Any) -> list[dict]:
     company_country = (f.get("company_country") or "").lower()
     source        = (f.get("source")        or "").lower()
     hiring_entity = (f.get("hiring_entity") or "").lower()
+    verification_status = (f.get("verification_status") or "").lower()
     work_mode     = (f.get("work_mode")     or "").lower()
     job_type      = f.get("job_type")       or ""
     run_id        = (f.get("run_id")        or "")
@@ -256,6 +257,11 @@ def _apply_job_filters(jobs: list[dict], **f: Any) -> list[dict]:
         result = [j for j in result if (j.get("source") or "").lower() != DEMAND_SOURCE.lower()]
     if hiring_entity:
         result = [j for j in result if (j.get("hiring_entity") or "").lower() == hiring_entity]
+    if verification_status:
+        result = [
+            j for j in result
+            if (j.get("verification_status") or "").lower() == verification_status
+        ]
     if work_mode:
         result = [j for j in result if (j.get("work_mode") or "").lower() == work_mode]
     if job_type in JOB_TYPE_FILTER_VALUES:
@@ -350,6 +356,7 @@ async def list_jobs(
     company_country: str = Query("",                      description="Filter by company HQ country (UI dropdown), e.g. United States"),
     source:        str = Query("",                        description="Filter by source: LinkedIn | Naukri | Dice | Demand (Demand Search jobs are listed only when asked for)"),
     hiring_entity: str = Query("",                        description="Filter: Direct Client | GCC | Staffing Firm | Ambiguous"),
+    verification_status: str = Query("", description="Verification status, e.g. verified"),
     work_mode:     str = Query("",                        description="Filter: Remote | Hybrid | Onsite"),
     job_type:      str = Query("",                        description="Job type: full_time | contract | not_specified — from the source's own employment-type label, else the run's enforced LinkedIn/Dice search filter (no description guessing)"),
     run_id:        str = Query("",                        description="Filter to a single harvest run's jobs (display run id, e.g. 20260817_110703)"),
@@ -402,6 +409,7 @@ async def list_jobs(
             company_country = company_country,
             source        = source,
             hiring_entity = hiring_entity,
+            verification_status = verification_status,
             work_mode     = work_mode,
             job_type      = job_type,
             run_id        = run_id or None,
@@ -426,6 +434,7 @@ async def list_jobs(
             company_country = company_country or None,
             source        = source        or None,
             hiring_entity = hiring_entity or None,
+            verification_status = verification_status or None,
             work_mode     = work_mode     or None,
             job_type      = job_type      or None,
             run_id        = run_id        or None,
@@ -468,6 +477,7 @@ async def list_jobs(
             "company_country": company_country or None,
             "source":        source        or None,
             "hiring_entity": hiring_entity or None,
+            "verification_status": verification_status or None,
             "work_mode":     work_mode     or None,
             "job_type":      job_type      or None,
             "run_id":        run_id        or None,
@@ -507,6 +517,19 @@ async def job_facets(
     # isinstance: a direct call (tests) gets the Query(...) default object.
     demand = isinstance(source, str) and source.strip().lower() == DEMAND_SOURCE.lower()
 
+    def _bucket_counts(jobs: list[dict]) -> dict[str, int]:
+        """Verified / hiring-entity bucket counts, mirroring the /jobs filters."""
+        def _ent(value: str) -> int:
+            return sum(1 for j in jobs if (j.get("hiring_entity") or "").lower() == value)
+        return {
+            "verified":  sum(1 for j in jobs
+                             if (j.get("verification_status") or "").lower() == "verified"),
+            "direct":    _ent("direct client"),
+            "gcc":       _ent("gcc"),
+            "staffing":  _ent("staffing firm"),
+            "ambiguous": _ent("ambiguous"),
+        }
+
     def _facets_from_json() -> dict:
         """Compute the same facets and stats from the latest combined JSON file."""
         jobs = _load_all_jobs()
@@ -538,6 +561,8 @@ async def job_facets(
                 "with_company_email": _count("email_company"),
                 "with_phone":         _count("mobile"),
                 "with_linkedin":      _count("linkedin"),
+                # Classification buckets for the stat cards (same as the DB path).
+                **_bucket_counts(jobs),
                 # Distinct contacts (a shared recruiter counts once) — same keys as the DB path.
                 **unique_contact_counts(
                     {"emails": [j.get(k) for k in ("email_scraped", "email_recruiter",
