@@ -4,6 +4,7 @@ import EmailComposeModal from "./components/EmailComposeModal";
 import LinkedInMessageModal from "./components/LinkedInMessageModal";
 import { getOutreachStatus, getJobOutreachDetail, runJobResdexSearch, openLoginRequired, ApiError } from "./api";
 import LiveBrowserView from "./components/LiveBrowserView";
+import { ContactTimeline } from "./components/ContactHistory";
 import { useCurrentUserEmail, isAssignedToOther } from "./components/AssignJob";
 import { GLASS, GLASS_BTN, PAGE_BG, GLASS_FALLBACK } from "./theme";
 import { copyText } from "./lib/clipboard";
@@ -119,6 +120,33 @@ function CompanySizeBadge({ band, tier }) {
  * Round contact-action icon: a button when `onClick` is given (green when `sent`),
  * else a link to `href` (new tab unless `newTab` is false), else a disabled icon.
  */
+/** "Call history" under a contact: every logged call to its number(s) on ANY job, by
+ * any teammate (GET /phone-verifications/contact-history, loaded when the page opens).
+ * Informational only — the assigned user decides whether to call, skip or release the
+ * job with the existing actions. Numbers sharing their last 10 digits are one contact. */
+function CallHistoryBlock({ phones, jobId, exclude = [] }) {
+  // `exclude`: numbers already shown in another contact's block on this page.
+  const seen = new Set(exclude.map((p) => (p || "").replace(/\D/g, "").slice(-10)).filter(Boolean));
+  const nums = (phones || []).map((p) => (p || "").trim()).filter((p) => {
+    const key = p.replace(/\D/g, "").slice(-10);
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  if (!nums.length) return null;
+  return (
+    <div style={{ marginTop: 14, paddingTop: 12, borderTop: "1px dashed #E2E8F0" }}>
+      <div className="ha-key" style={{ marginBottom: 2 }}>Call history</div>
+      {nums.map((p) => (
+        <div key={p}>
+          {nums.length > 1 && <div style={{ fontSize: 11.5, color: "#64748B", fontWeight: 600, marginTop: 6 }}>{p}</div>}
+          <ContactTimeline phone={p} currentJobId={jobId} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function ContactAction({ glyph: Glyph, href, onClick, title, variant, newTab = true, sent = false }) {
   // A click handler (opens the LLM composer) takes precedence over a plain href
   // (mailto / profile link fallback); with neither, the action is disabled.
@@ -989,6 +1017,10 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
             </div>
             )}
           </div>
+          {!isDemand && (
+            <CallHistoryBlock jobId={job.id}
+              phones={[job.posterContact?.mobileScraped, job.posterContact?.mobileRecruiter, job.posterContact?.mobile]} />
+          )}
         </section>
 
         {!isDemand && hasCompanyContact && (
@@ -1047,6 +1079,8 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
                 />
               </div>
             </div>
+            <CallHistoryBlock jobId={job.id} phones={[cc.phone]}
+              exclude={[job.posterContact?.mobileScraped, job.posterContact?.mobileRecruiter, job.posterContact?.mobile]} />
             <div className="ha-en-foot">
               Not the job poster — a likely HR contact at this company's location. Verify before relying on it.
             </div>

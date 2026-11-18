@@ -37,6 +37,7 @@ import app.models.outreach  # noqa: F401 — registers email_outreach on Base.me
 import app.models.outreach_reply  # noqa: F401 — registers outreach_replies on Base.metadata
 import app.models.phone_call_log  # noqa: F401 — registers phone_call_logs on Base.metadata
 import app.models.phone_contact_flag  # noqa: F401 — registers phone_contact_flags on Base.metadata
+import app.models.job_assignment_rotation  # noqa: F401 — registers job_assignment_rotation on Base.metadata
 import app.models.resdex  # noqa: F401 — registers resdex_searches / resdex_candidates / resdex_candidate_emails / resdex_daily_usage on Base.metadata
 import app.models.suppression  # noqa: F401 — registers email_suppressions on Base.metadata
 import app.models.tenant  # noqa: F401 — registers tenants on Base.metadata
@@ -125,6 +126,9 @@ def _ensure_scraped_jobs_columns(sync_conn) -> None:
         ("assignment_note",   "ALTER TABLE scraped_jobs ADD COLUMN assignment_note TEXT NOT NULL DEFAULT ''"),
         # Dismissal of the 7-day self-assignment reminder. Mirrored in alembic 0037.
         ("assignment_reminder_done_at", f"ALTER TABLE scraped_jobs ADD COLUMN assignment_reminder_done_at {ts_type}"),
+        # How the assignee was set: "" manual claim | "auto" round-robin | "demand"
+        # Demand-search owner. Auto outreach skips only manual claims. Mirrored in alembic 0039.
+        ("assignment_source", "ALTER TABLE scraped_jobs ADD COLUMN assignment_source VARCHAR(20) NOT NULL DEFAULT ''"),
     ]
     for name, ddl in pending:
         if name not in existing_cols:
@@ -442,6 +446,26 @@ def _ensure_phone_call_logs_owner(sync_conn, cols: set[str]) -> None:
     ))
     filled = sync_conn.execute(sa_text(_PHONE_OWNER_BACKFILL)).rowcount
     logger.info("phone_call_logs_column_added", column="assigned_to_user_id", backfilled=filled)
+
+
+def _ensure_phone_contact_keys(sync_conn) -> None:
+    """Per-contact call history keys numbers by their trailing 10 digits
+    (phone_verification_service.normalize_phone = contact_keys.phone_key). One-time,
+    idempotent: re-key phone_contact_flags rows still on the old all-digits key, merging
+    rows that collapse onto one (tenant, key) — rekey_phone_contact_flags — and, on
+    PostgreSQL, index phone_call_logs by (tenant_id, that key). Mirrors alembic 0040."""
+    from app.services.phone_verification_service import rekey_phone_contact_flags
+
+    changed = rekey_phone_contact_flags(sync_conn)
+    if changed:
+        logger.info("phone_contact_flags_rekeyed", rows=changed)
+    if sync_conn.dialect.name == "postgresql" and "phone_call_logs" in set(
+        sa_inspect(sync_conn).get_table_names()
+    ):
+        sync_conn.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS ix_phone_call_logs_tenant_phone_key ON phone_call_logs "
+            "(tenant_id, right(regexp_replace(phone, '\\D', '', 'g'), 10))"
+        ))
 
 
 # Owner of legacy call rows = the user whose email logged them (no match → NULL).
@@ -812,6 +836,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # phone_call_logs gained call_outcome + outcome_details + proof (the
         # call-log popup) — same idempotent ADD COLUMN treatment.
         await conn.run_sync(_ensure_phone_call_logs_columns)
+        # One phone key everywhere (trailing 10 digits): re-key + merge old flag rows,
+        # index the call-history key on Postgres. Idempotent.
+        await conn.run_sync(_ensure_phone_contact_keys)
         # users gained role (user | admin) — same idempotent ADD COLUMN treatment.
         await conn.run_sync(_ensure_users_role_column)
         # roles table (admin / business_lead / user) seeded, users.role normalised to a

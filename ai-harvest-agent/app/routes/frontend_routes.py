@@ -500,22 +500,67 @@ async def list_jobs(
     status_code = status.HTTP_200_OK,
     summary     = "Job filter facets",
     description = (
-        "Distinct Company / Job-title / POC dropdown values plus whole-dataset "
-        "stat counts for the jobs page. GET /jobs is paginated server-side, so "
-        "the UI's filter options and header stats come from here rather than "
-        "from the loaded rows."
+        "Distinct Company / Job-title / POC / country dropdown values (global — "
+        "never narrowed by the filters) plus stat counts for the jobs page. "
+        "Accepts the same filter parameters as GET /jobs (not page/page_size/"
+        "sort); `stats` then cover exactly the rows GET /jobs returns for those "
+        "filters (stats.total == its total), regardless of pagination. With no "
+        "filters the stats cover the whole dataset."
     ),
 )
 async def job_facets(
-    source: str = Query("", description="'Demand' = facets of Demand Search jobs only (left out otherwise)"),
+    keyword:       str = Query("",    description="Same as GET /jobs"),
+    company:       str = Query("",    description="Same as GET /jobs"),
+    company_exact: str = Query("",    description="Same as GET /jobs"),
+    job_title:     str = Query("",    description="Same as GET /jobs"),
+    poc:           str = Query("",    description="Same as GET /jobs"),
+    contact:       str = Query("",    description="Same as GET /jobs (comma-separated tokens)"),
+    size_tier:     str = Query("",    description="Same as GET /jobs"),
+    country:       str = Query("",    description="Same as GET /jobs"),
+    company_country: str = Query("",  description="Same as GET /jobs"),
+    source:        str = Query("",    description="Same as GET /jobs. 'Demand' = facets of Demand Search jobs only (left out otherwise)"),
+    hiring_entity: str = Query("",    description="Same as GET /jobs"),
+    verification_status: str = Query("", description="Same as GET /jobs"),
+    work_mode:     str = Query("",    description="Same as GET /jobs"),
+    job_type:      str = Query("",    description="Same as GET /jobs"),
+    run_id:        str = Query("",    description="Same as GET /jobs"),
+    date_from:     str = Query("",    description="Same as GET /jobs"),
+    date_to:       str = Query("",    description="Same as GET /jobs"),
+    assigned_to_me: bool = Query(False, description="Same as GET /jobs"),
+    current_user: AuthenticatedUser = Depends(get_current_user),
 ) -> dict:
-    """Distinct Company / Job title / POC filter values and whole-dataset stats for the jobs page.
+    """Distinct Company / Job title / POC filter values (global) and filter-aware stats.
 
     `source=Demand` returns facets of Demand Search jobs only; otherwise they are left out. On a
     DB error in database mode returns empty lists and empty stats instead of failing.
     """
-    # isinstance: a direct call (tests) gets the Query(...) default object.
-    demand = isinstance(source, str) and source.strip().lower() == DEMAND_SOURCE.lower()
+    def _s(value: Any) -> str:
+        """The str value — a direct call (tests) gets the Query(...) default object."""
+        return value if isinstance(value, str) else ""
+
+    demand = _s(source).strip().lower() == DEMAND_SOURCE.lower()
+    # Unknown contact tokens are dropped, exactly like GET /jobs.
+    contact_tokens = [
+        t for t in (tok.strip() for tok in _s(contact).split(","))
+        if t in CONTACT_FILTER_TOKENS
+    ]
+    me = (
+        current_user.email
+        if assigned_to_me is True and isinstance(current_user, AuthenticatedUser) else None
+    )
+    # The same filter kwargs GET /jobs passes to list_scraped_jobs ("" → None).
+    filters: dict[str, Any] = {
+        "keyword": _s(keyword) or None, "company": _s(company) or None,
+        "company_exact": _s(company_exact) or None, "job_title": _s(job_title) or None,
+        "poc": _s(poc) or None, "contact": contact_tokens or None,
+        "size_tier": _s(size_tier) or None, "country": _s(country) or None,
+        "company_country": _s(company_country) or None, "source": _s(source) or None,
+        "hiring_entity": _s(hiring_entity) or None,
+        "verification_status": _s(verification_status) or None,
+        "work_mode": _s(work_mode) or None, "job_type": _s(job_type) or None,
+        "run_id": _s(run_id) or None, "date_from": _s(date_from) or None,
+        "date_to": _s(date_to) or None,
+    }
 
     def _bucket_counts(jobs: list[dict]) -> dict[str, int]:
         """Verified / hiring-entity bucket counts, mirroring the /jobs filters."""
@@ -532,11 +577,14 @@ async def job_facets(
 
     def _facets_from_json() -> dict:
         """Compute the same facets and stats from the latest combined JSON file."""
-        jobs = _load_all_jobs()
+        all_jobs = _load_all_jobs()
+        # Stats over exactly what GET /jobs' JSON path lists for these filters;
+        # assigned_to_me has no JSON equivalent (GET /jobs ignores it there too).
+        jobs = _apply_job_filters(all_jobs, **filters)
 
         def _distinct(key: str) -> list[str]:
-            """Sorted distinct non-empty values of `key` across the loaded jobs."""
-            return sorted({j.get(key) or "" for j in jobs} - {""})
+            """Sorted distinct non-empty values of `key` across ALL loaded jobs (global)."""
+            return sorted({j.get(key) or "" for j in all_jobs} - {""})
 
         # Same contact semantics as the DB path (poster/recruiter + Company-tagged).
         contacts = [job_dict_contact(j) for j in jobs]
@@ -548,7 +596,7 @@ async def job_facets(
         return {
             "companies":  _distinct("company"),
             "job_titles": _distinct("job_title"),
-            "poc_names":  sorted({c["poc_name"] for c in contacts} - {""}),
+            "poc_names":  sorted({job_dict_contact(j)["poc_name"] for j in all_jobs} - {""}),
             "stats": {
                 "total":         len(jobs),
                 "companies":     len({j.get("company") or "" for j in jobs} - {""}),
@@ -590,7 +638,9 @@ async def job_facets(
     mode = data_source_mode()
     result, _used = await resolve_read(
         mode,
-        lambda: db_read(lambda db: HarvestRunService(db).job_facets(demand=demand)),
+        lambda: db_read(lambda db: HarvestRunService(db).job_facets(
+            demand=demand, assigned_to_email=me, **filters,
+        )),
         _facets_from_json,
     )
     # db_read returns None on a DB error in "database" mode — keep the shape.

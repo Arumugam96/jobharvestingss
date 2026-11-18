@@ -8,6 +8,8 @@ Endpoints (all under the shared auth guard; added to harvest-agent/nginx.conf):
   GET  /recruiter-finder/jobs/{job_id}/items   paginated per-row states (live table)
   POST /recruiter-finder/jobs/{job_id}/retry   re-queue unsuccessful/deferred rows
   GET  /recruiter-finder/usage                 per-tenant daily credit gauge + 14-day history
+                                               (+ Apollo account credits left: ``apollo_credits``)
+  GET  /recruiter-finder/apollo-credits        Apollo account credits left (cached; ?refresh=1)
   GET  /recruiter-finder/history               recent jobs
   GET  /recruiter-finder/phone-status          poll async Apollo phone deliveries
   GET  /recruiter-finder/apollo-webhook-events recent raw webhook deliveries (diagnostics)
@@ -39,7 +41,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.core.dependencies import get_current_user, get_db_session
 from app.core.tenant_context import is_all_access
-from app.services import apollo_budget, apollo_phone_service, recruiter_finder_budget
+from app.services import (
+    apollo_account_credits, apollo_budget, apollo_phone_service, recruiter_finder_budget,
+)
+from app.services.apollo_client import ApolloAPIError
 from app.services.recruiter_finder_import import parse_and_validate
 from app.services.recruiter_finder_service import (
     FinderJobBusyError,
@@ -62,6 +67,43 @@ logger = structlog.get_logger(__name__)
 router = APIRouter(tags=["Recruiter Contact Finder"])
 # Mounted WITHOUT the auth guard in app/main.py (Apollo has no session cookie).
 webhook_router = APIRouter(tags=["Recruiter Contact Finder"])
+
+
+# ── Apollo account credits gate ─────────────────────────────────────────────────
+
+CREDITS_EXHAUSTED_MSG = (
+    "Apollo credits have run out, so new contact lookups and enrichment are unavailable. "
+    "Please contact your admin to top up credits."
+)
+
+
+async def _require_apollo_credits() -> None:
+    """Refuse a credit-spending action with a clean ``402`` when the Apollo ACCOUNT has no
+    credits left this cycle. Fails open: an unknown/stale reading never blocks."""
+    credits = await apollo_account_credits.get_account_credits()
+    if credits.get("exhausted"):
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED, detail=CREDITS_EXHAUSTED_MSG,
+        )
+
+
+async def _flag_if_credits_exhausted(resp: Any) -> Any:
+    """After an action that came back failed (wholly or for some rows), re-read Apollo's
+    balance (forced, rate-limited) and flag ``credits_exhausted`` so the UI locks itself."""
+    if not isinstance(resp, dict):
+        return resp
+    results = resp.get("results") or []
+    failed = resp.get("status") == "failed" or any(
+        isinstance(r, dict) and r.get("status") == "failed" for r in results
+    )
+    if not failed:
+        return resp
+    credits = await apollo_account_credits.get_account_credits(force=True)
+    resp["apollo_credits"] = credits
+    if credits.get("exhausted"):
+        resp["credits_exhausted"] = True
+        resp["message"] = CREDITS_EXHAUSTED_MSG
+    return resp
 
 
 # ── Serializers ──────────────────────────────────────────────────────────────
@@ -174,7 +216,9 @@ async def upload_and_enrich(
     current_user=Depends(get_current_user),
 ) -> Any:
     """Re-validate the file server-side, persist a job + per-row items, launch the
-    detached enrichment worker, and return ``202 {job_id}`` to poll."""
+    detached enrichment worker, and return ``202 {job_id}`` to poll. ``402`` when the
+    Apollo account is out of credits."""
+    await _require_apollo_credits()
     content = await file.read()
     if not content:
         raise HTTPException(status_code=400, detail="The uploaded file is empty.")
@@ -212,11 +256,12 @@ async def single_search(
     or LinkedIn URL on its own)."""
     if not (body.company.strip() or body.person_name.strip() or body.linkedin_url.strip()):
         raise HTTPException(status_code=422, detail="Enter a company, a person's name, or a LinkedIn URL.")
-    return await run_single(
+    await _require_apollo_credits()
+    return await _flag_if_credits_exhausted(await run_single(
         company=body.company, location=body.location, persona=body.persona, reveal=body.reveal,
         person_name=body.person_name, linkedin_url=body.linkedin_url, domain=body.domain,
         count=body.count, requested_by=current_user.email,
-    )
+    ))
 
 
 @router.post("/recruiter-finder/candidates")
@@ -229,10 +274,22 @@ async def candidates(
     picks rows to reveal via POST /recruiter-finder/reveal."""
     if not body.company.strip():
         raise HTTPException(status_code=422, detail="Enter a company to browse its contacts.")
-    return await list_company_candidates(
-        company=body.company, location=body.location, persona=body.persona,
-        personas=body.personas, domain=body.domain,
-    )
+    await _require_apollo_credits()
+    try:
+        return await list_company_candidates(
+            company=body.company, location=body.location, persona=body.persona,
+            personas=body.personas, domain=body.domain,
+        )
+    except ApolloAPIError as exc:
+        # An out-of-credits upstream error -> a clean 402 the UI understands; anything
+        # else keeps the existing 502 ENRICHMENT_API_ERROR handling.
+        if apollo_account_credits.is_credits_exhausted_error(exc) or (
+            await apollo_account_credits.get_account_credits(force=True)
+        ).get("exhausted"):
+            raise HTTPException(
+                status_code=status.HTTP_402_PAYMENT_REQUIRED, detail=CREDITS_EXHAUSTED_MSG,
+            ) from exc
+        raise
 
 
 @router.post("/recruiter-finder/reveal")
@@ -245,10 +302,11 @@ async def reveal(
     hit into `recruiters`."""
     if not body.selections:
         raise HTTPException(status_code=422, detail="Select at least one contact to reveal.")
-    return await reveal_candidates(
+    await _require_apollo_credits()
+    return await _flag_if_credits_exhausted(await reveal_candidates(
         selections=[s.model_dump() for s in body.selections],
         reveal=body.reveal, requested_by=current_user.email,
-    )
+    ))
 
 
 # ── Job status / items / retry ───────────────────────────────────────────────
@@ -319,8 +377,10 @@ async def retry(
 
     Successful/ambiguous rows are left alone, so a retry never re-spends credits on them. Returns
     `{"job_id", "status": "queued"}`; 404 if the job isn't in the caller's tenant; 409 while the
-    job is still queued or running (a second worker would process the same rows).
+    job is still queued or running (a second worker would process the same rows); 402 when the
+    Apollo account is out of credits.
     """
+    await _require_apollo_credits()
     try:
         ok = await retry_job(db, job_id)
     except FinderJobBusyError:
@@ -349,6 +409,7 @@ async def usage(current_user=Depends(get_current_user)) -> Any:
     used = await recruiter_finder_budget.usage_today(tenant)
     remaining = await recruiter_finder_budget.remaining_today(tenant, cap=cap)
     history = await recruiter_finder_budget.usage_history(tenant, 14)
+    global_left = await apollo_budget.remaining_today(purpose="finder")
     return {
         "cap": cap, "used": used, "remaining": remaining, "history": history,
         # Async phone reveal (Apollo → webhook): offered only when a webhook URL is set;
@@ -361,7 +422,25 @@ async def usage(current_user=Depends(get_current_user)) -> Any:
         "phone_pending_ttl_minutes": get_settings().apollo_phone_pending_ttl_minutes,
         # Account-wide Apollo usage today (global ceiling + harvest enrichment sub-cap).
         "apollo": await apollo_budget.usage_today(),
+        # Apollo ACCOUNT credits left this billing cycle (live -> snapshot -> harvest run).
+        # ``exhausted`` drives the page's "credits exhausted" modal / read-only mode.
+        "apollo_credits": await apollo_account_credits.get_account_credits(),
+        # This app's own daily caps (tenant Finder cap or global APOLLO_DAILY_CAP) are spent
+        # -- a softer, resets-tomorrow notice in the UI.
+        "daily_cap_exhausted": (remaining is not None and remaining <= 0)
+        or (global_left is not None and global_left <= 0),
     }
+
+
+@router.get("/recruiter-finder/apollo-credits")
+async def apollo_credits(
+    refresh: bool = Query(False, description="Bypass the short in-process cache"),
+    current_user=Depends(get_current_user),
+) -> Any:
+    """Apollo account credits left this billing cycle: ``{remaining, limit, consumed,
+    cycle_start, cycle_end, as_of, source: live|snapshot|harvest_run|unavailable, stale,
+    exhausted}``. Reading Apollo's stats costs no credits. Never errors (fails open)."""
+    return await apollo_account_credits.get_account_credits(force=refresh)
 
 
 @router.get("/recruiter-finder/history")

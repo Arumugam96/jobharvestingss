@@ -11,6 +11,7 @@ import ThemeStyles from "./components/ThemeStyles";
 import IntroSplash from "./components/IntroSplash";
 import NotificationBell from "./components/NotificationBell";
 import LoginRequiredBanner from "./components/LoginRequiredBanner";
+import ScrollRestoration, { useBackNavigation } from "./components/ScrollRestoration";
 import { getJob, ApiError } from "./api";
 import { mapApiJob, mapJobToDetail } from "./lib/jobsData";
 import { HarvestDataProvider, useHarvestData } from "./HarvestDataContext";
@@ -125,6 +126,9 @@ function JobDetailRoute() {
   const { jobId } = useParams();
   const location = useLocation();
   const navigate = useNavigate();
+  // Back = history-back when opened in-app (a POP, so the list's scroll position
+  // is restored), else the `from` list URL / Harvested Jobs.
+  const goBack = useBackNavigation("/jobs");
   // Prefer the object passed via navigation state (instant); on a refresh/direct
   // link there's no in-memory list anymore (the jobs page is server-paginated),
   // so fetch the single record from GET /jobs/{id}.
@@ -180,7 +184,7 @@ function JobDetailRoute() {
   }
   // Detail views are full-page (own root, no sidebar) — render outside the layout
   // chrome by returning them directly from a route mounted above AppLayout.
-  return <JobDetailsView job={job} onBack={() => navigate(location.state?.from || "/jobs")} />;
+  return <JobDetailsView job={job} onBack={goBack} />;
 }
 
 /** /library — JobsPage in My Workspace mode (only jobs assigned to the current user). */
@@ -203,12 +207,14 @@ function MyWorkspaceRoute() {
 function HistoryRoute() {
   const { runs, runsTotal, runsAggStats, runsLoading, runsError, fetchRuns } = useHarvestData();
   const navigate = useNavigate();
+  const location = useLocation();
   return (
     <RunHistoryPage
       runs={runs} runsTotal={runsTotal} runsAggStats={runsAggStats}
       loading={runsLoading} error={runsError} onRefresh={fetchRuns}
       onNavigate={(key) => navigate(`/${key}`)}
-      onView={(runId) => navigate(`/history/${encodeURIComponent(runId)}`)}
+      // `from` lets the run page's Back go history-back to this exact list.
+      onView={(runId) => navigate(`/history/${encodeURIComponent(runId)}`, { state: { from: location.pathname + location.search } })}
     />
   );
 }
@@ -218,10 +224,11 @@ function RunDetailRoute() {
   const { runId } = useParams();
   const navigate = useNavigate();
   const location = useLocation();
+  const goBack = useBackNavigation("/history");
   return (
     <RunDetailView
       runId={runId}
-      onBack={() => navigate("/history")}
+      onBack={goBack}
       // `from` = this run's page, so the job detail's Back returns here, not /jobs.
       onView={(dv) => navigate(`/jobs/${encodeURIComponent(dv.job.id)}`, { state: { job: dv.job, from: location.pathname + location.search } })}
     />
@@ -279,6 +286,9 @@ export default function HarvestAgent({ onLogout }) {
       {/* App-wide "login needed → Open Live Browser" banner (every page, detail
           views included) — polls only our cheap GET /login-required. */}
       <LoginRequiredBanner />
+      {/* Saves/restores window + table scroll per history entry, for every route
+          (sidebar pages and the full-page detail views alike). */}
+      <ScrollRestoration />
       <Routes>
         {/* Full-page detail views — own root/chrome, no shared sidebar (as before). */}
         <Route path="/jobs/:jobId" element={<JobDetailRoute />} />

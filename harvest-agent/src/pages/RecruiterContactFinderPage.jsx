@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   Loader2, Search, Upload, RotateCw, Download, Zap, Mail, FileSpreadsheet,
   CheckCircle2, AlertTriangle, Building2, MapPin, UserSearch, Users, Link2,
@@ -7,8 +8,96 @@ import {
 import {
   finderSearch, finderCandidates, finderRevealSelected, finderHistoryLog, finderValidate,
   finderUpload, getFinderJob, getFinderJobItems, retryFinderJob, getFinderUsage, getFinderHistory,
-  getFinderRecentContacts, getFinderPhoneStatus, ApiError,
+  getFinderRecentContacts, getFinderPhoneStatus, getFinderApolloCredits, ApiError,
 } from "../api";
+
+// ── Apollo ACCOUNT credits (GET /recruiter-finder/apollo-credits) ─────────────
+// When Apollo's own balance hits zero every lookup fails upstream, so the page goes
+// read-only: actions disabled, history / history-log / recent contacts still usable.
+const CREDITS_EXHAUSTED_MSG =
+  "Apollo credits have run out, so new contact lookups and enrichment are unavailable. Please contact your admin to top up credits.";
+const LOCK_TIP = "Apollo credits are exhausted — contact your admin to top up credits.";
+const CREDITS_RECHECK_MS = 3 * 60 * 1000; // re-check so the page unlocks after a top-up
+
+/** Whether an action's error / response means the Apollo account is out of credits
+ * (the backend answers 402, or flags `credits_exhausted` on a response). */
+function isCreditsExhausted(errOrRes) {
+  if (errOrRes instanceof ApiError) return errOrRes.status === 402;
+  return !!(errOrRes && errOrRes.credits_exhausted);
+}
+
+/** "12 Nov, 14:05" for an ISO timestamp ("" when absent/invalid). */
+function shortDateTime(iso) {
+  const d = iso ? new Date(iso) : null;
+  if (!d || Number.isNaN(d.getTime())) return "";
+  return d.toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+}
+
+const CREDIT_SOURCE_LABEL = {
+  live: "live reading from Apollo",
+  snapshot: "last stored Apollo snapshot",
+  harvest_run: "last harvest run's Apollo reading",
+  unavailable: "unavailable",
+};
+
+/** Tooltip for the Apollo credits figure: source, as-of time and cycle reset. */
+function creditsTip(c) {
+  if (!c) return "Checking Apollo credits…";
+  if (c.source === "unavailable" || c.remaining == null) {
+    return c.reason === "not_configured"
+      ? "Apollo isn't configured for this deployment."
+      : "Apollo's credit balance couldn't be read right now — lookups are still allowed.";
+  }
+  const parts = [`Apollo account credits left this billing cycle · ${CREDIT_SOURCE_LABEL[c.source] || c.source}`];
+  if (c.as_of) parts.push(`as of ${shortDateTime(c.as_of)}`);
+  if (c.cycle_end) parts.push(`cycle resets ${shortDateTime(c.cycle_end)}`);
+  if (c.stale) parts.push("reading is from a previous billing cycle");
+  return parts.join(" · ");
+}
+
+/** Modal shown once when Apollo's credits are exhausted; Esc / Close / backdrop dismiss it. */
+function CreditsExhaustedModal({ onClose }) {
+  const closeRef = useRef(null);
+  useEffect(() => {
+    if (closeRef.current) closeRef.current.focus();
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return createPortal(
+    <div role="dialog" aria-modal="true" aria-labelledby="rcf-cx-title" onMouseDown={onClose}
+      style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,.45)", backdropFilter: "blur(4px)",
+        WebkitBackdropFilter: "blur(4px)", display: "flex", alignItems: "center", justifyContent: "center",
+        zIndex: 1000, padding: 16 }}>
+      <div onMouseDown={(e) => e.stopPropagation()}
+        style={{ background: "linear-gradient(165deg, rgba(255,255,255,.97), rgba(255,255,255,.9))",
+          backdropFilter: "blur(20px) saturate(150%)", WebkitBackdropFilter: "blur(20px) saturate(150%)",
+          border: "1px solid rgba(255,255,255,.85)", borderRadius: 14, maxWidth: 460, width: "100%",
+          padding: 24, boxShadow: "0 20px 50px rgba(0,0,0,.25)",
+          fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+          <span style={{ width: 38, height: 38, borderRadius: 10, background: "#FEF2F2", color: "#DC2626",
+            display: "inline-flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+            <AlertTriangle size={20} />
+          </span>
+          <h3 id="rcf-cx-title" style={{ margin: 0, fontSize: 18, fontWeight: 700, color: "#0F172A" }}>Apollo credits exhausted</h3>
+        </div>
+        <p style={{ margin: "0 0 18px", fontSize: 14, lineHeight: 1.6, color: "#475569" }}>
+          {CREDITS_EXHAUSTED_MSG} You can still browse your enrichment history.
+        </p>
+        <div style={{ display: "flex", justifyContent: "flex-end" }}>
+          <button ref={closeRef} type="button" onClick={onClose}
+            style={{ display: "inline-flex", alignItems: "center", gap: 7, cursor: "pointer", fontSize: 13,
+              fontWeight: 600, padding: "9px 18px", borderRadius: 8, border: "1px solid #2563EB",
+              background: "#2563EB", color: "#fff" }}>
+            Close
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
 
 /* ── Recruiter Contact Finder — ports the approved artifact design. The whole page
  * is scoped under `.rcf` with an injected <style> so its classes never collide with
@@ -299,10 +388,44 @@ export default function RecruiterContactFinderPage() {
   const [collapsed, setCollapsed] = useState(false);
   const rcfRef = useRef(null);
 
+  // Apollo ACCOUNT credits: null = not checked yet (never blocks). Exhausted → modal once,
+  // then read-only mode (banner + disabled actions) until a re-check shows credits again.
+  const [credits, setCredits] = useState(null);
+  const [creditsModal, setCreditsModal] = useState(false);
+  const modalShownRef = useRef(false);
+  const creditsExhausted = !!credits?.exhausted;
+
   const loadUsage = useCallback(async () => {
-    try { setUsage(await getFinderUsage()); } catch { /* keep prior */ }
+    try {
+      const u = await getFinderUsage();
+      setUsage(u);
+      if (u && u.apollo_credits) setCredits(u.apollo_credits);
+    } catch { /* keep prior */ }
   }, []);
-  useEffect(() => { loadUsage(); }, [loadUsage]);
+  /** Fetch the Apollo account balance (refresh=true bypasses the backend's short cache). */
+  const loadCredits = useCallback(async (refresh = false) => {
+    try { setCredits(await getFinderApolloCredits({ refresh })); } catch { /* fail open: keep prior */ }
+  }, []);
+  useEffect(() => { loadCredits(); loadUsage(); }, [loadCredits, loadUsage]);
+
+  // Show the modal the first time credits read as exhausted; re-arm it once they recover.
+  useEffect(() => {
+    if (creditsExhausted && !modalShownRef.current) { modalShownRef.current = true; setCreditsModal(true); }
+    if (!creditsExhausted) { modalShownRef.current = false; setCreditsModal(false); }
+  }, [creditsExhausted]);
+
+  // Periodic re-check (forced while locked so a top-up unlocks the page without a reload).
+  useEffect(() => {
+    const t = setInterval(() => loadCredits(creditsExhausted), CREDITS_RECHECK_MS);
+    return () => clearInterval(t);
+  }, [loadCredits, creditsExhausted]);
+
+  /** An action came back "out of Apollo credits" (402 / credits_exhausted) — lock the page. */
+  const onCreditsExhausted = useCallback((res) => {
+    setCredits((prev) => ({ ...(prev || {}), ...((res && res.apollo_credits) || {}), exhausted: true }));
+  }, []);
+  const closeCreditsModal = useCallback(() => setCreditsModal(false), []);
+  const recheckCredits = useCallback(() => loadCredits(true), [loadCredits]);
 
   // The page is its own scroll container (the app's .ha-main has overflow-x:hidden,
   // which breaks window-relative position:sticky), so the stat band can stick + collapse.
@@ -319,7 +442,22 @@ export default function RecruiterContactFinderPage() {
           </div>
         </div>
 
-        <StatBand usage={usage} collapsed={collapsed} />
+        <StatBand usage={usage} collapsed={collapsed} credits={credits} />
+
+        {creditsExhausted ? (
+          <div className="valnote credits-lock" role="status">
+            <Lock className="ic" style={{ color: "var(--bad)" }} />
+            <div className="t"><b>Apollo credits exhausted — contact your admin.</b> Showing enrichment history only.</div>
+            <button type="button" className="btn sm btn-ghost" onClick={() => loadCredits(true)}>
+              <RotateCw size={13} /> Check again
+            </button>
+          </div>
+        ) : usage?.daily_cap_exhausted ? (
+          <div className="valnote credits-soft" role="status">
+            <Clock className="ic" />
+            <div className="t">Today's enrichment budget is used up — new lookups resume after the daily reset (00:00 UTC).</div>
+          </div>
+        ) : null}
 
         <section className="card">
           <div className="tabs" role="tablist">
@@ -330,15 +468,23 @@ export default function RecruiterContactFinderPage() {
               <Upload size={15} /> Bulk upload <span className="kbd">CSV · XLSX</span>
             </button>
           </div>
-          {tab === "single" ? <SinglePanel usage={usage} onSpent={loadUsage} /> : <BulkPanel usage={usage} onSpent={loadUsage} />}
+          {tab === "single"
+            ? <SinglePanel usage={usage} onSpent={loadUsage} locked={creditsExhausted} onCreditsExhausted={onCreditsExhausted} onActionFailed={recheckCredits} />
+            : <BulkPanel usage={usage} onSpent={loadUsage} locked={creditsExhausted} onCreditsExhausted={onCreditsExhausted} onActionFailed={recheckCredits} />}
         </section>
       </div>
+      {creditsModal && <CreditsExhaustedModal onClose={closeCreditsModal} />}
     </main>
   );
 }
 
 // ── Stat band: usage card (left) + credit gauge (right), collapses on scroll ───
-function StatBand({ usage, collapsed }) {
+function StatBand({ usage, collapsed, credits }) {
+  // Apollo ACCOUNT balance (this billing cycle) — separate from the daily caps above.
+  const cKnown = credits && credits.remaining != null;
+  const creditsText = !credits ? "…" : cKnown ? credits.remaining.toLocaleString() : "unavailable";
+  const creditsOf = cKnown && credits.limit ? ` of ${credits.limit.toLocaleString()} this cycle` : "";
+  const creditsTone = credits?.exhausted ? "var(--bad)" : cKnown ? "var(--ink)" : "var(--ink-faint)";
   const cap = usage?.cap ?? 50;
   const used = usage?.used ?? 0;
   const left = usage?.remaining != null ? usage.remaining : (cap > 0 ? Math.max(0, cap - used) : "∞");
@@ -361,7 +507,7 @@ function StatBand({ usage, collapsed }) {
       <div className="sb-mini" aria-hidden="true">
         <span className="sb-mini-l"><Zap size={14} style={{ color: "var(--accent)" }} /> Enrichment credits · today</span>
         <span className="sb-mini-bar"><i style={{ width: pctW }} /></span>
-        <span className="sb-mini-r num"><b>{used}</b>/{cap} used · <b>{left}</b> left · this workspace</span>
+        <span className="sb-mini-r num"><b>{used}</b>/{cap} used · <b>{left}</b> left · this workspace · Apollo <b style={{ color: creditsTone }}>{creditsText}</b> left</span>
       </div>
 
       <div className="sb-cards">
@@ -411,6 +557,10 @@ function StatBand({ usage, collapsed }) {
             <div className="credit-meta">
               <span className="lbl">Credits left</span>
               <span className="bigleft num">{left}</span>
+              <span className="apollo-left" title={creditsTip(credits)}>
+                Apollo credits left: <b className="num" style={{ color: creditsTone }}>{creditsText}</b>
+                {creditsOf && <small className="num">{creditsOf}</small>}
+              </span>
               <div className="credit-tags"><span className="ctag sep"><span className="dot" />Separate budget</span>
                 {usage?.phones_pending > 0 && (
                   <span className="ctag" title={`Each delivered phone costs ${usage.phone_credit_cost ?? 8} credits`}>
@@ -658,7 +808,7 @@ function HistoryTab() {
 }
 
 // ── Single lookup ─────────────────────────────────────────────────────────────
-function SinglePanel({ usage, onSpent }) {
+function SinglePanel({ usage, onSpent, locked = false, onCreditsExhausted, onActionFailed }) {
   const [target, setTarget] = useState("company"); // company | people | history
   const [reveal, setReveal] = useState("email");
   const [company, setCompany] = useState("");
@@ -692,6 +842,19 @@ function SinglePanel({ usage, onSpent }) {
   const perMax = maxCredits(reveal, phoneCost, 1); // worst-case credits per revealed contact
   const revealWhat = reveal === "both" ? "email + phone" : reveal;
 
+  // Apollo credits exhausted -> read-only: land on History when nothing else is on screen.
+  useEffect(() => {
+    if (locked) { setConfirming(false); if (!result && candidates === null) setTarget("history"); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [locked]);
+  /** Route an action's error: out of Apollo credits -> lock the page; otherwise show it and
+   * re-check the balance (a failure may mean credits just ran out). */
+  const handleActionError = (err, fallback) => {
+    if (isCreditsExhausted(err)) { if (onCreditsExhausted) onCreditsExhausted(err.body); setError(CREDITS_EXHAUSTED_MSG); return; }
+    setError(err instanceof ApiError ? err.message : fallback);
+    if (onActionFailed) onActionFailed();
+  };
+
   // Phones arrive asynchronously: poll every PENDING one (browse reveals + person result).
   const pendingPhoneIds = useMemo(() => {
     const ids = new Set();
@@ -715,12 +878,16 @@ function SinglePanel({ usage, onSpent }) {
   /** Confirmed person lookup: POST /recruiter-finder/search with name / LinkedIn URL / company
    * and the reveal choice; shows the result and refreshes usage. */
   const runPerson = async () => {
-    setConfirming(false); setLoading(true); setError(""); setResult(null);
+    setConfirming(false);
+    if (locked) return;
+    setLoading(true); setError(""); setResult(null);
     try {
-      setResult(await finderSearch({ company, reveal, person_name: personName, linkedin_url: linkedinUrl }));
+      const r = await finderSearch({ company, reveal, person_name: personName, linkedin_url: linkedinUrl });
+      setResult(r);
+      if (isCreditsExhausted(r) && onCreditsExhausted) onCreditsExhausted(r);
       onSpent();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not reach the harvest backend.");
+      handleActionError(err, "Could not reach the harvest backend.");
     } finally { setLoading(false); }
   };
 
@@ -728,6 +895,7 @@ function SinglePanel({ usage, onSpent }) {
   /** Free browse: reset selection/reveals and list the company's candidates with locked emails
    * (POST /recruiter-finder/candidates); unconfigured / over-budget replies show an error. */
   const findCandidates = async () => {
+    if (locked) return;
     setCandLoading(true); setError(""); setCandidates(null); setCompanyDomain("");
     setSelected(new Set()); setRevealedMap({}); setRevealSummary(null);
     setTitleFilter("All titles"); setNameQuery("");
@@ -739,7 +907,7 @@ function SinglePanel({ usage, onSpent }) {
       }
       else setCandidates(r.candidates || []);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not reach the harvest backend.");
+      handleActionError(err, "Could not reach the harvest backend.");
       setCandidates([]);
     } finally { setCandLoading(false); }
   };
@@ -787,7 +955,7 @@ function SinglePanel({ usage, onSpent }) {
   /** Reveal the selected candidates (POST /recruiter-finder/reveal), merge results into
    * revealedMap, record the batch summary, clear the selection and refresh usage. */
   const doReveal = async () => {
-    if (selCount === 0) return;
+    if (selCount === 0 || locked) return;
     setRevealing(true); setError("");
     try {
       const selections = (candidates || []).filter((c) => selected.has(c.person_id)).map((c) => ({
@@ -795,6 +963,7 @@ function SinglePanel({ usage, onSpent }) {
         title: c.title, linkedin_url: c.linkedin_url, location: c.location,
       }));
       const r = await finderRevealSelected({ reveal, selections });
+      if (isCreditsExhausted(r) && onCreditsExhausted) onCreditsExhausted(r);
       setRevealedMap((prev) => {
         const next = { ...prev };
         (r.results || []).forEach((res) => { next[res.person_id] = res; });
@@ -803,11 +972,11 @@ function SinglePanel({ usage, onSpent }) {
       // Keep the batch's ids so the revealed / in-progress counts stay live as phones land.
       setRevealSummary({ credits_spent: r.credits_spent, ids: (r.results || []).map((x) => x.person_id),
         requested: r.requested, budget_exhausted: r.budget_exhausted,
-        message: r.status === "unconfigured" ? r.message : "" });
+        message: r.status === "unconfigured" || isCreditsExhausted(r) ? r.message : "" });
       setSelected(new Set());
       onSpent();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not reveal the selected contacts.");
+      handleActionError(err, "Could not reveal the selected contacts.");
     } finally { setRevealing(false); }
   };
 
@@ -833,12 +1002,13 @@ function SinglePanel({ usage, onSpent }) {
           <div className="fields mode-company">
             <div className="field"><label>Company</label>
               <div className="input"><Building2 size={15} /><input value={company} onChange={(e) => setCompany(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter" && company.trim()) findCandidates(); }} placeholder="e.g. Stripe" /></div></div>
+                onKeyDown={(e) => { if (e.key === "Enter" && company.trim() && !locked) findCandidates(); }} placeholder="e.g. Stripe" /></div></div>
             <div className="field"><label>Location <span className="opt">(optional)</span></label>
               <div className="input"><MapPin size={15} /><input value={location} onChange={(e) => setLocation(e.target.value)} placeholder="City or country" /></div></div>
             <div className="field"><label>Who to look up <span className="opt">(add several)</span></label>
               <MultiPersonaSelect value={personas} onChange={setPersonas} /></div>
-            <button className="btn btn-primary" onClick={findCandidates} disabled={candLoading || !company.trim()}>
+            <button className="btn btn-primary" onClick={findCandidates} disabled={locked || candLoading || !company.trim()}
+              title={locked ? LOCK_TIP : undefined}>
               {candLoading ? <Loader2 size={16} className="ha-spin" /> : <Search size={16} />} Find contacts
             </button>
           </div>
@@ -927,7 +1097,8 @@ function SinglePanel({ usage, onSpent }) {
                   <Zap size={15} />
                   <span className="cm"><b>{selCount}</b> selected — reveal {revealWhat} for up to <b>{perMax * selCount}</b> credit{perMax * selCount === 1 ? "" : "s"}. {costText(reveal, phoneCost)} — you're only charged for what's actually found.</span>
                   <button className="btn sm btn-ghost" onClick={() => setSelected(new Set())} disabled={revealing}>Clear</button>
-                  <button className="btn sm btn-primary" onClick={doReveal} disabled={revealing}>
+                  <button className="btn sm btn-primary" onClick={doReveal} disabled={locked || revealing}
+                    title={locked ? LOCK_TIP : undefined}>
                     {revealing ? <Loader2 size={15} className="ha-spin" /> : reveal === "phone" ? <Phone size={15} /> : <Mail size={15} />} Reveal {selCount} · up to {perMax * selCount} credit{perMax * selCount === 1 ? "" : "s"}
                   </button>
                 </div>
@@ -944,7 +1115,8 @@ function SinglePanel({ usage, onSpent }) {
               <div className="input"><Building2 size={15} /><input value={company} onChange={(e) => setCompany(e.target.value)} placeholder="e.g. Stripe" /></div></div>
             <div className="field"><label>LinkedIn URL <span className="opt">(works on its own)</span></label>
               <div className="input"><Link2 size={15} /><input value={linkedinUrl} onChange={(e) => setLinkedinUrl(e.target.value)} placeholder="linkedin.com/in/…" /></div></div>
-            <button className="btn btn-primary" onClick={() => setConfirming(true)} disabled={loading || !canSubmitPerson}>
+            <button className="btn btn-primary" onClick={() => setConfirming(true)} disabled={locked || loading || !canSubmitPerson}
+              title={locked ? LOCK_TIP : undefined}>
               {loading ? <Loader2 size={16} className="ha-spin" /> : <Zap size={16} />} Enrich
             </button>
           </div>
@@ -954,7 +1126,7 @@ function SinglePanel({ usage, onSpent }) {
               <Zap size={15} />
               <span className="cm">Reveal this contact ({revealWhat}) — <b>{costText(reveal, phoneCost)}</b>.</span>
               <button className="btn sm btn-ghost" onClick={() => setConfirming(false)}>Cancel</button>
-              <button className="btn sm btn-primary" onClick={runPerson}>Confirm &amp; reveal</button>
+              <button className="btn sm btn-primary" onClick={runPerson} disabled={locked} title={locked ? LOCK_TIP : undefined}>Confirm &amp; reveal</button>
             </div>
           ) : (
             <div className="form-foot"><Zap size={15} />
@@ -1099,7 +1271,7 @@ function rowTone(s) {
 // Run view — the hero/runbar + counters + records table for ONE job. Shared by the
 // live "Running" pane and the History detail pane (image-2 layout). `onReset` is
 // only passed in the running pane (New-upload makes no sense on a past run).
-function RunView({ job, items, filter, setFilter, running, mapping, onRetry, onExport, onReset }) {
+function RunView({ job, items, filter, setFilter, running, mapping, onRetry, onExport, onReset, locked = false }) {
   const filtered = useMemo(() => {
     if (filter === "successful") return items.filter((i) => i.status === "completed");
     if (filter === "ambiguous") return items.filter((i) => i.status === "ambiguous");
@@ -1151,9 +1323,9 @@ function RunView({ job, items, filter, setFilter, running, mapping, onRetry, onE
           </div>
         </div>
         <div className="rv-acts">
-          {!running && onRetry && hasUnsuccessful && <button className="btn sm btn-ghost" onClick={onRetry}><RotateCw size={14} /> Retry unsuccessful</button>}
+          {!running && onRetry && hasUnsuccessful && <button className="btn sm btn-ghost" onClick={onRetry} disabled={locked} title={locked ? LOCK_TIP : undefined}><RotateCw size={14} /> Retry unsuccessful</button>}
           <button className="btn sm btn-ghost" onClick={onExport}><Download size={14} /> Export CSV</button>
-          {!running && onReset && <button className="btn sm btn-ghost" onClick={onReset}><Upload size={14} /> New upload</button>}
+          {!running && onReset && <button className="btn sm btn-ghost" onClick={onReset} disabled={locked} title={locked ? LOCK_TIP : undefined}><Upload size={14} /> New upload</button>}
         </div>
       </div>
 
@@ -1205,7 +1377,7 @@ function RunView({ job, items, filter, setFilter, running, mapping, onRetry, onE
 }
 
 // ── Bulk upload + live enrichment ─────────────────────────────────────────────
-function BulkPanel({ usage, onSpent }) {
+function BulkPanel({ usage, onSpent, locked = false, onCreditsExhausted, onActionFailed }) {
   const [file, setFile] = useState(null);
   const [preview, setPreview] = useState(null);
   const [validating, setValidating] = useState(false);
@@ -1235,10 +1407,17 @@ function BulkPanel({ usage, onSpent }) {
   const phoneMaxRef = useRef(phonePollMaxMs());
   phoneMaxRef.current = phonePollMaxMs(usage?.phone_pending_ttl_minutes);
   const fileRef = useRef(null);
+  const failCheckedRef = useRef(null); // job id whose failed rows already triggered a credits re-check
   const phoneEnabled = usage?.phone_enabled;
   const phoneCost = usage?.phone_credit_cost ?? 8;
   useEffect(() => { if (phoneEnabled === false && reveal !== "email") setReveal("email"); }, [phoneEnabled, reveal]);
   const [dragging, setDragging] = useState(false);
+  /** Route an action's error: out of Apollo credits -> lock the page; otherwise show it. */
+  const handleActionError = (err, fallback) => {
+    if (isCreditsExhausted(err)) { if (onCreditsExhausted) onCreditsExhausted(err.body); setError(CREDITS_EXHAUSTED_MSG); return; }
+    setError(err instanceof ApiError ? err.message : fallback);
+    if (onActionFailed) onActionFailed();
+  };
 
   const loadHistory = useCallback(async () => {
     try { const h = await getFinderHistory(); const jobs = (h && h.jobs) || []; setHistory(jobs); return jobs; }
@@ -1252,6 +1431,7 @@ function BulkPanel({ usage, onSpent }) {
   /** Take a chosen file and validate it (POST /recruiter-finder/validate) for the preview;
    * a failure clears the file and shows the error. */
   const onFile = async (f) => {
+    if (locked) return;
     setError(""); setPreview(null); setFile(f);
     if (!f) return;
     setValidating(true);
@@ -1284,11 +1464,14 @@ function BulkPanel({ usage, onSpent }) {
         }
       }
       else stopPoll();
+      if (j.status !== "running" && j.status !== "queued" && j.failed > 0 && onActionFailed && failCheckedRef.current !== id) {
+        failCheckedRef.current = id; onActionFailed();
+      }
     } catch (err) {
       if (err instanceof ApiError && err.status === 404) pollRef.current = setTimeout(() => tick(id), 10000);
       else stopPoll();
     }
-  }, [onSpent]);
+  }, [onSpent, onActionFailed]);
 
   // On mount, load history (feeds the drawer) and surface the latest run so the
   // Bulk page shows real DB data and resumes a live run.
@@ -1317,6 +1500,14 @@ function BulkPanel({ usage, onSpent }) {
     finally { setHistLoading(false); }
   }, []);
 
+  // Apollo credits exhausted and no run in flight -> show History (the read-only view).
+  useEffect(() => {
+    if (!locked || jobId) return;
+    setBulkTab("history");
+    if (!selHistId && history.length) openHist(history[0].job_id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [locked, history.length]);
+
   // Switch to the History tab; auto-select the most recent run the first time.
   const goHistory = () => {
     setBulkTab("history");
@@ -1325,23 +1516,23 @@ function BulkPanel({ usage, onSpent }) {
 
   /** Retry the selected past run's unsuccessful rows, then reload it and the run list. */
   const histRetry = async () => {
-    if (!selHistId) return;
+    if (!selHistId || locked) return;
     try { await retryFinderJob(selHistId); openHist(selHistId); loadHistory(); }
-    catch { /* surfaced on next poll */ }
+    catch (err) { if (isCreditsExhausted(err) && onCreditsExhausted) onCreditsExhausted(err.body); /* else surfaced on next poll */ }
   };
 
   /** Upload the file with the chosen personas and reveal type (finderUpload) to start a bulk
    * job, switch to the Running pane, begin polling and refresh the run list. */
   const start = async () => {
-    if (!file) return;
+    if (!file || locked) return;
     setStarting(true); setError("");
     try { const res = await finderUpload(file, { personas, reveal }); setBulkTab("running"); setJobId(res.job_id); setJob(null); setItems([]); tick(res.job_id); loadHistory(); }
-    catch (err) { setError(err instanceof ApiError ? err.message : "Could not start enrichment."); }
+    catch (err) { handleActionError(err, "Could not start enrichment."); }
     finally { setStarting(false); }
   };
 
   /** Retry the live job's unsuccessful rows (POST /recruiter-finder/jobs/{id}/retry) and poll. */
-  const retry = async () => { if (!jobId) return; try { await retryFinderJob(jobId); tick(jobId); } catch (err) { setError(err instanceof ApiError ? err.message : "Retry failed."); } };
+  const retry = async () => { if (!jobId || locked) return; try { await retryFinderJob(jobId); tick(jobId); } catch (err) { handleActionError(err, "Retry failed."); } };
   /** Stop polling and clear the file, preview and live job for a fresh upload. */
   const reset = () => { stopPoll(); setFile(null); setPreview(null); setJobId(null); setJob(null); setItems([]); setError(""); if (fileRef.current) fileRef.current.value = ""; };
 
@@ -1440,13 +1631,14 @@ function BulkPanel({ usage, onSpent }) {
 
       {!jobId && (
         <>
-          <div className="drop-wrap" onClick={() => fileRef.current && fileRef.current.click()}
+          <div className="drop-wrap" onClick={() => !locked && fileRef.current && fileRef.current.click()}
+            title={locked ? LOCK_TIP : undefined} aria-disabled={locked || undefined}
             onDragEnter={(e) => { e.preventDefault(); e.stopPropagation(); setDragging(true); }}
             onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); if (e.dataTransfer) e.dataTransfer.dropEffect = "copy"; setDragging(true); }}
             onDragLeave={(e) => { e.preventDefault(); e.stopPropagation(); setDragging(false); }}
             onDrop={(e) => { e.preventDefault(); e.stopPropagation(); setDragging(false); const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]; if (f) onFile(f); }}
-            style={{ border: dragging ? "2px dashed var(--primary)" : "2px dashed var(--pale-br)", background: dragging ? "var(--pale-br)" : "var(--pale)", borderRadius: 12, padding: "28px 20px", textAlign: "center", cursor: "pointer", transition: "background .15s, border-color .15s" }}>
-            <input ref={fileRef} type="file" accept=".csv,.xlsx,.xls" style={{ display: "none" }} onChange={(e) => onFile(e.target.files && e.target.files[0])} />
+            style={{ border: dragging ? "2px dashed var(--primary)" : "2px dashed var(--pale-br)", background: dragging ? "var(--pale-br)" : "var(--pale)", borderRadius: 12, padding: "28px 20px", textAlign: "center", cursor: locked ? "not-allowed" : "pointer", opacity: locked ? 0.55 : 1, transition: "background .15s, border-color .15s" }}>
+            <input ref={fileRef} type="file" accept=".csv,.xlsx,.xls" style={{ display: "none" }} disabled={locked} onChange={(e) => onFile(e.target.files && e.target.files[0])} />
             <div style={{ width: 48, height: 48, borderRadius: 13, background: "var(--glass-solid)", border: "1px solid var(--pale-br)", display: "grid", placeItems: "center", color: "var(--primary)", margin: "0 auto 8px", boxShadow: "var(--shadow-sm)" }}><Upload size={24} /></div>
             <h3 style={{ margin: "2px 0 0", fontSize: 14, fontWeight: 700 }}>Drop a CSV or Excel file here</h3>
             <p style={{ margin: 0, color: "var(--ink-soft)", fontSize: 12.5 }}>or <span style={{ color: "var(--primary)", fontWeight: 700, textDecoration: "underline" }}>browse your computer</span> — needs a <b>Company</b> column; Person / LinkedIn / Location optional</p>
@@ -1492,7 +1684,8 @@ function BulkPanel({ usage, onSpent }) {
               </div>
               <div className="opts-row" style={{ margin: 0 }}>
                 <div className="optgrp"><span className="olbl">Reveal</span><Seg value={reveal} onChange={setReveal} options={revealOpts} /></div>
-                <button className="btn btn-primary" onClick={start} disabled={starting || sum.ready === 0}>
+                <button className="btn btn-primary" onClick={start} disabled={locked || starting || sum.ready === 0}
+                  title={locked ? LOCK_TIP : undefined}>
                   {starting ? <Loader2 size={16} className="ha-spin" /> : <Zap size={16} />} Start enrichment ({sum.ready})
                 </button>
               </div>
@@ -1508,7 +1701,7 @@ function BulkPanel({ usage, onSpent }) {
 
       {jobId && job ? (
         <RunView job={job} items={items} filter={filter} setFilter={setFilter} running={running}
-          mapping={preview?.mapping} onRetry={retry} onExport={() => downloadCsv(items, `contacts_${jobId}.csv`)} onReset={reset} />
+          mapping={preview?.mapping} onRetry={retry} onExport={() => downloadCsv(items, `contacts_${jobId}.csv`)} onReset={reset} locked={locked} />
       ) : null}
           </div>
         ) : (
@@ -1533,7 +1726,7 @@ function BulkPanel({ usage, onSpent }) {
                   ? <div className="hist-loading"><Loader2 size={22} className="ha-spin" /> Loading run…</div>
                   : histJob
                     ? <RunView job={histJob} items={histItems} filter={histFilter} setFilter={setHistFilter} running={false}
-                        onRetry={histRetry} onExport={() => downloadCsv(histItems, `contacts_${selHistId}.csv`)} />
+                        onRetry={histRetry} onExport={() => downloadCsv(histItems, `contacts_${selHistId}.csv`)} locked={locked} />
                     : <div className="hist-detail-empty"><History size={26} /><div>Select a run on the left to see its contacts.</div></div>}
               </div>
             </div>
@@ -1591,6 +1784,12 @@ const CSS = `
 .rcf .gauge-center .cap{font-size:11px;color:var(--ink-soft);font-weight:600;margin-top:2px}
 .rcf .credit-meta{display:flex;flex-direction:column;gap:3px;min-width:0}
 .rcf .credit-meta .lbl{font-size:10.5px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-faint)}
+.rcf .apollo-left{font-size:12px;color:var(--ink-soft);margin-top:4px;cursor:help;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rcf .apollo-left b{font-weight:800}.rcf .apollo-left small{font-size:11px;color:var(--ink-faint)}
+.rcf .credits-lock,.rcf .credits-soft{align-items:center;margin:0 0 14px}
+.rcf .credits-lock{background:var(--bad-bg);border-color:transparent}
+.rcf .credits-lock .t{flex:1}.rcf .credits-lock .t b{color:var(--bad)}
+.rcf .credits-soft .t{flex:1}
 .rcf .credit-tags{display:flex;gap:6px;margin-top:6px;flex-wrap:wrap}
 .rcf .ctag{font-size:10.5px;font-weight:600;color:var(--primary-ink);background:var(--pale);border:1px solid var(--pale-br);padding:3px 8px;border-radius:999px;display:inline-flex;align-items:center;gap:5px}
 .rcf .ctag .dot{width:6px;height:6px;border-radius:50%;background:var(--primary)}

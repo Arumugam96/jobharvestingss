@@ -44,9 +44,11 @@ from typing import Any
 
 from fastapi import HTTPException
 from fastapi import status as http_status
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import String, and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import aliased
+from sqlalchemy.sql.functions import FunctionElement
 
 from app.config import get_settings
 from app.core.contact_keys import phone_key
@@ -152,8 +154,94 @@ def _loads(raw: str | None, default):
 
 
 def normalize_phone(phone: str | None) -> str:
-    """The number's digits only — the phone_contact_flags key."""
-    return re.sub(r"\D", "", phone or "")[:50]
+    """The phone_contact_flags key and the per-number call-history key: the shared
+    unique-contact key (app.core.contact_keys.phone_key — trailing 10 digits), so
+    "+91 98400 12345" (LinkedIn) and "9840012345" (Naukri) are one number.
+
+    Not app.core.contact_normalize.normalize_phone (the scrapers' cleaner)."""
+    return phone_key(phone)
+
+
+class _PhoneKeySQL(FunctionElement):
+    """SQL twin of contact_keys.phone_key over a column: digits only, trailing 10."""
+    type = String()
+    inherit_cache = True
+    name = "phone_key"
+
+
+@compiles(_PhoneKeySQL)
+def _phone_key_sql_default(element, compiler, **kw):
+    """SQLite (tests): no regexp_replace, so strip the separators phone numbers carry
+    in practice. substr(x, -10) is the trailing 10 chars (all of them when shorter)."""
+    expr = compiler.process(list(element.clauses)[0], **kw)
+    for ch in (" ", "+", "-", "(", ")", ".", "/", "\t"):
+        expr = f"replace({expr}, '{ch}', '')"
+    return f"substr({expr}, -10)"
+
+
+@compiles(_PhoneKeySQL, "postgresql")
+def _phone_key_sql_pg(element, compiler, **kw):
+    """PostgreSQL: exact — every non-digit removed. right(x, 10) of a shorter string is
+    the whole string, like phone_key. Matches the ix_phone_call_logs_tenant_phone_key
+    expression index (app.main._ensure_phone_contact_keys)."""
+    expr = compiler.process(list(element.clauses)[0], **kw)
+    return f"right(regexp_replace({expr}, '\\D', '', 'g'), 10)"
+
+
+def phone_key_sql(col=None):
+    """SQL expression for a call's phone key (contact_keys.phone_key in SQL)."""
+    return _PhoneKeySQL(col if col is not None else PhoneCallLogORM.phone)
+
+
+# ── One-time re-key of phone_contact_flags (Step 0 of per-contact history) ──────
+
+_FLAG_STAMPS = ("invalid_at", "dnc_at", "warm_at", "reenrich_requested_at")
+
+
+def rekey_phone_contact_flags(sync_conn) -> int:
+    """Re-key phone_contact_flags from the old all-digits key to normalize_phone's
+    (trailing 10 digits). Idempotent: a second run finds nothing to change.
+
+    Rows that collapse onto one (tenant, new key) are merged into one (the unique
+    index ux_phone_contact_flags_tenant_phone forbids two): earliest non-null of each
+    *_at stamp and of created_at, a non-empty correct_number (the newer row's first),
+    last_outcome / last_call_id / updated_by_email / updated_at / phone from the row
+    with the newer updated_at. The others are deleted before the survivor's key is
+    updated. Sync (run via conn.run_sync); does not commit. Returns rows changed."""
+    from sqlalchemy import inspect as sa_inspect
+
+    if "phone_contact_flags" not in sa_inspect(sync_conn).get_table_names():
+        return 0
+    t = PhoneContactFlagORM.__table__
+    rows = sync_conn.execute(select(t)).mappings().all()
+    groups: dict[tuple[str, str], list[Any]] = {}
+    for r in rows:
+        groups.setdefault((r["tenant_id"], phone_key(r["phone_key"])), []).append(r)
+
+    changed = 0
+    for (_tenant, key), group in groups.items():
+        if len(group) == 1 and group[0]["phone_key"] == key:
+            continue
+        if not key:
+            continue  # a key with no digits can't be re-keyed (normalize_phone never writes one)
+        newest = max(group, key=lambda g: (_aware(g["updated_at"]) or _EPOCH, g["id"]))
+        keeper = next((g for g in group if g["phone_key"] == key), newest)
+        values: dict[str, Any] = {"phone_key": key}
+        for col in (*_FLAG_STAMPS, "created_at"):
+            present = [g[col] for g in group if g[col] is not None]
+            values[col] = min(present, key=_aware) if present else None
+        by_newest = sorted(group, key=lambda g: (_aware(g["updated_at"]) or _EPOCH, g["id"]),
+                           reverse=True)
+        values["correct_number"] = next(
+            (g["correct_number"] for g in by_newest if (g["correct_number"] or "").strip()), "")
+        for col in ("last_outcome", "last_call_id", "updated_by_email", "updated_at", "phone"):
+            values[col] = newest[col]
+        others = [g["id"] for g in group if g["id"] != keeper["id"]]
+        if others:
+            sync_conn.execute(t.delete().where(t.c.id.in_(others)))
+        sync_conn.execute(t.update().where(t.c.id == keeper["id"]).values(**values))
+        changed += len(group)
+    return changed
 
 
 def _clean_details(outcome: str, details: dict[str, Any] | None) -> dict[str, Any]:
@@ -197,6 +285,54 @@ def _validate_outcome(outcome: str, details: dict[str, Any], proof_count: int,
         msg = "Attach proof of the call to save"
     if msg:
         raise HTTPException(status_code=422, detail=msg)
+
+
+def _normalize_call_input(
+    *,
+    status: str,
+    remarks: str = "",
+    outcome: str = "",
+    details: dict[str, Any] | None = None,
+    proof: list[dict[str, Any]] | None = None,
+    require_phone: str | None = None,
+) -> tuple[str, str, str, dict[str, Any], str, list[dict[str, str]]]:
+    """Validation + normalisation shared by log_call and update_call (422 on bad input).
+
+    Returns ``(call_status, remarks, outcome, details, details_json, proof_items)``.
+    The attempt-dependent proof rule (_validate_outcome) is left to the caller, which
+    knows the call's attempt number. ``require_phone`` (log_call only) 422s when blank."""
+    call_status = (status or "").strip().lower()
+    if call_status not in CALL_STATUSES:
+        raise HTTPException(
+            status_code=422, detail=f"status must be one of {', '.join(CALL_STATUSES)}"
+        )
+    if require_phone is not None and not require_phone:
+        raise HTTPException(status_code=422, detail="phone is required")
+    remarks = (remarks or "").strip()[:REMARKS_MAX_LEN]
+    outcome = (outcome or "").strip().lower()
+    if outcome and outcome not in CALL_OUTCOMES[call_status]:
+        raise HTTPException(status_code=422, detail=f"Unknown outcome '{outcome}' for a {call_status} call")
+    # The outcome records what happened; without one (older clients) an answered
+    # call still needs remarks.
+    if call_status == "answered" and not outcome and not remarks:
+        raise HTTPException(status_code=422, detail="Remarks are required for an answered call")
+    # Calls without an outcome (older clients) keep their details as sent.
+    details = _clean_details(outcome, details) if outcome else dict(details or {})
+    details_json = json.dumps(details, ensure_ascii=False)
+    if len(details_json) > DETAILS_MAX_LEN:
+        raise HTTPException(status_code=422, detail="Outcome details are too long")
+    proof_items = []
+    for p in (proof or [])[:PROOF_MAX_FILES]:
+        src = str(p.get("src") or "")
+        if src and (not src.startswith("data:image/") or len(src) > PROOF_SRC_MAX_LEN):
+            src = ""  # keep the file's name, drop anything that isn't a small inline image
+        proof_items.append({
+            "name": str(p.get("name") or "")[:255],
+            "size": str(p.get("size") or "")[:20],
+            "type": str(p.get("type") or "")[:40],
+            "src": src,
+        })
+    return call_status, remarks, outcome, details, details_json, proof_items
 
 
 def call_view(row: PhoneCallLogORM, *, proof_src: bool = True) -> dict[str, Any]:
@@ -262,38 +398,11 @@ async def log_call(
     """Record one call against `job`'s `phone`. Supersedes (closes) any open
     follow-up on the same job+phone, then inserts the new row. `reminder_at`
     schedules the follow-up at that time (any status)."""
-    call_status = (status or "").strip().lower()
-    if call_status not in CALL_STATUSES:
-        raise HTTPException(
-            status_code=422, detail=f"status must be one of {', '.join(CALL_STATUSES)}"
-        )
     phone = (phone or "").strip()[:PHONE_MAX_LEN]
-    if not phone:
-        raise HTTPException(status_code=422, detail="phone is required")
-    remarks = (remarks or "").strip()[:REMARKS_MAX_LEN]
-    outcome = (outcome or "").strip().lower()
-    if outcome and outcome not in CALL_OUTCOMES[call_status]:
-        raise HTTPException(status_code=422, detail=f"Unknown outcome '{outcome}' for a {call_status} call")
-    # The outcome records what happened; without one (older clients) an answered
-    # call still needs remarks.
-    if call_status == "answered" and not outcome and not remarks:
-        raise HTTPException(status_code=422, detail="Remarks are required for an answered call")
-    # Calls without an outcome (older clients) keep their details as sent.
-    details = _clean_details(outcome, details) if outcome else dict(details or {})
-    details_json = json.dumps(details, ensure_ascii=False)
-    if len(details_json) > DETAILS_MAX_LEN:
-        raise HTTPException(status_code=422, detail="Outcome details are too long")
-    proof_items = []
-    for p in (proof or [])[:PROOF_MAX_FILES]:
-        src = str(p.get("src") or "")
-        if src and (not src.startswith("data:image/") or len(src) > PROOF_SRC_MAX_LEN):
-            src = ""  # keep the file's name, drop anything that isn't a small inline image
-        proof_items.append({
-            "name": str(p.get("name") or "")[:255],
-            "size": str(p.get("size") or "")[:20],
-            "type": str(p.get("type") or "")[:40],
-            "src": src,
-        })
+    call_status, remarks, outcome, details, details_json, proof_items = _normalize_call_input(
+        status=status, remarks=remarks, outcome=outcome, details=details, proof=proof,
+        require_phone=phone,
+    )
     if outcome:
         attempt_no = (await count_calls(db, [job.id])).get(job.id, 0) + 1
         _validate_outcome(outcome, details, sum(1 for p in proof_items if p["name"]), attempt_no)
@@ -598,6 +707,190 @@ async def history(db: AsyncSession, job_id: str) -> list[dict[str, Any]]:
     return [call_view(r) for r in (await db.execute(stmt)).scalars().all()]
 
 
+# ── Per-number call history (across jobs) ──────────────────────────────────────
+# The same recruiter posts many jobs, and every harvest makes new scraped_jobs rows,
+# so these look calls up by the number's key (normalize_phone / phone_key_sql), not
+# by job. They inform, never block, and are NOT limited to the viewer's own calls:
+# business leads see teammates' outcomes on a shared number (outcome, reason, revisit,
+# caller, date, job) — but not their proof images (contact_history strips proof src
+# unless can_edit_log), and edits still go through can_edit_log.
+
+# "Revisit" choices of a not_interested call (REVISIT in PhoneVerify.jsx) → days.
+# "Never" has no window: never due, and every later call falls inside it.
+REVISIT_DAYS = {"1 mo": 30, "3 mo": 90, "6 mo": 180}
+CONTACT_HISTORY_MAX = 200
+
+
+def _contact_call_columns():
+    """Minimal call + job columns for a per-number call brief (_call_brief)."""
+    L, J = PhoneCallLogORM, ScrapedJobORM
+    return select(
+        L.id, L.job_id, L.phone, L.contact_name, L.call_status, L.call_outcome,
+        L.outcome_details, L.remarks, L.proof, L.created_at, L.called_by_email,
+        L.called_by_name, L.assigned_to_user_id, J.job_title, J.company,
+    ).select_from(L).outerjoin(J, J.id == L.job_id)
+
+
+def _call_brief(r: Any) -> dict[str, Any]:
+    """{status, outcome, reason, revisit, called_by, called_at, job_id, job_title,
+    company, contact_name, phone} of one call — what a teammate may see of it."""
+    details = _loads(r.outcome_details, {})
+    return {
+        "id": r.id,
+        "status": r.call_status,
+        "outcome": r.call_outcome or "",
+        "reason": str(details.get("reason") or ""),
+        "revisit": str(details.get("revisit") or ""),
+        "called_by": {"email": r.called_by_email,
+                      "name": r.called_by_name or display_name_from_email(r.called_by_email)},
+        "called_at": _iso(r.created_at),
+        "job_id": r.job_id,
+        "job_title": r.job_title or "",
+        "company": r.company or "",
+        "contact_name": r.contact_name or "",
+        "phone": r.phone,
+    }
+
+
+async def contact_summaries(
+    db: AsyncSession, phones: list[str], exclude_job_id: str | None = None,
+) -> dict[str, dict[str, Any]]:
+    """{phone as given: {"calls", "jobs", "latest": _call_brief}} for the numbers with
+    at least one non-cleared call on any job (tenant-scoped; every caller's calls).
+    Numbers match on normalize_phone, so "+91 98400 12345" and "9840012345" share one
+    summary. `exclude_job_id` leaves that job's calls out. At most FLAGS_MAX_PHONES."""
+    by_key: dict[str, list[str]] = {}
+    for p in list(dict.fromkeys(p for p in phones if p))[:FLAGS_MAX_PHONES]:
+        key = normalize_phone(p)
+        if key:
+            by_key.setdefault(key, []).append(p)
+    if not by_key:
+        return {}
+    L = PhoneCallLogORM
+    k = phone_key_sql()
+    conds = [k.in_(list(by_key)), L.cleared_at.is_(None)]
+    if exclude_job_id:
+        conds.append(L.job_id != exclude_job_id)
+    agg = (await db.execute(apply_tenant(
+        select(k.label("k"), func.count(L.id), func.count(func.distinct(L.job_id)),
+               func.max(L.id)).where(*conds).group_by(k),
+        L.tenant_id,
+    ))).all()
+    if not agg:
+        return {}
+    latest = {r.id: r for r in (await db.execute(apply_tenant(
+        _contact_call_columns().where(L.id.in_([a[3] for a in agg])), L.tenant_id,
+    ))).all()}
+    out: dict[str, dict[str, Any]] = {}
+    for key, calls, jobs, latest_id in agg:
+        row = latest.get(latest_id)
+        if row is None:
+            continue
+        summary = {"calls": int(calls), "jobs": int(jobs), "latest": _call_brief(row)}
+        for p in by_key.get(key, []):
+            out[p] = summary
+    return out
+
+
+async def contact_history(
+    db: AsyncSession, phone: str, viewer: AuthenticatedUser | None,
+) -> dict[str, Any]:
+    """Every non-cleared call on this number across jobs, newest first (tenant-scoped,
+    every caller's): _call_brief + details, remarks, proof and can_edit. Proof images
+    (`src`) are blanked unless the viewer may edit that log (its owner, or an admin) —
+    the file names stay so the timeline can say proof exists."""
+    key = normalize_phone(phone)
+    empty = {"phone": phone, "key": key, "calls": 0, "jobs": 0, "items": []}
+    if not key:
+        return empty
+    L = PhoneCallLogORM
+    rows = (await db.execute(apply_tenant(
+        _contact_call_columns()
+        .where(phone_key_sql() == key, L.cleared_at.is_(None))
+        .order_by(L.created_at.desc(), L.id.desc())
+        .limit(CONTACT_HISTORY_MAX),
+        L.tenant_id,
+    ))).all()
+    items = []
+    for r in rows:
+        can_edit = can_edit_log(r.assigned_to_user_id, r.called_by_email, viewer)
+        proof = _loads(r.proof, [])
+        if not can_edit:
+            proof = [{**p, "src": ""} for p in proof if isinstance(p, dict)]
+        items.append({**_call_brief(r), "details": _loads(r.outcome_details, {}),
+                      "remarks": r.remarks or "", "proof": proof, "can_edit": can_edit})
+    return {**empty, "calls": len(items), "jobs": len({i["job_id"] for i in items}),
+            "items": items}
+
+
+def _in_revisit_window(prev_details: str | None, prev_at: datetime | None,
+                       at: datetime | None) -> bool:
+    """Was a call at ``at`` placed inside the revisit window a not_interested call
+    (``prev_*``) asked for? "Never" (or no recorded revisit) → always inside."""
+    revisit = str(_loads(prev_details, {}).get("revisit") or "")
+    days = REVISIT_DAYS.get(revisit)
+    if days is None:
+        return True
+    prev_at, at = _aware(prev_at), _aware(at)
+    return bool(prev_at and at and at < prev_at + timedelta(days=days))
+
+
+async def _attach_repeat(db: AsyncSession, items: list[dict[str, Any]]) -> None:
+    """Set each Phone logs item's ``repeat``: when the same number (normalize_phone) had
+    an earlier non-cleared call on a DIFFERENT job (any caller), ``{n, prev_outcome,
+    prev_status, prev_by, prev_at, prev_job_id}`` — n = this call's position among all
+    calls to the number, prev = the newest such earlier call. Otherwise None."""
+    for it in items:
+        it["repeat"] = None
+    keys = {normalize_phone(it["phone"]) for it in items} - {""}
+    if not keys:
+        return
+    L = PhoneCallLogORM
+    calls = (await db.execute(apply_tenant(
+        select(L.id, L.job_id, L.phone, L.call_status, L.call_outcome, L.created_at,
+               L.called_by_email, L.called_by_name)
+        .where(phone_key_sql().in_(list(keys)), L.cleared_at.is_(None))
+        .order_by(L.id),
+        L.tenant_id,
+    ))).all()
+    by_key: dict[str, list[Any]] = {}
+    for c in calls:
+        by_key.setdefault(normalize_phone(c.phone), []).append(c)
+    for it in items:
+        earlier = [c for c in by_key.get(normalize_phone(it["phone"]), []) if c.id < it["id"]]
+        prev = next((c for c in reversed(earlier) if c.job_id != it["job_id"]), None)
+        if prev is not None:
+            it["repeat"] = {
+                "n": len(earlier) + 1,
+                "prev_outcome": prev.call_outcome or "",
+                "prev_status": prev.call_status,
+                "prev_by": prev.called_by_name or display_name_from_email(prev.called_by_email),
+                "prev_at": _iso(prev.created_at),
+                "prev_job_id": prev.job_id,
+            }
+
+
+async def _repeat_call_ids(db: AsyncSession) -> set[int]:
+    """Ids of calls placed to a number whose PREVIOUS call (any job, any caller) was
+    not_interested and inside its revisit window — the admin "Repeat calls" card."""
+    L = PhoneCallLogORM
+    k = phone_key_sql()
+    win = {"partition_by": k, "order_by": L.id}
+    seq = apply_tenant(
+        select(L.id, L.created_at,
+               func.lag(L.call_outcome).over(**win).label("prev_outcome"),
+               func.lag(L.outcome_details).over(**win).label("prev_details"),
+               func.lag(L.created_at, type_=L.created_at.type).over(**win).label("prev_at"))
+        .where(L.cleared_at.is_(None)),
+        L.tenant_id,
+    ).subquery()
+    rows = (await db.execute(
+        select(seq.c.id, seq.c.created_at, seq.c.prev_details, seq.c.prev_at)
+        .where(seq.c.prev_outcome == "not_interested")
+    )).all()
+    return {r.id for r in rows if _in_revisit_window(r.prev_details, r.prev_at, r.created_at)}
+
+
 LOG_ASSIGNMENTS = ("assigned", "unassigned")
 
 
@@ -806,6 +1099,183 @@ def _reminder_view(due: datetime | None, done: datetime | None, closed_by_call: 
     return {"state": state, "at": _iso(at), "due_at": _iso(due), "closed_at": _iso(done)}
 
 
+def can_edit_log(assigned_to_user_id: str | None, called_by_email: str | None,
+                 user: AuthenticatedUser | None) -> bool:
+    """May ``user`` edit this call log? Admins: any. Others (business leads): only rows
+    they own — assigned_to_user_id is theirs, or, for an unowned row, they logged it
+    (called_by_email, case-insensitive)."""
+    if user is None:
+        return False
+    if user.is_admin:
+        return True
+    if assigned_to_user_id:
+        return assigned_to_user_id == user.id
+    return _same_user(called_by_email, user)
+
+
+def _log_columns():
+    """The Phone logs row SELECT (what _log_item reads); pair with _log_joins."""
+    L = PhoneCallLogORM
+    return select(
+        L.id, L.job_id, L.call_status, L.call_outcome, L.outcome_details, L.phone,
+        L.phone_source, L.contact_name, L.remarks, L.proof, L.follow_up,
+        L.created_at, L.called_by_email, L.called_by_name,
+        L.follow_up_due_at, L.follow_up_done_at,
+        _closed_by_call().label("closed_by_call"),
+        ScrapedJobORM.job_title, ScrapedJobORM.company,
+        ScrapedJobORM.assigned_to_email, ScrapedJobORM.assigned_to_name,
+        L.assigned_to_user_id, UserORM.email.label("owner_email"),
+    )
+
+
+def _log_joins(stmt):
+    """FROM phone_call_logs + outer joins to its job (may be deleted) and owner user."""
+    return (stmt.select_from(PhoneCallLogORM)
+            .outerjoin(ScrapedJobORM, ScrapedJobORM.id == PhoneCallLogORM.job_id)
+            .outerjoin(UserORM, UserORM.id == PhoneCallLogORM.assigned_to_user_id))
+
+
+def _log_item(r: Any, now: datetime, viewer: AuthenticatedUser | None) -> dict[str, Any]:
+    """One Phone logs item (GET /phone-verifications/logs `items[]`, and the PATCH
+    response) from a _log_columns() row."""
+    return {
+        "id": r.id,
+        "job_id": r.job_id,
+        "status": r.call_status,
+        "outcome": r.call_outcome or "",
+        "details": _loads(r.outcome_details, {}),
+        "phone": r.phone,
+        "phone_source": r.phone_source or "",
+        "contact_name": r.contact_name or "",
+        "remarks": r.remarks or "",
+        "proof": _loads(r.proof, []),
+        "follow_up": bool(r.follow_up),
+        "reminder_at": _iso(r.follow_up_due_at),
+        "called_at": _iso(r.created_at),
+        "called_by": {"email": r.called_by_email,
+                      "name": r.called_by_name or display_name_from_email(r.called_by_email)},
+        "reminder": _reminder_view(r.follow_up_due_at, r.follow_up_done_at,
+                                   bool(r.closed_by_call), now),
+        "job_title": r.job_title or "",
+        "company": r.company or "",
+        "assigned_to": ({"email": r.assigned_to_email,
+                         "name": r.assigned_to_name or display_name_from_email(r.assigned_to_email)}
+                        if r.assigned_to_email else None),
+        "owner": ({"id": r.assigned_to_user_id, "email": r.owner_email,
+                   "name": display_name_from_email(r.owner_email)}
+                  if r.assigned_to_user_id and r.owner_email else None),
+        "can_edit": can_edit_log(r.assigned_to_user_id, r.called_by_email, viewer),
+    }
+
+
+async def get_log_item(db: AsyncSession, log_id: int,
+                       viewer: AuthenticatedUser | None) -> dict[str, Any] | None:
+    """One non-cleared call as a Phone logs item (tenant-scoped), or None."""
+    row = (await db.execute(apply_tenant(
+        _log_joins(_log_columns()).where(PhoneCallLogORM.id == log_id,
+                                         PhoneCallLogORM.cleared_at.is_(None)),
+        PhoneCallLogORM.tenant_id,
+    ))).first()
+    if row is None:
+        return None
+    item = _log_item(row, _now(), viewer)
+    await _attach_repeat(db, [item])
+    return item
+
+
+async def update_call(
+    db: AsyncSession,
+    log_id: int,
+    user: AuthenticatedUser,
+    *,
+    status: str,
+    remarks: str = "",
+    follow_up: bool = False,
+    outcome: str = "",
+    details: dict[str, Any] | None = None,
+    proof: list[dict[str, Any]] | None = None,
+    reminder_at: datetime | None = None,
+) -> dict[str, Any]:
+    """Edit an existing call log IN PLACE (PATCH /phone-verifications/logs/{id}).
+
+    Same validation as log_call (_normalize_call_input + _validate_outcome, with the
+    attempt number = this call's position among the job's non-cleared calls). The
+    reminder is recomputed like log_call's; when its due time changes,
+    follow_up_done_at is reset so it fires again. do_not_call clears it. When the
+    outcome changed, _apply_outcome_effects re-runs (idempotent: flag upsert keyed on
+    the number, stamps set once, suppression / recruiter upserts) — the previous
+    outcome's effects are not undone. phone, phone_source, contact_name, job_id,
+    called_by_*, the owner and created_at are never touched.
+
+    404 when missing, cleared or another tenant's; 403 unless can_edit_log. Returns
+    the updated row as a Phone logs item (_log_item)."""
+    row = (await db.execute(apply_tenant(
+        select(PhoneCallLogORM).where(PhoneCallLogORM.id == log_id), PhoneCallLogORM.tenant_id,
+    ))).scalar_one_or_none()
+    if row is None or row.cleared_at is not None:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND, detail=f"Call log {log_id} not found"
+        )
+    if not can_edit_log(row.assigned_to_user_id, row.called_by_email, user):
+        raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN,
+                            detail="You can only edit your own call logs.")
+
+    call_status, remarks, outcome, details, details_json, proof_items = _normalize_call_input(
+        status=status, remarks=remarks, outcome=outcome, details=details, proof=proof,
+    )
+    if outcome:
+        # This call's own attempt number: its position among the job's live calls.
+        attempt_no = int((await db.execute(apply_tenant(
+            select(func.count(PhoneCallLogORM.id)).where(
+                PhoneCallLogORM.job_id == row.job_id,
+                PhoneCallLogORM.cleared_at.is_(None),
+                PhoneCallLogORM.id <= row.id,
+            ),
+            PhoneCallLogORM.tenant_id,
+        ))).scalar_one() or 1)
+        _validate_outcome(outcome, details, sum(1 for p in proof_items if p["name"]), attempt_no)
+    if outcome == "do_not_call":
+        reminder_at, follow_up = None, False  # the contact is suppressed — nothing to schedule
+
+    now = _now()
+    old_due = _aware(row.follow_up_due_at)
+    due = None
+    if reminder_at is not None:
+        due = _aware(reminder_at)
+        follow_up = True
+    elif call_status == "unanswered" and follow_up:
+        # Default-delay reminder: keep the one already scheduled rather than pushing
+        # it out on every edit.
+        due = old_due or now + timedelta(hours=get_settings().phone_followup_delay_hours)
+
+    old_outcome = row.call_outcome or ""
+    row.call_status = call_status
+    row.call_outcome = outcome
+    row.outcome_details = details_json
+    row.proof = json.dumps(proof_items, ensure_ascii=False) if proof_items else ""
+    row.remarks = remarks
+    row.follow_up = bool(follow_up)
+    if due != old_due:
+        row.follow_up_due_at = due
+        row.follow_up_done_at = None  # a new reminder time fires again
+    row.updated_at = now
+
+    if outcome and outcome != old_outcome:
+        job = (await db.execute(apply_tenant(
+            select(ScrapedJobORM).where(ScrapedJobORM.id == row.job_id),
+            ScrapedJobORM.tenant_id,
+        ))).scalar_one_or_none()
+        if job is not None:  # a since-deleted job has nothing left to act on
+            await db.flush()
+            await _apply_outcome_effects(db, job, user, row, details, now)
+    await db.commit()
+    item = await get_log_item(db, log_id, user)
+    if item is None:  # cannot happen: just updated, non-cleared, same tenant
+        raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND,
+                            detail=f"Call log {log_id} not found")
+    return item
+
+
 async def list_logs(
     db: AsyncSession,
     *,
@@ -818,6 +1288,7 @@ async def list_logs(
     page_size: int = 50,
     owner_id: str | None = None,
     own_email: str | None = None,
+    viewer: AuthenticatedUser | None = None,
 ) -> dict[str, Any]:
     """Every non-cleared call in the tenant, newest first, with its job's title,
     company and assignee, its outcome and its reminder (the admin Phone logs page).
@@ -831,39 +1302,18 @@ async def list_logs(
     `owner_id` keeps only the calls owned by that user (assigned_to_user_id) — the
     admin's assignee filter, or the forced scope of a business lead. `own_email`
     marks the business-lead view: `assigned_jobs` then counts only their own
-    self-assigned jobs and `total_phones` (a workspace-wide figure) is None."""
+    self-assigned jobs and `total_phones` (a workspace-wide figure) is None.
+    `viewer` (the caller) sets each item's `can_edit` (see can_edit_log); without
+    one every item reads `can_edit: false`. Items are shaped by _log_item."""
     now = _now()
-    is_assigned = and_(ScrapedJobORM.assigned_to_email.is_not(None),
-                       ScrapedJobORM.assigned_to_email != "")
-    conds: list = [PhoneCallLogORM.cleared_at.is_(None)]
-    if owner_id is not None:
-        conds.append(PhoneCallLogORM.assigned_to_user_id == owner_id)
-    if since is not None:
-        conds.append(PhoneCallLogORM.created_at >= since)
-    if assignment == "assigned":
-        conds.append(is_assigned)
-    elif assignment == "unassigned":
-        conds.append(or_(ScrapedJobORM.assigned_to_email.is_(None),
-                         ScrapedJobORM.assigned_to_email == ""))
-    term = (q or "").strip().lower()
-    if term:
-        like = f"%{term}%"
-        conds.append(or_(*(func.lower(col).like(like) for col in (
-            ScrapedJobORM.job_title, ScrapedJobORM.company, PhoneCallLogORM.phone,
-            PhoneCallLogORM.contact_name, PhoneCallLogORM.remarks,
-        ))))
+    is_assigned = _is_assigned()
+    conds = _log_filter_conds(owner_id=owner_id, since=since, assignment=assignment, q=q)
 
     def scoped(stmt, *extra):
         """Apply the call-log -> job outer join, the shared filters plus ``extra`` conditions,
         and tenant scoping to ``stmt``.
         """
-        return apply_tenant(
-            stmt.select_from(PhoneCallLogORM)
-            .outerjoin(ScrapedJobORM, ScrapedJobORM.id == PhoneCallLogORM.job_id)
-            .outerjoin(UserORM, UserORM.id == PhoneCallLogORM.assigned_to_user_id)
-            .where(*conds, *extra),
-            PhoneCallLogORM.tenant_id,
-        )
+        return apply_tenant(_log_joins(stmt).where(*conds, *extra), PhoneCallLogORM.tenant_id)
 
     by_status = dict((await db.execute(scoped(
         select(PhoneCallLogORM.call_status, func.count(PhoneCallLogORM.id))
@@ -882,42 +1332,20 @@ async def list_logs(
         select(func.count(PhoneCallLogORM.id)), *row_conds))).scalar_one()
     page = max(1, int(page))
     page_size = max(1, int(page_size))
-    L = PhoneCallLogORM
     rows = (await db.execute(scoped(
-        select(L.id, L.job_id, L.call_status, L.call_outcome, L.outcome_details, L.phone,
-               L.contact_name, L.remarks, L.created_at, L.called_by_email, L.called_by_name,
-               L.follow_up_due_at, L.follow_up_done_at,
-               _closed_by_call().label("closed_by_call"),
-               ScrapedJobORM.job_title, ScrapedJobORM.company,
-               ScrapedJobORM.assigned_to_email, ScrapedJobORM.assigned_to_name,
-               L.assigned_to_user_id, UserORM.email.label("owner_email")),
+        _log_columns(),
         *row_conds,
-    ).order_by(L.created_at.desc(), L.id.desc())
+    ).order_by(PhoneCallLogORM.created_at.desc(), PhoneCallLogORM.id.desc())
      .offset((page - 1) * page_size).limit(page_size))).all()
 
-    items = [{
-        "id": r.id,
-        "job_id": r.job_id,
-        "status": r.call_status,
-        "outcome": r.call_outcome or "",
-        "details": _loads(r.outcome_details, {}),
-        "phone": r.phone,
-        "contact_name": r.contact_name or "",
-        "remarks": r.remarks or "",
-        "called_at": _iso(r.created_at),
-        "called_by": {"email": r.called_by_email,
-                      "name": r.called_by_name or display_name_from_email(r.called_by_email)},
-        "reminder": _reminder_view(r.follow_up_due_at, r.follow_up_done_at,
-                                   bool(r.closed_by_call), now),
-        "job_title": r.job_title or "",
-        "company": r.company or "",
-        "assigned_to": ({"email": r.assigned_to_email,
-                         "name": r.assigned_to_name or display_name_from_email(r.assigned_to_email)}
-                        if r.assigned_to_email else None),
-        "owner": ({"id": r.assigned_to_user_id, "email": r.owner_email,
-                   "name": display_name_from_email(r.owner_email)}
-                  if r.assigned_to_user_id and r.owner_email else None),
-    } for r in rows]
+    items = [_log_item(r, now, viewer) for r in rows]
+    await _attach_repeat(db, items)
+    repeat_calls = None
+    if own_email is None:  # admin-only figure
+        repeat_ids = await _repeat_call_ids(db)
+        repeat_calls = int((await db.execute(scoped(
+            select(func.count(PhoneCallLogORM.id)), PhoneCallLogORM.id.in_(repeat_ids),
+        ))).scalar_one() or 0) if repeat_ids else 0
     return {
         "items": items,
         "total": int(total or 0),
@@ -926,9 +1354,114 @@ async def list_logs(
         "summary": {"total": answered + unanswered, "answered": answered,
                     "unanswered": unanswered, "assigned_jobs": assigned_jobs,
                     "called_assigned_jobs": int(called_assigned_jobs or 0),
-                    "total_phones": total_phones},
+                    "total_phones": total_phones, "repeat_calls": repeat_calls},
         "scope": "own" if own_email is not None else "all",
     }
+
+
+def _log_filter_conds(*, owner_id: str | None = None, since: datetime | None = None,
+                      assignment: str = "", q: str = "") -> list:
+    """The Phone logs filters shared by the Calls and By-contact views (pair with
+    _log_joins): non-cleared, owner, since, job assignment and free text."""
+    conds: list = [PhoneCallLogORM.cleared_at.is_(None)]
+    if owner_id is not None:
+        conds.append(PhoneCallLogORM.assigned_to_user_id == owner_id)
+    if since is not None:
+        conds.append(PhoneCallLogORM.created_at >= since)
+    if assignment == "assigned":
+        conds.append(_is_assigned())
+    elif assignment == "unassigned":
+        conds.append(or_(ScrapedJobORM.assigned_to_email.is_(None),
+                         ScrapedJobORM.assigned_to_email == ""))
+    term = (q or "").strip().lower()
+    if term:
+        like = f"%{term}%"
+        conds.append(or_(*(func.lower(col).like(like) for col in (
+            ScrapedJobORM.job_title, ScrapedJobORM.company, PhoneCallLogORM.phone,
+            PhoneCallLogORM.contact_name, PhoneCallLogORM.remarks,
+        ))))
+    return conds
+
+
+def _revisit_due_cond(L, now: datetime):
+    """SQL: call ``L`` is not_interested and its revisit window has passed ("Never" and
+    no revisit are never due). outcome_details is json.dumps text ('"revisit": "3 mo"')."""
+    return and_(L.call_outcome == "not_interested", or_(*(
+        and_(L.outcome_details.like(f'%"revisit": "{label}"%'),
+             L.created_at <= now - timedelta(days=days))
+        for label, days in REVISIT_DAYS.items()
+    )))
+
+
+async def list_contacts(
+    db: AsyncSession,
+    *,
+    status: str = "",
+    assignment: str = "",
+    reminder: str = "",
+    q: str = "",
+    since: datetime | None = None,
+    outcome: str = "",
+    revisit_due: bool = False,
+    page: int = 1,
+    page_size: int = 50,
+    owner_id: str | None = None,
+    own_email: str | None = None,
+) -> dict[str, Any]:
+    """Phone logs "By contact" view: one row per number (normalize_phone key), most
+    recently called first.
+
+    The Calls view's filters (status, assignment, reminder, since, q, owner) pick which
+    numbers appear — any number with a matching call. A business lead is pinned to
+    owner_id = themselves, so they get the numbers THEY called; admins get all (or one
+    assignee's). Each row's figures then cover EVERY non-cleared call on that number in
+    the tenant, teammates' included: `calls`, `jobs` (distinct), `first_called_at` and
+    `latest` (_call_brief). `outcome` keeps rows whose latest call has that outcome;
+    `revisit_due` keeps rows whose latest call is not_interested with its revisit
+    window passed. Paginated server-side."""
+    now = _now()
+    L = PhoneCallLogORM
+    k = phone_key_sql()
+    conds = _log_filter_conds(owner_id=owner_id, since=since, assignment=assignment, q=q)
+    if status in CALL_STATUSES:
+        conds.append(L.call_status == status)
+    if reminder in REMINDER_STATES:
+        conds.append(_reminder_cond(reminder, now))
+    keys = apply_tenant(_log_joins(select(k)).where(*conds), L.tenant_id)
+    agg = apply_tenant(
+        select(k.label("k"), func.count(L.id).label("calls"),
+               func.count(func.distinct(L.job_id)).label("jobs"),
+               func.min(L.created_at).label("first_at"),
+               func.max(L.id).label("latest_id"))
+        .where(L.cleared_at.is_(None), k.in_(keys.scalar_subquery()))
+        .group_by(k),
+        L.tenant_id,
+    ).subquery()
+    Latest = aliased(PhoneCallLogORM)
+    row_conds = []
+    if outcome:
+        row_conds.append(Latest.call_outcome == outcome)
+    if revisit_due:
+        row_conds.append(_revisit_due_cond(Latest, now))
+    base = (select(agg.c.k, agg.c.calls, agg.c.jobs, agg.c.first_at, agg.c.latest_id)
+            .select_from(agg).join(Latest, Latest.id == agg.c.latest_id).where(*row_conds))
+    total = (await db.execute(select(func.count()).select_from(base.subquery()))).scalar_one()
+    page, page_size = max(1, int(page)), max(1, int(page_size))
+    groups = (await db.execute(base.order_by(agg.c.latest_id.desc())
+                               .offset((page - 1) * page_size).limit(page_size))).all()
+    latest = {r.id: r for r in (await db.execute(
+        _contact_call_columns().where(L.id.in_([g.latest_id for g in groups]))
+    )).all()} if groups else {}
+    items = []
+    for g in groups:
+        r = latest.get(g.latest_id)
+        if r is None:
+            continue
+        items.append({"key": g.k, "phone": r.phone, "contact_name": r.contact_name or "",
+                      "company": r.company or "", "calls": int(g.calls), "jobs": int(g.jobs),
+                      "first_called_at": _iso(g.first_at), "latest": _call_brief(r)})
+    return {"items": items, "total": int(total or 0), "page": page, "page_size": page_size,
+            "scope": "own" if own_email is not None else "all"}
 
 
 async def list_assignees(db: AsyncSession, q: str = "", limit: int = 200) -> list[dict[str, Any]]:

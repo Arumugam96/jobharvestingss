@@ -1,11 +1,13 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { ChevronDown, Lock, RefreshCw, Search, X } from "lucide-react";
-import { getPhoneLogs, getPhoneInventory, getAssignedJobs, exportPhoneLogsXlsx, getPhoneLogAssignees } from "../api";
+import { createPortal } from "react-dom";
+import { ChevronDown, ChevronRight, Lock, Pencil, RefreshCw, Search, X } from "lucide-react";
+import { getPhoneLogs, getPhoneInventory, getAssignedJobs, exportPhoneLogsXlsx, getPhoneLogAssignees, getPhoneLogContacts } from "../api";
 import { useTenant } from "../TenantContext";
 import { C } from "../theme";
 import { StatCard, Select, PlainHeader } from "../components/ui";
 import ExportButton from "../components/ExportButton";
-import { PHONE_STATUSES, outcomeInfo, outcomeDetailText } from "../components/PhoneVerify";
+import PhoneVerifyModal, { PHONE_STATUSES, OUTCOME_OPTIONS, outcomeInfo, outcomeDetailText } from "../components/PhoneVerify";
+import { ContactTimeline, callLabel, callTone, shortDate } from "../components/ContactHistory";
 import { downloadCsv, downloadJson, saveBlob, fetchAllPages } from "../lib/csv";
 
 /* Phone logs (admins + Business Leads): admins see every call logged in
@@ -20,7 +22,14 @@ import { downloadCsv, downloadJson, saveBlob, fetchAllPages } from "../lib/csv";
  * "Self-assigned jobs" lists every assigned job, called or not (/logs/assigned-jobs).
  * "Export" (CSV / Excel / JSON, the Harvested Jobs button) saves whichever list is on
  * screen: every page, with its filters. Each view builds { name, sheet, head, rows };
- * Excel goes through POST /phone-verifications/logs/xlsx with those same rows. */
+ * Excel goes through POST /phone-verifications/logs/xlsx with those same rows.
+ *
+ * Per-contact history: the call log has a "Calls | By contact" toggle. "By contact"
+ * (GET /phone-verifications/logs/contacts) is one row per number — the same filters pick
+ * the numbers, but each row counts every teammate's calls to it; expanding a row shows
+ * the timeline (ContactTimeline). A call row placed to a number that had an earlier call
+ * on a different job carries a repeat tag (`row.repeat`, server-computed). Admins also
+ * get a "Repeat calls" tile: calls placed inside a not-interested contact's revisit window. */
 
 const PAGE_SIZE = 50;
 const STATUS_OPTIONS = [
@@ -70,6 +79,15 @@ const PHONE_SOURCES = {
   company: { label: "Company HR", color: "#B45309", bg: "#FFFBEB" },
   recruiter: { label: "Recruiter", color: "#7C3AED", bg: "#F5F3FF" },
 };
+// By-contact "Latest outcome" filter: every outcome, plus "revisit due" (latest call is
+// not interested and its revisit window has passed).
+const REVISIT_DUE = "__revisit_due";
+const LATEST_OUTCOME_OPTIONS = [
+  { value: "", label: "All outcomes" },
+  { value: REVISIT_DUE, label: "Not interested — revisit due" },
+  ...OUTCOME_OPTIONS.map((o) => ({ value: o.value, label: o.label })),
+];
+const VIEW_MODES = [{ value: "calls", label: "Calls" }, { value: "contacts", label: "By contact" }];
 const EMPTY_CELL = { textAlign: "center", padding: "48px 16px", color: "#94A3B8" };
 const SUBLINE = { marginTop: 3, fontSize: 12, color: C.textSoft };
 const statusLabel = (s) => PHONE_STATUSES[s]?.label || s || "";
@@ -114,6 +132,136 @@ function OutcomeCell({ status, outcome, details }) {
     <>
       <Chip tone={info.tone}>{info.label}</Chip>
       {detail && <div style={SUBLINE}>{detail}</div>}
+    </>
+  );
+}
+
+/** "1st" / "2nd" / "3rd" / "11th"… */
+const ordinal = (n) => {
+  const sfx = ["th", "st", "nd", "rd"];
+  const v = n % 100;
+  return `${n}${sfx[(v - 20) % 10] || sfx[v] || "th"}`;
+};
+
+/** Repeat tag under a call's number: the same number had an earlier call on a different
+ * job (server `repeat`). Coloured by that earlier call's outcome tone. */
+function RepeatTag({ repeat }) {
+  if (!repeat) return null;
+  const prev = callLabel(repeat.prev_status, repeat.prev_outcome);
+  const title = `${ordinal(repeat.n)} call to this number · previous: ${[prev, repeat.prev_by, shortDate(repeat.prev_at)].filter(Boolean).join(" · ")}`;
+  return (
+    <div style={{ marginTop: 3 }} title={title}>
+      <Chip tone={callTone(repeat.prev_status, repeat.prev_outcome)}>{ordinal(repeat.n)} call</Chip>
+    </div>
+  );
+}
+
+/** "Calls | By contact" segmented switch for the call log. */
+function ViewToggle({ value, onChange }) {
+  return (
+    <div role="tablist" aria-label="Phone logs view" style={{ display: "inline-flex", border: `1px solid ${C.border}`, borderRadius: 9, overflow: "hidden", background: "#fff", alignSelf: "flex-start" }}>
+      {VIEW_MODES.map((m) => (
+        <button key={m.value} type="button" role="tab" aria-selected={value === m.value} onClick={() => onChange(m.value)}
+          style={{
+            border: 0, padding: "7px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit",
+            background: value === m.value ? C.primary : "transparent", color: value === m.value ? "#fff" : C.textSoft,
+          }}>
+          {m.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** "By contact" view: one row per number with its latest outcome, call / job counts and
+ * last call; a row expands into the number's full timeline across jobs. Uses the call
+ * log's filters (`params`) plus `latest` (an outcome or REVISIT_DUE). */
+function ContactsPanel({ params, latest, reloadKey, exportRef }) {
+  const [page, setPage] = useState(1);
+  const [open, setOpen] = useState(null); // expanded row key
+  const query = {
+    ...params,
+    outcome: latest && latest !== REVISIT_DUE ? latest : "",
+    revisit_due: latest === REVISIT_DUE ? "true" : "",
+  };
+  const paramsKey = JSON.stringify(query);
+  useEffect(() => { setPage(1); setOpen(null); }, [paramsKey]);
+  const { data, loading, error } = usePagedFetch(
+    getPhoneLogContacts, { ...query, page, page_size: PAGE_SIZE }, reloadKey, "Could not load contacts.");
+  const items = data?.items || [];
+  exportRef.current = async () => {
+    const all = await fetchAllPages(getPhoneLogContacts, query);
+    return {
+      name: `phone-contacts-history-${today()}`, sheet: "By contact",
+      head: ["Contact", "Company", "Phone", "Latest outcome", "Reason", "Revisit", "Total calls", "Jobs", "Last call", "Last caller", "Last job"],
+      rows: all.map((r) => [r.contact_name, r.company, r.phone, callLabel(r.latest?.status, r.latest?.outcome),
+        r.latest?.reason || "", r.latest?.revisit || "", r.calls, r.jobs, fmtTime(r.latest?.called_at),
+        r.latest?.called_by?.name || "", r.latest?.job_title || ""]),
+    };
+  };
+
+  return (
+    <>
+      {error && <div className="ha-errbanner">{error}</div>}
+      <div className="ha-card" style={{ overflow: "hidden" }}>
+        <div className="ha-table-scroll">
+          <table className="ha-table" style={{ minWidth: 1100 }}>
+            <thead className="ha-thead">
+              <tr>
+                <PlainHeader label="" width={36} />
+                <PlainHeader label="Contact / Company" width={240} />
+                <PlainHeader label="Phone" width={150} />
+                <PlainHeader label="Latest outcome" width={260} />
+                <PlainHeader label="Calls" align="center" width={70} />
+                <PlainHeader label="Jobs" align="center" width={70} />
+                <PlainHeader label="Last call" />
+              </tr>
+            </thead>
+            <tbody>
+              {loading && !data && <tr><td className="ha-td" colSpan={7} style={EMPTY_CELL}>Loading contacts…</td></tr>}
+              {!loading && items.length === 0 && <tr><td className="ha-td" colSpan={7} style={EMPTY_CELL}>No contacts match these filters.</td></tr>}
+              {items.map((row) => {
+                const l = row.latest || {};
+                const expanded = open === row.key;
+                const toggle = () => setOpen(expanded ? null : row.key);
+                const sub = [l.reason, l.revisit && (l.revisit === "Never" ? "Do not revisit" : `Revisit: ${l.revisit}`)].filter(Boolean).join(" · ");
+                return [
+                  <tr key={row.key} className="ha-row" style={{ cursor: "pointer" }} onClick={toggle}>
+                    <td className="ha-td" style={{ textAlign: "center" }}>
+                      <button type="button" aria-expanded={expanded} aria-label={expanded ? "Hide call history" : "Show call history"}
+                        onClick={(e) => { e.stopPropagation(); toggle(); }}
+                        style={{ border: 0, background: "transparent", cursor: "pointer", color: C.textSoft, padding: 2, display: "inline-flex" }}>
+                        {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+                      </button>
+                    </td>
+                    <td className="ha-td"><JobCell title={row.contact_name || "—"} company={row.company} /></td>
+                    <td className="ha-td" style={{ whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>{row.phone}</td>
+                    <td className="ha-td">
+                      <Chip tone={callTone(l.status, l.outcome)}>{callLabel(l.status, l.outcome)}</Chip>
+                      {sub && <div style={SUBLINE}>{sub}</div>}
+                    </td>
+                    <td className="ha-td" style={{ textAlign: "center", fontWeight: 600, color: C.text }}>{row.calls}</td>
+                    <td className="ha-td" style={{ textAlign: "center", fontWeight: 600, color: C.text }}>{row.jobs}</td>
+                    <td className="ha-td" style={{ color: C.textSoft }}>
+                      <div style={{ whiteSpace: "nowrap" }}>{fmtTime(l.called_at)}</div>
+                      <div style={SUBLINE}>{[l.called_by?.name && `by ${l.called_by.name}`, l.job_title && `on ${l.job_title}`].filter(Boolean).join(" · ")}</div>
+                    </td>
+                  </tr>,
+                  expanded && (
+                    <tr key={`${row.key}-history`}>
+                      <td className="ha-td" />
+                      <td className="ha-td" colSpan={6} style={{ background: "#FAFBFD" }}>
+                        <ContactTimeline phone={row.phone} showRemarks />
+                      </td>
+                    </tr>
+                  ),
+                ];
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <Pager page={page} total={data?.total || 0} loading={loading} setPage={setPage} />
     </>
   );
 }
@@ -512,6 +660,12 @@ export default function PhoneLogsPage() {
   const [exporting, setExporting] = useState(false);
   const [exportFormat, setExportFormat] = useState("csv");
   const exportRef = useRef(null); // the on-screen list's CSV exporter (set by the active view)
+  // The call-log row open in the "Edit call log" modal (null = closed).
+  const [editing, setEditing] = useState(null);
+  // Call log layout: "calls" (one row per call) or "contacts" (one row per number).
+  const [mode, setMode] = useState("calls");
+  // By-contact "Latest outcome" filter: an outcome value, REVISIT_DUE or "" (all).
+  const [latestOutcome, setLatestOutcome] = useState("");
 
   /** Update one filter and jump back to page 1. */
   const setFilter = (key, value) => { setFilters((f) => ({ ...f, [key]: value })); setPage(1); };
@@ -534,6 +688,26 @@ export default function PhoneLogsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filters, isAdmin, q, page, reloadKey]);
 
+  /** Re-fetch only the summary tiles for the current filters, keeping the rows on screen
+   * (no loading state, errors ignored — the next normal load surfaces them). */
+  const refreshSummaryQuietly = () => {
+    getPhoneLogs({ ...logParams, q, page, page_size: PAGE_SIZE })
+      .then((res) => {
+        if (res?.summary) setData((prev) => (prev ? { ...prev, summary: res.summary } : prev));
+      })
+      .catch(() => {});
+  };
+  /** After an edit: swap the updated call into the current page in place, then refresh the tiles. */
+  const onCallEdited = (updated) => {
+    if (updated && updated.id != null) {
+      setData((prev) => (prev ? {
+        ...prev,
+        items: (prev.items || []).map((r) => (String(r.id) === String(updated.id) ? { ...r, ...updated } : r)),
+      } : prev));
+    }
+    refreshSummaryQuietly();
+  };
+
   const items = data?.items || [];
   const total = data?.total || 0;
   const summary = data?.summary || {
@@ -544,7 +718,7 @@ export default function PhoneLogsPage() {
   // response lands, fall back to the role.
   const ownScope = data?.scope ? data.scope === "own" : !isAdmin;
 
-  if (view === "calls" || ownScope) {
+  if ((view === "calls" || ownScope) && mode === "calls") {
     exportRef.current = async () => {
       const all = await fetchAllPages(getPhoneLogs, { ...logParams, q });
       const days = filters.days === "0" ? "all-time" : `last-${filters.days}-days`;
@@ -614,6 +788,10 @@ export default function PhoneLogsPage() {
           <StatCard value={summary.assigned_jobs} label={ownScope ? "My self-assigned jobs" : "Self-assigned jobs"} color="#7C3AED"
             sub={`${summary.called_assigned_jobs ?? 0} called`}
             onClick={ownScope ? undefined : () => setView("assigned")} active={!ownScope && view === "assigned"} />
+          {!ownScope && summary.repeat_calls != null && (
+            <StatCard value={summary.repeat_calls} label="Repeat calls" color="#B45309"
+              title="Calls placed to a number whose previous call was “Not interested”, inside its revisit window" />
+          )}
         </div>
 
         {!ownScope && view === "phones" && <PhonesPanel reloadKey={reloadKey} exportRef={exportRef} />}
@@ -621,18 +799,26 @@ export default function PhoneLogsPage() {
 
         {(view === "calls" || ownScope) && (
           <>
-            <div className="ha-card ha-filterbar" style={{ padding: "11px 14px", gridTemplateColumns: `repeat(${isAdmin ? 5 : 4}, minmax(0, 1fr))` }}>
+            <ViewToggle value={mode} onChange={setMode} />
+            <div className="ha-card ha-filterbar" style={{ padding: "11px 14px", gridTemplateColumns: `repeat(${(isAdmin ? 5 : 4) + (mode === "contacts" ? 1 : 0)}, minmax(0, 1fr))` }}>
               <Select label="Status" value={filters.status} onChange={(v) => setFilter("status", v)} options={STATUS_OPTIONS} />
               <Select label="Assignment" value={filters.assignment} onChange={(v) => setFilter("assignment", v)} options={ASSIGNMENT_OPTIONS} />
               <Select label="Reminder" value={filters.reminder} onChange={(v) => setFilter("reminder", v)} options={REMINDER_OPTIONS} />
               <Select label="Date" value={filters.days} onChange={(v) => setFilter("days", v)} options={DAYS_OPTIONS} />
               {isAdmin && <AssigneeFilter value={assignee} onChange={pickAssignee} />}
+              {mode === "contacts" && (
+                <Select label="Latest outcome" value={latestOutcome} onChange={setLatestOutcome} options={LATEST_OUTCOME_OPTIONS} />
+              )}
               <SearchBox value={query} onChange={setQuery} placeholder="Search job, company, phone, POC…" label="Search phone logs" />
             </div>
 
+            {mode === "contacts" && (
+              <ContactsPanel params={{ ...logParams, q }} latest={latestOutcome} reloadKey={reloadKey} exportRef={exportRef} />
+            )}
+            {mode === "calls" && (<>
             <div className="ha-card" style={{ overflow: "hidden" }}>
               <div className="ha-table-scroll">
-                <table className="ha-table" style={{ minWidth: 1320 }}>
+                <table className="ha-table" style={{ minWidth: 1380 }}>
                   <thead className="ha-thead">
                     <tr>
                       <PlainHeader label="Status" width={120} />
@@ -644,16 +830,20 @@ export default function PhoneLogsPage() {
                       <PlainHeader label="Reminder" width={170} />
                       <PlainHeader label="Assigned to" width={140} />
                       <PlainHeader label="Date" width={160} />
+                      <PlainHeader label="" width={56} />
                     </tr>
                   </thead>
                   <tbody>
-                    {loading && !data && <tr><td className="ha-td" colSpan={9} style={EMPTY_CELL}>Loading phone logs…</td></tr>}
-                    {!loading && items.length === 0 && <tr><td className="ha-td" colSpan={9} style={EMPTY_CELL}>No calls match these filters.</td></tr>}
+                    {loading && !data && <tr><td className="ha-td" colSpan={10} style={EMPTY_CELL}>Loading phone logs…</td></tr>}
+                    {!loading && items.length === 0 && <tr><td className="ha-td" colSpan={10} style={EMPTY_CELL}>No calls match these filters.</td></tr>}
                     {items.map((row) => (
                       <tr key={row.id} className="ha-row">
                         <td className="ha-td"><StatusPill status={row.status} /></td>
                         <td className="ha-td"><JobCell title={row.job_title} company={row.company} /></td>
-                        <td className="ha-td" style={{ whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>{row.phone}</td>
+                        <td className="ha-td" style={{ whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>
+                          {row.phone}
+                          <RepeatTag repeat={row.repeat} />
+                        </td>
                         <td className="ha-td" style={{ color: C.text }}>{row.contact_name || "—"}</td>
                         <td className="ha-td"><OutcomeCell status={row.status} outcome={row.outcome} details={row.details} /></td>
                         <td className="ha-td"><CommentCell text={row.remarks} /></td>
@@ -665,6 +855,17 @@ export default function PhoneLogsPage() {
                             <div style={SUBLINE} title={row.owner?.email || row.called_by?.email}>by {row.owner?.name || row.called_by?.name}</div>
                           )}
                         </td>
+                        <td className="ha-td" style={{ textAlign: "center" }}>
+                          {/* Shown unless the server says no; it still enforces (403). */}
+                          {row.can_edit !== false && (
+                            <button type="button" className="ha-btn ha-btn-secondary" title="Edit call log"
+                              aria-label={`Edit call log for ${row.phone || "this call"}`}
+                              style={{ width: 30, height: 30, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center" }}
+                              onClick={() => setEditing(row)}>
+                              <Pencil size={14} />
+                            </button>
+                          )}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -673,9 +874,23 @@ export default function PhoneLogsPage() {
             </div>
 
             <Pager page={page} total={total} loading={loading} setPage={setPage} />
+            </>)}
           </>
         )}
       </div>
+      {editing && createPortal(
+        <PhoneVerifyModal
+          key={editing.id}
+          editCall={editing}
+          jobId={editing.job_id}
+          phone={editing.phone}
+          pocName={editing.contact_name}
+          company={editing.company}
+          onSave={onCallEdited}
+          onClose={() => setEditing(null)}
+        />,
+        document.body
+      )}
     </main>
   );
 }

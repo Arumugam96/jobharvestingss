@@ -7,6 +7,7 @@ import {
 import { getRunHistoryContactMatch, ApiError } from "../api";
 import { CONTACT_FILTER_OPTIONS } from "../lib/contactFilter";
 import { fmtSeconds } from "../lib/jobsData";
+import { isPlainLeftClick } from "../components/JobsTable";
 import { useHarvestData } from "../HarvestDataContext";
 import { useTenant } from "../TenantContext";
 
@@ -55,12 +56,6 @@ export default function RunHistoryPage({ runs, runsTotal, runsAggStats, loading,
     // runs.length: re-resolve when a refresh brings in new runs.
   }, [contactKey, runs.length]);
 
-  const counts = useMemo(() => ({
-    totalRuns: runsTotal ?? runs.length,
-    totalJobs: runsAggStats?.totalJobs ?? runs.reduce((sum, r) => sum + r.jobsFound, 0),
-    directClients: runsAggStats?.totalDirectClients ?? runs.reduce((sum, r) => sum + r.directClients, 0),
-  }), [runs, runsTotal, runsAggStats]);
-
   const filtered = useMemo(() => {
     let rows = runs.filter((r) => {
       if (filters.source !== "all" && !r.sources.some((s) => s.toLowerCase() === filters.source)) return false;
@@ -85,6 +80,33 @@ export default function RunHistoryPage({ runs, runsTotal, runsAggStats, loading,
     });
   }, [runs, filters, startDate, endDate, query, sort, contactMatch]);
 
+  // Stat cards follow the filters. With any filter active they're computed from
+  // the filtered runs; otherwise Total runs / Jobs harvested / Direct clients use
+  // the server's uncapped aggregates. GET /run-history may return only the most
+  // recent runs, so per-run sums over a partial list are marked "of loaded runs".
+  const filterActive = filters.source !== "all" || filters.status !== "all" || !!startDate || !!endDate
+    || !!query.trim() || contact.length > 0;
+  const partial = runs.length < (runsTotal ?? runs.length);
+  const counts = useMemo(() => {
+    const src = filterActive ? filtered : runs;
+    const sum = (key) => src.reduce((acc, r) => acc + (r[key] || 0), 0);
+    const byStatus = (st) => src.filter((r) => r.status === st).length;
+    return {
+      totalRuns: filterActive ? src.length : (runsTotal ?? runs.length),
+      totalJobs: filterActive ? sum("jobsFound") : (runsAggStats?.totalJobs ?? sum("jobsFound")),
+      directClients: filterActive ? sum("directClients") : (runsAggStats?.totalDirectClients ?? sum("directClients")),
+      gcc: sum("gcc"),
+      staffingFirms: sum("staffingFirms"),
+      ambiguous: sum("ambiguous"),
+      success: byStatus("success"),
+      failed: byStatus("failed"),
+    };
+  }, [filterActive, filtered, runs, runsTotal, runsAggStats]);
+  // Tooltip for counts that only cover the loaded runs (filtered, or per-run sums
+  // the server doesn't aggregate) when the loaded list is shorter than the total.
+  const loadedNote = partial ? `Counted over the ${runs.length} loaded runs (of ${runsTotal} total)` : undefined;
+  const aggNote = filterActive ? loadedNote : undefined;
+
   /** Download the filtered, sorted runs as run-history.csv (UTF-8 BOM for Excel). */
   function exportCsv() {
     const header = ["Run ID", "Sources", "Status", "Started", "Completed", "Duration (s)", "Jobs found", "Verified", "Direct clients", "GCC", "Staffing firms", "Ambiguous"];
@@ -106,7 +128,7 @@ export default function RunHistoryPage({ runs, runsTotal, runsAggStats, loading,
         <div className="ha-pagehead-titles">
           <h1>Run History</h1>
           <p className="ha-sub">
-            {loading ? "Loading…" : `${counts.totalRuns} run${counts.totalRuns === 1 ? "" : "s"} · ${counts.totalJobs} jobs harvested`}
+            {loading ? "Loading…" : `${counts.totalRuns}${filterActive ? " matching" : ""} run${counts.totalRuns === 1 ? "" : "s"} · ${counts.totalJobs} jobs harvested${filterActive && partial ? " (of loaded runs)" : ""}`}
           </p>
         </div>
         <div className="ha-pagehead-actions">
@@ -133,10 +155,20 @@ export default function RunHistoryPage({ runs, runsTotal, runsAggStats, loading,
             <button className="ha-btn ha-btn-secondary" style={{ height: 34, boxSizing: "border-box", padding: "0 14px" }} onClick={() => { setStartDate(""); setEndDate(""); }}>Clear dates</button>
           )}
         </div>
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
-          <StatCard value={counts.totalRuns} label="Total runs" color={C.accent} />
-          <StatCard value={counts.totalJobs} label="Jobs harvested" color={C.primary} />
-          <StatCard value={counts.directClients} label="Direct clients" color={C.primary} />
+        <style>{`
+          .ha-runhist-stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;width:100%;}
+          @media(max-width:900px){.ha-runhist-stats{grid-template-columns:repeat(2,minmax(0,1fr));}}
+          @media(max-width:360px){.ha-runhist-stats{grid-template-columns:minmax(0,1fr);}}
+        `}</style>
+        <div className="ha-runhist-stats">
+          <StatCard value={counts.totalRuns} label={filterActive ? "Matching runs" : "Total runs"} color={C.accent} title={aggNote} />
+          <StatCard value={counts.totalJobs} label="Jobs harvested" color={C.primary} title={aggNote} />
+          <StatCard value={counts.directClients} label="Direct clients" color={C.primary} title={aggNote} />
+          <StatCard value={counts.gcc} label="GCC companies" color={C.secondary} title={loadedNote} />
+          <StatCard value={counts.staffingFirms} label="Staffing firms" color="#7C3AED" title={loadedNote} />
+          <StatCard value={counts.ambiguous} label="Needs review" color="#D97706" title={loadedNote} />
+          <StatCard value={counts.success} label="Successful runs" color="#059669" title={loadedNote} />
+          <StatCard value={counts.failed} label="Failed runs" color="#DC2626" title={loadedNote} />
         </div>
 
         <div className="ha-card ha-filterbar" style={{ padding: "11px 14px", gridTemplateColumns: "repeat(3, minmax(0, 1fr))" }}>
@@ -168,16 +200,26 @@ export default function RunHistoryPage({ runs, runsTotal, runsAggStats, loading,
                 </tr>
               </thead>
               <tbody>
-                {(loading || contactLoading) && (
+                {/* Only the FIRST load blanks the table: a refetch (the 6s live poll
+                    while a run is running, or Refresh) keeps the current rows, so the
+                    list never collapses and loses its scroll position. */}
+                {((loading && !runs.length) || contactLoading) && (
                   <tr><td className="ha-td" colSpan={8} style={{ textAlign: "center", padding: "48px 16px", color: "#94A3B8" }}>
-                    {loading ? "Loading run history…" : "Filtering runs by contact…"}
+                    {loading && !runs.length ? "Loading run history…" : "Filtering runs by contact…"}
                   </td></tr>
                 )}
-                {!loading && !contactLoading && filtered.map((r) => {
+                {!(loading && !runs.length) && !contactLoading && filtered.map((r) => {
                   const isFeed = r.runType === "feed";
                   return (
                   <tr key={r.runId} className="ha-row">
-                    <td className="ha-td"><button className="ha-link" onClick={() => onView(r.runId)}>{r.runId}</button></td>
+                    <td className="ha-td">
+                      {/* Real link: modifier/middle-click opens the run in a new tab
+                          (nginx serves /history/* as the SPA); a plain click stays in-app. */}
+                      <a className="ha-link" href={"/history/" + encodeURIComponent(r.runId)}
+                        onClick={(e) => { if (!isPlainLeftClick(e)) return; e.preventDefault(); onView(r.runId); }}>
+                        {r.runId}
+                      </a>
+                    </td>
                     <td className="ha-td">
                       <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
                         {(isFeed ? ["LinkedIn Feed"] : r.sources).map((s) => <SourceChip key={s} source={s} />)}
@@ -219,7 +261,7 @@ export default function RunHistoryPage({ runs, runsTotal, runsAggStats, loading,
                   </tr>
                   );
                 })}
-                {!loading && !contactLoading && !error && !contactError && filtered.length === 0 && (
+                {!(loading && !runs.length) && !contactLoading && !error && !contactError && filtered.length === 0 && (
                   <tr><td className="ha-td" colSpan={8} style={{ textAlign: "center", padding: "48px 16px", color: "#94A3B8" }}>
                     No runs match your search. Trigger a harvest from the Rule Engine to see history here.
                   </td></tr>

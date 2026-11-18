@@ -6,8 +6,9 @@
     phone_verification_service._apply_outcome_effects; read back by the table
     through /phone-verifications/latest.
 
-phone_key is the number's digits only (phone_verification_service.normalize_phone),
-so "+91 98400 12345" and "+919840012345" share one row. Each *_at stamp is set
+phone_key is the number's trailing 10 digits (phone_verification_service.normalize_phone
+= app.core.contact_keys.phone_key), so "+91 98400 12345" and "9840012345" share one row
+(older all-digits keys are re-keyed and merged on boot — rekey_phone_contact_flags). Each *_at stamp is set
 once, by the first call that established it. Tenant-scoped content table
 (RLS + apply_tenant). Integer autoincrement PK.
 """
@@ -31,7 +32,7 @@ class PhoneContactFlagORM(Base):
     tenant_id: Mapped[str] = mapped_column(
         String(40), nullable=False, server_default="'internal'", index=True
     )
-    phone_key: Mapped[str] = mapped_column(String(50), nullable=False)  # digits only
+    phone_key: Mapped[str] = mapped_column(String(50), nullable=False)  # trailing 10 digits
     phone: Mapped[str] = mapped_column(String(50), nullable=False, default="")  # as dialed
 
     # Wrong number / invalid number (not in service) — drop from the dialler.

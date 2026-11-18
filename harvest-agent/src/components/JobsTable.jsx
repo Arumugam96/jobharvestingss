@@ -8,6 +8,7 @@ import PhoneVerifyModal, {
 } from "./PhoneVerify";
 import AssignJobModal, { AssignJobStyles, AssignCell, useCurrentUserEmail, isAssignedToOther } from "./AssignJob";
 import { getOutreachStatus, getPhoneVerifications, logPhoneCall } from "../api";
+import { ContactedBadge, hasEarlierCalls } from "./ContactHistory";
 import { C } from "../theme";
 import { useTenant } from "../TenantContext";
 import {
@@ -89,6 +90,12 @@ export const PAGE_SIZE_OPTIONS = [
 const DEFAULT_DISPLAY_PAGE_SIZE = 100;
 
 const NO_OUTREACH_TITLE = "No outreach for Demand Search jobs";
+
+/** True for an unmodified primary-button click — the only click an in-app link
+ *  should intercept (modifier/middle clicks keep the browser's new-tab behaviour). */
+export function isPlainLeftClick(e) {
+  return !e.defaultPrevented && e.button === 0 && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey;
+}
 
 /**
  * The harvested-jobs table: filter bar (source, company, size, locations, job, contact,
@@ -179,6 +186,9 @@ export default function JobsTable({
   const [phoneVerify, setPhoneVerify] = useState({});
   // Flags logged calls put on a number (invalid / do-not-call / warm), by number.
   const [phoneFlags, setPhoneFlags] = useState({});
+  // Earlier calls to a number on ANY job (every caller's), by number — the POC
+  // "Contacted" badge: { calls, jobs, latest } from /phone-verifications/latest `contacts`.
+  const [phoneContacts, setPhoneContacts] = useState({});
   const [phoneModal, setPhoneModal] = useState(null); // { job, phone, phoneSource, pocName, pocKind, email }
   // Logs a call for the modal's job + number. Rejects on failure so the modal
   // can show the error and stay open.
@@ -421,9 +431,15 @@ export default function JobsTable({
       const res = await getPhoneVerifications(ids, phones);
       const items = (res && res.items) || {};
       const flags = (res && res.flags) || {};
+      const contacts = (res && res.contacts) || {};
       setPhoneFlags((prev) => {
         const next = { ...prev };
         phones.forEach((p) => { if (flags[p]) next[p] = flags[p]; else delete next[p]; });
+        return next;
+      });
+      setPhoneContacts((prev) => {
+        const next = { ...prev };
+        phones.forEach((p) => { if (contacts[p]) next[p] = contacts[p]; else delete next[p]; });
         return next;
       });
       setPhoneVerify((prev) => {
@@ -517,12 +533,19 @@ export default function JobsTable({
                         <Lock size={13} style={{ flex: "none" }} /> {j.title}
                       </span>
                     ) : (
-                      <span className="ha-link" role="button" tabIndex={0} style={{ cursor: "pointer" }}
+                      // A real link, so ctrl/cmd/shift/middle-click and "Open in new
+                      // tab" work (a fresh tab loads /jobs/:id via GET /jobs/{id}); a
+                      // plain left click stays in-app and passes the row as state.
+                      <a className="ha-link" href={"/jobs/" + encodeURIComponent(j.id)}
                         title="View details"
-                        onClick={() => onView({ mode: "view", job: { ...mapJobToDetail(j), assignedTo } })}
-                        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onView({ mode: "view", job: { ...mapJobToDetail(j), assignedTo } }); } }}>
+                        onClick={(e) => {
+                          if (!isPlainLeftClick(e)) return;
+                          e.preventDefault();
+                          onView({ mode: "view", job: { ...mapJobToDetail(j), assignedTo } });
+                        }}
+                        onKeyDown={(e) => { if (e.key === " ") { e.preventDefault(); onView({ mode: "view", job: { ...mapJobToDetail(j), assignedTo } }); } }}>
                         {j.title}
-                      </span>
+                      </a>
                     )}
                   </td>
                   <td className="ha-td" style={{ color: C.text }}>{j.company}</td>
@@ -530,7 +553,12 @@ export default function JobsTable({
                     <CompanySizeCell band={j.companySize} tier={j.companySizeTier} />
                   </td>
                   <td className="ha-td" style={{ color: C.text }}>
-                    <PocCell name={c.pocName} kind={c.pocKind} />
+                    {c.phone && hasEarlierCalls(phoneContacts[c.phone], j.id) ? (
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                        <PocCell name={c.pocName} kind={c.pocKind} />
+                        <ContactedBadge summary={phoneContacts[c.phone]} />
+                      </div>
+                    ) : <PocCell name={c.pocName} kind={c.pocKind} />}
                   </td>
                   <td className="ha-td">
                     <DualContact parts={c.emailParts} link="mailto:" cls="ha-mail" />

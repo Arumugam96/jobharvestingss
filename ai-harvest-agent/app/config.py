@@ -450,6 +450,9 @@ class Settings(BaseSettings):
     # A self-assigned job reminds its assignee once, this many days after the claim
     # (app/services/assignment_reminder_service.py).
     assignment_reminder_days: int = 7
+    # Newly harvested jobs with an email/phone are auto-assigned round-robin to the
+    # tenant's active Business Leads (app/services/auto_assignment_service.py).
+    job_auto_assign_enabled: bool = True
 
     # ── CORS ─────────────────────────────────────────────────────────────────────
     cors_origins: str = "http://localhost:3000,http://localhost:8080"

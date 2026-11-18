@@ -23,6 +23,7 @@ import app.models.recruiter_finder  # noqa: F401
 import app.models.apollo_phone  # noqa: F401
 import app.models.outreach  # noqa: F401
 import app.models.phone_call_log  # noqa: F401
+import app.models.job_assignment_rotation  # noqa: F401
 import app.models.suppression  # noqa: F401
 import app.models.tenant  # noqa: F401
 from app.models.harvest import Base

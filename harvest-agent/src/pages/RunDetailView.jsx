@@ -18,6 +18,19 @@ const BUCKET_LABELS = {
   ambiguous: "Needs review",
 };
 
+// Last few runs' loaded data, so returning to a run (e.g. Back from one of its
+// jobs) renders instantly — and at the same scroll position — then revalidates
+// quietly, instead of blanking to "Loading…" while every page of its jobs refetches.
+const runViewCache = new Map(); // runId → { entry?, jobs?, resdexAvailable? }
+const RUN_CACHE_MAX = 5;
+/** Merges `patch` into the cache entry for `runId` (most recent last, bounded). */
+function cacheRun(runId, patch) {
+  const next = { ...(runViewCache.get(runId) || {}), ...patch };
+  runViewCache.delete(runId);
+  runViewCache.set(runId, next);
+  while (runViewCache.size > RUN_CACHE_MAX) runViewCache.delete(runViewCache.keys().next().value);
+}
+
 /**
  * Detail page for one harvest run: run header and summary from GET /run-history/{runId},
  * classification stat cards that filter by bucket (verified / direct / GCC / staffing /
@@ -30,26 +43,33 @@ const BUCKET_LABELS = {
  * @param {Function} props.onView - open a job's detail view.
  */
 export default function RunDetailView({ runId, onBack, onView }) {
-  const [entry, setEntry] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const cached = runViewCache.get(runId);
+  const [entry, setEntry] = useState(cached?.entry || null);
+  const [loading, setLoading] = useState(!cached?.entry);
   const [error, setError] = useState("");
 
   // This run's harvested jobs (GET /jobs?run_id=…) — same list→detail pattern
   // as the global Harvested Jobs page, scoped to this single run.
-  const [jobs, setJobs] = useState([]);
-  const [jobsLoading, setJobsLoading] = useState(true);
+  const [jobs, setJobs] = useState(cached?.jobs || []);
+  const [jobsLoading, setJobsLoading] = useState(!cached?.jobs);
   const [jobsError, setJobsError] = useState("");
   const [pageSizeSel, setPageSizeSel] = useState("100");
   // Resdex searches live server-side (resdex_searches), so the run's Resdex-selected job
   // ids are fetched separately and stamped as `hasResdex` on the rows. Only when
   // that lookup succeeds does the Contact filter offer "Resdex contacts".
-  const [resdexAvailable, setResdexAvailable] = useState(false);
+  const [resdexAvailable, setResdexAvailable] = useState(!!cached?.resdexAvailable);
 
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
+    // A cached run stays on screen while it revalidates (no loading flash).
+    if (!runViewCache.get(runId)?.entry) setLoading(true);
     getRunHistoryEntry(runId)
-      .then((res) => { if (!cancelled) setEntry(mapRun(res)); })
+      .then((res) => {
+        if (cancelled) return;
+        const mapped = mapRun(res);
+        setEntry(mapped);
+        cacheRun(runId, { entry: mapped });
+      })
       .catch((err) => { if (!cancelled) setError(err instanceof ApiError ? err.message : "Could not load this run."); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
@@ -57,9 +77,12 @@ export default function RunDetailView({ runId, onBack, onView }) {
 
   useEffect(() => {
     let cancelled = false;
-    setJobsLoading(true);
+    const hasCachedJobs = !!runViewCache.get(runId)?.jobs;
+    if (!hasCachedJobs) {
+      setJobsLoading(true);
+      setResdexAvailable(false);
+    }
     setJobsError("");
-    setResdexAvailable(false);
     (async () => {
       try {
         // The Resdex lookup is best-effort: a failure just hides the option.
@@ -68,13 +91,12 @@ export default function RunDetailView({ runId, onBack, onView }) {
           fetchAllJobs({ run_id: runId, contact: "resdex" }).catch(() => null),
         ]);
         if (cancelled) return;
-        if (resdex) {
-          const matched = new Set(resdex.rows.map((r) => r.id));
-          setJobs(rows.map((r) => (matched.has(r.id) ? { ...r, hasResdex: true } : r)));
-          setResdexAvailable(true);
-        } else {
-          setJobs(rows);
-        }
+        const next = resdex
+          ? (() => { const matched = new Set(resdex.rows.map((r) => r.id)); return rows.map((r) => (matched.has(r.id) ? { ...r, hasResdex: true } : r)); })()
+          : rows;
+        setJobs(next);
+        setResdexAvailable(!!resdex);
+        cacheRun(runId, { jobs: next, resdexAvailable: !!resdex });
       } catch (err) {
         if (!cancelled) { setJobsError(err instanceof ApiError ? err.message : "Could not load this run's jobs."); setJobs([]); }
       } finally {

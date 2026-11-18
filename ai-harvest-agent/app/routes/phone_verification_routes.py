@@ -7,10 +7,16 @@ POST   /jobs/{id}/phone-verification          — log a call (outcome, details, 
 DELETE /jobs/{id}/phone-verification?phone=   — "Clear status" for that number
 GET    /jobs/{id}/phone-verification/history  — every non-cleared call, newest first
 GET    /phone-verifications/latest?job_ids=   — newest call per visible job (badges)
-                                               + flags of those numbers
+                                               + flags and per-number call summaries
+                                               (`contacts`, across all jobs) of those numbers
+GET    /phone-verifications/contact-history?phone= — every call on a number, across jobs
 GET    /phone-verifications/logs              — every call in the tenant (admins; filter by
                                                assignee) or a business lead's own calls
+PATCH  /phone-verifications/logs/{id}         — edit one logged call in place (admins: any;
+                                               business leads: their own)
 GET    /phone-verifications/assignees         — business leads for the assignee filter (admins)
+GET    /phone-verifications/logs/contacts     — "By contact": one row per number (admins:
+                                               all; business leads: numbers they called)
 GET    /phone-verifications/logs/phones       — every phone number held (admins only)
 GET    /phone-verifications/logs/assigned-jobs — every self-assigned job (admins only)
 POST   /phone-verifications/logs/xlsx         — the page's export rows as .xlsx (admins + leads)
@@ -90,6 +96,18 @@ class LogCallRequest(BaseModel):
                                          description="Remind me at this time (any status).")
     follow_up: bool = Field(default=False,
                             description="Older clients: remind me in 24h (unanswered calls only).")
+
+
+class UpdateCallRequest(BaseModel):
+    """PATCH body: LogCallRequest's editable fields (phone / phone_source / contact_name
+    are fixed once logged)."""
+    status: str = Field(..., description="answered | unanswered")
+    outcome: str = Field(default="", max_length=40)
+    details: dict[str, Any] = Field(default_factory=dict)
+    proof: list[ProofFile] = Field(default_factory=list, max_length=pvs.PROOF_MAX_FILES)
+    remarks: str = Field(default="")
+    reminder_at: datetime | None = Field(default=None)
+    follow_up: bool = Field(default=False)
 
 
 def _split_phones(raw: str) -> list[str]:
@@ -205,14 +223,19 @@ async def latest_phone_verifications(
     """Newest non-cleared call per job, for the table's status badges, plus number flags.
 
     `job_ids` and `phones` are comma-separated and capped at 200. For non-admins, jobs assigned to
-    someone else are silently omitted; admins see them read-only. `flags` cover the numbers of the
-    returned calls plus any extra `phones`. Returns `{"items": {job_id: call}, "flags": {...}}`.
+    someone else are silently omitted; admins see them read-only. `flags` and `contacts` cover the
+    extra `phones` plus the numbers of the returned calls. Returns
+    `{"items": {job_id: call}, "flags": {phone: flag_view}, "contacts": {phone: summary}}` where a
+    summary is `{calls, jobs, latest: {id, status, outcome, reason, revisit, called_by, called_at,
+    job_id, job_title, company, contact_name, phone}}` over every caller's calls to that number on
+    any job (pvs.contact_summaries) — the "Contacted" badge. Numbers never called are absent.
     """
     ids = [j.strip() for j in job_ids.split(",") if j.strip()]
     ids = list(dict.fromkeys(ids))[:LATEST_MAX_IDS]
     extra_phones = _split_phones(phones)
     if not ids:
-        return {"items": {}, "flags": await pvs.flags_for_phones(db, extra_phones)}
+        return {"items": {}, "flags": await pvs.flags_for_phones(db, extra_phones),
+                "contacts": await pvs.contact_summaries(db, extra_phones)}
 
     # Drop jobs locked to someone else (same rule as ensure_job_access). Admins
     # keep them: they read the assignee's call results (read-only — every write
@@ -228,8 +251,28 @@ async def latest_phone_verifications(
         locked = {jid for jid, owner in locks if owner and owner.lower() != me}
         visible = [j for j in ids if j not in locked]
     items = await pvs.latest_for_jobs(db, visible)
-    flags = await pvs.flags_for_phones(db, [v["phone"] for v in items.values()] + extra_phones)
-    return {"items": items, "flags": flags}
+    numbers = list(dict.fromkeys(extra_phones + [v["phone"] for v in items.values()]))
+    flags = await pvs.flags_for_phones(db, numbers)
+    contacts = await pvs.contact_summaries(db, numbers)
+    return {"items": items, "flags": flags, "contacts": contacts}
+
+
+@router.get("/phone-verifications/contact-history",
+            summary="Every call to one number, across jobs (team-wide)")
+async def contact_call_history(
+    phone: str = Query(..., min_length=1, max_length=pvs.PHONE_MAX_LEN),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """Every non-cleared call on this number (matched on its trailing 10 digits) on any job
+    in the tenant, newest first, by any caller — so a business lead sees a teammate's
+    outcome before calling the same recruiter again. Informational only; nothing blocks.
+
+    Returns `{"phone", "key", "calls", "jobs", "items": [...]}`; each item is
+    `{id, status, outcome, reason, revisit, called_by, called_at, job_id, job_title, company,
+    contact_name, phone, details, remarks, proof, can_edit}`. Proof images (`src`) are blank
+    unless the viewer owns that log or is an admin (pvs.can_edit_log)."""
+    return await pvs.contact_history(db, phone, current_user)
 
 
 def logs_owner_scope(user: AuthenticatedUser, assignee: str) -> tuple[str | None, str | None]:
@@ -278,7 +321,75 @@ async def phone_call_logs(
     since = datetime.now(timezone.utc) - timedelta(days=days) if days else None
     return await pvs.list_logs(db, status=status_filter, assignment=assignment,
                                reminder=reminder, q=q, since=since, page=page,
-                               page_size=page_size, owner_id=owner_id, own_email=own_email)
+                               page_size=page_size, owner_id=owner_id, own_email=own_email,
+                               viewer=current_user)
+
+
+@router.get("/phone-verifications/logs/contacts",
+            summary="Phone logs by contact: one row per number (admins: all; leads: their numbers)")
+async def phone_log_contacts(
+    status_filter: str = Query(default="", alias="status", pattern="^(|answered|unanswered)$"),
+    assignment: str = Query(default="", pattern="^(|assigned|unassigned)$"),
+    reminder: str = Query(
+        default="", pattern="^(|none|scheduled|delivered|dismissed|called_again|cancelled)$"),
+    days: int = Query(default=0, ge=0, le=3650),
+    q: str = Query(default="", max_length=200),
+    assignee: str = Query(default="", max_length=36),
+    outcome: str = Query(default="", max_length=40,
+                         description="Only numbers whose LATEST call has this outcome."),
+    revisit_due: bool = Query(default=False,
+                              description="Only numbers whose latest call is not_interested "
+                                          "and its revisit window has passed."),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=200),
+    current_user: AuthenticatedUser = Depends(require_phone_logs_access),
+    db: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """The Phone logs "By contact" view, grouped and paginated server-side.
+
+    The Calls view's filters pick the numbers (any matching call); a business lead only
+    gets numbers they called (403 for another `assignee`), but each row's figures include
+    teammates' calls on that number. Returns `{"items", "total", "page", "page_size",
+    "scope"}`; each item is `{key, phone, contact_name, company, calls, jobs,
+    first_called_at, latest: {id, status, outcome, reason, revisit, called_by, called_at,
+    job_id, job_title, company, contact_name, phone}}`. Expand a row with
+    GET /phone-verifications/contact-history."""
+    owner_id, own_email = logs_owner_scope(current_user, assignee)
+    since = datetime.now(timezone.utc) - timedelta(days=days) if days else None
+    return await pvs.list_contacts(
+        db, status=status_filter, assignment=assignment, reminder=reminder, q=q, since=since,
+        outcome=(outcome or "").strip().lower(), revisit_due=revisit_due, page=page,
+        page_size=page_size, owner_id=owner_id, own_email=own_email,
+    )
+
+
+@router.patch(
+    "/phone-verifications/logs/{log_id}",
+    status_code=status.HTTP_200_OK,
+    summary="Edit a logged call in place (admins: any; business leads: their own)",
+    responses={403: {"description": "Not your call log"},
+               404: {"description": "Call log not found (or cleared)"},
+               422: {"description": "Invalid status / outcome, missing outcome "
+                                     "fields or proof of call"}},
+)
+async def update_phone_call_log(
+    log_id: int,
+    body: UpdateCallRequest,
+    current_user: AuthenticatedUser = Depends(require_phone_logs_access),
+    db: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """Update one call log row (status, outcome, details, remarks, proof, reminder) —
+    never inserts a new one. Same validation as logging a call. Returns the row shaped
+    exactly like one GET /phone-verifications/logs item."""
+    item = await pvs.update_call(
+        db, log_id, current_user,
+        status=body.status, remarks=body.remarks, follow_up=body.follow_up,
+        outcome=body.outcome, details=body.details,
+        proof=[p.model_dump() for p in body.proof], reminder_at=body.reminder_at,
+    )
+    logger.info("phone_call_log_updated", log_id=log_id, user=current_user.email,
+                status=item["status"], outcome=item["outcome"])
+    return item
 
 
 @router.get("/phone-verifications/assignees",

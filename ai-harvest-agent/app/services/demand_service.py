@@ -344,7 +344,10 @@ async def start_batch(preview: dict, *, batch_name: str, uploaded_by: str) -> di
                               "The database is unavailable — nothing was started.")
         posted = started.strftime("%Y-%m-%d")
         dicts = [_job_dict(r, posted) for r in preview["rows"]]
-        await db_write(lambda db: HarvestRunService(db).bulk_insert_scraped_jobs(run_pk, dicts))
+        # The searcher gets the batch's jobs when they are a Business Lead
+        # (app/services/auto_assignment_service.assign_jobs_to_searcher).
+        await db_write(lambda db: HarvestRunService(db).bulk_insert_scraped_jobs(
+            run_pk, dicts, assign_to_email=uploaded_by or ""))
         jobs = await db_read(lambda db: HarvestRunService(db).list_jobs_for_run(run_pk)) or []
         ids = {normalize_job_url(j.job_url): j.id for j in jobs}
         for r in snap["rows"]:

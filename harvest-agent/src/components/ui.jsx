@@ -72,11 +72,12 @@ const hexToTint = (hex, a) => {
 };
 
 /** Glass stat tile (big value + label), tinted from the `color` hex. */
-export const StatCard = ({ value, label, color, sub, onClick, active }) => {
+export const StatCard = ({ value, label, color, sub, onClick, active, title }) => {
   const clickable = typeof onClick === "function";
   return (
     <div
       className="ha-card ha-statcard"
+      title={title}
       role={clickable ? "button" : undefined}
       tabIndex={clickable ? 0 : undefined}
       aria-pressed={clickable ? !!active : undefined}
@@ -349,7 +350,7 @@ export function ContactActionBtn({ glyph: Glyph, title, available, href, onClick
   }
   if (href) {
     return (
-      <a className="ha-cbtn ha-cbtn-on" href={href} target="_blank" rel="noreferrer" title={title}>
+      <a className="ha-cbtn ha-cbtn-on" href={href} target="_blank" rel="noopener noreferrer" title={title}>
         <Glyph size={16} />
       </a>
     );

@@ -90,6 +90,9 @@ async def assign_job(db: AsyncSession, job_id: str, user: AuthenticatedUser, not
             assigned_to_name=display_name_from_email(user.email),
             assigned_at=case((new_claim, datetime.now(timezone.utc)), else_=ScrapedJobORM.assigned_at),
             assignment_note=note,
+            # A new manual claim is "" (manual — auto outreach then skips it); the
+            # owner editing the note of an auto-assigned job keeps its source.
+            assignment_source=case((new_claim, ""), else_=ScrapedJobORM.assignment_source),
             assignment_reminder_done_at=case(
                 (new_claim, None), else_=ScrapedJobORM.assignment_reminder_done_at),
         ),
@@ -129,6 +132,7 @@ async def unassign_job(db: AsyncSession, job_id: str, user: AuthenticatedUser) -
     job.assigned_to_name = ""
     job.assigned_at = None
     job.assignment_note = ""
+    job.assignment_source = ""
     job.assignment_reminder_done_at = None
     await db.commit()
     await db.refresh(job)

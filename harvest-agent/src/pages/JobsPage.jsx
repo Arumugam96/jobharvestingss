@@ -25,10 +25,11 @@ import { useTenant } from "../TenantContext";
 // apart from Harvested Jobs'.
 const DEMAND_SOURCE = "Demand";
 
-// Classification stat cards (same set as Run Detail). Each bucket maps to the
-// GET /jobs server filter it applies; counts come from GET /jobs/facets stats.
+// Classification stat cards. Each bucket maps to the GET /jobs server filter it
+// applies; counts come from GET /jobs/facets stats. (Run Detail additionally shows
+// a "Verified contacts" card — career-page verification_status — which is
+// deliberately not offered here: the label read as "verified emails/phones".)
 const BUCKETS = {
-  verified:  { label: "Verified contacts", color: "#059669",   params: { verification_status: "verified" } },
   direct:    { label: "Direct clients",    color: C.primary,   params: { hiring_entity: "Direct Client" } },
   gcc:       { label: "GCC companies",     color: C.secondary, params: { hiring_entity: "GCC" } },
   staffing:  { label: "Staffing firms",    color: "#7C3AED",   params: { hiring_entity: "Staffing Firm" } },
@@ -74,6 +75,11 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
   const [pageLoading, setPageLoading] = useState(!rowsSeed);
   const [pageError, setPageError] = useState("");
   const [facets, setFacets] = useState(cache?.facets || null);
+  // Stat counts for the CURRENT filters (GET /jobs/facets with the filter params,
+  // minus the active bucket's own params so every bucket card keeps its count).
+  // null = use the unfiltered facets' stats (no filters, or not fetched yet).
+  const [filteredStats, setFilteredStats] = useState(rowsSeed?.filteredStats?.data ?? null);
+  const [filtersActive, setFiltersActive] = useState(!!rowsSeed?.filteredStats?.active);
   const [exporting, setExporting] = useState(false);
   const [exportFormat, setExportFormat] = useState("csv");
   // Monotonic request counter — a response only lands if no newer request has
@@ -84,9 +90,67 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
   // (revalidating) fetch instead of flashing the loading state.
   const seededRef = useRef(!!rowsSeed);
   const firstFetchRef = useRef(false);
+  // Stats fetch bookkeeping: own seq counter (stale-response guard), the
+  // signature of the params last requested (a pure page/size/sort change keeps
+  // it, so no refetch) and the pending debounce timer.
+  const statsSeqRef = useRef(0);
+  const statsSigRef = useRef(null);
+  const statsTimerRef = useRef(null);
+  useEffect(() => () => clearTimeout(statsTimerRef.current), []);
+
+  // The facets params that carry no user filter for this page mode — the
+  // unfiltered dropdown fetch uses `facetBase`; `statsBase` is what the stats
+  // params reduce to when the user hasn't filtered anything.
+  const facetBase = useMemo(() => (demand ? { source: DEMAND_SOURCE } : {}), [demand]);
+  const statsBase = useMemo(
+    () => ({ ...facetBase, ...(library ? { assigned_to_me: true } : {}) }),
+    [facetBase, library]
+  );
+
+  /** Fetch filter-scoped stats for the params JobsTable emitted (debounced, seq-guarded).
+   * Drops pagination/sort and the active bucket's own params; skips the request when
+   * nothing changed since the last one (page flips) unless `force`. */
+  const updateStats = useCallback((params, force = false) => {
+    const { page, page_size, sort_by, sort_order, ...rest } = params || {};
+    const bucketKey = Object.keys(BUCKETS).find((k) =>
+      Object.entries(BUCKETS[k].params).every(([pk, pv]) => rest[pk] === pv));
+    if (bucketKey) Object.keys(BUCKETS[bucketKey].params).forEach((pk) => { delete rest[pk]; });
+    // Normalise: drop empty values and sort keys so the signature is stable.
+    const clean = {};
+    Object.keys(rest).sort().forEach((k) => {
+      const v = rest[k];
+      if (v !== undefined && v !== null && v !== "" && v !== false) clean[k] = v;
+    });
+    const sig = JSON.stringify(clean);
+    if (!force && sig === statsSigRef.current) return;
+    statsSigRef.current = sig;
+    const active = sig !== JSON.stringify(Object.fromEntries(Object.entries(statsBase).sort()));
+    setFiltersActive(active);
+    clearTimeout(statsTimerRef.current);
+    const seq = ++statsSeqRef.current;
+    // Same params as the unfiltered facets fetch → its stats already cover it.
+    if (sig === JSON.stringify(Object.fromEntries(Object.entries(facetBase).sort()))) {
+      setFilteredStats(null);
+      jobsViewRef.current = { ...(jobsViewRef.current || {}), filteredStats: { sig, data: null, active } };
+      return;
+    }
+    statsTimerRef.current = setTimeout(async () => {
+      try {
+        const f = await getJobsFacets(clean);
+        if (seq !== statsSeqRef.current) return; // superseded by a newer filter set
+        const data = f?.stats || null;
+        setFilteredStats(data);
+        jobsViewRef.current = { ...(jobsViewRef.current || {}), filteredStats: { sig, data, active } };
+      } catch {
+        // Keep the previous counts; the jobs fetch's own banner covers an outage.
+        if (seq === statsSeqRef.current) statsSigRef.current = null; // retry next change
+      }
+    }, 300);
+  }, [jobsViewRef, facetBase, statsBase]);
 
   const handleParamsChange = useCallback(async (params) => {
     lastParamsRef.current = params;
+    updateStats(params);
     const seq = ++seqRef.current;
     const quiet = !firstFetchRef.current && seededRef.current;
     firstFetchRef.current = true;
@@ -132,25 +196,30 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
       setPageTotal(0);
       setPageLoading(false);
     }
-  }, [jobsViewRef]);
+  }, [jobsViewRef, updateStats]);
 
   const fetchFacets = useCallback(async () => {
     try {
-      const f = await getJobsFacets(demand ? { source: DEMAND_SOURCE } : {});
+      const f = await getJobsFacets(facetBase);
       setFacets(f);
-      // Facets are whole-dataset (filter-independent), so cache them globally.
+      // Unfiltered facets (dropdown options + whole-dataset stats) are
+      // filter-independent, so cache them globally.
       jobsViewRef.current = { ...(jobsViewRef.current || {}), facets: f };
     } catch {
       // Dropdowns fall back to "All"-only and stats render as 0; the jobs
       // fetch's own error banner covers a backend outage.
     }
-  }, [jobsViewRef, demand]);
+  }, [jobsViewRef, facetBase]);
   useEffect(() => { fetchFacets(); }, [fetchFacets]);
 
+  // eslint-disable-next-line no-unused-vars
   const refresh = useCallback(() => {
     fetchFacets();
-    if (lastParamsRef.current) handleParamsChange(lastParamsRef.current);
-  }, [fetchFacets, handleParamsChange]);
+    if (lastParamsRef.current) {
+      updateStats(lastParamsRef.current, true);
+      handleParamsChange(lastParamsRef.current);
+    }
+  }, [fetchFacets, handleParamsChange, updateStats]);
 
   // Date range is a server-side filter now (date_from/date_to) — JobsTable
   // folds these into every emitted params object.
@@ -164,7 +233,14 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
     [startDate, endDate, demand, library, bucket]
   );
 
-  const stats = facets?.stats || {};
+  // Filter-scoped stats when filters are active (falls back to the unfiltered
+  // facets' stats — also what an older backend that ignores the params returns).
+  const stats = filteredStats || facets?.stats || {};
+  // Header count: the exact GET /jobs total (incl. an active bucket card) once
+  // filters are applied; the stats total otherwise.
+  const isFiltered = filtersActive || bucket !== "all";
+  const headTotal = isFiltered ? pageTotal : (stats.total || 0);
+  const plural = (n) => (n === 1 ? "" : "s");
 
   /** Export in the selected format: JSON / Excel navigate to the backend download URLs; CSV is
    * built client-side by exportCsv(). */
@@ -233,10 +309,16 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
           </div>
           <p className="ha-sub">
             {pageLoading && !facets ? "Loading…" : library
-              ? `${stats.total || 0} assigned job${(stats.total || 0) === 1 ? "" : "s"} awaiting outreach`
+              ? isFiltered
+                ? `${headTotal} matching assigned job${plural(headTotal)}`
+                : `${headTotal} assigned job${plural(headTotal)} awaiting outreach`
               : demand
-                ? `${stats.total || 0} Demand Search job${(stats.total || 0) === 1 ? "" : "s"} from uploaded and manually added requirements`
-                : `${stats.total || 0} harvested posting${(stats.total || 0) === 1 ? "" : "s"} · ${stats.qualified || 0} qualified · ${stats.flagged || 0} flagged`}
+                ? isFiltered
+                  ? `${headTotal} matching Demand Search job${plural(headTotal)}`
+                  : `${headTotal} Demand Search job${plural(headTotal)} from uploaded and manually added requirements`
+                : isFiltered
+                  ? `${headTotal} matching posting${plural(headTotal)}`
+                  : `${headTotal} harvested posting${plural(headTotal)} · ${stats.qualified || 0} qualified · ${stats.flagged || 0} flagged`}
           </p>
         </div>
         <div className="ha-pagehead-actions">
@@ -284,11 +366,16 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
           <StatCard value={stats.pocs || 0} label="POCs identified" color={C.primary} />
         </div>
         */}
-        {/* Classification cards (as on Run Detail): clicking one filters the jobs to
-            that bucket server-side (hiring_entity / verification_status); clicking it
-            again — or the chip — clears it. Counts are whole-dataset facet stats. */}
-        {/* All six on one row here (Run Detail keeps its 3×2 grid). */}
-        <div className="ha-runstats" style={{ gridTemplateColumns: "repeat(6, minmax(0, 1fr))" }}>
+        {/* Classification cards: clicking one filters the jobs to that bucket
+            server-side (hiring_entity); clicking it again — or the chip — clears it.
+            Counts follow the user's filters (GET /jobs/facets with the filter params;
+            each bucket's own filter is left out so every card keeps its count). */}
+        <style>{`
+          .ha-runstats.ha-jobstats{grid-template-columns:repeat(5,minmax(0,1fr));}
+          @media(max-width:900px){.ha-runstats.ha-jobstats{grid-template-columns:repeat(3,minmax(0,1fr));}}
+          @media(max-width:520px){.ha-runstats.ha-jobstats{grid-template-columns:repeat(2,minmax(0,1fr));}}
+        `}</style>
+        <div className="ha-runstats ha-jobstats">
           {[
             { key: "all", value: stats.total || 0, label: demand ? "Total Demand jobs" : "Jobs found", color: C.accent },
             ...Object.entries(BUCKETS).map(([key, b]) => ({ key, value: stats[key] || 0, label: b.label, color: b.color })),
@@ -308,6 +395,25 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
               </button>
             );
           })}
+        </div>
+        {/* Contact / filter-status counts for the same filtered rows (informational). */}
+        <div className="ha-runstats ha-jobstats">
+          {[
+            { key: "qualified", value: stats.qualified || 0, label: "Qualified", color: "#059669",
+              title: "Jobs that passed the business filter" },
+            { key: "flagged", value: stats.flagged || 0, label: "Flagged", color: "#DC2626",
+              title: "Jobs flagged by the business filter" },
+            { key: "emails", value: stats.unique_emails ?? stats.with_email ?? 0, label: "Emails", color: C.primary,
+              title: `Distinct email addresses on these jobs. Jobs with email: ${stats.with_email || 0} (${stats.with_poster_email || 0} job/recruiter · ${stats.with_company_email || 0} company contact)` },
+            { key: "contacts", value: stats.phone_contacts ?? stats.unique_phones ?? stats.with_phone ?? 0, label: "Contacts", color: C.secondary,
+              title: `Contacts = phone numbers on these jobs, counted like Phone logs → Total contacts. Jobs with: ${stats.with_email || 0} email (${stats.with_poster_email || 0} job/recruiter · ${stats.with_company_email || 0} company contact) · ${stats.with_phone || 0} phone · ${stats.with_linkedin || 0} LinkedIn` },
+            { key: "linkedin", value: stats.unique_linkedin ?? stats.with_linkedin ?? 0, label: "LinkedIn", color: "#0A66C2",
+              title: `Distinct LinkedIn profiles on these jobs. Jobs with LinkedIn: ${stats.with_linkedin || 0}` },
+          ].map((card) => (
+            <div key={card.key} className="ha-runstat" title={card.title}>
+              <b style={{ color: card.color }}>{card.value}</b><span>{card.label}</span>
+            </div>
+          ))}
         </div>
         {bucket !== "all" && (
           <div>
@@ -339,13 +445,7 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
         />
 
         <div style={{ display: "flex", justifyContent: "space-between", padding: "0 4px", fontSize: 12, color: C.textSoft }}>
-          <span>Showing {pageJobs.length} of {pageTotal} matching posting{pageTotal === 1 ? "" : "s"} · {stats.qualified || 0} qualified · {stats.flagged || 0} flagged</span>
-          {/* Contacts = phone_contacts, counted the same way as the Phone logs "Total
-              contacts" card, over these jobs; email/LinkedIn = unique_* (distinct
-              addresses / profiles); with_* = jobs that have the channel (GET /jobs/facets). */}
-          <span title={`Contacts = phone numbers on these jobs, counted like Phone logs → Total contacts. Jobs with: ${stats.with_email || 0} email (${stats.with_poster_email || 0} job/recruiter · ${stats.with_company_email || 0} company contact) · ${stats.with_phone || 0} phone · ${stats.with_linkedin || 0} LinkedIn`}>
-            {stats.unique_emails ?? stats.with_email ?? 0} email · {stats.phone_contacts ?? stats.unique_phones ?? stats.with_phone ?? 0} Contacts · {stats.unique_linkedin ?? stats.with_linkedin ?? 0} LinkedIn
-          </span>
+          <span>Showing {pageJobs.length} of {pageTotal} matching posting{plural(pageTotal)}</span>
         </div>
       </div>
     </main>

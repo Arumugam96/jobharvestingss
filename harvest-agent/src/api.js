@@ -267,6 +267,27 @@ export function getPhoneCallHistory(jobId) {
   return request(`/jobs/${encodeURIComponent(jobId)}/phone-verification/history`);
 }
 
+/* Per-number call history (across jobs, every caller's calls). getPhoneVerifications'
+ * response also carries `contacts: { phone: { calls, jobs, latest } }` for the same numbers,
+ * where latest = { id, status, outcome, reason, revisit, called_by: {email, name},
+ * called_at, job_id, job_title, company, contact_name, phone } — the "Contacted" badge. */
+
+/** GET /phone-verifications/contact-history?phone=… — every call to this number on any
+ * job, newest first (matched on its trailing 10 digits). Returns { phone, key, calls, jobs,
+ * items: [{ ...latest fields, details, remarks, proof, can_edit }] } — proof `src` is blank
+ * unless the viewer owns that log or is an admin. */
+export function getContactHistory(phone) {
+  return request(`/phone-verifications/contact-history${qs({ phone })}`);
+}
+
+/** GET /phone-verifications/logs/contacts — Phone logs "By contact": one row per number.
+ * params: getPhoneLogs' filters + { outcome (latest call's), revisit_due: true|"" }.
+ * Returns { items: [{ key, phone, contact_name, company, calls, jobs, first_called_at,
+ * latest }], total, page, page_size, scope }. */
+export function getPhoneLogContacts(params = {}) {
+  return request(`/phone-verifications/logs/contacts${qs(params)}`);
+}
+
 /** GET /phone-verifications/logs — logged calls (admins and business leads). Admins see
  * every call in the tenant; a business lead only their own (the backend forces it).
  * params: { status, assignment, reminder, days, q, page, page_size, assignee }
@@ -278,6 +299,27 @@ export function getPhoneCallHistory(jobId) {
  * (for scope "own", total_phones is null and assigned_jobs counts only the caller's jobs). */
 export function getPhoneLogs(params = {}) {
   return request(`/phone-verifications/logs${qs(params)}`);
+}
+
+/** PATCH /phone-verifications/logs/{id} — edit a logged call in place (no new record).
+ * body: { status, outcome, details, remarks, proof: [{name, size, type, src}], follow_up,
+ * reminder_at (ISO|null) } — the same fields as logPhoneCall. Returns the updated row in
+ * the GET /phone-verifications/logs item shape. 403 not allowed, 404 gone, 422 invalid. */
+export function updatePhoneCallLog(logId, {
+  status, outcome, details, remarks, proof, follow_up, reminder_at,
+} = {}) {
+  return request(`/phone-verifications/logs/${encodeURIComponent(logId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      status,
+      outcome: outcome || "",
+      details: details || {},
+      proof: proof || [],
+      remarks: remarks || "",
+      follow_up: !!follow_up,
+      reminder_at: reminder_at || null,
+    }),
+  });
 }
 
 /** GET /phone-verifications/assignees?q=… — business leads to filter Phone logs by
@@ -670,6 +712,13 @@ export function retryFinderJob(jobId) {
 /** GET /recruiter-finder/usage — per-tenant daily credit gauge + 14-day history. */
 export function getFinderUsage() {
   return request("/recruiter-finder/usage");
+}
+
+/** GET /recruiter-finder/apollo-credits — Apollo ACCOUNT credits left this billing cycle:
+ * {remaining, limit, consumed, cycle_start, cycle_end, as_of, source, stale, exhausted}.
+ * `refresh` bypasses the backend's short cache (use after a failed action / when locked). */
+export function getFinderApolloCredits({ refresh = false } = {}) {
+  return request(`/recruiter-finder/apollo-credits${refresh ? "?refresh=true" : ""}`);
 }
 
 /** GET /recruiter-finder/history — recent enrichment jobs for this workspace. */

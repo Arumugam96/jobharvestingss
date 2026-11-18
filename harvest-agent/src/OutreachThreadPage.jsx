@@ -138,7 +138,7 @@ export default function OutreachThreadPage() {
       {/* Page header — subject as title + engagement/tone. The title uses the full
           available width (no artificial cap) so it stays on one line where it fits
           and only wraps the overflow onto a second line when it truly must. */}
-      <div style={{ paddingBottom: 18, borderBottom: "1px solid #E2E8F0" }}>
+      <div className="ha-bell-clear" style={{ paddingBottom: 18, borderBottom: "1px solid #E2E8F0" }}>
         <h1 style={{ fontSize: 24, fontWeight: 800, letterSpacing: "-.02em", margin: 0, lineHeight: 1.25 }}>
           {detail?.subject || (detail?.channel === "linkedin" ? "LinkedIn message" : "Outreach")}
         </h1>

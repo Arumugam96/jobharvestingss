@@ -224,6 +224,12 @@ const CSS = `
 .lr-x:hover{ color:#475569; background:#F1F5F9; }
 .lr-spin{ animation:lr-rot .9s linear infinite; }
 @keyframes lr-rot{ to{ transform:rotate(360deg); } }
+/* Where the centred stack would reach the fixed top-right notification bell
+   (NotificationBell publishes --ha-bell-zone while mounted), left-align it and stop
+   short of the bell instead. Without the bell the var is unset → full width. */
+@media (max-width:840px){
+  .lr-stack{ left:16px; transform:none; width:calc(100vw - 16px - var(--ha-bell-zone, 16px)); }
+}
 @media (max-width:640px){
   .lr-card{ flex-wrap:wrap; }
   .lr-btn{ margin-left:46px; }

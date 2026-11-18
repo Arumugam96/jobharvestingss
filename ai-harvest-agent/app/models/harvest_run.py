@@ -218,6 +218,12 @@ class ScrapedJobORM(Base):
     # Reset to NULL whenever the job is newly claimed, so each assignment gets one
     # reminder, due at assigned_at + settings.assignment_reminder_days.
     assignment_reminder_done_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # How the assignee was set: "" = a manual "Assign to me" claim (and every
+    # assignment older than this column), "auto" = round-robin to a Business Lead,
+    # "demand" = the Business Lead who ran the Demand search
+    # (app/services/auto_assignment_service.py). Automated post-harvest outreach
+    # skips only manual claims, so auto-assigned jobs still get the initial email.
+    assignment_source: Mapped[str] = mapped_column(String(20), nullable=False, default="", server_default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     # Real scrape/collection instant (app-set in the orchestrator converters);
     # distinct from created_at, which is the batch-insert time. Nullable — NULL on

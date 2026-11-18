@@ -23,6 +23,15 @@ const ThemeStyles = () => (
        modeled on the Rule Engine's rr-head so the app reads as one system and the
        table claims more of the viewport (requirement: reduce header/filter height). */
     .ha-pagehead{display:flex;flex-wrap:wrap;align-items:flex-start;justify-content:space-between;gap:8px 16px;padding:12px 24px 8px;}
+    /* Keep page headers' right-hand actions clear of the fixed top-right
+       notification bell. --ha-bell-zone (width the bell claims from the viewport's
+       right edge) is defined by NotificationBell's own <style>, so it only applies
+       while the bell is mounted (sidebar pages, not the full-page detail views).
+       Each rule subtracts the header's own distance from the right edge. */
+    .ha-pagehead{padding-right:max(24px,var(--ha-bell-zone,0px));}
+    .ha-root .rr-head{padding-right:max(0px,calc(var(--ha-bell-zone,0px) - 30px));}
+    .ha-root .rec-header{padding-right:max(20px,var(--ha-bell-zone,0px));}
+    .ha-root .dmj-topbar,.ha-bell-clear{padding-right:max(0px,calc(var(--ha-bell-zone,0px) - 24px));}
     .ha-pagehead-titles{min-width:0;}
     .ha-pagehead h1{margin:0;font-size:18px;font-weight:800;letter-spacing:-.02em;color:${C.text};line-height:1.15;}
     .ha-pagehead h1 .ha-h1-soft{color:${C.textSoft};font-weight:600;}
@@ -54,6 +63,9 @@ const ThemeStyles = () => (
     .ha-row{border-top:1px solid #EEF2F7;}
     .ha-row:hover{background:rgba(226,236,254,.5);}
     .ha-link{color:${C.primary};font-weight:600;background:none;border:0;padding:0;cursor:pointer;font-size:inherit;font-family:inherit;text-align:left;}
+    /* Row links are real <a href> (open-in-new-tab) but keep the button look. */
+    a.ha-link{text-decoration:none;}
+    a.ha-link:focus-visible{outline:2px solid ${C.primary};outline-offset:2px;border-radius:3px;}
     .ha-statnum{font-size:26px;font-weight:800;line-height:1;letter-spacing:-.02em;}
     .ha-statlbl{margin-top:3px;font-size:13px;color:${C.textSoft};}
     .ha-select{cursor:pointer;flex:1 1 auto;min-width:0;box-sizing:border-box;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}

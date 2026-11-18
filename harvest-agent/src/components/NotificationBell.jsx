@@ -28,9 +28,14 @@ import { fmtRel, avatarColor, initials } from "./outreachUi";
  *   • a toast for items that arrive AFTER the first poll (so a page load doesn't
  *     spam toasts for the existing backlog).
  *
- * Positioned bottom-right as a self-contained affordance: the app has no global top
- * bar, and a fixed top-right bell would collide with each page's own header actions
- * (Mail logs' Export/Refresh). The toast stacks just above the bell.
+ * Positioned fixed in the top-right corner, level with the page header row (the app
+ * has no global top bar; Sign out lives in the Sidebar). The dropdown opens downward,
+ * right-aligned under the bell, and toasts stack top-right just below it. So the
+ * bell never sits on a page's own header actions (Mail logs' Export/Refresh, Rule
+ * Engine's Run…), this component publishes --ha-bell-zone (the width it claims from
+ * the viewport's right edge) and ThemeStyles pads .ha-pagehead and the other page
+ * headers by it; the var disappears with the bell, so pages without it are unchanged.
+ * It sits below the app's modals (z-index 1000) so it never covers a dialog.
  *
  * Indigo (#4F46E5) for replies — the same Replied accent used across Mail logs and
  * the thread page; amber for follow-up calls so the two read apart at a glance. */
@@ -63,7 +68,7 @@ const asFollowUp = (f) => ({ ...f, type: "call_followup", key: `fu:${f.id}`, sor
 const ts = (iso) => { const t = new Date(iso || 0).getTime(); return Number.isNaN(t) ? 0 : t; };
 
 /**
- * Bottom-right notification bell + dropdown + toasts for unread inbound replies
+ * Top-right notification bell + dropdown + toasts for unread inbound replies
  * (GET /outreach/notifications, only when `repliesEnabled`) and the user's due
  * follow-up calls (GET /phone-verifications/follow-ups), both polled every 30s.
  * Opening a reply marks it read and navigates to its /mail thread; opening a
@@ -253,7 +258,7 @@ export default function NotificationBell({ repliesEnabled = true }) {
     <>
       <style>{CSS}</style>
 
-      {/* Toasts — newest on top, stacked just above the bell. */}
+      {/* Toasts — newest on top, stacked top-right just below the bell. */}
       <div className="rb-toasts">
         {toasts.map((t) => {
           if (t.type === "assign_reminder") {
@@ -308,7 +313,7 @@ export default function NotificationBell({ repliesEnabled = true }) {
       </div>
 
       {/* Bell + dropdown. */}
-      <div className="rb-wrap" ref={panelRef}>
+      <div className={"rb-wrap" + (open ? " is-open" : "")} ref={panelRef}>
         {open && (
           <div className="rb-panel" role="dialog" aria-label="Notifications">
             <div className="rb-panel-head">
@@ -381,7 +386,7 @@ export default function NotificationBell({ repliesEnabled = true }) {
           aria-label={label}
           title={label}
         >
-          <Bell size={20} />
+          <Bell size={17} />
           {unread > 0 && <span className="rb-count">{unread > 99 ? "99+" : unread}</span>}
         </button>
       </div>
@@ -390,18 +395,23 @@ export default function NotificationBell({ repliesEnabled = true }) {
 }
 
 const CSS = `
-.rb-wrap{ position:fixed; right:24px; bottom:24px; z-index:1100; }
-.rb-bell{ position:relative; width:52px; height:52px; border-radius:50%; display:grid; place-items:center;
+/* Horizontal room the bell takes from the viewport's right edge (24 + 38 + 8 gap);
+   read by ThemeStyles to keep page-header actions clear of it. */
+:root{ --ha-bell-zone:70px; }
+.rb-wrap{ position:fixed; right:24px; top:12px; z-index:990; }
+/* Open dropdown paints over the toasts (which share the top-right corner). */
+.rb-wrap.is-open{ z-index:1101; }
+.rb-bell{ position:relative; width:38px; height:38px; border-radius:50%; display:grid; place-items:center;
   background:#fff; color:#334155; border:1px solid #E2E8F0; cursor:pointer;
   box-shadow:0 10px 26px -10px rgba(15,23,42,.35); transition:transform .15s ease, box-shadow .15s ease, color .15s ease; }
-.rb-bell:hover{ transform:translateY(-2px); box-shadow:0 16px 32px -12px rgba(15,23,42,.42); color:#1E293B; }
+.rb-bell:hover{ transform:translateY(-1px); box-shadow:0 16px 32px -12px rgba(15,23,42,.42); color:#1E293B; }
 .rb-bell:focus-visible{ outline:2px solid ${REPLY}; outline-offset:2px; }
 .rb-bell.has-unread{ color:${REPLY}; border-color:rgba(79,70,229,.45); box-shadow:0 10px 26px -10px rgba(79,70,229,.5), 0 0 0 4px rgba(79,70,229,.10); }
-.rb-count{ position:absolute; top:-3px; right:-3px; min-width:21px; height:21px; padding:0 6px; border-radius:999px;
-  background:${REPLY}; color:#fff; font-size:11.5px; font-weight:800; display:grid; place-items:center;
+.rb-count{ position:absolute; top:-5px; right:-6px; min-width:18px; height:18px; padding:0 5px; border-radius:999px;
+  background:${REPLY}; color:#fff; font-size:10.5px; font-weight:800; display:grid; place-items:center;
   border:2px solid #fff; font-variant-numeric:tabular-nums; }
 
-.rb-panel{ position:absolute; right:0; bottom:64px; width:340px; max-width:calc(100vw - 48px);
+.rb-panel{ position:absolute; right:0; top:48px; width:340px; max-width:calc(100vw - 48px);
   background:#fff; border:1px solid #E2E8F0; border-radius:14px; overflow:hidden;
   box-shadow:0 26px 60px -18px rgba(15,23,42,.4); font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; }
 .rb-panel-head{ display:flex; align-items:center; justify-content:space-between; padding:13px 15px; border-bottom:1px solid #EDF1F6; }
@@ -409,7 +419,7 @@ const CSS = `
 .rb-markall{ display:inline-flex; align-items:center; gap:5px; border:0; background:transparent; cursor:pointer;
   color:${REPLY}; font-size:12px; font-weight:700; font-family:inherit; padding:2px 4px; }
 .rb-markall:hover{ text-decoration:underline; }
-.rb-list{ max-height:min(60vh,420px); overflow-y:auto; }
+.rb-list{ max-height:min(calc(100vh - 130px),420px); overflow-y:auto; }
 .rb-empty{ padding:28px 16px; text-align:center; color:#94A3B8; font-size:13px; }
 .rb-item{ display:flex; gap:11px; width:100%; text-align:left; padding:12px 15px; border:0; border-bottom:1px solid #EDF1F6;
   background:linear-gradient(90deg, rgba(79,70,229,.05), transparent 55%); cursor:pointer; font-family:inherit; }
@@ -432,12 +442,12 @@ const CSS = `
 .rb-av-asg{ background:${ASG_SOFT}; color:${ASG}; border:1px solid #99F6E4; }
 .rb-av-asg .rb-dot{ background:${ASG}; }
 
-.rb-toasts{ position:fixed; right:24px; bottom:88px; z-index:1100; display:flex; flex-direction:column; gap:12px;
+.rb-toasts{ position:fixed; right:24px; top:62px; z-index:1100; display:flex; flex-direction:column; gap:12px;
   width:320px; max-width:calc(100vw - 48px); }
 .rb-toast{ position:relative; background:#fff; border:1px solid rgba(79,70,229,.28); border-radius:13px; overflow:hidden;
   padding:14px 15px 14px 18px; box-shadow:0 22px 50px -16px rgba(15,23,42,.5), 0 0 0 4px rgba(79,70,229,.08);
   font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; animation:rb-in .22s ease-out; }
-@keyframes rb-in{ from{ opacity:0; transform:translateY(8px); } to{ opacity:1; transform:none; } }
+@keyframes rb-in{ from{ opacity:0; transform:translateY(-8px); } to{ opacity:1; transform:none; } }
 .rb-toast-accent{ position:absolute; left:0; top:0; bottom:0; width:4px; background:${REPLY}; }
 .rb-toast-x{ position:absolute; top:9px; right:9px; border:0; background:transparent; color:#94A3B8; cursor:pointer; padding:2px; line-height:0; }
 .rb-toast-x:hover{ color:#475569; }

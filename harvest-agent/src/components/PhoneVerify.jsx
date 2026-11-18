@@ -5,7 +5,7 @@ import {
   CornerUpRight, Ban, Upload, ChevronRight, ChevronDown, Paperclip, RefreshCw, AlertCircle,
 } from "lucide-react";
 import { GLASS_MODAL } from "../theme";
-import { getPhoneCallHistory } from "../api";
+import { getPhoneCallHistory, updatePhoneCallLog } from "../api";
 
 /* Manual call log for a Harvested Jobs mobile number. The shield button in front
  * of the Mobile cell opens PhoneVerifyModal, where the user logs one call attempt:
@@ -52,6 +52,11 @@ const OUTCOMES = {
     { v: "voicemail", l: "Voicemail / IVR only", tone: "info", panel: "retry", rem: true, proof: "from2", preset: "Tomorrow 10 AM" },
   ],
 };
+/** Every outcome as { value, label, status, tone } (answered first) — e.g. Phone logs'
+ * "Latest outcome" filter. */
+export const OUTCOME_OPTIONS = Object.entries(OUTCOMES).flatMap(([status, list]) =>
+  list.map((o) => ({ value: o.v, label: o.l, status, tone: o.tone })));
+
 /** The OUTCOMES entry for a call's status + outcome, or null when either is unset/unknown. */
 const outcomeOf = (call) => (call?.status && call?.outcome ? OUTCOMES[call.status]?.find((o) => o.v === call.outcome) : null);
 
@@ -640,14 +645,36 @@ function HistorySheet({ calls, subtitle, onClose, onZoom }) {
   );
 }
 
+/** Local reminder state { on, date, time } for an ISO reminder time (off when absent/invalid). */
+const remFromIso = (iso) => {
+  const d = iso ? new Date(iso) : null;
+  if (!d || isNaN(d)) return { on: false, date: "", time: "" };
+  const [date, time] = toParts(d);
+  return { on: true, date, time };
+};
+
 /* Logs one call. Loads the job's call history from the server; `latest` (the
  * table's latest call, if any) gives the attempt number until it arrives.
  * onSave receives the call payload and may return a promise — the modal stays
- * open with the error shown if it rejects, and closes once it resolves. */
-export default function PhoneVerifyModal({ jobId, phone, pocName, pocTitle, company, email, latest = null, onSave = () => {}, onClose = () => {} }) {
+ * open with the error shown if it rejects, and closes once it resolves.
+ *
+ * Edit mode (`editCall` = a GET /phone-verifications/logs item): the form is
+ * pre-filled from that call, the number/contact stay read-only, Save PATCHes
+ * /phone-verifications/logs/{id} itself (updating the row in place) and then
+ * passes the updated log item to onSave. */
+export default function PhoneVerifyModal({ jobId, phone: phoneProp, pocName: pocNameProp, pocTitle, company, email, latest = null, editCall = null, onSave = () => {}, onClose = () => {} }) {
+  const editing = !!editCall;
+  const phone = phoneProp || editCall?.phone || "";
+  const pocName = pocNameProp || editCall?.contact_name || "";
   const [hist, setHist] = useState({ loading: true, calls: [], error: "" });
   const history = hist.calls;
-  const attemptNo = (hist.loading ? latest?.attempts || 0 : history.length) + 1;
+  // Editing: the call's own position in the job's history (oldest first) is its
+  // attempt number — not "next attempt" — so the 2nd-attempt proof rule matches
+  // what applied when it was logged.
+  const editIdx = editing ? history.findIndex((h) => String(h.id) === String(editCall.id)) : -1;
+  const attemptNo = editing
+    ? (editIdx >= 0 ? editIdx + 1 : Math.max(1, hist.loading ? editCall.attempts || 1 : history.length))
+    : (hist.loading ? latest?.attempts || 0 : history.length) + 1;
   const [busy, setBusy] = useState(false);
   const [saveError, setSaveError] = useState("");
 
@@ -663,12 +690,19 @@ export default function PhoneVerifyModal({ jobId, phone, pocName, pocTitle, comp
     return () => { cancelled = true; };
   }, [jobId]);
 
-  const [status, setStatusRaw] = useState(null);
-  const [outcome, setOutcomeRaw] = useState(null);
-  const [details, setDetails] = useState({});
-  const [remarks, setRemarks] = useState("");
-  const [files, setFiles] = useState([]);
-  const [rem, setRemState] = useState({ on: false, date: "", time: "" });
+  // Seeded straight into state (not via setStatus/setOutcome, whose resets would
+  // wipe the prefill) when editing an existing call.
+  const [status, setStatusRaw] = useState(() => (editing && PHONE_STATUSES[editCall.status] ? editCall.status : null));
+  const [outcome, setOutcomeRaw] = useState(() => (editing && editCall.outcome ? editCall.outcome : null));
+  const [details, setDetails] = useState(() => (editing && editCall.details && typeof editCall.details === "object" ? { ...editCall.details } : {}));
+  const [remarks, setRemarks] = useState(() => (editing ? editCall.remarks || "" : ""));
+  const [files, setFiles] = useState(() => (editing && Array.isArray(editCall.proof)
+    ? editCall.proof.slice(0, MAX_FILES).map((f, i) => ({
+      id: `existing-${i}-${f?.name || ""}`, name: f?.name || "proof", size: f?.size || "",
+      type: f?.type || PROOF_TYPES[0], src: f?.src || "",
+    }))
+    : []));
+  const [rem, setRemState] = useState(() => (editing ? remFromIso(editCall.reminder_at) : { on: false, date: "", time: "" }));
   const [sheetOpen, setSheetOpen] = useState(false);
   const [zoom, setZoom] = useState(null);
   const [dragOver, setDragOver] = useState(false);
@@ -762,7 +796,7 @@ export default function PhoneVerifyModal({ jobId, phone, pocName, pocTitle, comp
   else if (c.panel === "email" && !details.sendTo?.trim()) why = "Add the email to send details to";
   else if (c.panel === "redirect" && !details.referredName?.trim()) why = "Add who you were referred to";
   else if (proofNeeded && !files.length) why = "Attach proof of the call to save";
-  else { ok = true; why = `Saving as “${c.l}” · attempt ${attemptNo}`; }
+  else { ok = true; why = `${editing ? "Updating" : "Saving"} as “${c.l}” · attempt ${attemptNo}`; }
 
   /**
    * Builds the call payload (status, outcome, details, comments, proof, reminder_at ISO)
@@ -773,12 +807,24 @@ export default function PhoneVerifyModal({ jobId, phone, pocName, pocTitle, comp
     const reminderAt = rem.on && rem.date ? new Date(`${rem.date}T${rem.time || "10:00"}`) : null;
     setBusy(true);
     setSaveError("");
+    const reminderIso = reminderAt && !isNaN(reminderAt) ? reminderAt.toISOString() : null;
+    const proof = files.map(({ name, size, type, src }) => ({ name, size, type, src }));
     try {
-      await onSave({
-        phone, status, outcome, details, remarks: remarks.trim(),
-        proof: files.map(({ name, size, type, src }) => ({ name, size, type, src })),
-        reminder_at: reminderAt && !isNaN(reminderAt) ? reminderAt.toISOString() : null,
-      });
+      if (editing) {
+        // follow_up mirrors the reminder: the server treats a bare follow_up on an
+        // unanswered call as the legacy "remind me in 24h", so never send it alone.
+        const updated = await updatePhoneCallLog(editCall.id, {
+          status, outcome, details, remarks: remarks.trim(), proof,
+          follow_up: !!reminderIso, reminder_at: reminderIso,
+        });
+        await onSave(updated);
+      } else {
+        await onSave({
+          phone, status, outcome, details, remarks: remarks.trim(),
+          proof,
+          reminder_at: reminderIso,
+        });
+      }
       onClose();
     } catch (err) {
       setSaveError(err?.message || "Couldn't save the call. Please try again.");
@@ -796,9 +842,9 @@ export default function PhoneVerifyModal({ jobId, phone, pocName, pocTitle, comp
   return (
     <div className="pvm-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget && !busy) onClose(); }}>
       <style>{styles}</style>
-      <div className="pvm-card" role="dialog" aria-modal="true" aria-label="Verify mobile number">
+      <div className="pvm-card" role="dialog" aria-modal="true" aria-label={editing ? "Edit call log" : "Verify mobile number"}>
         <div className="pvm-head">
-          <h2>Verify mobile number {company && <span className="pvm-org">· {company}</span>}</h2>
+          <h2>{editing ? "Edit call log" : "Verify mobile number"} {company && <span className="pvm-org">· {company}</span>}</h2>
           <button className="pvm-close" onClick={onClose} disabled={busy} aria-label="Close"><X size={16} /></button>
         </div>
 
@@ -918,7 +964,7 @@ export default function PhoneVerifyModal({ jobId, phone, pocName, pocTitle, comp
               {hist.loading ? "Loading…"
                 : hist.error ? hist.error
                 : history.length
-                  ? `${history.length} earlier call${history.length > 1 ? "s" : ""} · ${withProof} with proof`
+                  ? `${history.length} ${editing ? "" : "earlier "}call${history.length > 1 ? "s" : ""} · ${withProof} with proof`
                   : "No earlier calls"}
             </span>
             {history.length > 0 && <ChevronRight size={14} color="#94A3B8" />}

@@ -194,12 +194,22 @@ def _no_email_resdex_targets(job_rows: list[ScrapedJobORM]) -> list[dict]:
     return out
 
 
+def _manually_claimed(email: str | None, source: str | None) -> bool:
+    """True for a manual "Assign to me" claim: an assignee with an empty
+    assignment_source. Automatic assignments ("auto" round-robin to a Business
+    Lead, "demand" search owner) don't block the initial outreach email — the
+    Business Lead follows up after it."""
+    return bool(email) and not (source or "")
+
+
 async def _job_assigned(db, job_id: str | None) -> bool:
-    """True when the job row is currently claimed by a user (assigned_to_email set)."""
+    """True when the job row is currently claimed manually by a user (see _manually_claimed)."""
     if not job_id:
         return False
-    stmt = select(ScrapedJobORM.assigned_to_email).where(ScrapedJobORM.id == job_id)
-    return bool((await db.execute(stmt)).scalar_one_or_none())
+    stmt = select(ScrapedJobORM.assigned_to_email, ScrapedJobORM.assignment_source).where(
+        ScrapedJobORM.id == job_id)
+    row = (await db.execute(stmt)).first()
+    return bool(row) and _manually_claimed(row[0], row[1])
 
 
 async def _skip_reason(
@@ -319,11 +329,13 @@ async def run_auto_outreach_after_harvest(
             return {"enabled": False, **counts}
 
         floor = minimum_floor(company_sizes or [])
-        # A job someone claimed ("Assign to me") is theirs to work — never email its
-        # contact automatically. Dropped before dedup so another, unclaimed posting
-        # of the same contact can still carry the email. (_skip_reason re-checks the
-        # DB right before each send for a claim made after these rows were read.)
-        unassigned = [j for j in (job_rows or []) if not getattr(j, "assigned_to_email", None)]
+        # A job someone claimed manually ("Assign to me") is theirs to work — never
+        # email its contact automatically. Auto-assigned jobs (round-robin Business
+        # Lead) still get the initial email. Dropped before dedup so another, unclaimed
+        # posting of the same contact can still carry the email. (_skip_reason re-checks
+        # the DB right before each send for a claim made after these rows were read.)
+        unassigned = [j for j in (job_rows or []) if not _manually_claimed(
+            getattr(j, "assigned_to_email", None), getattr(j, "assignment_source", ""))]
         counts["skipped_assigned"] = len(job_rows or []) - len(unassigned)
         if counts["skipped_assigned"]:
             logger.info("auto_outreach_skipped_assigned", run_id=run_id,

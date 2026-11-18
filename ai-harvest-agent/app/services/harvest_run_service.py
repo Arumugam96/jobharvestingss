@@ -208,6 +208,122 @@ def poc_name_expr():
     )
 
 
+def _job_filter_conditions(
+    *,
+    keyword:       str | None = None,
+    company:       str | None = None,
+    company_exact: str | None = None,
+    job_title:     str | None = None,
+    poc:           str | None = None,
+    contact:       list[str] | None = None,
+    size_tier:     str | None = None,
+    country:       str | None = None,
+    company_country: str | None = None,
+    source:        str | None = None,
+    hiring_entity: str | None = None,
+    verification_status: str | None = None,
+    work_mode:     str | None = None,
+    job_type:      str | None = None,
+    date_from:     str | None = None,
+    date_to:       str | None = None,
+    run_id:        str | None = None,
+    assigned_to_email: str | None = None,
+) -> tuple[list[Any], bool]:
+    """WHERE predicates for GET /jobs' filters over ScrapedJobORM — shared by
+    list_scraped_jobs (the page) and job_facets (its stats), so the stats always
+    cover exactly the rows the list returns. Returns ``(conditions, needs_recruiter)``;
+    when ``needs_recruiter`` the statement must outerjoin RecruiterORM on
+    ``recruiter_id`` (1:1 on the recruiter PK — never duplicates job rows).
+    Tenant scoping is NOT included — callers apply_tenant() themselves."""
+    conds: list[Any] = []
+    if assigned_to_email:
+        conds.append(ScrapedJobORM.assigned_to_email == assigned_to_email)
+    token_exprs = _contact_token_exprs()
+    selected = [token_exprs[t] for t in (contact or []) if t in token_exprs]
+    needs_recruiter = bool(keyword or selected)
+    if keyword:
+        # Matches everything the UI's free-text search used to cover
+        # client-side (title/company/source/POC/email/phone, incl. the
+        # recruiter's enriched email/phone and the Company-tagged contact),
+        # plus the description that this endpoint always searched.
+        like = f"%{keyword}%"
+        conds.append(
+            or_(
+                ScrapedJobORM.job_title.ilike(like),
+                ScrapedJobORM.job_description.ilike(like),
+                ScrapedJobORM.company.ilike(like),
+                ScrapedJobORM.job_poster_name.ilike(like),
+                ScrapedJobORM.source.ilike(like),
+                ScrapedJobORM.email_id.ilike(like),
+                ScrapedJobORM.contact_number.ilike(like),
+                RecruiterORM.official_email_id.ilike(like),
+                RecruiterORM.contact_number.ilike(like),
+                ScrapedJobORM.company_contact_name.ilike(like),
+                ScrapedJobORM.company_contact_email.ilike(like),
+                ScrapedJobORM.company_contact_phone.ilike(like),
+            )
+        )
+    if company:
+        conds.append(ScrapedJobORM.company.ilike(f"%{company}%"))
+    if company_exact:
+        conds.append(ScrapedJobORM.company == company_exact)
+    if job_title:
+        conds.append(ScrapedJobORM.job_title == job_title)
+    if poc:
+        # The POC the table shows: poster name, else the company contact's.
+        conds.append(poc_name_expr() == poc.strip())
+    if selected:
+        conds.append(or_(*selected))  # needs RecruiterORM joined
+    if size_tier:
+        # company_size stores the canonical "<band> employees" string (or "");
+        # the replace() folds legacy en-dash rows onto BAND_TO_TIER's hyphen keys.
+        norm = func.replace(func.coalesce(ScrapedJobORM.company_size, ""), "–", "-")
+        known = [f"{band} employees" for band in BAND_TO_TIER]
+        if size_tier == "unknown":
+            conds.append(norm.notin_(known))
+        elif size_tier in TIER_TO_BANDS:
+            conds.append(
+                norm.in_([f"{band} employees" for band in TIER_TO_BANDS[size_tier]])
+            )
+    if country:
+        conds.append(func.lower(ScrapedJobORM.country) == country.lower())
+    if company_country:
+        conds.append(func.lower(ScrapedJobORM.company_country) == company_country.lower())
+    if source:
+        conds.append(func.lower(ScrapedJobORM.source) == source.lower())
+    else:
+        conds.append(_not_demand_job())  # Demand jobs only when asked for by name
+    if hiring_entity:
+        conds.append(func.lower(ScrapedJobORM.hiring_entity) == hiring_entity.lower())
+    if verification_status:
+        conds.append(
+            func.lower(ScrapedJobORM.verification_status) == verification_status.lower()
+        )
+    if work_mode:
+        conds.append(func.lower(ScrapedJobORM.work_mode) == work_mode.lower())
+    if job_type in JOB_TYPE_FILTER_VALUES:
+        # Full-Time / Contractual / not specified, from the source's own label or
+        # the run's enforced search filter — see app/core/job_type_class.py.
+        want = "" if job_type == "not_specified" else job_type
+        conds.append(job_type_class_expr(ScrapedJobORM, HarvestRunORM) == want)
+    if date_from:
+        conds.append(func.substr(ScrapedJobORM.posted_date, 1, 10) >= date_from[:10])
+    if date_to:
+        conds.append(func.substr(ScrapedJobORM.posted_date, 1, 10) <= date_to[:10])
+    if run_id:
+        # ScrapedJobORM.run_id is the HarvestRunORM PK (uuid); the caller
+        # passes the human-facing display run_id (e.g. "20260817_110703"),
+        # so resolve it through a subquery. A display run_id can map to more
+        # than one HarvestRunORM row (the orchestrator run plus any
+        # single-source runs sharing the timestamp), hence IN (...).
+        conds.append(
+            ScrapedJobORM.run_id.in_(
+                select(HarvestRunORM.id).where(HarvestRunORM.run_id == run_id)
+            )
+        )
+    return conds, needs_recruiter
+
+
 # str.strip() covers \s and NBSP but not zero-width space / BOM (see _TRIM_CHARS).
 _EDGE_BLANK_RE = re.compile(r"^[\s\u200b\ufeff]+|[\s\u200b\ufeff]+$")
 
@@ -388,13 +504,28 @@ class HarvestRunService:
             update(HarvestRunORM).where(HarvestRunORM.id == run_pk).values(**fields)
         )
 
-    async def bulk_insert_scraped_jobs(self, run_pk: str, jobs: list[dict[str, Any]]) -> None:
+    async def bulk_insert_scraped_jobs(
+        self,
+        run_pk: str,
+        jobs: list[dict[str, Any]],
+        *,
+        auto_assign: bool = True,
+        assign_to_email: str | None = None,
+    ) -> None:
         """jobs is a list of plain dicts keyed by ScrapedJobORM's column names
         (e.g. UnifiedJob.to_dict()'s output, or a per-source mapper's dict for
         the standalone single-source routes — see linkedin_routes.py's
         _to_scraped_job_dict() for the field-name translation each source
         needs, since LinkedIn/Naukri/Dice's own scraped dataclasses don't
-        share field names for recruiter/poster info)."""
+        share field names for recruiter/poster info).
+
+        With ``auto_assign`` (default) the inserted rows that have a contact are
+        then dealt round-robin to the tenant's Business Leads
+        (app/services/auto_assignment_service.py — best-effort, never fails the
+        insert). replace_run_jobs passes False and assigns after its carry-over.
+        Demand Search inserts pass ``assign_to_email`` (the searcher): their
+        Demand rows go to that user if they are a Business Lead of the tenant,
+        never into the rotation."""
         if not jobs:
             return
         tid = get_current_tenant_id()  # own every inserted job to the current tenant
@@ -558,6 +689,17 @@ class HarvestRunService:
                     setattr(r, f, slot[f])
         self._db.add_all(rows)
         await self._db.flush()
+        if auto_assign:
+            # Imported lazily: auto_assignment_service imports this module.
+            from app.services.auto_assignment_service import (
+                assign_jobs_to_searcher,
+                auto_assign_jobs,
+            )
+
+            ids = [r.id for r in rows]
+            if assign_to_email is not None:
+                await assign_jobs_to_searcher(self._db, job_ids=ids, searcher_email=assign_to_email)
+            await auto_assign_jobs(self._db, job_ids=ids)  # Demand rows are excluded here
 
     async def delete_jobs_for_run(self, run_pk: str) -> None:
         """Delete all scraped-job rows for a run. Used by the end-of-run
@@ -577,17 +719,25 @@ class HarvestRunService:
         A job claimed ("Assign to me") while the run was still scraping keeps its
         claim: the assignment columns are carried over to the reinserted row with
         the same job_url, and per-job references (phone call logs) are relinked
-        from the old row id to the new one — all in this same transaction."""
+        from the old row id to the new one — all in this same transaction.
+
+        Round-robin auto-assignment runs only AFTER the carry-over, on the rows
+        still unassigned, so earlier claims (manual or auto) win and no rotation
+        slot is spent on a job that already had an owner."""
         old_rows = await self._snapshot_run_job_rows(run_pk)
         await self.delete_jobs_for_run(run_pk)
-        await self.bulk_insert_scraped_jobs(run_pk, jobs)  # flushes
+        await self.bulk_insert_scraped_jobs(run_pk, jobs, auto_assign=False)  # flushes
         if old_rows:
             await self._carry_over_job_state(run_pk, old_rows)
+        if jobs:
+            from app.services.auto_assignment_service import auto_assign_jobs
+
+            await auto_assign_jobs(self._db, run_pk=run_pk)
         return True
 
     async def _snapshot_run_job_rows(self, run_pk: str) -> dict[str, dict[str, Any]]:
         """{normalized job_url: {"ids": [old row ids], "assignment": (email, name,
-        assigned_at, note, reminder_done_at) | None}} for a run's current rows. Scoped by run_id only,
+        assigned_at, note, reminder_done_at, source) | None}} for a run's current rows. Scoped by run_id only,
         exactly like delete_jobs_for_run. Blank job_urls can't be matched and are
         skipped. For a duplicated job_url every old id is kept (all relink to the
         one new row) and the first assigned row's claim wins."""
@@ -596,19 +746,20 @@ class HarvestRunService:
                 ScrapedJobORM.id, ScrapedJobORM.job_url, ScrapedJobORM.assigned_to_email,
                 ScrapedJobORM.assigned_to_name, ScrapedJobORM.assigned_at,
                 ScrapedJobORM.assignment_note, ScrapedJobORM.assignment_reminder_done_at,
+                ScrapedJobORM.assignment_source,
             )
             .where(ScrapedJobORM.run_id == run_pk)
             .order_by(ScrapedJobORM.assigned_at, ScrapedJobORM.id)
         )
         snapshot: dict[str, dict[str, Any]] = {}
-        for job_id, job_url, email, name, at, note, reminder_done in result.all():
+        for job_id, job_url, email, name, at, note, reminder_done, source in result.all():
             key = normalize_job_url(job_url)
             if not key:
                 continue
             slot = snapshot.setdefault(key, {"ids": [], "assignment": None})
             slot["ids"].append(job_id)
             if email and slot["assignment"] is None:
-                slot["assignment"] = (email, name or "", at, note or "", reminder_done)
+                slot["assignment"] = (email, name or "", at, note or "", reminder_done, source or "")
         return snapshot
 
     async def _carry_over_job_state(self, run_pk: str, old_rows: dict[str, dict[str, Any]]) -> None:
@@ -630,7 +781,7 @@ class HarvestRunService:
             slot = old_rows[key]
             mapping.update({old_id: new_id for old_id in slot["ids"] if old_id != new_id})
             if slot["assignment"] is not None:
-                email, name, at, note, reminder_done = slot["assignment"]
+                email, name, at, note, reminder_done, source = slot["assignment"]
                 await self._db.execute(
                     update(ScrapedJobORM)
                     .where(ScrapedJobORM.id == new_id)
@@ -638,6 +789,7 @@ class HarvestRunService:
                         assigned_to_email=email, assigned_to_name=name,
                         assigned_at=at, assignment_note=note,
                         assignment_reminder_done_at=reminder_done,
+                        assignment_source=source,
                     )
                 )
         if mapping:
@@ -940,97 +1092,23 @@ class HarvestRunService:
         JSON path's _date_gte/_date_lte, and only works if callers persist
         posted_date as a YYYY-MM-DD-prefixed string (true for LinkedIn's
         _format_posted(); not independently verified for Naukri/Dice)."""
+        conditions, needs_recruiter = _job_filter_conditions(
+            keyword=keyword, company=company, company_exact=company_exact,
+            job_title=job_title, poc=poc, contact=contact, size_tier=size_tier,
+            country=country, company_country=company_country, source=source,
+            hiring_entity=hiring_entity, verification_status=verification_status,
+            work_mode=work_mode, job_type=job_type, date_from=date_from,
+            date_to=date_to, run_id=run_id, assigned_to_email=assigned_to_email,
+        )
         stmt = select(ScrapedJobORM)
         stmt = apply_tenant(stmt, ScrapedJobORM.tenant_id)  # scope to the caller's tenant
-        if assigned_to_email:
-            stmt = stmt.where(ScrapedJobORM.assigned_to_email == assigned_to_email)
-        token_exprs = _contact_token_exprs()
-        selected = [token_exprs[t] for t in (contact or []) if t in token_exprs]
-        if keyword or selected:
+        if needs_recruiter:
             # Both the keyword search and the contact predicates read the linked
             # recruiter's email/phone. Joined once; 1:1 on the recruiter PK —
             # never duplicates job rows.
             stmt = stmt.outerjoin(RecruiterORM, ScrapedJobORM.recruiter_id == RecruiterORM.id)
-        if keyword:
-            # Matches everything the UI's free-text search used to cover
-            # client-side (title/company/source/POC/email/phone, incl. the
-            # recruiter's enriched email/phone and the Company-tagged contact),
-            # plus the description that this endpoint always searched.
-            like = f"%{keyword}%"
-            stmt = stmt.where(
-                or_(
-                    ScrapedJobORM.job_title.ilike(like),
-                    ScrapedJobORM.job_description.ilike(like),
-                    ScrapedJobORM.company.ilike(like),
-                    ScrapedJobORM.job_poster_name.ilike(like),
-                    ScrapedJobORM.source.ilike(like),
-                    ScrapedJobORM.email_id.ilike(like),
-                    ScrapedJobORM.contact_number.ilike(like),
-                    RecruiterORM.official_email_id.ilike(like),
-                    RecruiterORM.contact_number.ilike(like),
-                    ScrapedJobORM.company_contact_name.ilike(like),
-                    ScrapedJobORM.company_contact_email.ilike(like),
-                    ScrapedJobORM.company_contact_phone.ilike(like),
-                )
-            )
-        if company:
-            stmt = stmt.where(ScrapedJobORM.company.ilike(f"%{company}%"))
-        if company_exact:
-            stmt = stmt.where(ScrapedJobORM.company == company_exact)
-        if job_title:
-            stmt = stmt.where(ScrapedJobORM.job_title == job_title)
-        if poc:
-            # The POC the table shows: poster name, else the company contact's.
-            stmt = stmt.where(poc_name_expr() == poc.strip())
-        if selected:
-            stmt = stmt.where(or_(*selected))  # RecruiterORM joined above
-        if size_tier:
-            # company_size stores the canonical "<band> employees" string (or "");
-            # the replace() folds legacy en-dash rows onto BAND_TO_TIER's hyphen keys.
-            norm = func.replace(func.coalesce(ScrapedJobORM.company_size, ""), "–", "-")
-            known = [f"{band} employees" for band in BAND_TO_TIER]
-            if size_tier == "unknown":
-                stmt = stmt.where(norm.notin_(known))
-            elif size_tier in TIER_TO_BANDS:
-                stmt = stmt.where(
-                    norm.in_([f"{band} employees" for band in TIER_TO_BANDS[size_tier]])
-                )
-        if country:
-            stmt = stmt.where(func.lower(ScrapedJobORM.country) == country.lower())
-        if company_country:
-            stmt = stmt.where(func.lower(ScrapedJobORM.company_country) == company_country.lower())
-        if source:
-            stmt = stmt.where(func.lower(ScrapedJobORM.source) == source.lower())
-        else:
-            stmt = stmt.where(_not_demand_job())  # Demand jobs only when asked for by name
-        if hiring_entity:
-            stmt = stmt.where(func.lower(ScrapedJobORM.hiring_entity) == hiring_entity.lower())
-        if verification_status:
-            stmt = stmt.where(
-                func.lower(ScrapedJobORM.verification_status) == verification_status.lower()
-            )
-        if work_mode:
-            stmt = stmt.where(func.lower(ScrapedJobORM.work_mode) == work_mode.lower())
-        if job_type in JOB_TYPE_FILTER_VALUES:
-            # Full-Time / Contractual / not specified, from the source's own label or
-            # the run's enforced search filter — see app/core/job_type_class.py.
-            want = "" if job_type == "not_specified" else job_type
-            stmt = stmt.where(job_type_class_expr(ScrapedJobORM, HarvestRunORM) == want)
-        if date_from:
-            stmt = stmt.where(func.substr(ScrapedJobORM.posted_date, 1, 10) >= date_from[:10])
-        if date_to:
-            stmt = stmt.where(func.substr(ScrapedJobORM.posted_date, 1, 10) <= date_to[:10])
-        if run_id:
-            # ScrapedJobORM.run_id is the HarvestRunORM PK (uuid); the caller
-            # passes the human-facing display run_id (e.g. "20260817_110703"),
-            # so resolve it through a subquery. A display run_id can map to more
-            # than one HarvestRunORM row (the orchestrator run plus any
-            # single-source runs sharing the timestamp), hence IN (...).
-            stmt = stmt.where(
-                ScrapedJobORM.run_id.in_(
-                    select(HarvestRunORM.id).where(HarvestRunORM.run_id == run_id)
-                )
-            )
+        if conditions:
+            stmt = stmt.where(*conditions)
 
         total = (
             await self._db.execute(select(func.count()).select_from(stmt.subquery()))
@@ -1058,8 +1136,13 @@ class HarvestRunService:
             jobs.append(job)
         return jobs, total
 
-    async def job_facets(self, demand: bool = False) -> dict[str, Any]:
-        """Distinct dropdown values + whole-dataset stats for the jobs page.
+    async def job_facets(self, demand: bool = False, **filters: Any) -> dict[str, Any]:
+        """Distinct dropdown values + filter-aware stats for the jobs page.
+
+        ``filters`` are list_scraped_jobs' filter kwargs (keyword, company, ...,
+        assigned_to_email; NOT sort/page). ``stats`` cover exactly the rows GET
+        /jobs returns for them (stats.total == its total); with none they cover
+        the whole dataset, as before. The dropdown distincts stay global.
 
         Stats: ``with_*`` = jobs that have the channel (matches the contact
         filter); ``unique_*`` = distinct contacts (app.core.contact_keys);
@@ -1072,6 +1155,12 @@ class HarvestRunService:
         to the active filters. Demand Search jobs are left out (as in GET /jobs),
         unless ``demand`` — then the facets cover only Demand jobs."""
         scope = (func.lower(ScrapedJobORM.source) == DEMAND_SOURCE.lower()) if demand else _not_demand_job()
+        if demand and not filters.get("source"):
+            filters["source"] = DEMAND_SOURCE
+        # The stats' WHERE: GET /jobs' own filter predicates (they carry the
+        # Demand/non-Demand scope via `source`). Both stats statements below
+        # always outerjoin RecruiterORM, so needs_recruiter is satisfied.
+        stat_conds, _needs_recruiter = _job_filter_conditions(**filters)
 
         async def _distinct(col) -> list[str]:
             """Sorted non-empty distinct values of ``col`` within scope, tenant-filtered."""
@@ -1123,7 +1212,7 @@ class HarvestRunService:
             )
             .select_from(ScrapedJobORM)
             .outerjoin(RecruiterORM, ScrapedJobORM.recruiter_id == RecruiterORM.id)
-            .where(scope)
+            .where(*stat_conds)
         )
         stats_stmt = apply_tenant(stats_stmt, ScrapedJobORM.tenant_id)  # scope stats to the tenant
         row = (await self._db.execute(stats_stmt)).one()
@@ -1149,7 +1238,7 @@ class HarvestRunService:
             )
             .select_from(ScrapedJobORM)
             .outerjoin(RecruiterORM, ScrapedJobORM.recruiter_id == RecruiterORM.id)
-            .where(scope),
+            .where(*stat_conds),
             ScrapedJobORM.tenant_id,
         ))).all()
         stats.update(unique_contact_counts(
