@@ -176,6 +176,24 @@ class Settings(BaseSettings):
     linkedin_feed_empty_dom_stop_rounds: int = 2
     linkedin_feed_llm_max_calls:         int = 300
     linkedin_feed_min_confidence:        float = 0.6    # condifence level of llm to classify
+    # Post search for vendor-opportunity phrases, run after the Home Feed scroll.
+    # The Home Feed is ranked and different every load, so vendor-requirement posts
+    # are rare there; LinkedIn's post search for these phrases finds them directly.
+    # Queries are "|"-separated.
+    linkedin_feed_search_enabled:            bool = True
+    linkedin_feed_search_queries:            str = (
+        "vendor empanelment|vendor registration|looking for vendors|"
+        "C2C requirement|staffing partners|recruitment agencies empanelment|"
+        "contract staffing requirement|implementation partner IT"
+    )
+    linkedin_feed_search_date_posted:        str = "past-week"   # past-24h | past-week | past-month | "" (any)
+    linkedin_feed_search_max_scrolls:        int = 6
+    linkedin_feed_search_max_posts_per_query: int = 40
+
+    @property
+    def linkedin_feed_search_query_list(self) -> list[str]:
+        """The configured post-search phrases, split on "|" and stripped."""
+        return [q.strip() for q in (self.linkedin_feed_search_queries or "").split("|") if q.strip()]
 
     # ---------   Naukri Configurations     -------------------
     naukri_email:    str = ""

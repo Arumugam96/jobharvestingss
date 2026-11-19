@@ -577,13 +577,16 @@ export function getDiceResult(runId) {
 
 // ── LinkedIn Home Feed lead harvest (async — 202, then poll GET /harvest-status) ─
 
-/** POST /run-linkedin-feed-agent — start a background LinkedIn Home-Feed IT-hiring
- * lead harvest; returns {job_id, run_id, status:"running"}. Poll getHarvestStatus. */
-export function runLinkedinFeedAgent() {
-  return request("/run-linkedin-feed-agent", { method: "POST" });
+/** POST /run-linkedin-feed-agent — start a background LinkedIn vendor-lead harvest
+ * (companies looking for staffing / recruitment vendors). `mode` = "both" (Home Feed +
+ * post search), "feed" or "search"; omitted → the backend default. Returns
+ * {job_id, run_id, mode, status:"running"}. Poll getHarvestStatus. */
+export function runLinkedinFeedAgent(mode) {
+  const qs = mode ? `?mode=${encodeURIComponent(mode)}` : "";
+  return request(`/run-linkedin-feed-agent${qs}`, { method: "POST" });
 }
 
-/** GET /linkedin-feed-results — list all saved Home-Feed lead runs. */
+/** GET /linkedin-feed-results — list all saved vendor-lead runs (each with `mode`). */
 export function getLinkedinFeedResults() {
   return request("/linkedin-feed-results");
 }

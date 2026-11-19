@@ -985,12 +985,16 @@ def _is_assigned():
     return _filled(ScrapedJobORM.assigned_to_email)
 
 
-async def count_assigned_jobs(db: AsyncSession, email: str | None = None) -> int:
+async def count_assigned_jobs(db: AsyncSession, email: str | None = None,
+                              since: datetime | None = None) -> int:
     """Jobs currently self-assigned in the tenant, whether or not anyone has called them
-    (only those assigned to `email` when given — a business lead's own count)."""
+    (only those assigned to `email` when given — one person's count; only those
+    assigned on or after `since` when given — the Phone logs Date filter)."""
     conds = [_is_assigned()]
     if email is not None:
         conds.append(func.lower(ScrapedJobORM.assigned_to_email) == email.lower())
+    if since is not None:
+        conds.append(ScrapedJobORM.assigned_at >= since)
     stmt = apply_tenant(
         select(func.count(ScrapedJobORM.id)).where(*conds), ScrapedJobORM.tenant_id,
     )
@@ -1295,9 +1299,10 @@ async def list_logs(
     Jobs since deleted still list (outer join) and count as unassigned. `summary`'s
     call counts apply every filter except `status` and `reminder`, so the
     answered / unanswered split stays visible.
-    `summary.assigned_jobs` (every job currently self-assigned, called or not),
-    `called_assigned_jobs` (those with a call matching the filters) and
-    `total_phones` (every phone entry held — count_phone_entries) describe the workspace.
+    `summary.assigned_jobs` (jobs currently self-assigned, called or not — assigned
+    within `since` and, with `owner_id`, to that user), `called_assigned_jobs` (those
+    with a call matching the filters) and `total_phones` (every phone entry held —
+    count_phone_entries, workspace-wide) fill the tiles.
 
     `owner_id` keeps only the calls owned by that user (assigned_to_user_id) — the
     admin's assignee filter, or the forced scope of a business lead. `own_email`
@@ -1318,10 +1323,20 @@ async def list_logs(
     by_status = dict((await db.execute(scoped(
         select(PhoneCallLogORM.call_status, func.count(PhoneCallLogORM.id))
     ).group_by(PhoneCallLogORM.call_status))).all())
-    called_assigned_jobs = (await db.execute(scoped(
-        select(func.count(func.distinct(PhoneCallLogORM.job_id))), is_assigned,
-    ))).scalar_one()
-    assigned_jobs = await count_assigned_jobs(db, own_email)
+    # The self-assigned card: an admin's follows the Assignee and Date filters like the
+    # call cards; a business lead's is all-time (it opens My Workspace, which lists every
+    # job assigned to them), and so is its "N called" line.
+    assigned_since = since if own_email is None else None
+    called_conds = conds if own_email is None else _log_filter_conds(
+        owner_id=owner_id, assignment=assignment, q=q)
+    called_assigned_jobs = (await db.execute(apply_tenant(_log_joins(
+        select(func.count(func.distinct(PhoneCallLogORM.job_id)))).where(*called_conds, is_assigned),
+        PhoneCallLogORM.tenant_id))).scalar_one()
+    assignee_email = own_email
+    if assignee_email is None and owner_id is not None:
+        assignee_email = (await db.execute(
+            select(UserORM.email).where(UserORM.id == owner_id))).scalar_one_or_none() or ""
+    assigned_jobs = await count_assigned_jobs(db, assignee_email, assigned_since)
     total_phones = None if own_email is not None else await count_phone_entries(db)
     answered, unanswered = int(by_status.get("answered", 0)), int(by_status.get("unanswered", 0))
 

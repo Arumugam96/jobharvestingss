@@ -50,6 +50,7 @@ from app.models.harvest_run import (
     ReenrichmentTaskORM,
     ScrapedJobORM,
 )
+from app.models.phone_call_log import PhoneCallLogORM
 from app.models.recruiter import RecruiterORM
 from app.models.resdex import ResdexSearchORM
 from app.services.company_service import get_companies_by_keys, normalize_company_key
@@ -228,14 +229,20 @@ def _job_filter_conditions(
     date_to:       str | None = None,
     run_id:        str | None = None,
     assigned_to_email: str | None = None,
+    called:        str | None = None,
 ) -> tuple[list[Any], bool]:
     """WHERE predicates for GET /jobs' filters over ScrapedJobORM — shared by
     list_scraped_jobs (the page) and job_facets (its stats), so the stats always
     cover exactly the rows the list returns. Returns ``(conditions, needs_recruiter)``;
     when ``needs_recruiter`` the statement must outerjoin RecruiterORM on
     ``recruiter_id`` (1:1 on the recruiter PK — never duplicates job rows).
-    Tenant scoping is NOT included — callers apply_tenant() themselves."""
+    Tenant scoping is NOT included — callers apply_tenant() themselves.
+    ``called`` = "yes" / "no" keeps jobs with / without a logged call (job_called_expr)."""
     conds: list[Any] = []
+    if called == "yes":
+        conds.append(job_called_expr())
+    elif called == "no":
+        conds.append(not_(job_called_expr()))
     if assigned_to_email:
         conds.append(ScrapedJobORM.assigned_to_email == assigned_to_email)
     token_exprs = _contact_token_exprs()
@@ -322,6 +329,16 @@ def _job_filter_conditions(
             )
         )
     return conds, needs_recruiter
+
+
+def job_called_expr():
+    """SQL condition: the job has at least one logged (non-cleared) phone call — the
+    My Workspace "Called" / "Not called yet" cards and GET /jobs' ``called`` filter."""
+    return exists().where(
+        PhoneCallLogORM.job_id == ScrapedJobORM.id,
+        PhoneCallLogORM.tenant_id == ScrapedJobORM.tenant_id,
+        PhoneCallLogORM.cleared_at.is_(None),
+    )
 
 
 # str.strip() covers \s and NBSP but not zero-width space / BOM (see _TRIM_CHARS).
@@ -1075,6 +1092,7 @@ class HarvestRunService:
         date_to:       str | None = None,
         run_id:        str | None = None,
         assigned_to_email: str | None = None,
+        called:        str | None = None,
         sort_by:       str = "posted_date",
         sort_order:    str = "desc",
         page:          int = 1,
@@ -1099,6 +1117,7 @@ class HarvestRunService:
             hiring_entity=hiring_entity, verification_status=verification_status,
             work_mode=work_mode, job_type=job_type, date_from=date_from,
             date_to=date_to, run_id=run_id, assigned_to_email=assigned_to_email,
+            called=called,
         )
         stmt = select(ScrapedJobORM)
         stmt = apply_tenant(stmt, ScrapedJobORM.tenant_id)  # scope to the caller's tenant
@@ -1209,6 +1228,8 @@ class HarvestRunService:
                 .label("staffing"),
                 _count_if(func.lower(ScrapedJobORM.hiring_entity) == "ambiguous")
                 .label("ambiguous"),
+                # My Workspace call cards (same predicate as the `called` filter).
+                _count_if(job_called_expr()).label("called"),
             )
             .select_from(ScrapedJobORM)
             .outerjoin(RecruiterORM, ScrapedJobORM.recruiter_id == RecruiterORM.id)
@@ -1222,9 +1243,10 @@ class HarvestRunService:
                 "total", "companies", "pocs", "qualified", "flagged",
                 "with_email", "with_poster_email", "with_company_email",
                 "with_phone", "with_linkedin",
-                "verified", "direct", "gcc", "staffing", "ambiguous",
+                "verified", "direct", "gcc", "staffing", "ambiguous", "called",
             )
         }
+        stats["notcalled"] = stats["total"] - stats["called"]
         # with_* count JOBS that have a channel (they back the contact filter);
         # unique_* count distinct CONTACTS — a recruiter on 40 jobs is one phone.
         contact_rows = (await self._db.execute(apply_tenant(

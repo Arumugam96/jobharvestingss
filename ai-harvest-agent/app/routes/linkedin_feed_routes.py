@@ -1,7 +1,11 @@
 """
-LinkedIn Home Feed lead-harvest API route.
+LinkedIn vendor-opportunity lead-harvest API route (runs separately from the job harvest).
 
-  POST /run-linkedin-feed-agent   Start a Home-Feed IT-hiring lead harvest (async).
+  POST /run-linkedin-feed-agent?mode=both|feed|search
+      Start a vendor-lead harvest (async): companies looking for staffing /
+      recruitment vendors, read from the Home Feed ("feed"), LinkedIn post search
+      for the configured vendor phrases ("search"), or both (default when
+      LINKEDIN_FEED_SEARCH_ENABLED=true).
 
 Status is polled via the shared GET /harvest-status/{job_id} (the run carries a
 job_id, so the existing endpoint finds it) — no dedicated status route needed.
@@ -20,10 +24,10 @@ from typing import Any
 from uuid import uuid4
 
 import structlog
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.responses import JSONResponse
 
-from app.agents.linkedin_feed_agent import FeedAuthError, LinkedInFeedAgent
+from app.agents.linkedin_feed_agent import MODES, FeedAuthError, LinkedInFeedAgent
 from app.config import get_settings
 from app.core.exceptions import DailyJobLimitExceededError, JobAlreadyRunningError, LLMUnavailableError
 from app.core.proactor import needs_proactor, run_in_proactor
@@ -43,9 +47,10 @@ logger = structlog.get_logger(__name__)
 router = APIRouter(tags=["LinkedIn Feed Harvest"])
 
 _SOURCE = "LinkedIn Feed"
+_MODE_LABELS = {"both": "Feed + Search", "feed": "Home Feed", "search": "Post Search"}
 _SETUP_HINT = (
     "LinkedIn session is not authenticated. Run POST /linkedin-setup-session, log in "
-    "at linkedin.com, close the browser, then re-run the Home-Feed harvest."
+    "at linkedin.com, close the browser, then re-run the LinkedIn vendor-lead harvest."
 )
 
 
@@ -58,30 +63,32 @@ def _make_run_id() -> str:
 # Background task
 # ══════════════════════════════════════════════════════════════════════════════
 
-async def _run_feed_background(job_id: str, run_id: str, run_pk: str | None) -> None:
+async def _run_feed_background(job_id: str, run_id: str, run_pk: str | None, mode: str) -> None:
     """Background entry point — always releases the single-flight guard."""
     try:
-        await _run_feed_background_impl(job_id, run_id, run_pk)
+        await _run_feed_background_impl(job_id, run_id, run_pk, mode)
     finally:
         run_guard.end()
 
 
-async def _run_feed_background_impl(job_id: str, run_id: str, run_pk: str | None) -> None:
-    """Harvest the LinkedIn Home Feed and record progress/results in JobTracker and the DB.
+async def _run_feed_background_impl(
+    job_id: str, run_id: str, run_pk: str | None, mode: str,
+) -> None:
+    """Harvest LinkedIn vendor leads (Home Feed and/or post search, per `mode`) and record progress/results in JobTracker and the DB.
 
     Leads are inserted batch by batch as they are found; at the end the run's job set is replaced
     with the final list and the LLM call log stored. Ends the run as "success", "no_results" or
     "stopped" (stop requested), "action_required" when the LinkedIn session is not logged in, or
     "failed" (LLM unavailable / any other error). Never raises; DB writes are best-effort.
     """
-    log = logger.bind(job_id=job_id, run_id=run_id, source=_SOURCE)
+    log = logger.bind(job_id=job_id, run_id=run_id, source=_SOURCE, mode=mode)
     log.info("linkedin_feed_background_start")
 
     config   = ConfigService().load()
     headless = config.browser.resolved_headless
     slow_mo  = config.browser.slow_mo_ms
 
-    JobTracker.update(job_id, progress=10, message="Opening LinkedIn Home Feed…")
+    JobTracker.update(job_id, progress=10, message=f"Opening LinkedIn ({_MODE_LABELS.get(mode, mode)})…")
 
     agent = LinkedInFeedAgent(get_settings())
 
@@ -122,6 +129,7 @@ async def _run_feed_background_impl(job_id: str, run_id: str, run_pk: str | None
         """Run the feed agent; returns (leads, token usage, LLM call log)."""
         leads = await agent.harvest(
             headless=headless, slow_mo=slow_mo, on_status=_on_status, on_batch=_on_batch,
+            mode=mode,
         )
         return leads, agent.get_token_usage(), agent.get_llm_call_log()
 
@@ -182,7 +190,7 @@ async def _run_feed_background_impl(job_id: str, run_id: str, run_pk: str | None
     status_str = "stopped" if stopped else ("success" if leads else "no_results")
     final_message = (
         f"Harvest stopped — {len(leads)} leads saved" if stopped
-        else f"Harvest complete — {len(leads)} IT hiring leads"
+        else f"Harvest complete — {len(leads)} vendor leads"
     )
     log.info(
         "linkedin_feed_completed",
@@ -206,16 +214,34 @@ async def _run_feed_background_impl(job_id: str, run_id: str, run_pk: str | None
 # ══════════════════════════════════════════════════════════════════════════════
 
 @router.post("/run-linkedin-feed-agent", status_code=status.HTTP_202_ACCEPTED)
-async def run_linkedin_feed_agent() -> Any:
+async def run_linkedin_feed_agent(
+    mode: str | None = Query(
+        None,
+        description='Where to read posts: "feed" (Home Feed), "search" (post search for the '
+                    'configured vendor phrases) or "both". Default: "both" when '
+                    'LINKEDIN_FEED_SEARCH_ENABLED=true, else "feed".',
+    ),
+) -> Any:
     """
-    Start a LinkedIn Home-Feed IT-hiring lead harvest in the background.
+    Start a LinkedIn vendor-opportunity lead harvest in the background.
 
-    Reads the whole authenticated Home Feed (NOT the Jobs board), classifies posts
-    with the LLM, extracts job + recruiter info from genuine IT hiring posts, and
-    persists them to scraped_jobs with source="LinkedIn Feed".
+    Finds posts where a company is looking for staffing / recruitment vendors
+    (vendor registration / empanelment, C2C / C2H / contract requirements open to
+    vendors) in the authenticated Home Feed and/or LinkedIn post search, classifies
+    them with the LLM, extracts the opportunity + poster info, and persists them to
+    scraped_jobs with source="LinkedIn Feed". Runs separately from the job harvest
+    but shares its LinkedIn session, so the two never run at once.
 
     Returns 202 with a `job_id`; poll **GET /harvest-status/{job_id}** for progress.
     """
+    settings = get_settings()
+    if mode is None:
+        mode = "both" if settings.linkedin_feed_search_enabled else "feed"
+    if mode not in MODES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"mode must be one of {list(MODES)}",
+        )
     run_id = _make_run_id()
 
     # Global daily cap — reject before claiming the single-flight slot.
@@ -244,11 +270,16 @@ async def run_linkedin_feed_agent() -> Any:
             job_id=job_id,
             source=_SOURCE,
             sources=[_SOURCE],
+            filters_snapshot={
+                "mode": mode,
+                "search_queries": settings.linkedin_feed_search_query_list if mode != "feed" else [],
+                "search_date_posted": settings.linkedin_feed_search_date_posted if mode != "feed" else "",
+            },
             started_at=datetime.now(timezone.utc),
         ))
-        logger.info("linkedin_feed_queued", job_id=job_id, run_id=run_id)
+        logger.info("linkedin_feed_queued", job_id=job_id, run_id=run_id, mode=mode)
         asyncio.create_task(
-            _run_feed_background(job_id, run_id, run_pk),
+            _run_feed_background(job_id, run_id, run_pk, mode),
             name=f"linkedin-feed-{job_id}",
         )
     except Exception:
@@ -262,8 +293,10 @@ async def run_linkedin_feed_agent() -> Any:
             "job_id":  job_id,
             "run_id":  run_id,
             "source":  _SOURCE,
+            "mode":    mode,
             "status":  "running",
-            "message": "LinkedIn Home-Feed harvest started — poll GET /harvest-status/{job_id}",
+            "message": f"LinkedIn vendor-lead harvest started ({_MODE_LABELS[mode]}) — "
+                       "poll GET /harvest-status/{job_id}",
         },
     )
 
@@ -274,16 +307,24 @@ async def run_linkedin_feed_agent() -> Any:
 
 @router.get("/linkedin-feed-results", status_code=status.HTTP_200_OK)
 async def list_linkedin_feed_results() -> Any:
-    """List all saved LinkedIn Home-Feed lead runs, newest first. Reads the shared
+    """List all saved LinkedIn vendor-lead runs, newest first. Reads the shared
     harvest_runs table filtered to source="LinkedIn Feed" (same shape the other
-    per-source results endpoints return)."""
+    per-source results endpoints return, plus `mode` and `keyword` = the run's mode
+    label so the Source Runs table shows how each run was made)."""
     runs = await db_read(lambda db: HarvestRunService(db).list_runs(source=_SOURCE)) or []
-    return {"total_runs": len(runs), "results": [run_to_result_summary(r) for r in runs]}
+    results = []
+    for r in runs:
+        row = run_to_result_summary(r)
+        mode = (r.filters_snapshot or {}).get("mode") or "feed"  # pre-mode runs were feed-only
+        row["mode"] = mode
+        row["keyword"] = _MODE_LABELS.get(mode, mode)
+        results.append(row)
+    return {"total_runs": len(results), "results": results}
 
 
 @router.get("/linkedin-feed-results/{run_id}", status_code=status.HTTP_200_OK)
 async def get_linkedin_feed_result(run_id: str) -> Any:
-    """Return one Home-Feed run's extracted IT-hiring leads (from scraped_jobs)."""
+    """Return one run's extracted vendor leads (from scraped_jobs)."""
     run = await db_read(lambda db: HarvestRunService(db).get_by_run_id(run_id, source=_SOURCE))
     if run is None:
         raise HTTPException(
@@ -295,6 +336,7 @@ async def get_linkedin_feed_result(run_id: str) -> Any:
         "executed_at": run.started_at.isoformat() if run.started_at else "",
         "status":      run.status,
         "source":      _SOURCE,
+        "mode":        (run.filters_snapshot or {}).get("mode") or "feed",
         "total_found": run.combined_count,
         "jobs":        [scraped_job_view(j) for j in run.jobs],
         "token_usage": run.token_usage or {},

@@ -121,16 +121,18 @@ Frontend (React / nginx)
 
 **End-to-end (one line):** Trigger → LinkedInAgent → Playwright (li_at session) → LinkedIn jobs search → paginate/scroll/extract → per-job detail → LLM extract → recruiter enrich (LLM+Apollo) → normalize/dedup → HarvestRunService → Postgres.
 
-## 8. Future Extension — LinkedIn Home Feed
+## 8. LinkedIn Vendor-Lead Agent (Home Feed + post search)
 
-The WIP Feed workflow **plugs into the existing architecture, reusing it heavily** rather than replacing it:
+Finds companies looking for **staffing / recruitment vendors** (SightSpectrum's leads): vendor registration / empanelment and C2C / C2H / contract requirements open to vendors. Runs **separately** from the job harvest (own endpoint + run row) but shares the same LinkedIn session, so `run_guard` single-flight still serialises the two.
 
-- **New agent:** `app/agents/linkedin_feed_agent.py` (`LinkedInFeedAgent`) — scrolls `/feed/`, then a 2-stage LLM pipeline: `_is_candidate` (deterministic IT+hiring pre-filter) → `_classify` (`feed_classify`) → `_extract` (`feed_extract`) → `_score` → `lead_confidence`. Imports helpers from `linkedin_agent` — **no shared base class**.
-- **New route:** `app/routes/linkedin_feed_routes.py` — `POST /run-linkedin-feed-agent` (async 202), reusing the shared `GET /harvest-status/{job_id}` and `run_guard` single-flight (serialized against Jobs on the same Chrome profile).
-- **Shared, unchanged:** same `SessionManager("linkedin")` / `li_at` auth, same `LLMService.extract_json`, same `HarvestRunService` + tables. Feed leads reuse `scraped_jobs` with `source="LinkedIn Feed"` + `lead_confidence`; **no new table**.
-- **Frontend:** wired as an async `"feed"` source in `HarvestAgent.jsx`; `stallWatch.js` adds a non-fatal "no progress / LLM may be slow" watchdog during polling.
-
-**Plug points for new feed work:** new agent under `app/agents/`, new route registered in `main.py`, `source` tag + optional column on `scraped_jobs`, and a new `LlmCallType` constant — all reusing the existing browser/session, LLM service, persistence service, and status/polling infrastructure.
+- **Agent:** `app/agents/linkedin_feed_agent.py` (`LinkedInFeedAgent.harvest(mode=…)`).
+  - `mode`: `feed` (scroll `/feed/`), `search` (LinkedIn post search for `LINKEDIN_FEED_SEARCH_QUERIES`, newest first, `LINKEDIN_FEED_SEARCH_DATE_POSTED` window) or `both` (default when `LINKEDIN_FEED_SEARCH_ENABLED=true`). Posts are de-duplicated across all sources by activity URN.
+  - Page reading: posts found by the "Feed post" accessibility heading → URN containers → large list items; "…more" is clicked first; author from the first profile/company link (skipping "X likes this"); outbound links (`/redir/` unwrapped) and promoted flag captured; page-text split fallback when nothing matches.
+  - Pipeline: `_is_candidate` (vendor phrases, or weak phrase + IT term) → `_classify` (`feed_classify`; keeper categories `vendor_registration` / `vendor_requirement`; direct hiring and staffing-firm bench posts are dropped) → `_extract` (`feed_extract`) → `_finalize` (contacts + registration link grounded verbatim) → `_score`.
+  - LLM failures: one retry per call; the run stops only after 3 consecutive failures. `data/results/lead_intelligence/feed_diag.json` records every post, where it was found and the stage it stopped at.
+- **Route:** `POST /run-linkedin-feed-agent?mode=both|feed|search` (async 202; `filters_snapshot.mode` saved on the run), `GET /linkedin-feed-results[/{run_id}]` (rows carry `mode`). Status via the shared `GET /harvest-status/{job_id}`.
+- **Storage:** `scraped_jobs` with `source="LinkedIn Feed"`: `job_title` = roles (or "Vendor empanelment / registration" / "Contract staffing requirement"), `employment_type` = engagement model, `job_type` = opportunity type, `hiring_entity` = Direct Client / Staffing Firm / Ambiguous, `job_description` = summary + engagement details + original post, `job_url` = post permalink.
+- **Frontend:** Source Runs → "LinkedIn Feed" tab with a mode selector (Feed + Search / Home Feed only / Post Search only) and vendor columns in the run viewer.
 
 ---
 

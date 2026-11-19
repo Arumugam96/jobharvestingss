@@ -363,6 +363,7 @@ async def list_jobs(
     date_from:     str = Query("",                        description="Filter jobs posted on or after this date (YYYY-MM-DD)"),
     date_to:       str = Query("",                        description="Filter jobs posted on or before this date (YYYY-MM-DD)"),
     assigned_to_me: bool = Query(False,                   description="When true, return only jobs assigned to the authenticated user"),
+    called:        str = Query("", pattern="^(|yes|no)$", description="yes = jobs with a logged phone call; no = not called yet (DB only)"),
     current_user: AuthenticatedUser = Depends(get_current_user),
 ) -> dict:
     """
@@ -441,6 +442,8 @@ async def list_jobs(
             date_from     = date_from     or None,
             date_to       = date_to       or None,
             assigned_to_email = current_user.email if assigned_to_me else None,
+            # A direct (non-HTTP) call gets the Query() default object, not a str.
+            called        = called if isinstance(called, str) and called else None,
             sort_by       = sort_by,
             sort_order    = sort_order,
             page          = page,
@@ -484,6 +487,7 @@ async def list_jobs(
             "date_from":     date_from     or None,
             "date_to":       date_to       or None,
             "assigned_to_me": assigned_to_me,
+            "called":        called if isinstance(called, str) and called else None,
         },
         "sort": {"by": sort_by, "order": sort_order},
         "jobs": page_items,
@@ -527,6 +531,7 @@ async def job_facets(
     date_from:     str = Query("",    description="Same as GET /jobs"),
     date_to:       str = Query("",    description="Same as GET /jobs"),
     assigned_to_me: bool = Query(False, description="Same as GET /jobs"),
+    called:        str = Query("", pattern="^(|yes|no)$", description="Same as GET /jobs"),
     current_user: AuthenticatedUser = Depends(get_current_user),
 ) -> dict:
     """Distinct Company / Job title / POC filter values (global) and filter-aware stats.
@@ -639,7 +644,7 @@ async def job_facets(
     result, _used = await resolve_read(
         mode,
         lambda: db_read(lambda db: HarvestRunService(db).job_facets(
-            demand=demand, assigned_to_email=me, **filters,
+            demand=demand, assigned_to_email=me, called=_s(called) or None, **filters,
         )),
         _facets_from_json,
     )

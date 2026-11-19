@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { useNavigate } from "react-router-dom";
 import { ChevronDown, ChevronRight, Lock, Pencil, RefreshCw, Search, X } from "lucide-react";
 import { getPhoneLogs, getPhoneInventory, getAssignedJobs, exportPhoneLogsXlsx, getPhoneLogAssignees, getPhoneLogContacts } from "../api";
 import { useTenant } from "../TenantContext";
@@ -271,7 +272,7 @@ function ContactsPanel({ params, latest, reloadKey, exportRef }) {
 function CommentCell({ text }) {
   if (!text) return <span style={{ color: "#94A3B8" }}>—</span>;
   return (
-    <div title={text} style={{ maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: C.textSoft, cursor: "default" }}>
+    <div title={text} style={{ maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: C.textSoft, cursor: "default" }}>
       {text}
     </div>
   );
@@ -469,10 +470,13 @@ function AssigneeFilter({ value, onChange }) {
 
 /** Debounced search text: returns [input value, setter, committed value]; `onCommit` runs
  * (e.g. reset to page 1) whenever the committed value changes. */
-function useDebouncedSearch(onCommit) {
-  const [query, setQuery] = useState("");
-  const [q, setQ] = useState("");
+function useDebouncedSearch(onCommit, initial = "") {
+  const [query, setQuery] = useState(initial);
+  const [q, setQ] = useState(initial);
   useEffect(() => {
+    // Nothing new to commit (first render, or typed back to the committed text):
+    // don't fire onCommit, so a restored page number isn't reset to 1.
+    if (query.trim() === q) return undefined;
     const t = setTimeout(() => { setQ(query.trim()); onCommit(); }, 350);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -637,6 +641,19 @@ function AssignedJobsPanel({ reloadKey, exportRef }) {
   );
 }
 
+const DEFAULT_FILTERS = { status: "", assignment: "", reminder: "", days: "7", assignee: "" };
+const SAVED_VIEW_KEY = "phoneLogs.savedView";
+
+/** The Phone logs view saved earlier in this browser tab ({} when none / unreadable). */
+function loadSavedView() {
+  try {
+    const v = JSON.parse(sessionStorage.getItem(SAVED_VIEW_KEY) || "{}");
+    return v && typeof v === "object" ? v : {};
+  } catch {
+    return {};
+  }
+}
+
 /**
  * Phone logs page: summary tiles, status / assignment / reminder / date (+ assignee, admins
  * only) filters, a debounced search box and a paged table of logged calls — every call in
@@ -647,12 +664,16 @@ function AssignedJobsPanel({ reloadKey, exportRef }) {
  */
 export default function PhoneLogsPage() {
   const { isAdmin } = useTenant();
-  const [view, setView] = useState("calls");
+  const navigate = useNavigate();
+  // What the user had picked last time in this tab (filters, search, page, view), so
+  // coming Back from a job's page lands on the same list instead of the defaults.
+  const [saved] = useState(loadSavedView);
+  const [view, setView] = useState(saved.view || "calls");
   // `assignee` is a business lead's user id (admins only; "" = everyone).
-  const [filters, setFilters] = useState({ status: "", assignment: "", reminder: "", days: "7", assignee: "" });
-  const [assignee, setAssignee] = useState(null); // the picked {id, name, email}, for the picker label
-  const [page, setPage] = useState(1);
-  const [query, setQuery, q] = useDebouncedSearch(() => setPage(1));
+  const [filters, setFilters] = useState({ ...DEFAULT_FILTERS, ...(saved.filters || {}) });
+  const [assignee, setAssignee] = useState(saved.assignee || null); // the picked {id, name, email}, for the picker label
+  const [page, setPage] = useState(saved.page || 1);
+  const [query, setQuery, q] = useDebouncedSearch(() => setPage(1), saved.query || "");
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -663,9 +684,17 @@ export default function PhoneLogsPage() {
   // The call-log row open in the "Edit call log" modal (null = closed).
   const [editing, setEditing] = useState(null);
   // Call log layout: "calls" (one row per call) or "contacts" (one row per number).
-  const [mode, setMode] = useState("calls");
+  const [mode, setMode] = useState(saved.mode || "calls");
   // By-contact "Latest outcome" filter: an outcome value, REVISIT_DUE or "" (all).
-  const [latestOutcome, setLatestOutcome] = useState("");
+  const [latestOutcome, setLatestOutcome] = useState(saved.latestOutcome || "");
+
+  // Remember the current view for this tab (see loadSavedView).
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(SAVED_VIEW_KEY, JSON.stringify(
+        { view, filters, assignee, page, query: q, mode, latestOutcome }));
+    } catch { /* storage unavailable: just don't remember */ }
+  }, [view, filters, assignee, page, q, mode, latestOutcome]);
 
   /** Update one filter and jump back to page 1. */
   const setFilter = (key, value) => { setFilters((f) => ({ ...f, [key]: value })); setPage(1); };
@@ -717,6 +746,13 @@ export default function PhoneLogsPage() {
   // "own" = a business lead's own calls (no tenant-wide drill-downs). Until the first
   // response lands, fall back to the role.
   const ownScope = data?.scope ? data.scope === "own" : !isAdmin;
+  /** Open the call's job on its details page (Back returns here). */
+  const openJob = (row) => {
+    if (!row.job_id) return;
+    navigate(`/jobs/${encodeURIComponent(row.job_id)}`, { state: { from: "/phone-logs" } });
+  };
+  // Columns: the "Assigned to" column is admin-only (a business lead's list is already theirs).
+  const callCols = ownScope ? 9 : 10;
 
   if ((view === "calls" || ownScope) && mode === "calls") {
     exportRef.current = async () => {
@@ -787,7 +823,9 @@ export default function PhoneLogsPage() {
             onClick={() => showCalls("unanswered")} active={callsAt("unanswered")} />
           <StatCard value={summary.assigned_jobs} label={ownScope ? "My self-assigned jobs" : "Self-assigned jobs"} color="#7C3AED"
             sub={`${summary.called_assigned_jobs ?? 0} called`}
-            onClick={ownScope ? undefined : () => setView("assigned")} active={!ownScope && view === "assigned"} />
+            title={ownScope ? "Open My Workspace on the jobs you haven't called yet" : undefined}
+            onClick={ownScope ? () => navigate("/library", { state: { bucket: "notcalled" } }) : () => setView("assigned")}
+            active={!ownScope && view === "assigned"} />
           {!ownScope && summary.repeat_calls != null && (
             <StatCard value={summary.repeat_calls} label="Repeat calls" color="#B45309"
               title="Calls placed to a number whose previous call was “Not interested”, inside its revisit window" />
@@ -818,26 +856,41 @@ export default function PhoneLogsPage() {
             {mode === "calls" && (<>
             <div className="ha-card" style={{ overflow: "hidden" }}>
               <div className="ha-table-scroll">
-                <table className="ha-table" style={{ minWidth: 1380 }}>
+                <table className="ha-table ha-table-compact" style={{ minWidth: ownScope ? 1150 : 1270 }}>
                   <thead className="ha-thead">
                     <tr>
-                      <PlainHeader label="Status" width={120} />
-                      <PlainHeader label="Job / Company" width={230} />
-                      <PlainHeader label="Phone" width={140} />
-                      <PlainHeader label="POC" width={130} />
-                      <PlainHeader label="Call outcome" width={240} />
-                      <PlainHeader label="Comments" width={220} />
-                      <PlainHeader label="Reminder" width={170} />
-                      <PlainHeader label="Assigned to" width={140} />
-                      <PlainHeader label="Date" width={160} />
-                      <PlainHeader label="" width={56} />
+                      <PlainHeader label="" width={48} />
+                      <PlainHeader label="Status" width={112} />
+                      <PlainHeader label="Job / Company" width={200} />
+                      <PlainHeader label="Phone" width={130} />
+                      <PlainHeader label="POC" width={110} />
+                      <PlainHeader label="Call outcome" width={190} />
+                      <PlainHeader label="Comments" width={150} />
+                      <PlainHeader label="Reminder" width={140} />
+                      {!ownScope && <PlainHeader label="Assigned to" width={120} />}
+                      <PlainHeader label="Date" width={140} />
                     </tr>
                   </thead>
                   <tbody>
-                    {loading && !data && <tr><td className="ha-td" colSpan={10} style={EMPTY_CELL}>Loading phone logs…</td></tr>}
-                    {!loading && items.length === 0 && <tr><td className="ha-td" colSpan={10} style={EMPTY_CELL}>No calls match these filters.</td></tr>}
+                    {loading && !data && <tr><td className="ha-td" colSpan={callCols} style={EMPTY_CELL}>Loading phone logs…</td></tr>}
+                    {!loading && items.length === 0 && <tr><td className="ha-td" colSpan={callCols} style={EMPTY_CELL}>No calls match these filters.</td></tr>}
                     {items.map((row) => (
-                      <tr key={row.id} className="ha-row">
+                      <tr key={row.id} className={`ha-row${row.job_id ? " ha-row-link" : ""}`}
+                        title={row.job_id ? "Open this job" : undefined}
+                        tabIndex={row.job_id ? 0 : undefined}
+                        onClick={() => openJob(row)}
+                        onKeyDown={(e) => { if (e.key === "Enter" && e.target === e.currentTarget) openJob(row); }}>
+                        <td className="ha-td" style={{ textAlign: "center" }}>
+                          {/* Shown unless the server says no; it still enforces (403). */}
+                          {row.can_edit !== false && (
+                            <button type="button" className="ha-btn ha-btn-secondary" title="Edit call log"
+                              aria-label={`Edit call log for ${row.phone || "this call"}`}
+                              style={{ width: 30, height: 30, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center" }}
+                              onClick={(e) => { e.stopPropagation(); setEditing(row); }}>
+                              <Pencil size={14} />
+                            </button>
+                          )}
+                        </td>
                         <td className="ha-td"><StatusPill status={row.status} /></td>
                         <td className="ha-td"><JobCell title={row.job_title} company={row.company} /></td>
                         <td className="ha-td" style={{ whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>
@@ -848,22 +901,11 @@ export default function PhoneLogsPage() {
                         <td className="ha-td"><OutcomeCell status={row.status} outcome={row.outcome} details={row.details} /></td>
                         <td className="ha-td"><CommentCell text={row.remarks} /></td>
                         <td className="ha-td"><ReminderCell reminder={row.reminder} /></td>
-                        <td className="ha-td"><AssigneePill user={row.assigned_to} /></td>
+                        {!ownScope && <td className="ha-td"><AssigneePill user={row.assigned_to} /></td>}
                         <td className="ha-td" style={{ whiteSpace: "nowrap", color: C.textSoft }}>
                           {fmtTime(row.called_at)}
                           {!ownScope && (row.owner?.name || row.called_by?.name) && (
                             <div style={SUBLINE} title={row.owner?.email || row.called_by?.email}>by {row.owner?.name || row.called_by?.name}</div>
-                          )}
-                        </td>
-                        <td className="ha-td" style={{ textAlign: "center" }}>
-                          {/* Shown unless the server says no; it still enforces (403). */}
-                          {row.can_edit !== false && (
-                            <button type="button" className="ha-btn ha-btn-secondary" title="Edit call log"
-                              aria-label={`Edit call log for ${row.phone || "this call"}`}
-                              style={{ width: 30, height: 30, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center" }}
-                              onClick={() => setEditing(row)}>
-                              <Pencil size={14} />
-                            </button>
                           )}
                         </td>
                       </tr>

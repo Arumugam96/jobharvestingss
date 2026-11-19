@@ -22,6 +22,13 @@ const SOURCE_TABS = [
   { key: "feed",     label: "LinkedIn Feed", run: runLinkedinFeedAgent, list: getLinkedinFeedResults, one: getLinkedinFeedResult, async: true },
 ];
 
+// Where the LinkedIn Feed (vendor-lead) run reads posts — each can be run on its own.
+const FEED_MODES = [
+  { value: "both",   label: "Feed + Search" },
+  { value: "feed",   label: "Home Feed only" },
+  { value: "search", label: "Post Search only" },
+];
+
 /**
  * Source Runs page: tabs per source (LinkedIn, Naukri, Dice, LinkedIn Feed) to trigger a
  * single-source harvest and browse that source's saved runs and their jobs.
@@ -42,6 +49,7 @@ export default function SourceRunsPage({ harvestRunning, setHarvestRunning }) {
   const [runMessage, setRunMessage] = useState("");
   const [stallWarn, setStallWarn] = useState(""); // amber "no progress" notice while a run is stalled
   const [viewing, setViewing] = useState(null); // { runId, jobs } | null
+  const [feedMode, setFeedMode] = useState("both"); // LinkedIn Feed tab: where to read posts
   const pollTimer = useRef(null); // async feed run: recursive setTimeout handle
   const stallWatch = useRef(makeStallWatch());
   const syncStallTimer = useRef(null); // synchronous single-source run: one-shot stall notice
@@ -99,7 +107,7 @@ export default function SourceRunsPage({ harvestRunning, setHarvestRunning }) {
       try {
         const st = await getHarvestStatus(jobId);
         if (st.status === "running") {
-          setRunMessage(st.message || "Harvesting Home Feed — collecting & classifying posts…");
+          setRunMessage(st.message || "Harvesting LinkedIn — collecting & classifying posts…");
           // Watchdog: warn (without failing) if message + count freeze for 2 min —
           // e.g. the extraction LLM is down and each call is waiting out its timeout.
           const { stalled } = stallWatch.current.note(`${st.message || ""}|${st.combined ?? 0}`);
@@ -113,7 +121,7 @@ export default function SourceRunsPage({ harvestRunning, setHarvestRunning }) {
         } else if (st.status === "failed") {
           setRunMessage(`Failed: ${st.error || st.message}`);
         } else {
-          setRunMessage(`${st.status === "success" ? "Success" : "No results"} — ${st.combined ?? 0} IT hiring leads extracted (run_id: ${st.run_id}).`);
+          setRunMessage(`${st.status === "success" ? "Success" : "No results"} — ${st.combined ?? 0} vendor leads extracted (run_id: ${st.run_id}).`);
           fetchResults(feedTab);
         }
       } catch (err) {
@@ -156,7 +164,7 @@ export default function SourceRunsPage({ harvestRunning, setHarvestRunning }) {
       );
     }
     try {
-      const res = await current.run();
+      const res = await (current.key === "feed" ? current.run(feedMode) : current.run());
       if (res.status === "failed") {
         setRunMessage(`Failed: ${res.reason || res.message}`);
         clearTimeout(syncStallTimer.current);
@@ -167,7 +175,8 @@ export default function SourceRunsPage({ harvestRunning, setHarvestRunning }) {
       }
       if (isAsync) {
         // 202 accepted — keep controls frozen and poll the background run to done.
-        setRunMessage(`Home-Feed harvest started (run_id: ${res.run_id}) — collecting & classifying posts…`);
+        const modeLabel = (FEED_MODES.find((m) => m.value === res.mode) || {}).label || "LinkedIn";
+        setRunMessage(`Vendor-lead harvest started — ${modeLabel} (run_id: ${res.run_id}) — collecting & classifying posts…`);
         pollFeed(res.job_id, feedTab);
         return;
       }
@@ -213,11 +222,19 @@ export default function SourceRunsPage({ harvestRunning, setHarvestRunning }) {
         <div className="ha-pagehead-titles">
           <h1>Source Runs</h1>
           <p className="ha-sub">
-            Trigger a single-source harvest and browse its saved results. "LinkedIn Feed" scrolls the
-            authenticated Home Feed and extracts genuine IT hiring leads.
+            Trigger a single-source harvest and browse its saved results. "LinkedIn Feed" finds companies
+            looking for staffing / recruitment vendors (vendor registration, C2C / contract requirements) in the
+            Home Feed and LinkedIn post search.
           </p>
         </div>
         <div className="ha-pagehead-actions">
+          {current.key === "feed" && (
+            <select className="ha-btn" value={feedMode} onChange={(e) => setFeedMode(e.target.value)}
+              disabled={running || harvestRunning} title="Where the vendor-lead run reads LinkedIn posts"
+              style={{ background: "#fff", border: "1px solid rgba(148,163,184,.5)", color: C.text }}>
+              {FEED_MODES.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+            </select>
+          )}
           <StopHarvestButton harvestRunning={harvestRunning}
             onStopped={() => setRunMessage("Stop requested — the run will halt shortly and save its jobs. The report email is deferred to the next successful run.")} />
           <button className="ha-btn ha-btn-primary" onClick={handleRun} disabled={running || harvestRunning}
@@ -256,7 +273,46 @@ export default function SourceRunsPage({ harvestRunning, setHarvestRunning }) {
             </div>
             {viewing.loading && <div style={{ padding: 24, textAlign: "center", color: "#94A3B8" }}>Loading…</div>}
             {viewing.error && <div className="ha-errbanner" style={{ margin: 16 }}>{viewing.error}</div>}
-            {!viewing.loading && !viewing.error && (
+            {!viewing.loading && !viewing.error && current.key === "feed" && (
+              <div className="ha-table-scroll">
+                <table className="ha-table" style={{ minWidth: 1200 }}>
+                  <thead className="ha-thead"><tr>
+                    <PlainHeader label="Opportunity" width={300} /><PlainHeader label="Company" width={200} />
+                    <PlainHeader label="Engagement" width={140} /><PlainHeader label="Location" width={170} />
+                    <PlainHeader label="Posted by" width={180} /><PlainHeader label="Contact" width={200} />
+                    <PlainHeader label="Posted" width={110} /><PlainHeader label="Post" align="center" width={70} />
+                  </tr></thead>
+                  <tbody>
+                    {viewing.jobs.map((j, i) => (
+                      <tr key={i} className="ha-row">
+                        <td className="ha-td">
+                          <div style={{ fontWeight: 600 }}>{j.job_title}</div>
+                          <div style={{ fontSize: 12, color: C.textSoft }}>
+                            {j.job_type === "vendor_registration" ? "Vendor registration" : "Vendor requirement"}
+                            {j.hiring_entity && j.hiring_entity !== "Ambiguous" ? ` · ${j.hiring_entity}` : ""}
+                          </div>
+                        </td>
+                        <td className="ha-td">{j.company}</td>
+                        <td className="ha-td">{j.employment_type}</td>
+                        <td className="ha-td">{j.location}</td>
+                        <td className="ha-td">{j.job_poster_name}</td>
+                        <td className="ha-td" style={{ fontSize: 12.5 }}>
+                          {[j.email_id, j.contact_number].filter(Boolean).join(" · ") || "—"}
+                        </td>
+                        <td className="ha-td">{j.posted_date}</td>
+                        <td className="ha-td" style={{ textAlign: "center" }}>
+                          {j.job_url ? <a href={j.job_url} target="_blank" rel="noopener noreferrer">Open</a> : "—"}
+                        </td>
+                      </tr>
+                    ))}
+                    {viewing.jobs.length === 0 && (
+                      <tr><td className="ha-td" colSpan={8} style={{ textAlign: "center", padding: 24, color: "#94A3B8" }}>No vendor leads in this run.</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {!viewing.loading && !viewing.error && current.key !== "feed" && (
               <div className="ha-table-scroll">
                 <table className="ha-table" style={{ minWidth: 900 }}>
                   <thead className="ha-thead"><tr>
@@ -286,7 +342,7 @@ export default function SourceRunsPage({ harvestRunning, setHarvestRunning }) {
               <table className="ha-table" style={{ minWidth: 1080 }}>
                 <thead className="ha-thead"><tr>
                   <PlainHeader label="Run ID" width={190} /><PlainHeader label="Status" width={120} /><PlainHeader label="Executed" width={160} />
-                  <PlainHeader label="Total found" width={110} /><PlainHeader label="Keyword" width={150} /><PlainHeader label="Location" width={150} />
+                  <PlainHeader label="Total found" width={110} /><PlainHeader label={current.key === "feed" ? "Mode" : "Keyword"} width={150} /><PlainHeader label="Location" width={150} />
                   <PlainHeader label="Action" align="center" width={90} />
                 </tr></thead>
                 <tbody>

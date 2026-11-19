@@ -1,35 +1,63 @@
 """
-LinkedIn Home Feed Lead Agent — turns Home Feed posts into IT hiring leads.
+LinkedIn Vendor-Opportunity Lead Agent: turns LinkedIn posts into vendor leads
+for SightSpectrum, an IT staffing / recruitment vendor.
 
-What this agent does
-────────────────────
-• Opens the authenticated recruiter's LinkedIn **Home Feed** (/feed/) — NOT the
-  Jobs board and NOT LinkedIn's post/content search.
-• Scrolls the dynamically-rendered feed, collecting each rendered post (author,
-  headline, text, timestamp, repost flag, stable post URN → permalink).
-• Runs a two-stage intelligent pipeline so most of the noisy feed never reaches
-  the LLM:
-    1. cheap deterministic candidate filter (hiring intent + IT terminology),
-    2. LLM semantic classification (is this a genuine IT hiring post?),
-    3. LLM extraction of job + recruiter info for the genuine ones only.
-• Validates the extraction and assigns a lead_confidence from independent signals.
+What this agent looks for
+─────────────────────────
+Posts where a company (or a prime vendor) is looking for EXTERNAL staffing /
+recruitment / IT-services vendors:
+  • vendor_registration: vendor empanelment, registration or partner onboarding
+    ("we are empanelling recruitment agencies", "vendors may register here").
+  • vendor_requirement: a contract / C2C / C2H / third-party requirement shared
+    for vendors or partners to supply candidates.
+Companies hiring employees directly, staffing firms advertising their own bench
+or hotlists, job seekers, commentary and ads for unrelated products are dropped
+(the reason is recorded in feed_diag.json).
+
+Where it reads posts (the `mode` argument)
+──────────────────────────────────────────
+  • "feed":   the authenticated Home Feed (/feed/), scrolled.
+  • "search": LinkedIn post search (/search/results/content/) for each configured
+              vendor phrase, sorted by latest. The Home Feed is ranked and changes
+              on every load, so vendor posts are rare there; search finds them.
+  • "both":   feed first, then search (default when search is enabled).
+Posts are de-duplicated across all of these by their activity URN.
+
+How it reads a page (mirrors what a person or a browsing assistant does)
+────────────────────────────────────────────────────────────────────────
+  • Finds each post by LinkedIn's "Feed post" accessibility heading, falling back
+    to activity-URN containers, then to large list items. Hashed CSS class names
+    are only used as optional hints.
+  • Clicks every "…more" so the full post text is read.
+  • Records the author (from the first profile/company link, skipping "X likes
+    this" lines), the post's outbound links (registration forms, lnkd.in) and
+    whether the post is promoted. Promoted posts are kept: a company paying to
+    promote "vendor registration open" is a lead.
+  • If no post element matches at all, splits the page's text on the "Feed post"
+    headings so a LinkedIn layout change can't silently yield 0 posts.
+
+Pipeline: keyword pre-filter → LLM classify → LLM extract → validate + score.
+A failed LLM call is retried; the run stops only after several consecutive
+failures (one malformed reply no longer ends the run).
 
 Security / integrity contract (identical to the other LinkedIn agents)
 ──────────────────────────────────────────────────────────────────────
 • Reuses the authenticated session (session file / persistent Chrome profile).
-• NO login automation. Auth is verified by the `li_at` cookie; when it is
-  absent the run raises FeedAuthError and the caller tells the user to run
+• NO login automation. Auth is verified by the `li_at` cookie; when it is absent
+  the run raises FeedAuthError and the caller tells the user to run
   POST /linkedin-setup-session.
-• The LLM NEVER fabricates contact/job info — email/phone/company/title are kept
-  only when explicitly present in the post text; otherwise they stay null.
-• Only publicly-visible feed content is stored.
+• The LLM NEVER fabricates contact/company info: email, phone and registration
+  link are kept only when they appear verbatim in the post (or its links).
+• Only publicly-visible post content is stored.
 """
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from urllib.parse import quote, urlencode
 
 import structlog
 
@@ -46,7 +74,7 @@ from app.agents.linkedin_agent import (
     _resolve_posted_date,
     _wait_for_page_text_stable,
 )
-from app.agents.linkedin_lead_agent import _HIRING_KEYWORDS, _clean_mailto
+from app.agents.linkedin_lead_agent import _clean_mailto
 from app.agents.prospect_intelligence_agent import _HIRING_DOMAIN_MAP, _classify_hiring_domain
 
 if TYPE_CHECKING:
@@ -57,48 +85,94 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 FEED_URL = "https://www.linkedin.com/feed/"
+SEARCH_URL = "https://www.linkedin.com/search/results/content/"
 _GATED_PATHS = ("/login", "/checkpoint", "/challenge", "/authwall", "/uas/")
 
-# Batch size for the incremental-persistence callback — flush finalized leads to
+# Run modes accepted by harvest(): where posts are read from.
+MODE_FEED, MODE_SEARCH, MODE_BOTH = "feed", "search", "both"
+MODES = (MODE_FEED, MODE_SEARCH, MODE_BOTH)
+_DATE_POSTED_VALUES = ("past-24h", "past-week", "past-month")
+
+# Batch size for the incremental-persistence callback: flush finalized leads to
 # the DB every N so the frontend's live "leads saved" counter ticks steadily and
 # a mid-run crash keeps what was already extracted.
 _PERSIST_BATCH = 5
 
-# Max chars of a single post's text handed to the LLM (a feed post is short; this
-# is a safety cap for the occasional very long post).
+# Max chars of a single post's text handed to the LLM.
 _POST_TEXT_MAX_CHARS = 6_000
 
-# Categories the classifier may assign. Only "it_hiring" is a keeper; the rest
-# name the feed-noise buckets so the audit trail records *why* a post was dropped.
-_FEED_CATEGORIES = (
-    "it_hiring", "non_it_hiring", "hiring_trends", "hr_content",
-    "ad_promo", "company_promo", "repost_no_info", "irrelevant", "other",
-)
+# LLM resilience: retry a failed call this many times (with backoff); stop the
+# whole run only after this many consecutive failures.
+_LLM_POST_RETRIES = 1
+_LLM_RETRY_BACKOFF_S = 5.0
+_LLM_FAILURE_STREAK_ABORT = 3
 
-# IT / technology terminology for the candidate filter — flattened from the
-# existing hiring-domain keyword map, plus a few generic role words. A post must
-# contain hiring intent AND at least one of these to reach the LLM.
+# Categories the classifier may assign. Only the keeper categories become leads;
+# the rest name why a post was dropped, for the audit trail.
+_FEED_CATEGORIES = (
+    "vendor_registration", "vendor_requirement",
+    "direct_hiring", "vendor_marketing", "job_seeker", "hiring_trends",
+    "ad_promo", "company_promo", "repost_no_info", "non_staffing_vendor",
+    "irrelevant", "other",
+)
+_KEEPER_CATEGORIES = ("vendor_registration", "vendor_requirement")
+
+# requester_type (LLM) → scraped_jobs.hiring_entity (existing vocabulary).
+_HIRING_ENTITY_MAP = {"end_client": "Direct Client", "staffing_firm": "Staffing Firm"}
+
+
+def _term_re(terms: set[str] | tuple[str, ...]) -> re.Pattern[str]:
+    """Case-insensitive alternation of `terms`, matched on word boundaries so short
+    tokens (e.g. "ai", "msp", "rfp") can't match inside longer words."""
+    return re.compile(
+        r"(?<![a-z0-9])(?:"
+        + "|".join(sorted((re.escape(t) for t in terms if t), key=len, reverse=True))
+        + r")(?![a-z0-9])",
+        re.IGNORECASE,
+    )
+
+
+# Vendor-intent phrases strong enough to make a post a candidate on their own.
+_VENDOR_STRONG_TERMS = (
+    "vendor", "vendors", "vendor partner", "vendor partners", "vendor onboarding",
+    "vendor registration", "empanel", "empanelment", "empanelled", "empaneled",
+    "empanelling", "c2c", "corp to corp", "corp-to-corp", "c2h", "contract to hire",
+    "contract-to-hire", "third party", "third-party", "3rd party",
+    "staffing partner", "staffing partners", "recruitment partner", "recruitment partners",
+    "hiring partner", "hiring partners", "talent partner", "talent partners",
+    "implementation partner", "implementation partners", "delivery partner",
+    "delivery partners", "prime vendor", "subcontract", "sub-contract", "subcontracting",
+    "sub vendor", "sub-vendor", "subvendor", "supplier registration", "supplier onboarding",
+    "staffing agency", "staffing agencies", "recruitment agency", "recruitment agencies",
+    "placement agency", "placement agencies", "recruitment firms", "staffing firms",
+    "staffing companies", "consultancies", "staff augmentation", "outsourcing partner",
+    "rfp", "rfq", "rfi", "msp",
+)
+# Weaker phrases: a candidate only together with an IT term.
+_VENDOR_WEAK_TERMS = (
+    "contract", "contractual", "freelance", "requirement", "requirements",
+    "share profiles", "share resumes", "share your profiles", "send profiles",
+    "submit profiles", "profiles", "partner", "partners", "partnership", "agency",
+    "agencies", "consultants", "consulting firms", "bench", "hotlist",
+)
+_VENDOR_STRONG_RE = _term_re(_VENDOR_STRONG_TERMS)
+_VENDOR_WEAK_RE = _term_re(_VENDOR_WEAK_TERMS)
+
+# IT / technology terminology, flattened from the hiring-domain keyword map plus
+# generic role words. Word-boundary matched (see _term_re).
 _IT_TERMS: set[str] = {
     kw.strip() for kws, _domain in _HIRING_DOMAIN_MAP for kw in kws if kw.strip()
 } | {
-    "developer", "engineer", "software", "programming", "programmer", "coding",
-    "full stack", "fullstack", "backend", "back-end", "frontend", "front-end",
-    "web developer", "data engineer", "data scientist", "devops", "sdet", "tester",
-    "python", "java", "javascript", "typescript", "react", "angular", "node",
-    ".net", "c#", "golang", "kubernetes", "aws", "azure", "gcp", "sql",
-    "machine learning", "ai/ml", "ml engineer", "cloud", "cybersecurity",
-    "it recruitment", "tech hiring", "software engineer", "sre", "qa engineer",
+    "developer", "developers", "engineer", "engineers", "software", "programming",
+    "programmer", "coding", "full stack", "fullstack", "backend", "back-end", "frontend",
+    "front-end", "web developer", "data engineer", "data scientist", "devops", "sdet",
+    "tester", "python", "java", "javascript", "typescript", "react", "angular", "node",
+    ".net", "c#", "golang", "kubernetes", "aws", "azure", "gcp", "sql", "sap", "salesforce",
+    "servicenow", "oracle", "machine learning", "ai/ml", "ml engineer", "cloud",
+    "cybersecurity", "it", "it services", "it staffing", "it recruitment", "tech hiring",
+    "software engineer", "sre", "qa engineer", "technology", "tech",
 }
-# Match IT terms on WORD BOUNDARIES so short domain tokens (e.g. the map's " ai "
-# / " ml " / " bi ", which strip to "ai"/"ml"/"bi") can't substring-match inside
-# ordinary words like "mumbai", "email", or "training" — that would let almost
-# every post through and defeat the candidate filter's cost-saving purpose.
-_IT_TERM_RE = re.compile(
-    r"(?<![a-z0-9])(?:"
-    + "|".join(sorted((re.escape(t) for t in _IT_TERMS if t), key=len, reverse=True))
-    + r")(?![a-z0-9])",
-    re.IGNORECASE,
-)
+_IT_TERM_RE = _term_re(_IT_TERMS)
 
 StatusCallback = Callable[[str], Awaitable[None]]
 BatchCallback = Callable[[list["FeedLead"]], Awaitable[None]]
@@ -109,26 +183,30 @@ BatchCallback = Callable[[list["FeedLead"]], Awaitable[None]]
 # ══════════════════════════════════════════════════════════════════════════════
 
 class FeedAuthError(RuntimeError):
-    """Raised when the Home Feed can't be reached as an authenticated user
-    (no li_at cookie). The caller surfaces an action_required hint pointing at
+    """Raised when LinkedIn can't be reached as an authenticated user (no li_at
+    cookie). The caller surfaces an action_required hint pointing at
     POST /linkedin-setup-session."""
 
 
 @dataclass
 class FeedLead:
-    """One validated IT-hiring lead extracted from a Home Feed post."""
-    # ── Job info ──────────────────────────────────────────────────────────────
-    job_title:       str = ""
-    company:         str = ""
-    location:        str = ""
-    salary:          str = ""
-    employment_type: str = ""
-    work_mode:       str = "not_specified"
-    skills:          list[str] = field(default_factory=list)
-    description:     str = ""
-    posted_date:     str = ""              # YYYY-MM-DD (resolved in Python) or ""
-    domain:          str = "IT"            # IT sub-domain (display only)
-    # ── Recruiter info ────────────────────────────────────────────────────────
+    """One validated vendor-opportunity lead extracted from a LinkedIn post."""
+    # ── Opportunity ───────────────────────────────────────────────────────────
+    job_title:        str = ""             # roles needed, or a generic opportunity label
+    company:          str = ""             # company that needs vendors / candidates
+    location:         str = ""
+    salary:           str = ""             # rate / budget, only if stated
+    employment_type:  str = ""             # engagement model: C2C, C2H, Contract, Empanelment…
+    work_mode:        str = "not_specified"
+    skills:           list[str] = field(default_factory=list)
+    description:      str = ""
+    posted_date:      str = ""             # YYYY-MM-DD (resolved in Python) or ""
+    domain:           str = "IT"           # IT sub-domain (display only)
+    opportunity_type: str = ""             # vendor_registration | vendor_requirement
+    requester_type:   str = "unknown"      # end_client | staffing_firm | unknown
+    how_to_engage:    str = ""
+    registration_link: str = ""            # only if verbatim in the post / its links
+    # ── Poster info ───────────────────────────────────────────────────────────
     recruiter_name:        str = ""
     recruiter_title:       str = ""
     recruiter_company:     str = ""
@@ -136,34 +214,37 @@ class FeedLead:
     recruiter_email:       str = ""        # only if verbatim in the post
     recruiter_phone:       str = ""        # only if verbatim in the post
     # ── Provenance / meta ─────────────────────────────────────────────────────
-    post_url:        str = ""              # feed permalink (from URN)
+    post_url:        str = ""              # post permalink (from URN)
     post_urn:        str = ""
     is_repost:       bool = False
-    category:        str = "it_hiring"
+    is_promoted:     bool = False
+    found_via:       list[str] = field(default_factory=list)  # "feed" / "search: <query>"
+    category:        str = ""
     lead_confidence: float = 0.0
 
     def to_scraped_job_dict(self) -> dict[str, Any]:
         """Map onto ScrapedJobORM's canonical dict shape (see
         HarvestRunService.bulk_insert_scraped_jobs). source="LinkedIn Feed"
-        distinguishes these rows from LinkedIn Jobs / Naukri / Dice."""
+        distinguishes these rows from LinkedIn Jobs / Naukri / Dice. String fields
+        are capped at their column sizes so a long LLM value can't fail the insert."""
         return {
             "source":                 "LinkedIn Feed",
-            "job_title":              self.job_title,
-            "company":                self.company,
-            "location":               self.location,
+            "job_title":              self.job_title[:500],
+            "company":                self.company[:500],
+            "location":               self.location[:500],
             "salary":                 self.salary,
             "experience":             "",
-            "posted_date":            self.posted_date,
+            "posted_date":            self.posted_date[:100],
             "job_url":                self.post_url,
             "job_description":        self.description,
             "job_description_html":   "",
             "skills":                 self.skills,
             "work_mode":              self.work_mode,
             "company_url":            "",
-            "employment_type":        self.employment_type,
-            "job_type":               "",
-            "domain":                 self.domain or "IT",
-            "hiring_entity":          "Any",
+            "employment_type":        self.employment_type[:100],
+            "job_type":               self.opportunity_type,
+            "domain":                 (self.domain or "IT")[:50],
+            "hiring_entity":          _HIRING_ENTITY_MAP.get(self.requester_type, "Ambiguous"),
             "job_poster_name":        self.recruiter_name or None,
             "job_poster_designation": self.recruiter_title or None,
             "linkedin_profile_url":   self.recruiter_profile_url or None,
@@ -179,27 +260,83 @@ class FeedLead:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _is_candidate(text: str) -> bool:
-    """Cheap first-stage gate: keep a post only if it shows hiring intent AND IT
-    terminology. Broad recall — this only removes obviously-irrelevant posts to
-    cut LLM cost; the LLM makes the actual keep/drop decision."""
+    """Cheap first-stage gate: keep a post if it uses a strong vendor phrase, or a
+    weaker one (contract, requirement, share profiles…) together with an IT term.
+    Broad recall: this only removes obviously-irrelevant posts to cut LLM cost;
+    the LLM makes the actual keep/drop decision."""
     raw = text or ""
     if len(raw) < 12:
         return False
-    t = f" {raw.lower()} "
-    has_hiring = any(kw in t for kw in _HIRING_KEYWORDS)
-    has_it = bool(_IT_TERM_RE.search(raw))
-    return has_hiring and has_it
+    if _VENDOR_STRONG_RE.search(raw):
+        return True
+    return bool(_VENDOR_WEAK_RE.search(raw) and _IT_TERM_RE.search(raw))
+
+
+def _search_url(query: str, date_posted: str = "") -> str:
+    """LinkedIn post-search URL for `query`, newest first, optionally limited to a
+    date window (past-24h / past-week / past-month; anything else = any time)."""
+    params = {"keywords": query, "origin": "FACETED_SEARCH", "sortBy": '"date_posted"'}
+    if date_posted in _DATE_POSTED_VALUES:
+        params["datePosted"] = f'"{date_posted}"'
+    return f"{SEARCH_URL}?{urlencode(params, quote_via=quote)}"
+
+
+def _url_key(url: str) -> str:
+    """Comparison form of a URL: no scheme, no www., no trailing slash, lowercase."""
+    u = re.sub(r"^https?://", "", (url or "").strip().lower())
+    return re.sub(r"^www\.", "", u).rstrip("/")
+
+
+def _ground_link(link: str | None, links: list[str], text: str) -> str:
+    """Keep an LLM-returned link only if it is one of the post's own links or is
+    written in the post text. Returns the grounded URL or ""."""
+    link = (link or "").strip()
+    if not link or not re.match(r"^(https?://)?[\w.-]+\.[a-z]{2,}(/\S*)?$", link, re.I):
+        return ""
+    key = _url_key(link)
+    for candidate in links:
+        if _url_key(candidate) == key:
+            return candidate
+    if key and key in (text or "").lower():
+        return link if link.lower().startswith("http") else f"https://{link}"
+    return ""
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# In-browser feed post collection
+# In-browser post collection
 # ══════════════════════════════════════════════════════════════════════════════
 
-# Enumerate feed post containers by STABLE attributes (data-urn / data-id carry
-# the activity URN LinkedIn's own tracking depends on; role=listitem is driven by
-# accessibility, not the hashed CSS-module build) — far more durable than any
-# classname. For each post we return raw fields; Python does the dedup + parsing.
+# Click every "…more" / "see more" toggle inside <main> so the full post text is in
+# the DOM before it is read. Comment / result "show more" buttons are skipped.
+_EXPAND_JS = r"""() => {
+    let n = 0;
+    const root = document.querySelector('main') || document.body;
+    for (const b of root.querySelectorAll('button, [role="button"]')) {
+        const t = ((b.innerText || '') + ' ' + (b.getAttribute('aria-label') || '')).trim().toLowerCase();
+        if (!(/(…|\.\.\.)\s*(see )?more\b/.test(t) || /^see more\b/.test(t))) continue;
+        if (/comment|repl|result|jobs/.test(t)) continue;
+        if (b.getAttribute('aria-expanded') === 'true') continue;
+        try { b.click(); n++; } catch (e) { /* ignore */ }
+        if (n >= 40) break;
+    }
+    return n;
+}"""
+
+# Enumerate post containers, most-stable signal first:
+#   1. LinkedIn's accessibility heading "Feed post" that every post carries
+#      (present on the Home Feed in both the old and the hashed-class DOM);
+#   2. containers carrying the activity URN (old DOM, search results);
+#   3. large list items inside <main> (last resort, e.g. search-result cards).
+# For each post we return raw fields; Python does dedup + parsing.
 _COLLECT_POSTS_JS = r"""() => {
+    const SEL = 'div.feed-shared-update-v2, '
+        + 'div[data-urn*="urn:li:activity"], div[data-id*="urn:li:activity"], '
+        + 'div[data-urn*="urn:li:ugcPost"], div[data-id*="urn:li:ugcPost"], '
+        + 'div[data-urn*="urn:li:share"], div[data-id*="urn:li:share"]';
+    const URN_RE = /urn:li:(?:activity|ugcPost|share):\d+/;
+    const URN_ENC_RE = /urn%3Ali%3A(?:activity|ugcPost|share)%3A\d+/;
+    const SOCIAL_RE = /\b(likes|loves|celebrates|supports|finds|commented|reposted|follows|followed by|reacted)\b/i;
+
     function pickText(root, sels) {
         for (const s of sels) {
             const el = root.querySelector(s);
@@ -207,23 +344,53 @@ _COLLECT_POSTS_JS = r"""() => {
         }
         return '';
     }
-    const containers = Array.from(document.querySelectorAll(
-        'div.feed-shared-update-v2, ' +
-        'div[data-urn*="urn:li:activity"], ' +
-        'div[data-id*="urn:li:activity"], ' +
-        'div[role="listitem"]'
-    ));
-    const out = [];
-    const seen = new Set();
-    for (const el of containers) {
-        try {
-            const urn = el.getAttribute('data-urn') || el.getAttribute('data-id') || '';
-            // Skip nested/duplicate containers that share the same activity urn.
-            const key = urn || (el.textContent || '').slice(0, 80);
-            if (!key || seen.has(key)) continue;
-            seen.add(key);
+    function outermost(arr) {
+        return arr.filter(el => !arr.some(o => o !== el && o.contains(el)));
+    }
 
-            // Author name — actor title, then any /in/ link text.
+    let strategy = 'heading';
+    let found = [];
+    for (const h of document.querySelectorAll('h2, h3')) {
+        if (!/^feed post\b/i.test((h.textContent || '').trim())) continue;
+        const c = h.closest(SEL) || h.closest('[role="listitem"], article, [role="article"]') || h.parentElement;
+        if (c && !found.includes(c)) found.push(c);
+    }
+    if (!found.length) {
+        strategy = 'urn';
+        found = outermost(Array.from(document.querySelectorAll(SEL)));
+    }
+    if (!found.length) {
+        strategy = 'listitem';
+        found = outermost(Array.from(document.querySelectorAll(
+            'main [role="listitem"], main li, main article'
+        )).filter(el => (el.innerText || '').trim().length >= 150));
+    }
+
+    const out = [];
+    for (const el of found) {
+        try {
+            const fullText = (el.innerText || el.textContent || '').trim();
+            if (fullText.length < 40) continue;
+
+            // Activity URN: own attribute → descendant → ancestor → anywhere in the HTML.
+            let urn = el.getAttribute('data-urn') || el.getAttribute('data-id') || '';
+            if (!URN_RE.test(urn)) {
+                const inner = el.querySelector('[data-urn*="urn:li:"], [data-id*="urn:li:"]');
+                urn = inner ? (inner.getAttribute('data-urn') || inner.getAttribute('data-id') || '') : '';
+            }
+            if (!URN_RE.test(urn) && el.parentElement) {
+                const anc = el.parentElement.closest('[data-urn*="urn:li:"], [data-id*="urn:li:"]');
+                if (anc) urn = anc.getAttribute('data-urn') || anc.getAttribute('data-id') || '';
+            }
+            let m = URN_RE.exec(urn);
+            if (!m) {
+                const html = (el.outerHTML || '').slice(0, 300000);
+                m = URN_RE.exec(html) || URN_ENC_RE.exec(html);
+            }
+            try { urn = m ? decodeURIComponent(m[0]) : ''; } catch (e) { urn = m ? m[0] : ''; }
+
+            // Author: actor selectors (old DOM), else the first named profile/company
+            // link that isn't a "X likes this" social-proof line.
             let authorName = pickText(el, [
                 '.update-components-actor__title span[aria-hidden="true"]',
                 '.update-components-actor__name span[aria-hidden="true"]',
@@ -231,11 +398,17 @@ _COLLECT_POSTS_JS = r"""() => {
                 '.update-components-actor__title',
             ]);
             let profileUrl = '';
-            const inLink = el.querySelector('a.update-components-actor__meta-link, a[href*="/in/"]');
-            if (inLink) {
-                profileUrl = inLink.href || inLink.getAttribute('href') || '';
-                if (!authorName) {
-                    authorName = (inLink.textContent || '').trim().split('\n')[0].trim();
+            const actorLink = el.querySelector('a.update-components-actor__meta-link');
+            if (actorLink) profileUrl = actorLink.href || '';
+            if (!authorName || !profileUrl) {
+                for (const a of el.querySelectorAll('a[href*="/in/"], a[href*="/company/"]')) {
+                    const name = (a.innerText || '').trim().split('\n')[0].trim();
+                    if (!name || name.length > 80) continue;
+                    const ctx = ((a.parentElement && a.parentElement.innerText) || '').slice(0, 200);
+                    if (SOCIAL_RE.test(ctx) && !ctx.includes('•')) continue;
+                    if (!authorName) authorName = name;
+                    if (!profileUrl) profileUrl = a.href || '';
+                    break;
                 }
             }
 
@@ -244,38 +417,52 @@ _COLLECT_POSTS_JS = r"""() => {
                 '.update-components-actor__subtitle',
             ]);
 
-            // Timestamp — "2h", "1d • Edited", etc.
-            const timestamp = pickText(el, [
+            let timestamp = pickText(el, [
                 '.update-components-actor__sub-description span[aria-hidden="true"]',
                 '.update-components-actor__sub-description',
                 'time',
             ]);
+            if (!timestamp) {
+                const tm = /(?:^|\s)(\d+\s?(?:s|m|h|d|w|mo|yr|y))\s*•/.exec(fullText.slice(0, 600));
+                if (tm) timestamp = tm[1];
+            }
 
-            // Post body text (the author's commentary).
             let text = pickText(el, [
                 '.update-components-text',
                 '.feed-shared-update-v2__description',
                 '.feed-shared-inline-show-more-text',
+                '[data-test-id="main-feed-activity-card__commentary"]',
+                'span.break-words',
             ]);
-            if (!text || text.length < 20) {
-                text = (el.innerText || el.textContent || '').trim();
+            if (!text || text.length < 20) text = fullText;
+
+            const head = fullText.slice(0, 400);
+            const header = el.querySelector('.update-components-header, .update-components-actor__supplementary-actor-info');
+            const headerTxt = header ? (header.textContent || '').toLowerCase() : '';
+            const isRepost = headerTxt.includes('repost') || headerTxt.includes('reshare') || /reposted this/i.test(head);
+            const isPromoted = /\bPromoted\b/.test(head);
+
+            // Outbound links (registration forms, lnkd.in…). LinkedIn's /redir/
+            // wrapper is unwrapped; other linkedin.com links are skipped except forms/events.
+            const links = [];
+            for (const a of el.querySelectorAll('a[href]')) {
+                let h = a.href || '';
+                if (!/^https?:/i.test(h)) continue;
+                let u;
+                try { u = new URL(h); } catch (e) { continue; }
+                const host = u.hostname.toLowerCase();
+                const isLi = host === 'linkedin.com' || host.endsWith('.linkedin.com');
+                if (isLi && u.pathname.startsWith('/redir/')) {
+                    const target = u.searchParams.get('url');
+                    if (!target) continue;
+                    h = target;
+                } else if (isLi && !/^\/(forms|events)\//.test(u.pathname)) {
+                    continue;
+                }
+                if (!links.includes(h)) links.push(h);
+                if (links.length >= 10) break;
             }
 
-            // Full container text — commentary PLUS any embedded LinkedIn job/entity
-            // card (title, company, location, salary) and metadata. The job card is a
-            // SEPARATE component from .update-components-text, so the body alone omits
-            // those structured details; the whole container's innerText carries them,
-            // and the LLM extractor is told to use only what is explicitly present.
-            var fullText = (el.innerText || el.textContent || '').trim().slice(0, 5000);
-
-            // Repost / reshare indicator.
-            const header = (el.querySelector('.update-components-header')
-                || el.querySelector('.update-components-actor__supplementary-actor-info'));
-            const headerTxt = header ? (header.textContent || '').toLowerCase() : '';
-            const isRepost = headerTxt.includes('repost') || headerTxt.includes('reshare');
-
-            // Public email typed as a mailto link — address only: drop any
-            // ?subject=/&body= query and URL-decode (%40 etc.).
             const mailto = el.querySelector('a[href^="mailto:"]');
             var mailtoEmail = mailto
                 ? (mailto.href || '').replace(/^mailto:/i, '').split('?')[0].trim() : '';
@@ -288,26 +475,52 @@ _COLLECT_POSTS_JS = r"""() => {
                 author_headline: headline,
                 timestamp: timestamp,
                 text: text,
-                full_text: fullText,
+                full_text: fullText.slice(0, 8000),
                 is_repost: isRepost,
+                is_promoted: isPromoted,
+                links: links,
                 mailto: mailtoEmail,
             });
         } catch (e) { /* skip malformed post */ }
     }
-    return { count: containers.length, posts: out };
+    return { count: found.length, strategy: strategy, posts: out };
+}"""
+
+# Last-resort reader: split <main>'s visible text on the "Feed post" headings.
+# Used only when no post element matched at all, so a layout change degrades to
+# plain-text posts (no URN / author link) instead of 0 posts.
+_PAGE_TEXT_JS = r"""() => {
+    const main = document.querySelector('main') || document.body;
+    const txt = (main.innerText || '');
+    const parts = txt.split(/\n\s*Feed post(?: number \d+)?\s*\n/i).slice(1);
+    return parts.map(p => p.trim()).filter(p => p.length >= 60).slice(0, 60);
+}"""
+
+# Scroll nudges + "Show more results" for search pages. Returns nothing.
+_SCROLL_JS = r"""() => {
+    const scroller = document.scrollingElement || document.documentElement;
+    scroller.scrollTo(0, scroller.scrollHeight);
+    const posts = document.querySelectorAll(
+        'div.feed-shared-update-v2, div[data-urn*="urn:li:activity"], div[data-id*="urn:li:activity"], main [role="listitem"], main li'
+    );
+    if (posts.length) posts[posts.length - 1].scrollIntoView({block: 'end'});
+    window.dispatchEvent(new Event('scroll'));
+    for (const b of document.querySelectorAll('main button')) {
+        if (/^show more results$/i.test((b.innerText || '').trim())) { try { b.click(); } catch (e) {} break; }
+    }
 }"""
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# LinkedIn Feed Agent
+# Agent
 # ══════════════════════════════════════════════════════════════════════════════
 
 class LinkedInFeedAgent:
     """
-    Harvests IT hiring leads from the authenticated LinkedIn Home Feed.
+    Harvests vendor-opportunity leads from LinkedIn (Home Feed and/or post search).
 
-    One instance per run (mirrors LinkedInAgent). Owns an LLMService whose
-    token usage + per-call audit log the caller persists to llm_calls.
+    One instance per run. Owns an LLMService whose token usage + per-call audit
+    log the caller persists to llm_calls.
     """
 
     def __init__(
@@ -315,16 +528,13 @@ class LinkedInFeedAgent:
         settings: Settings | None = None,
         llm_service: "LLMService | None" = None,
     ) -> None:
-        """Read the feed scroll/stop limits, LLM call cap and confidence gate from settings.
-
-        The harvest start time is fixed here so every relative post date in the run resolves
-        against the same reference point.
-        """
+        """Read the scroll/stop limits, search settings, LLM call cap and confidence
+        gate from settings. The harvest start time is fixed here so every relative
+        post date in the run resolves against the same reference point."""
         self._settings = settings or get_settings()
         self._llm_service = llm_service or get_llm_service(self._settings)
         self._llm_calls_made = 0
-        # Fixed once per run so every relative date ("2h ago") resolves against
-        # the same reference point (see _resolve_posted_date).
+        self._llm_failure_streak = 0
         self._harvest_started_at = datetime.now(timezone.utc)
 
         s = self._settings
@@ -332,10 +542,21 @@ class LinkedInFeedAgent:
         self._max_scrolls      = int(s.linkedin_feed_max_scrolls)
         self._min_scrolls      = int(s.linkedin_feed_min_scrolls)
         self._scroll_delay_ms  = int(s.linkedin_feed_scroll_delay_ms)
-        self._no_new_rounds     = int(s.linkedin_feed_no_new_stop_rounds)
-        self._empty_dom_rounds  = int(s.linkedin_feed_empty_dom_stop_rounds)
+        self._no_new_rounds    = int(s.linkedin_feed_no_new_stop_rounds)
+        self._empty_dom_rounds = int(s.linkedin_feed_empty_dom_stop_rounds)
         self._llm_max_calls    = int(s.linkedin_feed_llm_max_calls)
         self._min_confidence   = float(s.linkedin_feed_min_confidence)
+        self._search_queries   = list(s.linkedin_feed_search_query_list)
+        self._search_date      = str(s.linkedin_feed_search_date_posted or "").strip()
+        self._search_scrolls   = int(s.linkedin_feed_search_max_scrolls)
+        self._search_max_posts = int(s.linkedin_feed_search_max_posts_per_query)
+
+        # Per-source collection counts ("feed", "search: <q>") for the diagnostic.
+        self._source_counts: dict[str, int] = {}
+
+    def default_mode(self) -> str:
+        """"both" when post search is enabled in settings, else "feed"."""
+        return MODE_BOTH if self._settings.linkedin_feed_search_enabled else MODE_FEED
 
     def get_token_usage(self) -> dict:
         """LLM token-usage summary for this agent's calls (an empty summary when no LLM service)."""
@@ -358,9 +579,15 @@ class LinkedInFeedAgent:
         slow_mo: int = 0,
         on_status: StatusCallback | None = None,
         on_batch: BatchCallback | None = None,
+        mode: str | None = None,
     ) -> list[FeedLead]:
-        """Open the Home Feed, collect posts, and return validated IT-hiring
-        leads. Raises FeedAuthError when the session is not authenticated."""
+        """Read posts from the Home Feed and/or post search (`mode`), then return
+        validated vendor-opportunity leads. Raises FeedAuthError when the session is
+        not authenticated, ValueError for an unknown mode."""
+        mode = mode or self.default_mode()
+        if mode not in MODES:
+            raise ValueError(f"Unknown LinkedIn feed mode {mode!r}; expected one of {MODES}")
+
         from app.scrapers.browser_manager import BrowserManager, PersistentBrowserManager
         from app.services.config_service import ConfigService
         from app.services.session_manager import SessionManager, account_profile_dir
@@ -388,34 +615,41 @@ class LinkedInFeedAgent:
                 profile_dir=account_profile, headless=headless, slow_mo=slow_mo,
             )
 
+        collected: dict[str, dict] = {}
         async with browser_ctx as bm:
             page = await bm.new_page()
-            await self._open_feed(page)
-            raw_posts = await self._collect_posts(page, on_status=on_status)
+            if mode in (MODE_FEED, MODE_BOTH):
+                await self._open(page, FEED_URL)
+                await self._collect_from_page(
+                    page, collected, label="feed", max_new=self._max_posts,
+                    max_scrolls=self._max_scrolls, min_scrolls=self._min_scrolls,
+                    on_status=on_status,
+                )
+            if mode in (MODE_SEARCH, MODE_BOTH):
+                await self._run_searches(page, collected, on_status=on_status)
+            raw_posts = list(collected.values())
             leads = await self._process_posts(raw_posts, on_status=on_status, on_batch=on_batch)
 
         logger.info(
             "linkedin_feed_harvest_completed",
-            posts_collected=len(raw_posts),
-            leads=len(leads),
-            llm_calls=self._llm_calls_made,
+            mode=mode, posts_collected=len(raw_posts), leads=len(leads),
+            llm_calls=self._llm_calls_made, sources=self._source_counts,
         )
         return leads
 
-    # ── Open + auth-gate the feed ───────────────────────────────────────────────
+    # ── Open + auth-gate a page ─────────────────────────────────────────────────
 
-    async def _open_feed(self, page: "Page") -> None:
-        """Open the LinkedIn Home Feed, dismiss overlays and verify the session is logged in.
+    async def _open(self, page: "Page", url: str) -> None:
+        """Navigate to `url`, dismiss overlays and verify the session is logged in.
 
-        Raises FeedAuthError if navigation fails, if there is no li_at cookie, or if LinkedIn
-        redirected to a gated (login/checkpoint) path.
-        """
+        Raises FeedAuthError if navigation fails, if there is no li_at cookie, or if
+        LinkedIn redirected to a gated (login/checkpoint) path."""
         try:
-            await page.goto(FEED_URL, wait_until="domcontentloaded", timeout=30_000)
+            await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
             await page.wait_for_timeout(3_000)
         except Exception as exc:
-            logger.error("linkedin_feed_navigation_failed", error=str(exc))
-            raise FeedAuthError(f"Could not open LinkedIn Home Feed: {exc}") from exc
+            logger.error("linkedin_feed_navigation_failed", url=url[:120], error=str(exc))
+            raise FeedAuthError(f"Could not open LinkedIn ({url[:80]}): {exc}") from exc
 
         await self._dismiss_overlays(page)
 
@@ -428,10 +662,10 @@ class LinkedInFeedAgent:
         if not any(c.get("name") == "li_at" for c in cookies) or any(p in page.url for p in _GATED_PATHS):
             logger.warning("linkedin_feed_not_authenticated", url=page.url[:80])
             raise FeedAuthError(
-                "LinkedIn Home Feed is not authenticated (no li_at cookie). "
+                "LinkedIn is not authenticated (no li_at cookie). "
                 "Run POST /linkedin-setup-session to log in once."
             )
-        logger.info("linkedin_feed_ready", url=page.url[:80])
+        logger.info("linkedin_feed_page_ready", url=page.url[:120])
 
     async def _dismiss_overlays(self, page: "Page") -> None:
         """Close any visible dismiss/close popups (e.g. messaging bubbles); failures are ignored."""
@@ -448,126 +682,184 @@ class LinkedInFeedAgent:
             except Exception:
                 pass
 
-    # ── Scroll-collect the rendered feed ────────────────────────────────────────
+    # ── Post search ─────────────────────────────────────────────────────────────
 
-    async def _collect_posts(
-        self, page: "Page", on_status: StatusCallback | None = None,
-    ) -> list[dict]:
-        """Scroll the feed, accumulating de-duplicated posts (keyed by URN), until
-        any env-configured stop condition trips: max posts, max scrolls, N scrolls
-        with no new posts, or M scrolls returning an empty DOM. Cooperative-stop
-        aware."""
-        collected: dict[str, dict] = {}   # urn/key → raw post
+    async def _run_searches(
+        self, page: "Page", collected: dict[str, dict], on_status: StatusCallback | None = None,
+    ) -> None:
+        """Run LinkedIn post search for every configured vendor phrase and add the
+        results to `collected`. A failing query is logged and skipped; an auth
+        failure (FeedAuthError) propagates."""
+        queries = self._search_queries
+        if not queries:
+            logger.warning("linkedin_feed_search_no_queries")
+            return
+        for i, query in enumerate(queries, start=1):
+            if run_guard.is_stop_requested():
+                logger.info("linkedin_feed_search_stopped_by_user", query=query)
+                break
+            if on_status:
+                await on_status(f"Searching LinkedIn posts: \"{query}\" ({i}/{len(queries)})…")
+            try:
+                await self._open(page, _search_url(query, self._search_date))
+            except FeedAuthError:
+                raise
+            except Exception as exc:
+                logger.warning("linkedin_feed_search_open_failed", query=query, error=str(exc))
+                continue
+            await self._collect_from_page(
+                page, collected, label=f"search: {query}", max_new=self._search_max_posts,
+                max_scrolls=self._search_scrolls, min_scrolls=0, on_status=on_status,
+            )
+
+    # ── Scroll-collect a page ───────────────────────────────────────────────────
+
+    async def _expand_posts(self, page: "Page") -> None:
+        """Click every "…more" toggle so full post text is readable. If a click
+        navigated away (some layouts open the post), go back."""
+        before = page.url.split("?")[0]
+        try:
+            clicked = int(await page.evaluate(_EXPAND_JS) or 0)
+        except Exception as exc:
+            logger.debug("linkedin_feed_expand_failed", error=str(exc))
+            return
+        if not clicked:
+            return
+        await page.wait_for_timeout(600)
+        if page.url.split("?")[0] != before:
+            logger.info("linkedin_feed_expand_navigated_back", to=page.url[:100])
+            try:
+                await page.go_back(wait_until="domcontentloaded", timeout=15_000)
+                await page.wait_for_timeout(1_500)
+            except Exception:
+                pass
+
+    async def _read_page_posts(self, page: "Page") -> tuple[int, str, list[dict]]:
+        """Return (container_count, strategy, posts) for the posts currently rendered.
+        Falls back to splitting the page text when no post element matched."""
+        try:
+            result = await page.evaluate(_COLLECT_POSTS_JS)
+        except Exception as exc:
+            logger.warning("linkedin_feed_collect_eval_failed", error=str(exc))
+            result = {"count": 0, "strategy": "error", "posts": []}
+        count = int(result.get("count", 0) or 0)
+        posts = list(result.get("posts", []) or [])
+        strategy = str(result.get("strategy") or "")
+        if count == 0:
+            try:
+                parts = await page.evaluate(_PAGE_TEXT_JS) or []
+            except Exception:
+                parts = []
+            posts = [{"urn": "", "text": p, "full_text": p, "page_text_fallback": True} for p in parts]
+            count, strategy = len(posts), "page_text"
+        return count, strategy, posts
+
+    async def _collect_from_page(
+        self,
+        page: "Page",
+        collected: dict[str, dict],
+        *,
+        label: str,
+        max_new: int,
+        max_scrolls: int,
+        min_scrolls: int,
+        on_status: StatusCallback | None = None,
+    ) -> int:
+        """Scroll the current page, adding de-duplicated posts (keyed by URN, else
+        text) to `collected`, until: `max_new` new posts, `max_scrolls` scrolls, N
+        scrolls with no new posts (after `min_scrolls`), or M empty reads. A post
+        seen again keeps the longer text and records every place it was found.
+        Returns the number of new posts. Cooperative-stop aware."""
+        added_total = 0
         no_new_streak = 0
         empty_dom_streak = 0
         prev_height = 0
 
         await _wait_for_page_text_stable(page, stable_rounds=3, max_polls=30)
 
-        for scroll_i in range(self._max_scrolls + 1):
+        for scroll_i in range(max_scrolls + 1):
             if run_guard.is_stop_requested():
-                logger.info("linkedin_feed_collect_stopped_by_user", scroll=scroll_i, collected=len(collected))
+                logger.info("linkedin_feed_collect_stopped_by_user", source=label, scroll=scroll_i)
                 break
 
-            try:
-                result = await page.evaluate(_COLLECT_POSTS_JS)
-            except Exception as exc:
-                logger.warning("linkedin_feed_collect_eval_failed", scroll=scroll_i, error=str(exc))
-                result = {"count": 0, "posts": []}
+            await self._expand_posts(page)
+            dom_count, strategy, posts = await self._read_page_posts(page)
 
-            dom_count = int(result.get("count", 0))
-            posts = result.get("posts", []) or []
-
-            # Empty-DOM signal — feed exhausted or a DOM change broke matching.
             if dom_count == 0:
                 empty_dom_streak += 1
-                logger.info("linkedin_feed_empty_dom", scroll=scroll_i, streak=empty_dom_streak)
+                logger.info("linkedin_feed_empty_dom", source=label, scroll=scroll_i, streak=empty_dom_streak)
                 if empty_dom_streak >= self._empty_dom_rounds:
-                    logger.info("linkedin_feed_stop_empty_dom", scroll=scroll_i)
+                    logger.info("linkedin_feed_stop_empty_dom", source=label, scroll=scroll_i)
                     break
             else:
                 empty_dom_streak = 0
 
             added = 0
             for p in posts:
-                key = (p.get("urn") or "").strip() or _clean(p.get("text", ""))[:80]
-                if not key or key in collected:
+                key = (p.get("urn") or "").strip() or _clean(p.get("full_text") or p.get("text", ""))[:120]
+                if not key:
                     continue
+                existing = collected.get(key)
+                if existing is not None:
+                    if len(p.get("full_text") or "") > len(existing.get("full_text") or ""):
+                        p["found_via"] = existing.get("found_via", [])
+                        existing = collected[key] = p
+                    if label not in existing.setdefault("found_via", []):
+                        existing["found_via"].append(label)
+                    continue
+                p["found_via"] = [label]
                 collected[key] = p
                 added += 1
-                if len(collected) >= self._max_posts:
+                if added_total + added >= max_new:
                     break
-
-            # No-new-posts signal — distinct from empty DOM (posts render but all
-            # are duplicates: natural end of fresh feed content).
-            if added == 0:
-                no_new_streak += 1
-            else:
-                no_new_streak = 0
+            added_total += added
+            no_new_streak = 0 if added else no_new_streak + 1
 
             if on_status:
-                await on_status(f"Collecting feed posts… {len(collected)} gathered")
+                await on_status(f"Collecting posts ({label})… {len(collected)} gathered")
             logger.info(
                 "linkedin_feed_scroll",
-                scroll=scroll_i, dom_count=dom_count, new=added,
-                total=len(collected), no_new_streak=no_new_streak,
+                source=label, scroll=scroll_i, dom_count=dom_count, strategy=strategy,
+                new=added, total=len(collected), no_new_streak=no_new_streak,
             )
 
-            if len(collected) >= self._max_posts:
-                logger.info("linkedin_feed_stop_max_posts", total=len(collected))
+            if added_total >= max_new:
+                logger.info("linkedin_feed_stop_max_posts", source=label, total=added_total)
                 break
             # Honour the "no new posts" early-stop only after a minimum number of
-            # scrolls — IT hiring posts sit deep in the feed and LinkedIn often
-            # serves a barren batch before loading more, so stopping at the first
-            # few quiet scrolls would miss them.
-            if no_new_streak >= self._no_new_rounds and scroll_i >= self._min_scrolls:
-                logger.info("linkedin_feed_stop_no_new", scroll=scroll_i)
+            # scrolls: LinkedIn often serves a barren batch before loading more.
+            if no_new_streak >= self._no_new_rounds and scroll_i >= min_scrolls:
+                logger.info("linkedin_feed_stop_no_new", source=label, scroll=scroll_i)
                 break
-            if scroll_i >= self._max_scrolls:
-                logger.info("linkedin_feed_stop_max_scrolls", scroll=scroll_i)
+            if scroll_i >= max_scrolls:
+                logger.info("linkedin_feed_stop_max_scrolls", source=label, scroll=scroll_i)
                 break
 
-            # Load more posts, then measure whether the document actually grew. If
-            # it did, the infinite-scroll loader fired — reset the no-new streak so
-            # a slow-rendering batch (posts appended but not yet parsed) isn't
-            # mistaken for the end of the feed.
-            new_height = await self._scroll_feed(page)
+            # If the document grew, the infinite-scroll loader fired; don't treat a
+            # slow-rendering batch as the end of the page.
+            new_height = await self._scroll(page)
             if new_height > prev_height + 50:
                 no_new_streak = 0
             prev_height = new_height
 
-        logger.info("linkedin_feed_collect_done", total=len(collected))
-        return list(collected.values())
+        self._source_counts[label] = self._source_counts.get(label, 0) + added_total
+        logger.info("linkedin_feed_collect_done", source=label, new=added_total, total=len(collected))
+        return added_total
 
-    async def _scroll_feed(self, page: "Page") -> int:
-        """Trigger the Home Feed's infinite-scroll loader and return the document
-        scroll height afterwards (so the caller can detect real growth).
+    async def _scroll(self, page: "Page") -> int:
+        """Trigger the page's infinite-scroll loader and return the document scroll
+        height afterwards (so the caller can detect real growth).
 
-        The feed lazy-loads via an IntersectionObserver near the bottom. The old
-        code only did window.scrollTo(0, body.scrollHeight) + a wheel event at the
-        default pointer position (0,0) — which lands on the fixed top nav and
-        scrolls nothing — so the loader never fired and the DOM stayed pinned at
-        the first ~11 posts. Three complementary nudges make it fire reliably:
-          1. scroll the document to the bottom (the feed scrolls on the window);
-          2. pull the LAST rendered post into view — scrollIntoView walks up to
-             whatever ancestor is actually scrollable, so it works whether the
-             feed scrolls on the window or an inner overflow container;
-          3. a real wheel gesture over the CENTRE of the 1366×900 viewport.
-        """
+        Three nudges: scroll the document to the bottom, pull the last rendered post
+        into view (works whichever ancestor actually scrolls), and a real wheel
+        gesture over the viewport centre (a wheel at (0,0) lands on the fixed top
+        nav). On search pages a "Show more results" button is clicked as well."""
         try:
-            await page.evaluate(
-                """() => {
-                    const scroller = document.scrollingElement || document.documentElement;
-                    scroller.scrollTo(0, scroller.scrollHeight);
-                    const posts = document.querySelectorAll('div.feed-shared-update-v2, div[data-urn*="urn:li:activity"], div[data-id*="urn:li:activity"], div[role="listitem"]');
-                    if (posts.length) posts[posts.length - 1].scrollIntoView({block: 'end'});
-                    window.dispatchEvent(new Event('scroll'));
-                }"""
-            )
+            await page.evaluate(_SCROLL_JS)
         except Exception as exc:
             logger.debug("linkedin_feed_scroll_eval_failed", error=str(exc))
         try:
-            await page.mouse.move(683, 450)   # centre of the viewport, not (0,0)
+            await page.mouse.move(683, 450)
             await page.mouse.wheel(0, 3000)
         except Exception:
             pass
@@ -579,7 +871,23 @@ class LinkedInFeedAgent:
         except Exception:
             return 0
 
-    # ── Two-stage LLM processing ────────────────────────────────────────────────
+    # ── LLM processing ──────────────────────────────────────────────────────────
+
+    async def _call_llm(self, fn: Callable[[], Awaitable[dict]]) -> dict:
+        """Run one LLM call with retry. Retries `_LLM_POST_RETRIES` times with
+        backoff on LLMUnavailableError (which also covers one unusable reply);
+        re-raises when retries are exhausted. Resets the failure streak on success."""
+        for attempt in range(_LLM_POST_RETRIES + 1):
+            try:
+                result = await fn()
+                self._llm_failure_streak = 0
+                return result
+            except LLMUnavailableError:
+                self._llm_failure_streak += 1
+                if attempt >= _LLM_POST_RETRIES or self._llm_failure_streak >= _LLM_FAILURE_STREAK_ABORT:
+                    raise
+                await asyncio.sleep(_LLM_RETRY_BACKOFF_S * (attempt + 1))
+        return {}
 
     async def _process_posts(
         self,
@@ -587,97 +895,103 @@ class LinkedInFeedAgent:
         on_status: StatusCallback | None = None,
         on_batch: BatchCallback | None = None,
     ) -> list[FeedLead]:
-        """Turn collected feed posts into IT-hiring leads via filter -> LLM classify -> LLM extract.
+        """Turn collected posts into vendor leads via filter -> LLM classify -> LLM extract.
 
-        A cheap keyword filter runs first, so only candidate posts cost LLM calls. Stops early
-        on a user stop request, when the per-run LLM call cap is reached, or when the LLM
-        provider is unavailable (leads found so far are kept). A failure on one post is logged
-        and skipped. Leads are handed to on_batch every _PERSIST_BATCH and at the end, and a
-        per-post diagnostic file (feed_diag.json) is written.
+        A cheap keyword filter runs first, so only candidate posts cost LLM calls.
+        A post whose LLM call still fails after a retry is skipped (stage
+        "llm_error"); processing stops on a user stop request, at the per-run LLM
+        call cap, or after _LLM_FAILURE_STREAK_ABORT consecutive LLM failures. Posts
+        never reached are recorded as "not_processed". Leads are handed to on_batch
+        every _PERSIST_BATCH and at the end; a per-post diagnostic (feed_diag.json)
+        is written.
         """
         leads: list[FeedLead] = []
         pending: list[FeedLead] = []
-        diag: list[dict] = []            # per-post trace → feed_diag.json
-        cat_counts: dict[str, int] = {}  # classifier category histogram
+        diag: list[dict] = []
+        cat_counts: dict[str, int] = {}
         candidates = 0
         classified_yes = 0
+        stop_reason = ""
+        last_idx = -1
 
         for idx, raw in enumerate(raw_posts):
+            last_idx = idx
             if run_guard.is_stop_requested():
-                logger.info("linkedin_feed_process_stopped_by_user", processed=idx)
+                stop_reason = "stopped_by_user"
                 break
 
-            # Prefer the full container text (commentary + embedded job card) so the
-            # card's company/location/salary reach the candidate filter and the LLM;
-            # fall back to the post body when the container text wasn't captured.
             text = _clean(raw.get("full_text") or raw.get("text", ""))
             rec: dict = {
-                "idx":       idx,
-                "author":    raw.get("author_name", ""),
-                "is_repost": bool(raw.get("is_repost")),
-                "text_len":  len(text),
-                "snippet":   text[:280],
-                "stage":     "collected",
+                "idx":         idx,
+                "author":      raw.get("author_name", ""),
+                "urn":         raw.get("urn", ""),
+                "found_via":   raw.get("found_via", []),
+                "is_repost":   bool(raw.get("is_repost")),
+                "is_promoted": bool(raw.get("is_promoted")),
+                "text_len":    len(text),
+                "snippet":     text[:280],
+                "stage":       "collected",
             }
 
-            # Stage 1 — deterministic candidate filter (no LLM).
             if not _is_candidate(text):
                 rec["stage"] = "filtered_out_not_candidate"
                 diag.append(rec)
                 continue
             candidates += 1
-            rec["stage"] = "candidate"
 
             if self._llm_calls_made >= self._llm_max_calls:
                 logger.warning("linkedin_feed_llm_cap_reached", cap=self._llm_max_calls, idx=idx)
                 rec["stage"] = "skipped_llm_cap"
                 diag.append(rec)
+                stop_reason = "llm_cap"
                 break
 
             try:
-                # Stage 2 — LLM classify.
-                classification = await self._classify(text, raw)
+                classification = await self._call_llm(lambda t=text, r=raw: self._classify(t, r))
                 cat = str(classification.get("category") or "unknown")
                 rec.update(
                     category=cat,
-                    is_it_hiring=classification.get("is_it_hiring"),
+                    is_vendor_opportunity=classification.get("is_vendor_opportunity"),
                     it_relevance=classification.get("it_relevance"),
                     confidence=classification.get("confidence"),
+                    reason=classification.get("reason"),
                 )
                 cat_counts[cat] = cat_counts.get(cat, 0) + 1
                 if not self._is_keeper(classification):
-                    rec["stage"] = "classified_not_it_hiring"
+                    rec["stage"] = "classified_not_vendor_opportunity"
                     diag.append(rec)
                     continue
                 classified_yes += 1
 
                 if self._llm_calls_made >= self._llm_max_calls:
-                    logger.warning("linkedin_feed_llm_cap_reached", cap=self._llm_max_calls, idx=idx)
                     rec["stage"] = "skipped_llm_cap_before_extract"
                     diag.append(rec)
+                    stop_reason = "llm_cap"
                     break
 
-                # Stage 3 — LLM extract (positives only).
-                extracted = await self._extract(text, raw)
+                extracted = await self._call_llm(lambda t=text, r=raw: self._extract(t, r))
                 lead = self._finalize(raw, text, classification, extracted)
                 if lead is None:
-                    rec["stage"] = "dropped_no_job_title"
+                    rec["stage"] = "dropped_empty_extraction"
                     diag.append(rec)
                     continue
                 rec["stage"] = "lead"
                 rec["lead_confidence"] = lead.lead_confidence
             except LLMUnavailableError as exc:
-                # Provider down — stop processing further posts but keep whatever
-                # was already extracted (the caller persists the partial set).
-                logger.error("linkedin_feed_llm_unavailable", error=str(exc), processed=idx)
-                rec["stage"] = "llm_unavailable"
+                rec["stage"] = "llm_error"
+                rec["error"] = str(exc)[:300]
                 diag.append(rec)
-                break
+                if self._llm_failure_streak >= _LLM_FAILURE_STREAK_ABORT:
+                    logger.error("linkedin_feed_llm_unavailable", error=str(exc), processed=idx)
+                    stop_reason = "llm_unavailable"
+                    break
+                logger.warning("linkedin_feed_post_llm_error", idx=idx, error=str(exc))
+                continue
             except Exception as exc:
                 # One bad post must never abort the whole harvest.
                 logger.warning("linkedin_feed_post_failed", idx=idx, error=str(exc))
                 rec["stage"] = "error"
-                rec["error"] = str(exc)
+                rec["error"] = str(exc)[:300]
                 diag.append(rec)
                 continue
 
@@ -688,27 +1002,43 @@ class LinkedInFeedAgent:
                 await self._flush(pending, on_batch, on_status, len(leads))
                 pending = []
 
+        # Record posts never reached so the diagnostic accounts for every post.
+        if stop_reason:
+            first_unrecorded = last_idx if stop_reason == "stopped_by_user" else last_idx + 1
+            for idx in range(first_unrecorded, len(raw_posts)):
+                raw = raw_posts[idx]
+                diag.append({
+                    "idx": idx, "author": raw.get("author_name", ""),
+                    "found_via": raw.get("found_via", []),
+                    "snippet": _clean(raw.get("full_text") or raw.get("text", ""))[:280],
+                    "stage": "not_processed",
+                })
+
         if pending and on_batch:
             await self._flush(pending, on_batch, on_status, len(leads))
 
         logger.info(
             "linkedin_feed_processing_done",
             posts=len(raw_posts), candidates=candidates,
-            classified_it_hiring=classified_yes, leads=len(leads),
-            categories=cat_counts,
+            classified_vendor_opportunity=classified_yes, leads=len(leads),
+            categories=cat_counts, stop_reason=stop_reason or None,
         )
-        self._write_diag(diag, cat_counts, len(raw_posts), candidates, classified_yes, len(leads))
+        self._write_diag(
+            diag, cat_counts, len(raw_posts), candidates, classified_yes, len(leads),
+            source_counts=dict(self._source_counts), stop_reason=stop_reason,
+        )
         return leads
 
     @staticmethod
     def _write_diag(
         diag: list[dict], cat_counts: dict[str, int],
         posts: int, candidates: int, classified_yes: int, leads: int,
+        source_counts: dict[str, int] | None = None, stop_reason: str = "",
     ) -> None:
         """Best-effort per-run diagnostic dump so a '0 leads' run is explainable:
-        every collected post with its text snippet and the stage it stopped at
-        (filtered_out_not_candidate / classified_not_it_hiring / lead / …), plus a
-        summary + category histogram. Written to the bind-mounted data dir
+        every collected post with its snippet, where it was found and the stage it
+        stopped at, plus a summary (per-source counts, category histogram, why
+        processing stopped early). Written to the bind-mounted data dir
         (ai-harvest-agent/data/results/lead_intelligence/feed_diag.json on the
         host). Never raises."""
         try:
@@ -720,11 +1050,13 @@ class LinkedInFeedAgent:
                 _json.dumps(
                     {
                         "summary": {
-                            "posts_collected":       posts,
-                            "candidates":            candidates,
-                            "classified_it_hiring":  classified_yes,
-                            "leads":                 leads,
-                            "category_counts":       cat_counts,
+                            "posts_collected":               posts,
+                            "posts_by_source":               source_counts or {},
+                            "candidates":                    candidates,
+                            "classified_vendor_opportunity": classified_yes,
+                            "leads":                         leads,
+                            "category_counts":               cat_counts,
+                            "stop_reason":                   stop_reason or None,
                         },
                         "posts": diag,
                     },
@@ -750,64 +1082,79 @@ class LinkedInFeedAgent:
         try:
             await on_batch(list(pending))
             if on_status:
-                await on_status(f"Extracting IT hiring leads… {total} saved")
+                await on_status(f"Extracting vendor leads… {total} saved")
         except Exception as exc:
             logger.warning("linkedin_feed_batch_flush_failed", error=str(exc))
 
     def _is_keeper(self, c: dict) -> bool:
-        """Accept only a genuine IT hiring post above the confidence gate."""
+        """Accept only a genuine vendor opportunity above the confidence gate. A
+        vendor requirement must be for IT roles; a vendor registration only has to
+        be for staffing / recruitment vendors (the classifier checks that)."""
         try:
             conf = float(c.get("confidence", 0.0) or 0.0)
         except (TypeError, ValueError):
             conf = 0.0
+        cat = c.get("category")
         return bool(
-            c.get("is_it_hiring")
-            and c.get("it_relevance")
-            and c.get("category") == "it_hiring"
+            c.get("is_vendor_opportunity")
+            and cat in _KEEPER_CATEGORIES
+            and (c.get("it_relevance") or cat == "vendor_registration")
             and conf >= self._min_confidence
+        )
+
+    @staticmethod
+    def _post_context(raw: dict) -> str:
+        """Poster / flags / links header shared by the classify and extract prompts."""
+        author = _clean(raw.get("author_name", ""))
+        headline = _clean(raw.get("author_headline", ""))
+        links = [str(x) for x in (raw.get("links") or []) if x][:10]
+        return (
+            f"---POSTER---\n{author or '(unknown)'} — {headline or '(no headline)'}\n"
+            f"---PROMOTED POST---\n{'yes' if raw.get('is_promoted') else 'no'}\n"
+            f"---LINKS IN POST---\n{chr(10).join(links) if links else '(none)'}\n"
         )
 
     # ── Stage 2: classification ─────────────────────────────────────────────────
 
     async def _classify(self, text: str, raw: dict) -> dict:
-        """Ask the LLM whether a post is a genuine, current IT hiring post (one LLM call).
-
-        Returns the classifier dict (is_it_hiring, it_relevance, category, confidence,
-        reason) or {} when the LLM returns nothing. Counts toward the per-run call cap.
-        """
-        headline = _clean(raw.get("author_headline", ""))
+        """Ask the LLM whether a post is a vendor opportunity for an IT staffing
+        vendor (one LLM call). Returns the classifier dict (is_vendor_opportunity,
+        it_relevance, category, confidence, reason) or {} on an empty reply."""
         content = (
-            f"---AUTHOR HEADLINE---\n{headline or '(none)'}\n\n"
+            f"{self._post_context(raw)}\n"
             f"---POST TEXT---\n{text[:_POST_TEXT_MAX_CHARS]}"
         )
         schema = (
-            '{"is_it_hiring": bool (true ONLY if this post is a real, current job '
-            'opening / hiring call for an IT/software/technology role at a specific '
-            "company — judge the whole post's meaning, not the mere presence of "
-            'hiring words), '
-            '"it_relevance": bool (true if the role(s) are IT/software/technology — '
-            "software/backend/frontend/full-stack engineers, data engineers/"
-            "scientists, ML/AI, DevOps/cloud/SRE, QA/automation, cybersecurity, "
-            "database, mobile, etc.), "
-            f'"category": one of {list(_FEED_CATEGORIES)} (it_hiring = a genuine IT '
-            "hiring post; hiring_trends = commentary/discussion about hiring, NOT an "
-            "opening; hr_content = general HR/recruitment content; ad_promo = "
-            "advertisement/sponsored; company_promo = company promotion; "
-            "repost_no_info = a repost with no real hiring detail; non_it_hiring = "
-            "hiring but not IT; irrelevant/other otherwise), "
-            '"confidence": number between 0 and 1 (your confidence in is_it_hiring), '
+            '{"is_vendor_opportunity": bool (true ONLY if the poster is seeking EXTERNAL '
+            "staffing / recruitment / IT-services vendors or partners: vendor registration "
+            "or empanelment, partner onboarding, or a contract / C2C / C2H / third-party "
+            "requirement explicitly open to vendors, agencies or partners, so an IT staffing "
+            "company could supply candidates or services. FALSE for a company hiring "
+            "employees directly from candidates, a staffing firm advertising its own "
+            "bench / hotlist / services, job seekers, commentary, and requests for suppliers "
+            'of goods or non-staffing services), '
+            '"it_relevance": bool (true if the roles or services are IT / software / '
+            "technology: developers, data, cloud/DevOps, QA, SAP/Salesforce/ServiceNow, "
+            "cybersecurity, IT support, etc.), "
+            f'"category": one of {list(_FEED_CATEGORIES)} (vendor_registration = inviting '
+            "staffing/recruitment vendors to register, empanel or partner; "
+            "vendor_requirement = a specific requirement shared for vendors/partners to "
+            "fill; direct_hiring = hiring candidates directly, no vendors; "
+            "vendor_marketing = a staffing firm promoting its own consultants or services; "
+            "non_staffing_vendor = seeking suppliers of goods or non-staffing services; "
+            "ad_promo = an ad for a product, course or event; others as named), "
+            '"confidence": number between 0 and 1 (your confidence in is_vendor_opportunity), '
             '"reason": str (one short sentence)}'
         )
         system = (
-            "You classify a single LinkedIn Home Feed post. Decide from the "
-            "SEMANTIC MEANING of the entire post, never from keyword presence. A "
-            "post that a company is 'growing its engineering team and looking for "
-            "Python developers' IS a genuine IT hiring post (is_it_hiring=true, "
-            "category=it_hiring). A post 'discussing current hiring trends in the "
-            "IT industry' is NOT (category=hiring_trends, is_it_hiring=false). Ads, "
-            "company promotion, generic HR content, and reposts with no concrete "
-            "opening are not hiring posts. Return only the schema fields, no "
-            "commentary."
+            "You screen LinkedIn posts for SightSpectrum, an IT staffing and recruitment "
+            "vendor looking for companies that need staffing vendors. Decide from the "
+            "SEMANTIC MEANING of the whole post, not keyword presence. 'We are empanelling "
+            "recruitment agencies for our IT hiring, register here' and 'Need Java "
+            "developers on C2C, vendors share profiles to x@y.com' ARE vendor opportunities. "
+            "'We are hiring Java developers, apply here' is direct_hiring. 'Our bench: 5 "
+            "Java consultants available for C2C' is vendor_marketing. A promoted post can "
+            "still be a vendor opportunity. Return only the schema fields, no commentary."
         )
         self._llm_calls_made += 1
         result = await self._get_llm_service().extract_json(
@@ -821,35 +1168,45 @@ class LinkedInFeedAgent:
     # ── Stage 3: extraction (verbatim-only, no fabrication) ─────────────────────
 
     async def _extract(self, text: str, raw: dict) -> dict:
-        """Ask the LLM to extract job and recruiter fields from a confirmed hiring post.
+        """Ask the LLM to extract the opportunity and poster fields from a confirmed
+        vendor-opportunity post (one LLM call).
 
-        The posting date is resolved in Python first and passed in (stored back on the result
-        as "_resolved_date"); the prompt forbids invented companies/emails/phones. Counts
-        toward the per-run LLM call cap. Returns {} plus "_resolved_date" on an empty reply.
-        The exact content sent to the LLM is stored as "_source_text" so _finalize can
-        ground the returned email/phone against it.
-        """
-        headline = _clean(raw.get("author_headline", ""))
-        author_name = _clean(raw.get("author_name", ""))
+        The posting date is resolved in Python first and passed in (stored back as
+        "_resolved_date"); the prompt forbids invented companies/emails/phones/links.
+        The exact content sent is stored as "_source_text" so _finalize can ground
+        the returned email/phone/link against it."""
         profile_url = (raw.get("author_profile_url") or "").strip()
         mailto = _clean_mailto(raw.get("mailto"))
 
-        # Pre-resolve the posting date in Python (never ask the LLM to do date math).
         resolved_date = _resolve_posted_date(
             _clean(raw.get("timestamp", "")), self._harvest_started_at
         ) or _resolve_posted_date(text, self._harvest_started_at)
 
         schema = (
-            '{"job_title": str (the IT role being hired for; empty if not stated), '
-            '"company": str (the hiring company; empty if not stated — do NOT guess), '
+            '{"hiring_company": str (the company that needs vendors or candidates: the end '
+            "client if named, else the poster's company; empty if not stated — do NOT guess), "
+            '"requester_type": "end_client" | "staffing_firm" | "unknown" (end_client = the '
+            "company itself needs the people/services; staffing_firm = a staffing firm or "
+            "prime vendor passing on its client's requirement), "
+            '"opportunity_type": "vendor_registration" | "vendor_requirement", '
+            '"engagement_model": str (e.g. C2C, C2H, Contract, Third-party payroll, Vendor '
+            "empanelment, Staff augmentation; empty if not stated), "
+            '"roles": list[str] (roles / positions needed, as written; empty list if none), '
+            '"positions_count": str (empty if not stated), '
             '"location": str (city/region and Remote/Hybrid/On-site if stated; empty otherwise), '
-            '"salary": str (empty if not disclosed), '
-            '"employment_type": str (e.g. Full-time, Contract; empty if not stated), '
+            '"duration": str (contract duration; empty if not stated), '
+            '"rate_or_budget": str (empty if not disclosed), '
             '"skills": list[str] (technologies/skills explicitly named; empty list if none), '
-            '"description": str (the post\'s hiring details verbatim; empty if none), '
+            '"requirement_summary": str (1-2 sentences: what they need from vendors, using '
+            "only facts in the post), "
+            '"how_to_engage": str (how vendors should respond, as stated, e.g. "share '
+            'profiles to …", "fill the registration form"; empty if not stated), '
+            '"registration_link": str or null (a URL copied EXACTLY from the post text or the '
+            "LINKS list; null if none), "
+            '"deadline": str (empty if not stated), '
             '"posted": str or null (copy the pre-calculated date given below verbatim; '
             "do not derive it yourself; null if marked unavailable), "
-            '"recruiter_name": str or null (the poster/recruiter name, null if unknown), '
+            '"recruiter_name": str or null (the poster, null if unknown), '
             '"recruiter_title": str or null (their designation, null if unknown), '
             '"recruiter_company": str or null (only if explicitly stated), '
             '"recruiter_email": str or null (ONLY if an email appears verbatim in the '
@@ -858,15 +1215,15 @@ class LinkedInFeedAgent:
             "never guess; E.164 with country code when unambiguous; if masked/partial, null)}"
         )
         system = (
-            "You extract structured data from a single LinkedIn hiring post's text. "
-            "Extract ONLY what is explicitly present. NEVER fabricate, infer, or "
-            "construct a company, email, phone, location, salary, or requirement "
-            "that is not literally in the text (e.g. do not build an email from a "
-            "name and company). If a field is not present, return empty/null. "
-            "Return only the schema fields, no commentary."
+            "You extract structured data from a single LinkedIn post in which a company "
+            "is looking for staffing / recruitment vendors. Extract ONLY what is "
+            "explicitly present. NEVER fabricate, infer, or construct a company, email, "
+            "phone, link, location, rate, or requirement that is not literally in the "
+            "text (e.g. do not build an email from a name and company). If a field is not "
+            "present, return empty/null. Return only the schema fields, no commentary."
         )
         content = (
-            f"---POSTER---\n{author_name or '(unknown)'} — {headline or '(no headline)'}\n"
+            f"{self._post_context(raw)}"
             f"---POSTER PROFILE URL---\n{profile_url or '(none)'}\n"
             f"---MAILTO LINK---\n{mailto or '(none)'}\n"
             f"---POSTING DATE (pre-calculated)---\n{resolved_date or 'unavailable'}\n\n"
@@ -889,44 +1246,83 @@ class LinkedInFeedAgent:
     def _finalize(
         self, raw: dict, text: str, classification: dict, extracted: dict,
     ) -> FeedLead | None:
-        """Build a validated FeedLead. Returns None if the extraction has no
-        usable job title (can't be a job lead without one).
+        """Build a validated FeedLead, or None when the extraction came back empty.
 
-        The LLM's recruiter email/phone is kept only when grounded in the content it
-        was sent (extracted["_source_text"], else the post text + mailto); a DOM
-        mailto address (query string dropped, URL-decoded) is the email fallback."""
-        job_title = str(extracted.get("job_title") or "").strip()
-        if not job_title:
-            logger.info("linkedin_feed_lead_dropped_no_title", urn=raw.get("urn", "")[:40])
+        The LLM's email/phone/registration link are kept only when grounded in the
+        content it was sent (extracted["_source_text"], else the post text + mailto)
+        or the post's own links; a DOM mailto address is the email fallback."""
+        if not any(not str(k).startswith("_") and v for k, v in extracted.items()):
+            logger.info("linkedin_feed_lead_dropped_empty_extraction", urn=str(raw.get("urn", ""))[:40])
             return None
 
-        # Recruiter identity — prefer the DOM-scraped author (reliable) over the
-        # LLM's echo; contact only if verbatim (deterministic masking rejection).
-        author_name = _clean(raw.get("author_name", "")) or str(extracted.get("recruiter_name") or "").strip()
+        def _s(key: str) -> str:
+            return str(extracted.get(key) or "").strip()
+
+        def _list(key: str, limit: int) -> list[str]:
+            vals = extracted.get(key) or []
+            if isinstance(vals, str):
+                vals = [vals]
+            return [str(v).strip() for v in vals if str(v).strip()][:limit]
+
+        category = str(classification.get("category") or "")
+        opportunity = _s("opportunity_type")
+        if opportunity not in _KEEPER_CATEGORIES:
+            opportunity = category if category in _KEEPER_CATEGORIES else "vendor_requirement"
+        requester = _s("requester_type").lower()
+        if requester not in ("end_client", "staffing_firm"):
+            requester = "unknown"
+
+        roles = _list("roles", 10)
+        if roles:
+            job_title = ", ".join(roles[:3])[:250]
+        elif opportunity == "vendor_registration":
+            job_title = "Vendor empanelment / registration"
+        else:
+            job_title = "Contract staffing requirement"
+
+        # Poster identity: prefer the DOM-scraped author over the LLM's echo.
+        author_name = _clean(raw.get("author_name", "")) or _s("recruiter_name")
         profile_url = (raw.get("author_profile_url") or "").split("?")[0].strip()
         if profile_url and "/in/" not in profile_url.lower():
-            profile_url = ""  # company/school link, not a recruiter profile
+            profile_url = ""  # company/school link, not a person's profile
 
         # Grounding: an LLM-returned contact must be written in what it was given.
         mailto = _clean_mailto(raw.get("mailto"))
-        sources = [extracted.get("_source_text") or text, mailto]
+        source_text = extracted.get("_source_text") or text
+        sources = [source_text, mailto]
         email = ground_email(normalize_email(extracted.get("recruiter_email")), sources)[0]
         phone = ground_phone(normalize_phone(extracted.get("recruiter_phone")), sources)[0]
         email = normalize_email(email) or ""
         phone = normalize_phone(phone) or ""
-        # A mailto: link scraped straight from the DOM is authoritative too.
         if not email and mailto:
             email = normalize_email(mailto) or ""
+        links = [str(x) for x in (raw.get("links") or []) if x]
+        registration_link = _ground_link(extracted.get("registration_link"), links, f"{text} {source_text}")
 
-        company = str(extracted.get("company") or "").strip()
-        location = str(extracted.get("location") or "").strip()
-        skills = [str(s).strip() for s in (extracted.get("skills") or []) if str(s).strip()][:20]
-        description = str(extracted.get("description") or "").strip()[:20_000]
-        posted = extracted.get("_resolved_date") or (
-            str(extracted.get("posted")).strip() if extracted.get("posted") else ""
-        )
+        company = _s("hiring_company") or _s("company")
+        location = _s("location")
+        skills = _list("skills", 20)
+        engagement = _s("engagement_model")
+        how_to_engage = _s("how_to_engage")
+        posted = extracted.get("_resolved_date") or _s("posted")
 
-        # IT sub-domain tag (display only) — reuse the shared classifier.
+        details = [
+            ("Engagement", engagement),
+            ("Roles", ", ".join(roles)),
+            ("Positions", _s("positions_count")),
+            ("Duration", _s("duration")),
+            ("Rate / budget", _s("rate_or_budget")),
+            ("Deadline", _s("deadline")),
+            ("How to engage", how_to_engage),
+            ("Registration link", registration_link),
+        ]
+        body = _clean(raw.get("text") or "") or text
+        description = "\n".join(
+            [_s("requirement_summary")]
+            + [f"{k}: {v}" for k, v in details if v]
+            + ["", "--- Original post ---", body[:_POST_TEXT_MAX_CHARS]]
+        ).strip()[:20_000]
+
         domain = _classify_hiring_domain("", _clean(raw.get("author_headline", "")), [job_title, description])
         domain = (domain.split(",")[0].strip() if domain and domain != "NOT_FOUND" else "IT")
 
@@ -934,38 +1330,44 @@ class LinkedInFeedAgent:
             job_title=job_title,
             company=company,
             location=location,
-            salary=str(extracted.get("salary") or "").strip(),
-            employment_type=str(extracted.get("employment_type") or "").strip(),
+            salary=_s("rate_or_budget"),
+            employment_type=engagement,
             work_mode=_infer_work_mode(f"{location} {description}"),
             skills=skills,
             description=description,
             posted_date=posted,
             domain=domain,
+            opportunity_type=opportunity,
+            requester_type=requester,
+            how_to_engage=how_to_engage,
+            registration_link=registration_link,
             recruiter_name=author_name,
-            recruiter_title=str(extracted.get("recruiter_title") or "").strip()
-                or _clean(raw.get("author_headline", "")),
-            recruiter_company=str(extracted.get("recruiter_company") or "").strip(),
+            recruiter_title=_s("recruiter_title") or _clean(raw.get("author_headline", "")),
+            recruiter_company=_s("recruiter_company"),
             recruiter_profile_url=profile_url,
             recruiter_email=email,
             recruiter_phone=phone,
             post_url=self._permalink(raw.get("urn", "")),
             post_urn=str(raw.get("urn") or ""),
             is_repost=bool(raw.get("is_repost")),
-            category="it_hiring",
+            is_promoted=bool(raw.get("is_promoted")),
+            found_via=list(raw.get("found_via") or []),
+            category=opportunity,
         )
-        lead.lead_confidence = self._score(lead, classification)
+        lead.lead_confidence = self._score(lead, classification, text, roles)
         logger.info(
             "linkedin_feed_lead",
-            title=lead.job_title, company=lead.company,
-            recruiter=lead.recruiter_name, has_email=bool(lead.recruiter_email),
-            has_phone=bool(lead.recruiter_phone), confidence=lead.lead_confidence,
+            title=lead.job_title, company=lead.company, type=lead.opportunity_type,
+            poster=lead.recruiter_name, has_email=bool(lead.recruiter_email),
+            has_phone=bool(lead.recruiter_phone), has_link=bool(lead.registration_link),
+            confidence=lead.lead_confidence,
         )
         return lead
 
-    def _score(self, lead: FeedLead, classification: dict) -> float:
+    def _score(self, lead: FeedLead, classification: dict, text: str, roles: list[str]) -> float:
         """Blend the classifier's own confidence with a count of independent
-        supporting signals — a lead is stronger when several agree. No artificial
-        filler: each signal is a real, present piece of evidence."""
+        supporting signals — a lead is stronger when several agree. Each signal is a
+        real, present piece of evidence."""
         try:
             llm_conf = float(classification.get("confidence", 0.0) or 0.0)
         except (TypeError, ValueError):
@@ -973,20 +1375,30 @@ class LinkedInFeedAgent:
         llm_conf = max(0.0, min(1.0, llm_conf))
 
         signals = [
-            _is_candidate(lead.description or ""),           # explicit hiring + IT language
-            bool(lead.job_title),                            # clear IT job title
-            bool(classification.get("it_relevance")),        # IT relevance
-            bool(lead.recruiter_name),                       # recruiter identity
-            bool(lead.company),                              # company identity
-            bool(lead.recruiter_email or lead.recruiter_phone),  # public contact
+            bool(_VENDOR_STRONG_RE.search(text or "")),            # explicit vendor language
+            bool(lead.company),                                    # who needs the vendors
+            bool(roles) or lead.opportunity_type == "vendor_registration",  # concrete ask
+            bool(lead.how_to_engage or lead.registration_link
+                 or lead.recruiter_email or lead.recruiter_phone),  # a way to respond
+            bool(lead.recruiter_name),                             # poster identity
+            bool(classification.get("it_relevance")),              # IT relevance
         ]
         signal_fraction = sum(1 for s in signals if s) / len(signals)
         return round(0.5 * llm_conf + 0.5 * signal_fraction, 3)
 
     @staticmethod
     def _permalink(urn: str) -> str:
-        """Build the post URL from an activity URN ("" for any other URN shape)."""
+        """Build the post URL from an activity / ugcPost / share URN ("" otherwise)."""
         urn = (urn or "").strip()
-        if urn.startswith("urn:li:activity"):
+        if re.fullmatch(r"urn:li:(?:activity|ugcPost|share):\d+", urn):
             return f"https://www.linkedin.com/feed/update/{urn}/"
         return ""
+
+    def _get_llm_service(self) -> "LLMService":
+        """The LLM service, created on first use when none was injected. (This method
+        was accidentally removed in f43447c, which made every classify call raise
+        AttributeError and every feed run end with 0 leads.)"""
+        if self._llm_service is None:
+            from app.services.llm_service import LLMService
+            self._llm_service = LLMService(self._settings)
+        return self._llm_service

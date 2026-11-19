@@ -34,6 +34,9 @@ const BUCKETS = {
   gcc:       { label: "GCC companies",     color: C.secondary, params: { hiring_entity: "GCC" } },
   staffing:  { label: "Staffing firms",    color: "#7C3AED",   params: { hiring_entity: "Staffing Firm" } },
   ambiguous: { label: "Needs review",      color: "#D97706",   params: { hiring_entity: "Ambiguous" } },
+  // My Workspace only: has the job been phoned yet (any logged call in Phone logs)?
+  notcalled: { label: "Not called yet",    color: "#DC2626",   params: { called: "no" },  library: true },
+  called:    { label: "Called",            color: "#047857",   params: { called: "yes" }, library: true },
 };
 
 /**
@@ -69,7 +72,12 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
   const [endDate, setEndDate] = useState(rowsSeed?.dateTo || "");
   // Active classification card ("all" | a BUCKETS key). Like the dates it lives in
   // page state (not the URL), so it rides along in the view cache.
-  const [bucket, setBucket] = useState(rowsSeed?.bucket || "all");
+  // Another page can open My Workspace on a card (Phone logs → "Not called yet") via
+  // navigation state; a My-Workspace-only card never applies on the other pages.
+  const [bucket, setBucket] = useState(() => {
+    const b = location.state?.bucket || rowsSeed?.bucket || "all";
+    return BUCKETS[b] && (!BUCKETS[b].library || library) ? b : "all";
+  });
   const [pageJobs, setPageJobs] = useState(rowsSeed?.jobs || []);
   const [pageTotal, setPageTotal] = useState(rowsSeed?.total || 0);
   const [pageLoading, setPageLoading] = useState(!rowsSeed);
@@ -328,14 +336,18 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
           </p>
         </div>
         <div className="ha-pagehead-actions">
+          {/* Shown to every role (business leads included) — a solid, accented pill so
+              it isn't missed among the header actions. */}
           {!library && !demand && (
             <button
-              className="ha-btn ha-btn-secondary"
+              className="ha-btn"
+              title="Open My Workspace — the jobs assigned to you"
               style={{
-                display: "inline-flex", alignItems: "center", gap: 6,
-                height: 34, padding: "0 14px", borderRadius: 999,
-                fontSize: 13, fontWeight: 600, color: C.primary,
-                border: `1px solid ${C.primary}33`, background: `${C.primary}0A`,
+                display: "inline-flex", alignItems: "center", gap: 7,
+                height: 36, padding: "0 16px", borderRadius: 999,
+                fontSize: 13.5, fontWeight: 700, color: "#fff",
+                border: `1px solid ${C.primary}`, background: C.primary,
+                boxShadow: `0 0 0 3px ${C.primary}26, 0 4px 12px ${C.primary}40`,
                 cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap",
               }}
               onClick={() => onNavigate("library")}
@@ -377,15 +389,19 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
             Counts follow the user's filters (GET /jobs/facets with the filter params;
             each bucket's own filter is left out so every card keeps its count). */}
         <style>{`
-          .ha-runstats.ha-jobstats{grid-template-columns:repeat(4,minmax(0,1fr));}
+          .ha-runstats.ha-jobstats{grid-template-columns:repeat(5,minmax(0,1fr));}
           @media(max-width:520px){.ha-runstats.ha-jobstats{grid-template-columns:repeat(2,minmax(0,1fr));}}
         `}</style>
-        {/* One grid, 4 per row: the 5 clickable classification cards, then the 3
-            informational contact cards for the same filtered rows (2 rows × 4). */}
+        {/* One grid, 5 per row: the 10 stat cards (call status, classification and
+            contact counts for the same filtered rows) fill 2 rows × 5. */}
         <div className="ha-runstats ha-jobstats">
           {[
             { key: "all", value: stats.total || 0, label: demand ? "Total Demand jobs" : "Jobs found", color: C.accent },
-            ...Object.entries(BUCKETS).map(([key, b]) => ({ key, value: stats[key] || 0, label: b.label, color: b.color })),
+            // My Workspace leads with its call cards; the other pages don't show them.
+            ...Object.entries(BUCKETS)
+              .filter(([, b]) => (library ? true : !b.library))
+              .sort(([, a], [, b]) => Number(!!b.library) - Number(!!a.library))
+              .map(([key, b]) => ({ key, value: stats[key] || 0, label: b.label, color: b.color })),
           ].map((card) => {
             const active = bucket === card.key;
             return (

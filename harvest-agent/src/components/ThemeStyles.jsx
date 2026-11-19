@@ -61,6 +61,10 @@ const ThemeStyles = () => (
     .ha-sortbtn{display:inline-flex;align-items:center;gap:4px;border:0;background:transparent;cursor:pointer;font:inherit;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;}
     .ha-td{padding:14px 16px;vertical-align:middle;}
     .ha-row{border-top:1px solid #EEF2F7;}
+    /* Compact table: tighter side padding so more columns fit in the frame. */
+    .ha-table-compact .ha-th,.ha-table-compact .ha-td{padding-left:10px;padding-right:10px;}
+    .ha-row-link{cursor:pointer;}
+    .ha-row-link:focus-visible{outline:2px solid ${C.primary};outline-offset:-2px;}
     .ha-row:hover{background:rgba(226,236,254,.5);}
     .ha-link{color:${C.primary};font-weight:600;background:none;border:0;padding:0;cursor:pointer;font-size:inherit;font-family:inherit;text-align:left;}
     /* Row links are real <a href> (open-in-new-tab) but keep the button look. */
