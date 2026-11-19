@@ -196,6 +196,10 @@ function MyWorkspaceRoute() {
     <JobsPage
       library
       onNavigate={(key) => navigate(`/${key}`)}
+      // Back returns to the page My Workspace was opened from (e.g. Phone logs) — a
+      // history POP, so that page's scroll comes back too. Opened in a new tab /
+      // by direct link there's no earlier entry: go to Harvested Jobs.
+      onBack={() => ((window.history.state?.idx ?? 0) > 0 ? navigate(-1) : navigate("/jobs"))}
       onView={(dv) => navigate(`/jobs/${encodeURIComponent(dv.job.id)}`, { state: { job: dv.job, from: location.pathname + location.search } })}
       pageSizeSel={pageSizeSel} onPageSizeChange={setPageSizeSel}
       urlState

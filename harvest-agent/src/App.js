@@ -7,6 +7,7 @@ import { getMe, logout, ApiError } from "./api";
 import { TenantProvider, INTERNAL_TENANT } from "./TenantContext";
 import DevTenantSwitcher from "./components/DevTenantSwitcher";
 import { PAGE_BG_STYLE } from "./theme";
+import { clearPageCache } from "./lib/pageCache";
 
 // Only these mean "no valid session". Anything else from /auth/me — a network
 // error (laptop waking, Wi-Fi reconnecting), a 502/504 while the api restarts,
@@ -195,6 +196,9 @@ function App() {
               /* revoke best-effort — clear the UI regardless */
             }
             try { sessionStorage.removeItem("ss_intro_played"); } catch { /* ignore */ }
+            // The next user must not see this user's cached lists or saved filters.
+            clearPageCache();
+            try { sessionStorage.removeItem("phoneLogs.savedView"); } catch { /* ignore */ }
             setTenant(INTERNAL_TENANT);
             setRole("user");
             setStatus("anon");

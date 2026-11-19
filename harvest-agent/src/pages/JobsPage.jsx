@@ -8,6 +8,7 @@ import ExportButton from "../components/ExportButton";
 import JobsTable, { PAGE_SIZE_OPTIONS } from "../components/JobsTable";
 import { mapApiJob, fetchAllJobs, jobContact, pocKindLabel, partSourceLabel } from "../lib/jobsData";
 import { csvCell } from "../lib/csv";
+import { cacheRef } from "../lib/pageCache";
 import { useHarvestData } from "../HarvestDataContext";
 import { useTenant } from "../TenantContext";
 
@@ -53,10 +54,15 @@ const BUCKETS = {
  * @param {React.ReactNode} [props.demandTabs] - Demand Search tabs rendered in demand mode.
  * @param {boolean} [props.library] - My Workspace mode: only jobs assigned to the current user.
  */
-export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeChange, urlState = false, demand = false, demandTabs = null, library = false }) {
+const LIBRARY_VIEW = cacheRef("jobs:library");
+const DEMAND_VIEW = cacheRef("jobs:demand");
+
+export default function JobsPage({ onNavigate, onBack, onView, pageSizeSel, onPageSizeChange, urlState = false, demand = false, demandTabs = null, library = false }) {
   const { jobsViewRef: sharedViewRef } = useHarvestData();
-  const demandViewRef = useRef(null);
-  const jobsViewRef = demand ? demandViewRef : sharedViewRef;
+  // Each mode keeps its own view cache (rows, stats, dates, card), so Back to any of
+  // them redraws at once and lands on the saved scroll position. My Workspace and
+  // Demand jobs live in module-level stores that outlive the page's unmount.
+  const jobsViewRef = demand ? DEMAND_VIEW : library ? LIBRARY_VIEW : sharedViewRef;
   // Tenants without the rules feature (e.g. the India client) shouldn't see the
   // Rule Engine shortcut — FeatureGate would bounce the navigation anyway.
   const { hasFeature } = useTenant();
@@ -314,7 +320,7 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
               <button
                 className="ha-btn ha-btn-secondary"
                 style={{ display: "inline-flex", alignItems: "center", gap: 6, height: 34, padding: "0 14px" }}
-                onClick={() => onNavigate("jobs")}
+                onClick={onBack || (() => onNavigate("jobs"))}
               >
                 <ArrowLeft size={15} /> Back
               </button>
@@ -337,12 +343,17 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
         </div>
         <div className="ha-pagehead-actions">
           {/* Shown to every role (business leads included) — a solid, accented pill so
-              it isn't missed among the header actions. */}
+              it isn't missed among the header actions. Opens in a new browser tab so
+              the Harvested Jobs list stays where it was. */}
           {!library && !demand && (
-            <button
+            <a
               className="ha-btn"
-              title="Open My Workspace — the jobs assigned to you"
+              href="/library"
+              target="_blank"
+              rel="noopener noreferrer"
+              title="Open My Workspace in a new tab — the jobs assigned to you"
               style={{
+                textDecoration: "none",
                 display: "inline-flex", alignItems: "center", gap: 7,
                 height: 36, padding: "0 16px", borderRadius: 999,
                 fontSize: 13.5, fontWeight: 700, color: "#fff",
@@ -350,10 +361,9 @@ export default function JobsPage({ onNavigate, onView, pageSizeSel, onPageSizeCh
                 boxShadow: `0 0 0 3px ${C.primary}26, 0 4px 12px ${C.primary}40`,
                 cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap",
               }}
-              onClick={() => onNavigate("library")}
             >
               <Wrench size={14} /> My Workspace
-            </button>
+            </a>
           )}
           {!library && (
             <ExportButton format={exportFormat} onFormatChange={setExportFormat} onExport={doExport} exporting={exporting} />

@@ -10,6 +10,7 @@ import ExportButton from "../components/ExportButton";
 import PhoneVerifyModal, { PHONE_STATUSES, OUTCOME_OPTIONS, outcomeInfo, outcomeDetailText } from "../components/PhoneVerify";
 import { ContactTimeline, callLabel, callTone, shortDate } from "../components/ContactHistory";
 import { downloadCsv, downloadJson, saveBlob, fetchAllPages } from "../lib/csv";
+import { getCached, setCached } from "../lib/pageCache";
 
 /* Phone logs (admins + Business Leads): admins see every call logged in
  * the tenant, including jobs self-assigned by someone else, and can narrow it to one
@@ -486,18 +487,26 @@ function useDebouncedSearch(onCommit, initial = "") {
 
 /** Fetch `fetcher(params)` whenever `params` (compared as JSON) or `reloadKey` change. */
 function usePagedFetch(fetcher, params, reloadKey, errorText) {
-  const [data, setData] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
+  const { tenant } = useTenant();
   const key = JSON.stringify(params);
+  // Cached per panel (errorText is unique to each) + tenant + params: shown at once
+  // when returning to this view, then refreshed quietly.
+  const cacheKey = `phoneLogs:${tenant?.id || ""}:${errorText}:${key}`;
+  const [data, setData] = useState(() => getCached(cacheKey) ?? null);
+  const [loading, setLoading] = useState(() => getCached(cacheKey) === undefined);
+  const [error, setError] = useState("");
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
+    const cached = getCached(cacheKey);
+    if (cached !== undefined) setData(cached);
+    setLoading(cached === undefined);
     fetcher(JSON.parse(key))
-      .then((res) => { if (!cancelled) { setData(res); setError(""); } })
+      .then((res) => { if (!cancelled) { setCached(cacheKey, res); setData(res); setError(""); } })
       .catch((err) => { if (!cancelled) setError(err?.message || errorText); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
+    // cacheKey is derived from key + errorText (+ tenant).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fetcher, key, reloadKey, errorText]);
   return { data, loading, error };
 }
@@ -663,7 +672,7 @@ function loadSavedView() {
  * search, page or Refresh change (it also feeds the tiles, so it loads in every view).
  */
 export default function PhoneLogsPage() {
-  const { isAdmin } = useTenant();
+  const { isAdmin, tenant } = useTenant();
   const navigate = useNavigate();
   // What the user had picked last time in this tab (filters, search, page, view), so
   // coming Back from a job's page lands on the same list instead of the defaults.
@@ -674,8 +683,14 @@ export default function PhoneLogsPage() {
   const [assignee, setAssignee] = useState(saved.assignee || null); // the picked {id, name, email}, for the picker label
   const [page, setPage] = useState(saved.page || 1);
   const [query, setQuery, q] = useDebouncedSearch(() => setPage(1), saved.query || "");
-  const [data, setData] = useState(null);
-  const [loading, setLoading] = useState(true);
+  // Never send `assignee` for a non-admin: the backend 403s a business lead passing one.
+  const logParams = isAdmin ? filters : { ...filters, assignee: "" };
+  const requestParams = { ...logParams, q, page, page_size: PAGE_SIZE };
+  // The call log for these exact params, cached: on Back the rows (and so the saved
+  // scroll position) come back at once, then refresh quietly.
+  const logsCacheKey = `phoneLogs:${tenant?.id || ""}:calls:${JSON.stringify(requestParams)}`;
+  const [data, setData] = useState(() => getCached(logsCacheKey) ?? null);
+  const [loading, setLoading] = useState(() => getCached(logsCacheKey) === undefined);
   const [error, setError] = useState("");
   const [reloadKey, setReloadKey] = useState(0);
   const [exporting, setExporting] = useState(false);
@@ -700,16 +715,16 @@ export default function PhoneLogsPage() {
   const setFilter = (key, value) => { setFilters((f) => ({ ...f, [key]: value })); setPage(1); };
   /** Pick (or clear, with null) the Assignee filter. */
   const pickAssignee = (user) => { setAssignee(user); setFilter("assignee", user ? String(user.id) : ""); };
-  // Never send `assignee` for a non-admin: the backend 403s a business lead passing one.
-  const logParams = isAdmin ? filters : { ...filters, assignee: "" };
   /** Show the call log filtered to `status` ("" = all). */
   const showCalls = (status) => { setView("calls"); if (filters.status !== status) setFilter("status", status); };
 
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
-    getPhoneLogs({ ...logParams, q, page, page_size: PAGE_SIZE })
-      .then((res) => { if (!cancelled) { setData(res); setError(""); } })
+    const cached = getCached(logsCacheKey);
+    if (cached !== undefined) setData(cached);
+    setLoading(cached === undefined);
+    getPhoneLogs(requestParams)
+      .then((res) => { if (!cancelled) { setCached(logsCacheKey, res); setData(res); setError(""); } })
       .catch((err) => { if (!cancelled) setError(err?.message || "Couldn't load phone logs."); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };

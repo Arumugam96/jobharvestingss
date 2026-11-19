@@ -84,14 +84,17 @@ export const StatCard = ({ value, label, color, sub, onClick, active, title }) =
       onClick={onClick}
       onKeyDown={clickable ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(); } } : undefined}
       style={{
-        flex: 1, minWidth: 150, padding: "9px 16px", "--tint": hexToTint(color, 0.13), "--tint2": hexToTint(color, 0.04),
+        flex: 1, minWidth: 150, padding: "7px 14px", "--tint": hexToTint(color, 0.13), "--tint2": hexToTint(color, 0.04),
         ...(clickable && { cursor: "pointer" }),
         ...(active && { boxShadow: `0 0 0 2px ${color}` }),
       }}
     >
-      <div className="ha-statnum" style={{ color }}>{value}</div>
-      <div className="ha-statlbl">{label}</div>
-      {sub && <div className="ha-statlbl" style={{ fontSize: 11.5, opacity: 0.8 }}>{sub}</div>}
+      <div className="ha-statnum" style={{ color, fontSize: 22 }}>{value}</div>
+      {/* The sub-line sits beside the label (not under it) to keep every card one line tall. */}
+      <div className="ha-statlbl" style={{ marginTop: 2 }}>
+        {label}
+        {sub && <span style={{ fontSize: 11.5, opacity: 0.8 }}> · {sub}</span>}
+      </div>
     </div>
   );
 };
