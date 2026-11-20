@@ -403,9 +403,9 @@ async def log_call(
         status=status, remarks=remarks, outcome=outcome, details=details, proof=proof,
         require_phone=phone,
     )
-    if outcome:
-        attempt_no = (await count_calls(db, [job.id])).get(job.id, 0) + 1
-        _validate_outcome(outcome, details, sum(1 for p in proof_items if p["name"]), attempt_no)
+    # if outcome:
+        # attempt_no = (await count_calls(db, [job.id])).get(job.id, 0) + 1
+        # _validate_outcome(outcome, details, sum(1 for p in proof_items if p["name"]), attempt_no)
     if outcome == "do_not_call":
         reminder_at, follow_up = None, False  # the contact is suppressed — nothing to schedule
 

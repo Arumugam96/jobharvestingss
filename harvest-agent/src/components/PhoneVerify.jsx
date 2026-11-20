@@ -786,23 +786,24 @@ export default function PhoneVerifyModal({ jobId, phone: phoneProp, pocName: poc
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose, zoom, sheetOpen, busy]);
 
-  // Gate Save; the hint says what is still missing.
-  let ok = false, why;
-  if (!status) why = "Select a call status to continue";
-  else if (!c) why = status === "answered" ? "Select a call outcome" : "Select why the call did not connect";
-  else if (c.panel === "reason" && !details.reason) why = "Select a reason";
-  else if (c.panel === "dnc" && !details.dncConfirm) why = "Confirm the do-not-call request";
-  else if (c.panel === "next" && !details.nextSteps?.length) why = "Pick at least one next step";
-  else if (c.panel === "email" && !details.sendTo?.trim()) why = "Add the email to send details to";
-  else if (c.panel === "redirect" && !details.referredName?.trim()) why = "Add who you were referred to";
-  else { ok = true; why = `${editing ? "Updating" : "Saving"} as “${c.l}” · attempt ${attemptNo}`; }
+  // // Gate Save; the hint says what is still missing.
+  // let ok = false, why;
+  // if (!status) why = "Select a call status to continue";
+  // else if (!c) why = status === "answered" ? "Select a call outcome" : "Select why the call did not connect";
+  // else if (c.panel === "reason" && !details.reason) why = "Select a reason";
+  // else if (c.panel === "dnc" && !details.dncConfirm) why = "Confirm the do-not-call request";
+  // else if (c.panel === "next" && !details.nextSteps?.length) why = "Pick at least one next step";
+  // else if (c.panel === "email" && !details.sendTo?.trim()) why = "Add the email to send details to";
+  // else if (c.panel === "redirect" && !details.referredName?.trim()) why = "Add who you were referred to";
+  // else if (proofNeeded && !files.length) why = "Attach proof of the call to save";
+  // else { ok = true; why = `${editing ? "Updating" : "Saving"} as “${c.l}” · attempt ${attemptNo}`; }
 
   /**
    * Builds the call payload (status, outcome, details, comments, proof, reminder_at ISO)
    * and awaits onSave; closes on success, otherwise shows the error and stays open.
    */
   const save = async () => {
-    if (!ok || busy) return;
+    if (busy) return;
     const reminderAt = rem.on && rem.date ? new Date(`${rem.date}T${rem.time || "10:00"}`) : null;
     setBusy(true);
     setSaveError("");
@@ -971,9 +972,9 @@ export default function PhoneVerifyModal({ jobId, phone: phoneProp, pocName: poc
         </div>
 
         <div className="pvm-foot">
-          <span className="pvm-hint">{why}</span>
+          {/* <span className="pvm-hint">{why}</span> */}
           <button className="pvm-fbtn" onClick={onClose} disabled={busy}>Cancel</button>
-          <button className="pvm-fbtn primary" onClick={save} disabled={!ok || busy}>
+          <button className="pvm-fbtn primary" onClick={save} disabled={busy}>
             {busy ? <RefreshCw size={14} className="pvm-spin" /> : <Check size={14} />} {busy ? "Saving…" : "Save"}
           </button>
         </div>
