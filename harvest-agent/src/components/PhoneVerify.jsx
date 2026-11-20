@@ -434,8 +434,10 @@ export function PhoneVerifyBadge({ result, onEdit, mark = false }) {
       {open && createPortal(
         <div ref={popRef} className="pvm-pop" role="dialog" aria-label="Call details"
           onMouseEnter={show} onMouseLeave={hideSoon}
-          style={{ borderColor: st.border, borderTop: `3px solid ${st.color}`,
-            ...(pos ? { left: pos.left, top: pos.top } : { visibility: "hidden", left: 0, top: 0 }) }}>
+          style={{
+            borderColor: st.border, borderTop: `3px solid ${st.color}`,
+            ...(pos ? { left: pos.left, top: pos.top } : { visibility: "hidden", left: 0, top: 0 })
+          }}>
           <div className="pvm-pop-head">
             <div>
               <span className="pvm-pop-status" style={{ color: st.color }}><Icon size={14} /> {st.label}</span>
@@ -662,7 +664,7 @@ const remFromIso = (iso) => {
  * pre-filled from that call, the number/contact stay read-only, Save PATCHes
  * /phone-verifications/logs/{id} itself (updating the row in place) and then
  * passes the updated log item to onSave. */
-export default function PhoneVerifyModal({ jobId, phone: phoneProp, pocName: pocNameProp, pocTitle, company, email, latest = null, editCall = null, onSave = () => {}, onClose = () => {} }) {
+export default function PhoneVerifyModal({ jobId, phone: phoneProp, pocName: pocNameProp, pocTitle, company, email, latest = null, editCall = null, onSave = () => { }, onClose = () => { } }) {
   const editing = !!editCall;
   const phone = phoneProp || editCall?.phone || "";
   const pocName = pocNameProp || editCall?.contact_name || "";
@@ -709,7 +711,6 @@ export default function PhoneVerifyModal({ jobId, phone: phoneProp, pocName: poc
   const fileInput = useRef(null);
 
   const c = status && outcome ? OUTCOMES[status].find((o) => o.v === outcome) : null;
-  const proofNeeded = !!c && (c.proof === "required" || (c.proof === "from2" && attemptNo >= 2));
   /** Merges `patch` into the outcome-specific details object. */
   const set = (patch) => setDetails((prev) => ({ ...prev, ...patch }));
 
@@ -786,24 +787,15 @@ export default function PhoneVerifyModal({ jobId, phone: phoneProp, pocName: poc
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose, zoom, sheetOpen, busy]);
 
-  // // Gate Save; the hint says what is still missing.
-  // let ok = false, why;
-  // if (!status) why = "Select a call status to continue";
-  // else if (!c) why = status === "answered" ? "Select a call outcome" : "Select why the call did not connect";
-  // else if (c.panel === "reason" && !details.reason) why = "Select a reason";
-  // else if (c.panel === "dnc" && !details.dncConfirm) why = "Confirm the do-not-call request";
-  // else if (c.panel === "next" && !details.nextSteps?.length) why = "Pick at least one next step";
-  // else if (c.panel === "email" && !details.sendTo?.trim()) why = "Add the email to send details to";
-  // else if (c.panel === "redirect" && !details.referredName?.trim()) why = "Add who you were referred to";
-  // else if (proofNeeded && !files.length) why = "Attach proof of the call to save";
-  // else { ok = true; why = `${editing ? "Updating" : "Saving"} as “${c.l}” · attempt ${attemptNo}`; }
+  // Call status and outcome are the only UI-level requirements. Proof and
+  // outcome-specific supporting fields (including next steps) are optional.
 
   /**
    * Builds the call payload (status, outcome, details, comments, proof, reminder_at ISO)
    * and awaits onSave; closes on success, otherwise shows the error and stays open.
    */
   const save = async () => {
-    if (busy) return;
+    if (!status || !c || busy) return;
     const reminderAt = rem.on && rem.date ? new Date(`${rem.date}T${rem.time || "10:00"}`) : null;
     setBusy(true);
     setSaveError("");
@@ -834,8 +826,8 @@ export default function PhoneVerifyModal({ jobId, phone: phoneProp, pocName: poc
 
   const remSub = !c ? "Pick an outcome to schedule the next call."
     : c.remLock ? "Not available — the contact is suppressed."
-    : rem.on ? (c.rem ? "Suggested by this outcome · edit the date or time freely." : "The contact moves into the Follow-ups queue at this time.")
-    : "Switch on to schedule the next call.";
+      : rem.on ? (c.rem ? "Suggested by this outcome · edit the date or time freely." : "The contact moves into the Follow-ups queue at this time.")
+        : "Switch on to schedule the next call.";
   const withProof = history.filter((h) => h.proof?.length).length;
   const ctx = { phone, pocName, company, email, attempt: attemptNo };
 
@@ -891,7 +883,7 @@ export default function PhoneVerifyModal({ jobId, phone: phoneProp, pocName: poc
                 placeholder={status === "unanswered" ? "e.g. Switched off, will retry tomorrow" : "e.g. Spoke to the recruiter, prefers calls after 2 PM"} />
             </div>
             <div>
-              <p className="pvm-lbl">Proof of call <span className={"pvm-tag " + (proofNeeded ? "need" : "opt")}>{proofNeeded ? "REQUIRED" : "OPTIONAL"}</span></p>
+              <p className="pvm-lbl">Proof of call <span className="pvm-tag opt">OPTIONAL</span></p>
               {files.length ? (
                 <div className="pvm-files">
                   {files.map((f) => (
@@ -913,7 +905,7 @@ export default function PhoneVerifyModal({ jobId, phone: phoneProp, pocName: poc
                   {files.length < MAX_FILES && <button type="button" className="pvm-more" onClick={() => fileInput.current?.click()}>+ add another</button>}
                 </div>
               ) : (
-                <button type="button" className={"pvm-drop" + (dragOver ? " over" : "") + (proofNeeded ? " err" : "")}
+                <button type="button" className={"pvm-drop" + (dragOver ? " over" : "")}
                   onClick={() => fileInput.current?.click()}
                   onDragEnter={(e) => { e.preventDefault(); setDragOver(true); }}
                   onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
@@ -923,7 +915,7 @@ export default function PhoneVerifyModal({ jobId, phone: phoneProp, pocName: poc
                   <div>
                     <div className="pvm-drop-t">Drop, paste or <u>browse</u></div>
                     <div className="pvm-drop-s">
-                      {proofNeeded ? (c.short || `Call-log screenshot — attempt ${attemptNo}`) : "Screenshot or recording · up to 3"}
+                      {"Screenshot or recording · up to 3 (optional)"}
                     </div>
                   </div>
                 </button>
@@ -963,18 +955,17 @@ export default function PhoneVerifyModal({ jobId, phone: phoneProp, pocName: poc
             <span className="cnt">
               {hist.loading ? "Loading…"
                 : hist.error ? hist.error
-                : history.length
-                  ? `${history.length} ${editing ? "" : "earlier "}call${history.length > 1 ? "s" : ""} · ${withProof} with proof`
-                  : "No earlier calls"}
+                  : history.length
+                    ? `${history.length} ${editing ? "" : "earlier "}call${history.length > 1 ? "s" : ""} · ${withProof} with proof`
+                    : "No earlier calls"}
             </span>
             {history.length > 0 && <ChevronRight size={14} color="#94A3B8" />}
           </button>
         </div>
 
         <div className="pvm-foot">
-          {/* <span className="pvm-hint">{why}</span> */}
           <button className="pvm-fbtn" onClick={onClose} disabled={busy}>Cancel</button>
-          <button className="pvm-fbtn primary" onClick={save} disabled={busy}>
+          <button className="pvm-fbtn primary" onClick={save} disabled={!status || !c || busy}>
             {busy ? <RefreshCw size={14} className="pvm-spin" /> : <Check size={14} />} {busy ? "Saving…" : "Save"}
           </button>
         </div>

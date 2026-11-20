@@ -140,8 +140,7 @@ async def _load_job_guarded(
     summary="Log a phone call on a job",
     responses={403: {"description": "Assigned to someone else"},
                404: {"description": "Job not found"},
-               422: {"description": "Invalid status / outcome, missing outcome "
-                                     "fields or proof of call"}},
+               422: {"description": "Invalid status / outcome or missing required call fields"}},
 )
 async def log_phone_call(
     job_id: str,
@@ -153,8 +152,8 @@ async def log_phone_call(
 
     Closes any open follow-up on the same job + number before inserting the new row. Returns the
     call view plus `attempts` (non-cleared calls on the job) and the number's `flags`. 403/404 per
-    the assignment lock; 422 for an invalid status/outcome, missing remarks on an answered call
-    without an outcome, or oversized details.
+    the assignment lock; 422 for an invalid status/outcome, missing required call fields, or oversized details.
+    Proof attachments are optional; an empty proof list is accepted.
     """
     job = await _load_job_guarded(db, job_id, current_user)
     row = await pvs.log_call(
@@ -369,8 +368,7 @@ async def phone_log_contacts(
     summary="Edit a logged call in place (admins: any; business leads: their own)",
     responses={403: {"description": "Not your call log"},
                404: {"description": "Call log not found (or cleared)"},
-               422: {"description": "Invalid status / outcome, missing outcome "
-                                     "fields or proof of call"}},
+               422: {"description": "Invalid status / outcome or missing required call fields"}},
 )
 async def update_phone_call_log(
     log_id: int,
@@ -379,7 +377,7 @@ async def update_phone_call_log(
     db: AsyncSession = Depends(get_db_session),
 ) -> dict:
     """Update one call log row (status, outcome, details, remarks, proof, reminder) —
-    never inserts a new one. Same validation as logging a call. Returns the row shaped
+    never inserts a new one. Same call-field validation as logging a call. Proof attachments are optional. Returns the row shaped
     exactly like one GET /phone-verifications/logs item."""
     item = await pvs.update_call(
         db, log_id, current_user,
