@@ -8,7 +8,8 @@ Endpoints (Swagger-visible, session-authenticated like the other public routers)
   POST /outreach/send-email          send a (possibly edited) email; dedup-guarded, logged
   POST /outreach/log-linkedin        record a manually-sent LinkedIn message
   GET  /outreach/status              latest sent state per job (row icons)
-  GET  /outreach/history             outreach thread for a job/recruiter, or recent list
+  GET  /outreach/history             outreach thread for a job/recruiter/reply, or recent list
+  GET  /outreach/replies             inbound replies list (Mail-logs Replies / Auto-replies views)
 
 Generation is audited in the shared `llm_calls` table (call_type email_generation /
 email_followup / linkedin_generation, run_id NULL). Sends (email + linkedin) are logged
@@ -40,7 +41,7 @@ from app.models.outreach import EmailOutreachORM
 from app.services.active_clients import classify_client
 from app.services.email_service import EmailSender, render_outreach_email_html
 from app.services.harvest_run_service import HarvestRunService, insert_llm_call, scraped_job_view
-from app.services.job_assignment_service import ensure_job_access
+from app.services.job_assignment_service import assignment_view, ensure_job_access
 from app.services.llm_service import LLMService
 from app.services.outreach_service import OutreachService
 from app.services.outreach_log_service import (
@@ -60,13 +61,19 @@ from app.services.outreach_log_service import (
     thread_messages,
 )
 from app.services.outreach_reply_service import (
+    auto_replied_outreach_ids,
+    get_reply,
+    list_replies,
     mark_all_replies_read,
     mark_reply_read,
     notification_dict,
     recent_replies,
     record_inbound_replies,
     replies_for_thread,
+    reply_list_dict,
     reply_to_dict,
+    reply_view_counts,
+    sent_subjects,
     unread_reply_count,
 )
 from app.services.suppression_service import (
@@ -530,28 +537,51 @@ async def outreach_status(
 async def outreach_history(
     job_id: str | None = Query(default=None, description="Filter to one job's outreach thread."),
     recruiter_id: str | None = Query(default=None, description="Filter to one recruiter's outreach thread."),
+    reply_id: str | None = Query(default=None, description="Thread an inbound reply belongs to (or the reply alone when unmatched)."),
     limit: int = Query(default=200, ge=1, le=500, description="Thread branch (job_id/recruiter_id) row cap."),
     search: str = Query(default="", description="List branch: point-of-contact name / recipient email."),
     company: str = Query(default="", description="List branch: company name (partial)."),
     date_from: str = Query(default="", description="List branch: sent on/after (YYYY-MM-DD)."),
     date_to: str = Query(default="", description="List branch: sent on/before (YYYY-MM-DD)."),
-    engagement: str = Query(default="", description="List branch: one engagement-card bucket (replied/opened/clicked/unsubscribed/blocked/bounced)."),
+    engagement: str = Query(default="", description="List branch: one engagement-card bucket (replied/auto_replied/opened/clicked/unsubscribed/blocked/bounced)."),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=100, ge=1, le=500),
     current_user: AuthenticatedUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
 ) -> dict:
-    """With a job_id/recruiter_id: the ordered outreach thread (initial + follow-ups
-    + linkedin) for that contact. With neither: the server-paginated + filtered
-    recent-outreach list for the Mail logs page. Each item carries the resolved
-    contact_name (Contact column) plus the Mailjet delivery-engagement fields."""
-    if job_id:
-        # A job's thread belongs to its assignee, like the job's detail and outreach.
-        # An unknown job_id keeps the old behaviour (an empty / orphan-row thread).
-        job = await HarvestRunService(db).get_scraped_job_by_id(job_id)
-        if job is not None:
-            ensure_job_access(job.assigned_to_email, current_user)
+    """With a job_id/recruiter_id/reply_id: the ordered outreach thread (initial +
+    follow-ups + linkedin + received replies) for that contact. With none: the
+    server-paginated + filtered recent-outreach list for the Mail logs page. Each item
+    carries the resolved contact_name plus the delivery-engagement fields.
+
+    Reading a thread is open to everyone in the tenant (anyone who can see the row in
+    Mail logs can read it). Job ownership is enforced where it matters, on sending a
+    follow-up. The thread response says who owns the job (``assigned_to``) and whether
+    the caller may follow up (``can_follow_up``) so the UI can explain it."""
+    if reply_id:
+        reply = await get_reply(db, reply_id)
+        if reply is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Reply not found")
+        if not job_id and not recruiter_id:
+            job_id, recruiter_id = reply.job_id, reply.recruiter_id
+            if not job_id and not recruiter_id and reply.outreach_id:
+                send = await get_by_id_for_tenant(db, reply.outreach_id)
+                if send is not None:
+                    job_id, recruiter_id = send.job_id, send.recruiter_id
+            if not job_id and not recruiter_id:
+                # Unmatched reply (couldn't be tied to a send): show it on its own.
+                return {"items": [reply_to_dict(reply)], "assigned_to": None, "can_follow_up": False}
     if job_id or recruiter_id:
+        assigned_to = None
+        can_follow_up = True
+        if job_id:
+            job = await HarvestRunService(db).get_scraped_job_by_id(job_id)
+            if job is not None:
+                assigned_to = assignment_view(job)
+                try:
+                    ensure_job_access(job.assigned_to_email, current_user)
+                except HTTPException:
+                    can_follow_up = False
         rows = await thread_messages(db, job_id=job_id, recruiter_id=recruiter_id, limit=limit)
         names = await contact_names_for_rows(db, rows)
         sends = [outreach_to_dict(r, contact_name=names.get(r.job_id)) for r in rows]
@@ -562,7 +592,7 @@ async def outreach_history(
         )
         items = sends + [reply_to_dict(rp) for rp in replies]
         items.sort(key=lambda m: m.get("created_at") or "")
-        return {"items": items}
+        return {"items": items, "assigned_to": assigned_to, "can_follow_up": can_follow_up}
 
     rows, total = await recent_outreach(
         db, search=search or None, company=company or None,
@@ -570,8 +600,14 @@ async def outreach_history(
         engagement=engagement or None, page=page, page_size=page_size,
     )
     names = await contact_names_for_rows(db, rows)
+    auto_ids = await auto_replied_outreach_ids(db, [r.id for r in rows])
+    items = []
+    for r in rows:
+        item = outreach_to_dict(r, contact_name=names.get(r.job_id))
+        item["auto_replied"] = r.id in auto_ids
+        items.append(item)
     return {
-        "items": [outreach_to_dict(r, contact_name=names.get(r.job_id)) for r in rows],
+        "items": items,
         "total": total,
         "page": page,
         "page_size": page_size,
@@ -594,10 +630,52 @@ async def outreach_stats(
 ) -> dict:
     """{sent, failed} over the whole filtered Mail-logs set, so the stat tiles stay
     accurate under pagination (the loaded page is only 100 rows)."""
-    return await outreach_list_stats(
-        db, search=search or None, company=company or None,
+    filters = dict(
+        search=search or None, company=company or None,
         date_from=date_from or None, date_to=date_to or None,
     )
+    stats = await outreach_list_stats(db, **filters)
+    # Tab badges for the Replies / Auto-replies views (reply rows, not sends).
+    stats["views"] = await reply_view_counts(db, **filters)
+    return stats
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# GET /outreach/replies  — Mail-logs Replies / Auto-replies views
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/replies", status_code=status.HTTP_200_OK)
+async def outreach_replies(
+    kind: str = Query(default="human", pattern="^(human|auto)$", description="human = replies from a person; auto = auto-replies (OOO etc.)."),
+    search: str = Query(default="", description="Sender name / email."),
+    company: str = Query(default=""),
+    date_from: str = Query(default="", description="Received on/after (YYYY-MM-DD)."),
+    date_to: str = Query(default="", description="Received on/before (YYYY-MM-DD)."),
+    unread: bool = Query(default=False, description="Only unread replies."),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=100, ge=1, le=500),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """One page of inbound replies, newest first, plus tab counts for both views
+    (``counts``) over the same filters. Each item links to its thread via
+    outreach_id / job_id / recruiter_id (or its own id when unmatched)."""
+    filters = dict(
+        search=search or None, company=company or None,
+        date_from=date_from or None, date_to=date_to or None,
+    )
+    rows, total = await list_replies(
+        db, auto=(kind == "auto"), unread_only=unread, page=page, page_size=page_size, **filters
+    )
+    subjects = await sent_subjects(db, [r.outreach_id for r in rows if r.outreach_id])
+    return {
+        "items": [reply_list_dict(r, subjects.get(r.outreach_id or "")) for r in rows],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": max(1, math.ceil(total / page_size)) if page_size else 1,
+        "counts": await reply_view_counts(db, **filters),
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

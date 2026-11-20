@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { useParams, useLocation, useNavigate, useSearchParams } from "react-router-dom";
-import { Copy, Check, CornerUpRight, Link2, Reply } from "lucide-react";
-import { getOutreachHistory } from "./api";
+import { Copy, Check, CornerUpRight, Link2, Reply, UserRound } from "lucide-react";
+import { getOutreachHistory, ApiError } from "./api";
 import OutreachThread from "./components/OutreachThread";
 import EmailComposeModal from "./components/EmailComposeModal";
 import {
@@ -38,6 +38,12 @@ export default function OutreachThreadPage() {
   const [thread, setThread] = useState([]);
   const [threadLoading, setThreadLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
+  // Why the thread couldn't load (shown instead of a generic "not available").
+  const [loadError, setLoadError] = useState("");
+  // Who owns the job, and whether this user may follow up (only the assignee can).
+  // Everyone in the workspace can READ the thread.
+  const [assignedTo, setAssignedTo] = useState(null);
+  const [mayFollowUp, setMayFollowUp] = useState(true);
   const [copied, setCopied] = useState(false);
 
   // Follow-up composer context ({ job, parentOutreachId }) — opens EmailComposeModal.
@@ -49,17 +55,22 @@ export default function OutreachThreadPage() {
   const loadThread = useCallback(async () => {
     const jobId = stateItem?.job_id || searchParams.get("job") || null;
     const recruiterId = stateItem?.recruiter_id || searchParams.get("recruiter") || null;
+    const replyId = searchParams.get("reply") || null; // opened from Replies / the bell
     setThreadLoading(true);
     setNotFound(false);
+    setLoadError("");
     try {
-      const params = jobId ? { job_id: jobId } : recruiterId ? { recruiter_id: recruiterId } : null;
+      const params = jobId ? { job_id: jobId } : recruiterId ? { recruiter_id: recruiterId }
+        : replyId ? { reply_id: replyId } : null;
       const res = params ? await getOutreachHistory(params) : { items: stateItem ? [stateItem] : [] };
       const items = res.items && res.items.length ? res.items : stateItem ? [stateItem] : [];
       setThread(items);
+      setAssignedTo(res.assigned_to || null);
+      setMayFollowUp(res.can_follow_up !== false);
       const anchor = items.find((m) => String(m.id) === String(id)) || stateItem || items[0] || null;
       setDetail(anchor);
       if (!anchor) setNotFound(true);
-    } catch {
+    } catch (err) {
       if (stateItem) {
         setThread([stateItem]);
         setDetail(stateItem);
@@ -67,6 +78,11 @@ export default function OutreachThreadPage() {
         setThread([]);
         setDetail(null);
         setNotFound(true);
+        setLoadError(
+          err instanceof ApiError
+            ? (err.status === 404 ? "This message no longer exists or isn't in your workspace." : err.message)
+            : "Could not reach the harvest backend.",
+        );
       }
     } finally {
       setThreadLoading(false);
@@ -83,7 +99,10 @@ export default function OutreachThreadPage() {
     setTimeout(() => setCopied(false), 1600);
   };
 
-  const canFollowUp = detail && detail.channel === "email" && detail.job_id;
+  // Follow-ups go from a SENT email on a job, and only by the job's assignee (the
+  // send route enforces this too; hiding the button just avoids a dead-end 403).
+  const canFollowUp = detail && detail.channel === "email" && detail.job_id
+    && detail.direction !== "inbound" && mayFollowUp;
   /** Open EmailComposeModal as a follow-up to this email (email rows with a job only). */
   const startFollowUp = () => {
     if (!canFollowUp) return;
@@ -98,8 +117,10 @@ export default function OutreachThreadPage() {
     return (
       <main className="ha-main" style={{ padding: "24px 24px 32px" }}>
         <div className="ha-card" style={{ padding: "48px 24px", textAlign: "center", color: "#64748B", maxWidth: 560, margin: "40px auto" }}>
-          <div style={{ marginBottom: 6, fontWeight: 700, color: "#334155" }}>This thread isn’t available here.</div>
-          <div style={{ marginBottom: 18 }}>Open it from Mail logs to read the message and follow up.</div>
+          <div style={{ marginBottom: 6, fontWeight: 700, color: "#334155" }}>
+            {loadError ? "This thread couldn’t be opened." : "This thread isn’t available here."}
+          </div>
+          <div style={{ marginBottom: 18 }}>{loadError || "Open it from Mail logs to read the message and follow up."}</div>
           <button className="ha-btn ha-btn-secondary" onClick={() => navigate("/outreach")}>Go to Mail logs</button>
         </div>
       </main>
@@ -148,6 +169,14 @@ export default function OutreachThreadPage() {
           {detail && <ToneChip it={detail} />}
           {detail && <span style={{ color: "#94A3B8", fontSize: 12.5 }}>{fmtAbs(detail.created_at)}</span>}
         </div>
+        {assignedTo && !mayFollowUp && (
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 12, padding: "9px 12px", borderRadius: 10, background: "#F8FAFC", border: "1px solid #E2E8F0", fontSize: 13, color: "#475569", width: "fit-content", maxWidth: "100%" }}>
+            <UserRound size={15} style={{ flex: "none", color: "#64748B" }} />
+            <span>
+              Assigned to <b style={{ color: "#0F172A" }}>{assignedTo.name || assignedTo.email}</b>. You can read this thread; only they can send a follow-up.
+            </span>
+          </div>
+        )}
       </div>
 
       {/* Body — conversation (main) + delivery/details (right panel) */}

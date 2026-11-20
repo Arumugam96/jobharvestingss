@@ -12,7 +12,7 @@ notification feed (unread replies for the bell + toast), and the mark-as-read ac
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import structlog
@@ -510,15 +510,19 @@ async def replies_for_thread(
 
 
 async def unread_reply_count(db: AsyncSession) -> int:
-    """Number of unread inbound replies in the current tenant (drives the bell badge)."""
+    """Number of unread inbound replies from a person in the current tenant (drives the
+    bell badge). Auto-replies (OOO etc.) are left out: they live in the Mail-logs
+    Auto-replies view and shouldn't page anyone."""
     stmt = apply_tenant(select(func.count()).select_from(OutreachReplyORM), OutreachReplyORM.tenant_id)
-    stmt = stmt.where(OutreachReplyORM.is_read.is_(False))
+    stmt = stmt.where(OutreachReplyORM.is_read.is_(False), OutreachReplyORM.is_auto_reply.is_(False))
     return (await db.execute(stmt)).scalar_one()
 
 
 async def recent_replies(db: AsyncSession, *, limit: int = 20, unread_only: bool = True) -> list[OutreachReplyORM]:
-    """The newest replies for the notification feed (bell + toast)."""
+    """The newest replies from a person for the notification feed (bell + toast);
+    auto-replies are excluded, matching unread_reply_count."""
     stmt = apply_tenant(select(OutreachReplyORM), OutreachReplyORM.tenant_id)
+    stmt = stmt.where(OutreachReplyORM.is_auto_reply.is_(False))
     if unread_only:
         stmt = stmt.where(OutreachReplyORM.is_read.is_(False))
     stmt = stmt.order_by(OutreachReplyORM.received_at.desc().nullslast(), OutreachReplyORM.created_at.desc()).limit(limit)
@@ -543,6 +547,160 @@ def notification_dict(row: OutreachReplyORM) -> dict[str, Any]:
         "is_auto_reply": row.is_auto_reply,
         "received_at": received.isoformat() if received else None,
     }
+
+
+# ── Mail-logs Replies / Auto-replies views ───────────────────────────────────
+
+# Auto-reply sub-type, guessed from the subject + body. Checked in order: "left"
+# (the person is gone — the contact needs replacing) beats "ooo" (temporary), which
+# beats "ack" (a ticket/queue acknowledgement); anything else is a generic "auto".
+_AUTO_KIND_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("left", re.compile(
+        r"no longer (with|at|employed|work)|has left|have left|left the company|"
+        r"is no longer|not with .{0,40} anymore|mailbox (is )?(no longer|not) (monitored|active)",
+        re.I,
+    )),
+    ("ooo", re.compile(
+        r"out of (the )?office|\booo\b|on (annual |parental |maternity |paternity |sick )?leave|"
+        r"on vacation|on holiday|away from (the )?office|limited access to (my )?e-?mail|"
+        r"abwesenheit|absence|currently away|back (in|on) ",
+        re.I,
+    )),
+    ("ack", re.compile(
+        r"(we|i) ha(ve|s) received your|thank you for (your )?(e-?mail|message|contacting)|"
+        r"will (get back|respond|reply) (to you )?(within|shortly|as soon)|ticket|"
+        r"this is an automated|do not reply|no-?reply",
+        re.I,
+    )),
+)
+
+
+def classify_auto_reply(subject: str | None, body: str | None) -> str:
+    """Label an auto-reply as "left" | "ooo" | "ack" | "auto" from its subject + body."""
+    text = f"{subject or ''}\n{(body or '')[:2000]}"
+    for kind, pattern in _AUTO_KIND_PATTERNS:
+        if pattern.search(text):
+            return kind
+    return "auto"
+
+
+def _parse_day(raw: str | None, *, end: bool = False) -> datetime | None:
+    """'YYYY-MM-DD' → UTC start-of-day (or start of the NEXT day when ``end``, so a
+    ``< end`` bound is inclusive). Mirrors outreach_log_service._parse_day."""
+    if not raw:
+        return None
+    try:
+        d = datetime.fromisoformat(str(raw)[:10]).replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+    return d + timedelta(days=1) if end else d
+
+
+def _reply_list_base(*, search=None, company=None, date_from=None, date_to=None):
+    """Tenant-scoped ``select(OutreachReplyORM)`` with the Mail-logs filters applied.
+    Dates bound the time the reply was received (falling back to row insert time)."""
+    stmt = apply_tenant(select(OutreachReplyORM), OutreachReplyORM.tenant_id)
+    if search:
+        like = f"%{search.strip()}%"
+        stmt = stmt.where(or_(OutreachReplyORM.from_name.ilike(like), OutreachReplyORM.from_email.ilike(like)))
+    if company:
+        stmt = stmt.where(OutreachReplyORM.company.ilike(f"%{company.strip()}%"))
+    when = func.coalesce(OutreachReplyORM.received_at, OutreachReplyORM.created_at)
+    df, dt = _parse_day(date_from), _parse_day(date_to, end=True)
+    if df is not None:
+        stmt = stmt.where(when >= df)
+    if dt is not None:
+        stmt = stmt.where(when < dt)
+    return stmt
+
+
+async def list_replies(
+    db: AsyncSession,
+    *,
+    auto: bool,
+    search: str | None = None,
+    company: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    unread_only: bool = False,
+    page: int = 1,
+    page_size: int = 100,
+) -> tuple[list[OutreachReplyORM], int]:
+    """One page of inbound replies for the Mail-logs Replies (``auto=False``) or
+    Auto-replies (``auto=True``) view, newest first, plus the whole filtered count."""
+    base = _reply_list_base(search=search, company=company, date_from=date_from, date_to=date_to)
+    base = base.where(OutreachReplyORM.is_auto_reply.is_(bool(auto)))
+    if unread_only:
+        base = base.where(OutreachReplyORM.is_read.is_(False))
+    total = (await db.execute(select(func.count()).select_from(base.subquery()))).scalar_one()
+    stmt = (
+        base.order_by(OutreachReplyORM.received_at.desc().nullslast(), OutreachReplyORM.created_at.desc())
+        .offset(max(0, (page - 1) * page_size))
+        .limit(page_size)
+    )
+    return list((await db.execute(stmt)).scalars().all()), total
+
+
+async def reply_view_counts(
+    db: AsyncSession,
+    *,
+    search: str | None = None,
+    company: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+) -> dict[str, int]:
+    """Tab badges for the Mail-logs views: ``replies`` / ``replies_unread`` (from a
+    person) and ``auto_replies``, over the same filters as the lists."""
+    base = _reply_list_base(search=search, company=company, date_from=date_from, date_to=date_to)
+
+    async def _count(stmt) -> int:
+        """Row count of a filtered select."""
+        return (await db.execute(select(func.count()).select_from(stmt.subquery()))).scalar_one()
+
+    human = base.where(OutreachReplyORM.is_auto_reply.is_(False))
+    return {
+        "replies": await _count(human),
+        "replies_unread": await _count(human.where(OutreachReplyORM.is_read.is_(False))),
+        "auto_replies": await _count(base.where(OutreachReplyORM.is_auto_reply.is_(True))),
+    }
+
+
+async def sent_subjects(db: AsyncSession, outreach_ids: list[str]) -> dict[str, str]:
+    """{send id: subject} for the sends a page of replies answers ("In reply to")."""
+    ids = [i for i in {*outreach_ids} if i]
+    if not ids:
+        return {}
+    stmt = apply_tenant(
+        select(EmailOutreachORM.id, EmailOutreachORM.subject), EmailOutreachORM.tenant_id
+    ).where(EmailOutreachORM.id.in_(ids))
+    return {row.id: row.subject or "" for row in (await db.execute(stmt)).all()}
+
+
+async def auto_replied_outreach_ids(db: AsyncSession, outreach_ids: list[str]) -> set[str]:
+    """The subset of ``outreach_ids`` that received at least one auto-reply (drives
+    the amber Auto-reply pill on Sent rows)."""
+    ids = [i for i in {*outreach_ids} if i]
+    if not ids:
+        return set()
+    stmt = apply_tenant(
+        select(OutreachReplyORM.outreach_id), OutreachReplyORM.tenant_id
+    ).where(OutreachReplyORM.outreach_id.in_(ids), OutreachReplyORM.is_auto_reply.is_(True)).distinct()
+    return {r for r in (await db.execute(stmt)).scalars().all() if r}
+
+
+def reply_list_dict(row: OutreachReplyORM, in_reply_to_subject: str | None = None) -> dict[str, Any]:
+    """Row shape for the Mail-logs Replies / Auto-replies tables: the notification
+    fields plus the subject of the send it answers and, for auto-replies, its kind."""
+    out = notification_dict(row)
+    out["in_reply_to_subject"] = in_reply_to_subject or ""
+    out["auto_kind"] = classify_auto_reply(row.subject, row.body) if row.is_auto_reply else None
+    return out
+
+
+async def get_reply(db: AsyncSession, reply_id: str) -> OutreachReplyORM | None:
+    """One reply by id, tenant-scoped (None when missing or not visible)."""
+    stmt = apply_tenant(select(OutreachReplyORM), OutreachReplyORM.tenant_id).where(OutreachReplyORM.id == reply_id)
+    return (await db.execute(stmt)).scalar_one_or_none()
 
 
 async def mark_reply_read(db: AsyncSession, reply_id: str, *, read: bool = True) -> bool:

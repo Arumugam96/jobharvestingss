@@ -398,12 +398,9 @@ export default function JobsPage({ onNavigate, onBack, onView, pageSizeSel, onPa
             server-side (hiring_entity); clicking it again — or the chip — clears it.
             Counts follow the user's filters (GET /jobs/facets with the filter params;
             each bucket's own filter is left out so every card keeps its count). */}
-        <style>{`
-          .ha-runstats.ha-jobstats{grid-template-columns:repeat(5,minmax(0,1fr));}
-          @media(max-width:520px){.ha-runstats.ha-jobstats{grid-template-columns:repeat(2,minmax(0,1fr));}}
-        `}</style>
-        {/* One grid, 5 per row: the 10 stat cards (call status, classification and
-            contact counts for the same filtered rows) fill 2 rows × 5. */}
+        {/* One grid: the stat cards (call status, classification and contact counts
+            for the same filtered rows) share a single row, up to 10 per row
+            (.ha-runstats sizes its columns to the card count). */}
         <div className="ha-runstats ha-jobstats">
           {[
             { key: "all", value: stats.total || 0, label: demand ? "Total Demand jobs" : "Jobs found", color: C.accent },

@@ -1,12 +1,15 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { RefreshCw, Send, X, Download, Search, Calendar, ChevronDown, Check, Building2 } from "lucide-react";
-import { getOutreachHistory, getOutreachStats, ApiError } from "./api";
+import { getOutreachHistory, getOutreachStats, getOutreachReplies, markReplyRead, ApiError } from "./api";
 // `engagement` (the delivery-status → label helper) is imported as `engagementOf`
 // because this component also has an `engagement` state var (the active filter key)
 // that would otherwise shadow the import — calling the shadowed string in exportCsv
 // threw. See exportCsv below.
-import { fmtAbs, fmtRel, initials, avatarColor, engagement as engagementOf, EngagementStack, ReplyBadge } from "./components/outreachUi";
+import {
+  fmtAbs, fmtRel, initials, avatarColor, engagement as engagementOf, EngagementStack, ReplyBadge,
+  AutoReplyBadge, AutoKindChip, AUTO_KIND, AUTO_COLOR, REPLY_COLOR, REPLY_SOFT,
+} from "./components/outreachUi";
 
 /* Mail logs (route /outreach) — the log of every outreach email sent from
  * HarvestAgent, read from the backend (GET /outreach/history). It's the DB source
@@ -67,6 +70,8 @@ const STAT_EVENTS = [
   // Replied sits first (leftmost) — a reply is the highest-value outcome and owns
   // its own indigo accent, distinct from every delivery colour.
   { key: "replied",      label: "Replied",      c: "#4F46E5", tint: "rgba(79,70,229,.14)",  tint2: "rgba(79,70,229,.04)" },
+  // Sends that only got an automatic response (OOO etc.) — amber, next to Replied.
+  { key: "auto_replied", label: "Auto-replied", c: "#B45309", tint: "rgba(180,83,9,.13)",   tint2: "rgba(180,83,9,.04)" },
   { key: "opened",       label: "Opened",       c: "#0E7C5A", tint: "rgba(14,124,90,.14)",  tint2: "rgba(14,124,90,.04)" },
   { key: "clicked",      label: "Clicked",      c: "#0D9488", tint: "rgba(13,148,136,.14)", tint2: "rgba(13,148,136,.04)" },
   { key: "unsubscribed", label: "Unsubscribed", c: "#7C3AED", tint: "rgba(124,58,237,.14)", tint2: "rgba(124,58,237,.04)" },
@@ -81,9 +86,19 @@ const STATS_CSS = `
 .ha-stats-head { display:flex; align-items:baseline; gap:9px; margin-bottom:12px; }
 .ha-stats-head .big { font-size:28px; font-weight:800; letter-spacing:-.03em; color:#0F172A; line-height:1; font-variant-numeric:tabular-nums; }
 .ha-stats-head .cap { font-size:14px; color:#64748B; font-weight:500; }
-.ha-stats-grid { display:grid; grid-template-columns:repeat(6, minmax(0,1fr)); gap:13px; }
+.ha-stats-grid { display:grid; grid-auto-flow:column; grid-auto-columns:minmax(0,1fr); gap:13px; }
+.ha-stats-grid:has(> :nth-child(11)) { grid-auto-flow:row; grid-template-columns:repeat(10, minmax(0,1fr)); }
 .ha-stats-head .sep { width:1px; align-self:stretch; background:#D9E1EE; margin:0 2px; }
 .ha-stats-head .big.rep { color:#4F46E5; }
+.ha-stats-head .big.auto { color:#B45309; }
+.ha-stats-head { flex-wrap:wrap; }
+.ha-views { display:flex; gap:4px; padding:4px; border:1px solid #E2E8F0; border-radius:12px; background:rgba(255,255,255,.8); max-width:100%; overflow-x:auto; }
+.ha-view { display:inline-flex; align-items:center; gap:8px; border:0; background:transparent; color:#64748B; font:600 13.5px inherit; font-family:inherit; padding:7px 13px; border-radius:9px; cursor:pointer; white-space:nowrap; }
+.ha-view .n { font-size:11.5px; font-weight:800; border-radius:999px; padding:1px 7px; background:#EDF1F6; color:#334155; font-variant-numeric:tabular-nums; }
+.ha-view[aria-selected="true"] { background:#fff; color:#0F172A; box-shadow:0 1px 2px rgba(15,23,42,.08), inset 0 0 0 1px #E2E8F0; }
+.ha-view[data-v="replies"][aria-selected="true"] .n { background:#EEF0FF; color:#4F46E5; }
+.ha-view[data-v="auto"][aria-selected="true"] .n { background:#FFF7ED; color:#B45309; }
+.ha-view:focus-visible { outline:2px solid #2563EB; outline-offset:2px; }
 .ha-stat { position:relative; overflow:hidden; border-radius:14px; padding:14px 15px 20px;
   background:linear-gradient(150deg, var(--tint), var(--tint2) 52%, rgba(255,255,255,0) 78%), linear-gradient(160deg, rgba(255,255,255,.92), rgba(255,255,255,.6));
   -webkit-backdrop-filter:blur(10px) saturate(140%); backdrop-filter:blur(10px) saturate(140%);
@@ -102,8 +117,8 @@ const STATS_CSS = `
 .ha-stat .pct { font-size:13px; font-weight:700; color:#0F172A; font-variant-numeric:tabular-nums; }
 .ha-stat .track { position:absolute; left:0; right:0; bottom:0; height:6px; background:rgba(15,23,42,.06); }
 .ha-stat .fill { height:100%; background:var(--c); box-shadow:0 0 10px -1px var(--tint); }
-@media (max-width:1240px){ .ha-stats-grid{ grid-template-columns:repeat(3,1fr); } }
-@media (max-width:680px){ .ha-stats-grid{ grid-template-columns:repeat(2,1fr); } }
+@media (max-width:900px){ .ha-stats-grid, .ha-stats-grid:has(> :nth-child(11)){ grid-auto-flow:row; grid-template-columns:repeat(3,1fr); } }
+@media (max-width:680px){ .ha-stats-grid, .ha-stats-grid:has(> :nth-child(11)){ grid-template-columns:repeat(2,1fr); } }
 @media (prefers-reduced-motion: reduce){ .ha-stat{ transition:none; } .ha-stat:hover{ transform:none; } }
 `;
 
@@ -127,6 +142,9 @@ function StatsPanel({ stats, engagement, onToggle }) {
         <span className="sep" />
         <span className="big rep">{replies}</span>
         <span className="cap">replies received</span>
+        <span className="sep" />
+        <span className="big auto">{stats.auto_replied || 0}</span>
+        <span className="cap">auto-replied</span>
       </div>
       <div className="ha-stats-grid">
         {STAT_EVENTS.map((e) => {
@@ -157,6 +175,33 @@ function StatsPanel({ stats, engagement, onToggle }) {
 
 // ── Page ────────────────────────────────────────────────────────────────────
 
+// The three lists the page can show. `count(stats)` is the tab badge, read from the
+// /stats response (sends for Sent; reply rows — not sends — for the other two).
+const VIEWS = [
+  { key: "sent",    label: "Sent",         count: (s) => (s.sent || 0) + (s.failed || 0) },
+  { key: "replies", label: "Replies",      count: (s) => s.views?.replies || 0 },
+  { key: "auto",    label: "Auto-replies", count: (s) => s.views?.auto_replies || 0 },
+];
+
+const EMPTY_TEXT = {
+  sent: "No outreach sent yet.",
+  replies: "No replies yet. When a prospect writes back, it shows up here.",
+  auto: "No auto-replies yet. Out-of-office and other automatic responses show up here.",
+};
+
+const EMPTY_STATS = {
+  sent: 0, failed: 0, replied: 0, auto_replied: 0, opened: 0, clicked: 0, unsubscribed: 0, blocked: 0, bounced: 0,
+  views: { replies: 0, replies_unread: 0, auto_replies: 0 },
+};
+
+// Thread link for an inbound reply row. Anchored on the send it answers when matched;
+// `?reply=` lets the thread page resolve the conversation (or the lone reply when it
+// couldn't be matched to a send) without job/recruiter ids.
+function replyThreadHref(r) {
+  const anchor = r.outreach_id || `reply-${r.id}`;
+  return `/mail/${encodeURIComponent(anchor)}?reply=${encodeURIComponent(r.id)}`;
+}
+
 export default function OutreachHistoryPage() {
   const [searchParams, setSearchParams] = useSearchParams();
 
@@ -170,6 +215,9 @@ export default function OutreachHistoryPage() {
   const [search, setSearch] = useState(() => searchParams.get("search") || "");        // point-of-contact name / email
   const [companyQ, setCompanyQ] = useState(() => searchParams.get("company") || "");     // company
   const [engagement, setEngagement] = useState(() => searchParams.get("eng") || "");     // clickable stat-card bucket
+  // Which list is shown: sent mail, replies from a person, or auto-replies (OOO etc.).
+  const [view, setView] = useState(() => (VIEWS.some((v) => v.key === searchParams.get("view")) ? searchParams.get("view") : "sent"));
+  const [unreadOnly, setUnreadOnly] = useState(() => searchParams.get("unread") === "1"); // Replies view only
   const [rangeKey, setRangeKey] = useState(() => searchParams.get("range") || "all");
   const [customFrom, setCustomFrom] = useState(() => searchParams.get("from") || "");
   const [customTo, setCustomTo] = useState(() => searchParams.get("to") || "");
@@ -188,7 +236,7 @@ export default function OutreachHistoryPage() {
   const [page, setPage] = useState(() => Math.max(1, parseInt(searchParams.get("page") || "1", 10) || 1));
   const [total, setTotal] = useState(0);
   const [totalPages, setTotalPages] = useState(1);
-  const [stats, setStats] = useState({ sent: 0, failed: 0, replied: 0, opened: 0, clicked: 0, unsubscribed: 0, blocked: 0, bounced: 0 });
+  const [stats, setStats] = useState(EMPTY_STATS);
   const [exporting, setExporting] = useState(false);
   const seqRef = useRef(0);
 
@@ -208,7 +256,7 @@ export default function OutreachHistoryPage() {
   useEffect(() => {
     if (firstFilterRun.current) { firstFilterRun.current = false; return; }
     setPage(1);
-  }, [dq, dCompany, dateParams, engagement]);
+  }, [dq, dCompany, dateParams, engagement, view, unreadOnly]);
 
   // Mirror the filter/page state back to the URL (replace, so it doesn't spam the
   // history stack). This is what makes `location.pathname + location.search` — the
@@ -218,38 +266,41 @@ export default function OutreachHistoryPage() {
     if (search.trim()) sp.set("search", search.trim());
     if (companyQ.trim()) sp.set("company", companyQ.trim());
     if (engagement) sp.set("eng", engagement);
+    if (view !== "sent") sp.set("view", view);
+    if (view === "replies" && unreadOnly) sp.set("unread", "1");
     if (rangeKey && rangeKey !== "all") sp.set("range", rangeKey);
     if (customFrom) sp.set("from", customFrom);
     if (customTo) sp.set("to", customTo);
     if (page > 1) sp.set("page", String(page));
     setSearchParams(sp, { replace: true });
-  }, [search, companyQ, engagement, rangeKey, customFrom, customTo, page, setSearchParams]);
+  }, [search, companyQ, engagement, view, unreadOnly, rangeKey, customFrom, customTo, page, setSearchParams]);
 
   const load = useCallback(async () => {
     const seq = ++seqRef.current;
     setLoading(true);
     setError("");
-    // Stats stay scoped to date+search only (a stable clickable legend); the list
+    // Stats stay scoped to date+search only (a stable clickable legend); the Sent list
     // additionally narrows to the selected engagement bucket across the whole dataset.
+    // The Replies / Auto-replies views list inbound reply rows over the same filters.
     const filters = { search: dq, company: dCompany, ...dateParams };
+    const listCall = view === "sent"
+      ? getOutreachHistory({ ...filters, engagement, page, page_size: PAGE_SIZE })
+      : getOutreachReplies({ ...filters, kind: view === "auto" ? "auto" : "human", unread: view === "replies" && unreadOnly, page, page_size: PAGE_SIZE });
     try {
-      const [res, st] = await Promise.all([
-        getOutreachHistory({ ...filters, engagement, page, page_size: PAGE_SIZE }),
-        getOutreachStats(filters),
-      ]);
+      const [res, st] = await Promise.all([listCall, getOutreachStats(filters)]);
       if (seq !== seqRef.current) return; // a newer request superseded this one
       setItems(res.items || []);
       setTotal(res.total || 0);
       setTotalPages(res.total_pages || 1);
-      setStats(st || { sent: 0, failed: 0, replied: 0, opened: 0, clicked: 0, unsubscribed: 0, blocked: 0, bounced: 0 });
+      setStats(st || EMPTY_STATS);
     } catch (err) {
       if (seq !== seqRef.current) return;
       setError(err instanceof ApiError ? `Could not load mail logs: ${err.message}` : "Could not reach the harvest backend.");
-      setItems([]); setTotal(0); setTotalPages(1); setStats({ sent: 0, failed: 0, replied: 0, opened: 0, clicked: 0, unsubscribed: 0, blocked: 0, bounced: 0 });
+      setItems([]); setTotal(0); setTotalPages(1); setStats(EMPTY_STATS);
     } finally {
       if (seq === seqRef.current) setLoading(false);
     }
-  }, [page, dq, dCompany, dateParams, engagement]);
+  }, [page, dq, dCompany, dateParams, engagement, view, unreadOnly]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -272,37 +323,84 @@ export default function OutreachHistoryPage() {
     window.open(`/mail/${encodeURIComponent(it.id)}${q}`, "_blank", "noopener");
   }, []);
 
-  const anyFilter = !!(dq || dCompany || hasDateFilter || engagement);
-  /** Clear search, company, engagement and date-range filters. */
-  const resetFilters = () => { setSearch(""); setCompanyQ(""); setEngagement(""); setRangeKey("all"); setCustomFrom(""); setCustomTo(""); };
-  // Single-select: clicking the active card clears the filter, any other card switches to it.
-  const toggleEngagement = useCallback((key) => setEngagement((cur) => (cur === key ? "" : key)), []);
+  // Open a reply row → its thread in a new tab. An unread person reply is marked read
+  // (same as opening it from the bell); the row updates locally right away.
+  const openReply = useCallback((r) => {
+    window.open(replyThreadHref(r), "_blank", "noopener");
+    if (!r.is_read && !r.is_auto_reply) {
+      setItems((cur) => cur.map((x) => (x.id === r.id ? { ...x, is_read: true } : x)));
+      markReplyRead(r.id, true).catch(() => { /* best-effort */ });
+    }
+  }, []);
+
+  /** Switch list views; clear the old rows so the new table never renders the other shape. */
+  // The engagement cards filter the Sent list only, so leaving Sent drops that filter.
+  const switchView = (key) => {
+    if (key === view) return;
+    setItems([]);
+    setLoading(true);
+    if (key !== "sent") setEngagement("");
+    setView(key);
+  };
+
+  const anyFilter = !!(dq || dCompany || hasDateFilter || engagement || (view === "replies" && unreadOnly));
+  /** Clear search, company, engagement, unread and date-range filters. */
+  const resetFilters = () => { setSearch(""); setCompanyQ(""); setEngagement(""); setUnreadOnly(false); setRangeKey("all"); setCustomFrom(""); setCustomTo(""); };
+  // Single-select: clicking the active card clears the filter, any other card switches
+  // to it. The cards filter the Sent list, so picking one from another view jumps there.
+  const toggleEngagement = (key) => {
+    switchView("sent");
+    setEngagement((cur) => (cur === key ? "" : key));
+  };
+
+  const columns = view === "sent"
+    ? ["To", "From", "Company", "Subject", "Engagement", "Sent"]
+    : view === "auto"
+      ? ["From", "Company", "Type", "Message", "In reply to", "Received"]
+      : ["From", "Company", "Reply", "In reply to", "Received"];
 
   // Export the WHOLE filtered set (every page), not just the loaded page.
   const exportCsv = async () => {
     setExporting(true);
     try {
-      const filters = { search: dq, company: dCompany, ...dateParams, engagement };
-      const first = await getOutreachHistory({ ...filters, page: 1, page_size: PAGE_SIZE });
+      const base = { search: dq, company: dCompany, ...dateParams };
+      // Same list call the view uses, paged through to the end.
+      const fetchPage = (p) => (view === "sent"
+        ? getOutreachHistory({ ...base, engagement, page: p, page_size: PAGE_SIZE })
+        : getOutreachReplies({ ...base, kind: view === "auto" ? "auto" : "human", unread: view === "replies" && unreadOnly, page: p, page_size: PAGE_SIZE }));
+      const first = await fetchPage(1);
       let all = first.items || [];
       const pages = Math.min(first.total_pages || 1, 200); // safety cap (~20k rows)
       for (let p = 2; p <= pages; p += 1) {
-        const res = await getOutreachHistory({ ...filters, page: p, page_size: PAGE_SIZE });
+        const res = await fetchPage(p);
         all = all.concat(res.items || []);
       }
-      const head = ["Contact", "Email", "Company", "Client", "Subject", "Tone", "Type", "Status", "Engagement", "Sent"];
       /** Quote a CSV cell, doubling embedded quotes (null → empty). */
       const esc = (v) => `"${String(v == null ? "" : v).replace(/"/g, '""')}"`;
-      const rows = all.map((it) => [
-        it.contact_name || "", it.to_email || "", it.company || "", it.client_type || "",
-        it.subject || "", it.tone || "", it.outreach_kind || "", it.status || "",
-        engagementOf(it).label, it.created_at || "",
-      ].map(esc).join(","));
-      const blob = new Blob([[head.map(esc).join(","), ...rows].join("\r\n")], { type: "text/csv;charset=utf-8;" });
+      let head;
+      let rows;
+      if (view === "sent") {
+        head = ["Contact", "Email", "Company", "Client", "Subject", "Tone", "Type", "Status", "Engagement", "Auto-replied", "Sent"];
+        rows = all.map((it) => [
+          it.contact_name || "", it.to_email || "", it.company || "", it.client_type || "",
+          it.subject || "", it.tone || "", it.outreach_kind || "", it.status || "",
+          engagementOf(it).label, it.auto_replied ? "yes" : "", it.created_at || "",
+        ]);
+      } else {
+        head = ["From", "Email", "Company", ...(view === "auto" ? ["Type"] : ["Read"]), "Subject", "Message", "In reply to", "Received"];
+        rows = all.map((r) => [
+          r.from_name || "", r.from_email || "", r.company || "",
+          view === "auto" ? (AUTO_KIND[r.auto_kind] || AUTO_KIND.auto).label : (r.is_read ? "yes" : "no"),
+          r.subject || "", r.preview || "", r.in_reply_to_subject || "", r.received_at || "",
+        ]);
+      }
+      const lines = [head, ...rows].map((cells) => cells.map(esc).join(","));
+      const blob = new Blob([lines.join("\r\n")], { type: "text/csv;charset=utf-8;" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `mail-logs-${new Date().toISOString().slice(0, 10)}.csv`;
+      const suffix = view === "sent" ? "" : view === "auto" ? "-auto-replies" : "-replies";
+      a.download = `mail-logs${suffix}-${new Date().toISOString().slice(0, 10)}.csv`;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -320,7 +418,7 @@ export default function OutreachHistoryPage() {
         <div className="ha-pagehead-titles">
           <h1>Mail logs</h1>
           <div className="ha-sub" style={{ maxWidth: "56ch" }}>
-            Every outreach email sent using HarvestAgent, with delivery status and engagement per point of contact. Open a row to read the message and follow up.
+            Every outreach email sent using HarvestAgent, with delivery status and engagement per point of contact. Replies and auto-replies have their own views. Open a row to read the thread and follow up.
           </div>
         </div>
         <div className="ha-pagehead-actions">
@@ -342,6 +440,15 @@ export default function OutreachHistoryPage() {
         {/* Filter bar — lifted into its own stacking context (position+z-index) so the
             date popover paints above the sibling table card (same fix as .ha-filterbar). */}
         <div style={{ position: "relative", zIndex: 30, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        {/* View switcher — Sent mail · Replies from a person · Auto-replies (OOO etc.) */}
+        <div className="ha-views" role="tablist" aria-label="Mail logs view">
+          {VIEWS.map((v) => (
+            <button key={v.key} type="button" role="tab" className="ha-view" data-v={v.key}
+              aria-selected={view === v.key} onClick={() => switchView(v.key)}>
+              {v.label} <span className="n">{v.count(stats)}</span>
+            </button>
+          ))}
+        </div>
         <div ref={dateRef} style={{ position: "relative" }}>
           <button
             className="ha-btn ha-btn-secondary"
@@ -379,7 +486,7 @@ export default function OutreachHistoryPage() {
 
         <div style={{ display: "flex", alignItems: "center", gap: 8, border: "1px solid rgba(148,163,184,.5)", background: "rgba(255,255,255,.72)", borderRadius: 10, padding: "8px 12px", minWidth: 230, flex: "0 1 300px" }}>
           <Search size={15} color="#94A3B8" />
-          <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search by point of contact name…"
+          <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder={view === "sent" ? "Search by point of contact name…" : "Search by sender name or email…"}
             style={{ border: 0, outline: "none", background: "transparent", fontSize: 13, width: "100%", fontFamily: "inherit", color: "#0F172A" }} />
         </div>
 
@@ -388,6 +495,13 @@ export default function OutreachHistoryPage() {
           <input value={companyQ} onChange={(e) => setCompanyQ(e.target.value)} placeholder="Search by company…"
             style={{ border: 0, outline: "none", background: "transparent", fontSize: 13, width: "100%", fontFamily: "inherit", color: "#0F172A" }} />
         </div>
+
+        {view === "replies" && (
+          <button type="button" aria-pressed={unreadOnly} onClick={() => setUnreadOnly((u) => !u)}
+            style={{ border: `1px solid ${unreadOnly ? REPLY_COLOR : "rgba(148,163,184,.5)"}`, background: unreadOnly ? REPLY_SOFT : "rgba(255,255,255,.72)", color: unreadOnly ? REPLY_COLOR : "#334155", borderRadius: 999, padding: "7px 12px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>
+            Unread only · {stats.views?.replies_unread || 0}
+          </button>
+        )}
 
         {anyFilter && (
           <button onClick={resetFilters} style={{ border: 0, background: "transparent", color: "#64748B", fontSize: 13, fontWeight: 600, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 6, fontFamily: "inherit" }}>
@@ -403,21 +517,72 @@ export default function OutreachHistoryPage() {
           <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 860 }}>
             <thead>
               <tr>
-                {["To", "From", "Company", "Subject", "Engagement", "Sent"].map((h) => (
+                {columns.map((h) => (
                   <th key={h} style={{ textAlign: "left", fontSize: 11.5, letterSpacing: ".04em", textTransform: "uppercase", color: "#94A3B8", fontWeight: 700, padding: "13px 18px", borderBottom: "1px solid #E2E8F0", whiteSpace: "nowrap" }}>{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {loading && (
-                <tr><td colSpan={6} style={{ textAlign: "center", padding: "48px 16px", color: "#94A3B8" }}>Loading mail logs…</td></tr>
+                <tr><td colSpan={columns.length} style={{ textAlign: "center", padding: "48px 16px", color: "#94A3B8" }}>Loading mail logs…</td></tr>
               )}
               {!loading && items.length === 0 && !error && (
-                <tr><td colSpan={6} style={{ textAlign: "center", padding: "48px 16px", color: "#94A3B8" }}>
-                  {anyFilter ? "No mail matches your filters." : "No outreach sent yet."}
+                <tr><td colSpan={columns.length} style={{ textAlign: "center", padding: "48px 16px", color: "#94A3B8" }}>
+                  {anyFilter ? "No mail matches your filters." : EMPTY_TEXT[view]}
                 </td></tr>
               )}
-              {!loading && items.map((it) => {
+              {!loading && view !== "sent" && items.map((r) => {
+                const auto = view === "auto";
+                const name = r.from_name || r.from_email || "—";
+                const unread = !auto && !r.is_read;
+                const stripe = auto ? AUTO_COLOR : unread ? REPLY_COLOR : null;
+                return (
+                  <tr key={r.id} onClick={() => openReply(r)} title="Open the thread in a new tab"
+                    style={{ cursor: "pointer", borderBottom: "1px solid #EDF1F6", boxShadow: stripe ? `inset 3px 0 0 ${stripe}` : undefined }}
+                    onMouseEnter={(e) => { e.currentTarget.style.background = "#F8FAFC"; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}>
+                    {/* From — avatar + name · email */}
+                    <td style={{ padding: "9px 16px" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 9, minWidth: 0 }}>
+                        <div style={{ width: 28, height: 28, borderRadius: "50%", flex: "none", display: "grid", placeItems: "center", fontWeight: 700, fontSize: 11, color: "#fff", background: avatarColor(name) }}>
+                          {initials(r.from_name, r.from_email)}
+                        </div>
+                        <div style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "28ch" }}>
+                          <span style={{ fontWeight: unread ? 800 : 700, fontSize: 13.5, color: "#0F172A" }}>{name}</span>
+                          {r.from_name && <span style={{ color: "#64748B", fontSize: 12.5 }}> · {r.from_email}</span>}
+                        </div>
+                      </div>
+                    </td>
+                    {/* Company */}
+                    <td style={{ padding: "9px 16px" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+                        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "18ch", fontWeight: 600, fontSize: 13, color: "#1E293B" }}>{r.company || "—"}</span>
+                        {unread && <span style={{ flex: "none", fontSize: 10.5, fontWeight: 800, borderRadius: 6, padding: "2px 6px", color: "#1E40AF", background: "#EAF1FF" }}>New</span>}
+                      </div>
+                    </td>
+                    {/* Type (auto-replies only) */}
+                    {auto && <td style={{ padding: "9px 16px" }}><AutoKindChip kind={r.auto_kind} /></td>}
+                    {/* Message preview */}
+                    <td style={{ padding: "9px 16px" }}>
+                      <div style={{ color: "#475569", fontSize: 13, maxWidth: "46ch", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={r.preview || ""}>
+                        {r.preview || r.subject || "(no message body)"}
+                      </div>
+                    </td>
+                    {/* In reply to — the subject of the send it answers */}
+                    <td style={{ padding: "9px 16px" }}>
+                      <div style={{ fontWeight: 600, fontSize: 13, color: "#0F172A", maxWidth: "28ch", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {r.in_reply_to_subject || (r.outreach_id ? "—" : <span style={{ color: "#94A3B8", fontWeight: 500 }}>Not matched to a send</span>)}
+                      </div>
+                    </td>
+                    {/* Received */}
+                    <td style={{ padding: "9px 16px", whiteSpace: "nowrap" }}>
+                      <div style={{ fontWeight: 700, fontSize: 12.5, color: "#334155", fontVariantNumeric: "tabular-nums" }}>{fmtRel(r.received_at)}</div>
+                      <div style={{ color: "#94A3B8", fontSize: 11.5, marginTop: 1, fontVariantNumeric: "tabular-nums" }}>{fmtAbs(r.received_at)}</div>
+                    </td>
+                  </tr>
+                );
+              })}
+              {!loading && view === "sent" && items.map((it) => {
                 const name = it.contact_name || (it.channel === "linkedin" ? "(LinkedIn)" : it.to_email || "—");
                 const clientShort = it.client_type === "active" ? "Active" : it.client_type === "new" ? "New" : "";
                 const clientChip = it.client_type === "active"
@@ -468,6 +633,7 @@ export default function OutreachHistoryPage() {
                       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                         <EngagementStack it={it} />
                         <ReplyBadge it={it} size="sm" />
+                        <AutoReplyBadge it={it} />
                       </div>
                     </td>
                     {/* Sent */}

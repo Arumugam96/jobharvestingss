@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { SlidersHorizontal, Download, Search, RefreshCw } from "lucide-react";
 import { C } from "../theme";
 import {
-  SourceChip, StatusPill, AnimatedNumber, StatCard, SortHeader, PlainHeader, Select, MultiSelect, fmtDate,
+  SourceChip, StatusPill, AnimatedNumber, SortHeader, PlainHeader, Select, MultiSelect, fmtDate,
 } from "../components/ui";
 import { getRunHistoryContactMatch, ApiError } from "../api";
 import { CONTACT_FILTER_OPTIONS } from "../lib/contactFilter";
@@ -155,20 +155,22 @@ export default function RunHistoryPage({ runs, runsTotal, runsAggStats, loading,
             <button className="ha-btn ha-btn-secondary" style={{ height: 34, boxSizing: "border-box", padding: "0 14px" }} onClick={() => { setStartDate(""); setEndDate(""); }}>Clear dates</button>
           )}
         </div>
-        <style>{`
-          .ha-runhist-stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;width:100%;}
-          @media(max-width:900px){.ha-runhist-stats{grid-template-columns:repeat(2,minmax(0,1fr));}}
-          @media(max-width:360px){.ha-runhist-stats{grid-template-columns:minmax(0,1fr);}}
-        `}</style>
-        <div className="ha-runhist-stats">
-          <StatCard value={counts.totalRuns} label={filterActive ? "Matching runs" : "Total runs"} color={C.accent} title={aggNote} />
-          <StatCard value={counts.totalJobs} label="Jobs harvested" color={C.primary} title={aggNote} />
-          <StatCard value={counts.directClients} label="Direct clients" color={C.primary} title={aggNote} />
-          <StatCard value={counts.gcc} label="GCC companies" color={C.secondary} title={loadedNote} />
-          <StatCard value={counts.staffingFirms} label="Staffing firms" color="#7C3AED" title={loadedNote} />
-          <StatCard value={counts.ambiguous} label="Needs review" color="#D97706" title={loadedNote} />
-          <StatCard value={counts.success} label="Successful runs" color="#059669" title={loadedNote} />
-          <StatCard value={counts.failed} label="Failed runs" color="#DC2626" title={loadedNote} />
+        {/* Same compact tile + one-row grid as My Workspace / Run Detail (.ha-runstats). */}
+        <div className="ha-runstats">
+          {[
+            { value: counts.totalRuns, label: filterActive ? "Matching runs" : "Total runs", color: C.accent, title: aggNote },
+            { value: counts.totalJobs, label: "Jobs harvested", color: C.primary, title: aggNote },
+            { value: counts.directClients, label: "Direct clients", color: C.primary, title: aggNote },
+            { value: counts.gcc, label: "GCC companies", color: C.secondary, title: loadedNote },
+            { value: counts.staffingFirms, label: "Staffing firms", color: "#7C3AED", title: loadedNote },
+            { value: counts.ambiguous, label: "Needs review", color: "#D97706", title: loadedNote },
+            { value: counts.success, label: "Successful runs", color: "#059669", title: loadedNote },
+            { value: counts.failed, label: "Failed runs", color: "#DC2626", title: loadedNote },
+          ].map((card) => (
+            <div key={card.label} className="ha-runstat" title={card.title || card.label}>
+              <b style={{ color: card.color }}>{card.value}</b><span>{card.label}</span>
+            </div>
+          ))}
         </div>
 
         <div className="ha-card ha-filterbar" style={{ padding: "11px 14px", gridTemplateColumns: "repeat(3, minmax(0, 1fr))" }}>

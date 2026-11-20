@@ -53,9 +53,10 @@ const TOAST_MS = 8_000;
 // uses: the thread page reads ?job/?recruiter on a fresh tab). Falls back to the
 // Mail logs list when the reply couldn't be matched to a send.
 function threadHref(n) {
-  if (!n.outreach_id) return "/outreach";
+  // Unmatched reply → the thread page shows the reply on its own (?reply=).
+  if (!n.outreach_id) return `/mail/reply-${encodeURIComponent(n.id)}?reply=${encodeURIComponent(n.id)}`;
   const q = n.job_id ? `?job=${encodeURIComponent(n.job_id)}`
-    : n.recruiter_id ? `?recruiter=${encodeURIComponent(n.recruiter_id)}` : "";
+    : n.recruiter_id ? `?recruiter=${encodeURIComponent(n.recruiter_id)}` : `?reply=${encodeURIComponent(n.id)}`;
   return `/mail/${encodeURIComponent(n.outreach_id)}${q}`;
 }
 

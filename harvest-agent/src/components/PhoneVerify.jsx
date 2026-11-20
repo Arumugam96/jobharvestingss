@@ -795,7 +795,6 @@ export default function PhoneVerifyModal({ jobId, phone: phoneProp, pocName: poc
   else if (c.panel === "next" && !details.nextSteps?.length) why = "Pick at least one next step";
   else if (c.panel === "email" && !details.sendTo?.trim()) why = "Add the email to send details to";
   else if (c.panel === "redirect" && !details.referredName?.trim()) why = "Add who you were referred to";
-  else if (proofNeeded && !files.length) why = "Attach proof of the call to save";
   else { ok = true; why = `${editing ? "Updating" : "Saving"} as “${c.l}” · attempt ${attemptNo}`; }
 
   /**

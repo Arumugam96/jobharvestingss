@@ -43,8 +43,11 @@ failures (one malformed reply no longer ends the run).
 Security / integrity contract (identical to the other LinkedIn agents)
 ──────────────────────────────────────────────────────────────────────
 • Reuses the authenticated session (session file / persistent Chrome profile).
-• NO login automation. Auth is verified by the `li_at` cookie; when it is absent
-  the run raises FeedAuthError and the caller tells the user to run
+• NO login automation. Auth is verified by the `li_at` cookie. When it is absent
+  on a headed run, the browser waits on LinkedIn's login page for up to 5 minutes
+  (a "login needed" banner opens the Live Browser) so a person can log in; the
+  session is then saved and the run continues. Headless runs, or a wait that
+  times out, raise FeedAuthError and the caller points at
   POST /linkedin-setup-session.
 • The LLM NEVER fabricates contact/company info: email, phone and registration
   link are kept only when they appear verbatim in the post (or its links).
@@ -87,6 +90,13 @@ logger = structlog.get_logger(__name__)
 FEED_URL = "https://www.linkedin.com/feed/"
 SEARCH_URL = "https://www.linkedin.com/search/results/content/"
 _GATED_PATHS = ("/login", "/checkpoint", "/challenge", "/authwall", "/uas/")
+LOGIN_URL = "https://www.linkedin.com/login"
+
+# Manual-login wait: when the session is missing/expired on a headed run, keep the
+# browser on LinkedIn's login page this long (polling every _LOGIN_POLL_S) so a
+# person can log in through the Live Browser; the run then continues by itself.
+_LOGIN_WAIT_S = 300
+_LOGIN_POLL_S = 2
 
 # Run modes accepted by harvest(): where posts are read from.
 MODE_FEED, MODE_SEARCH, MODE_BOTH = "feed", "search", "both"
@@ -554,6 +564,11 @@ class LinkedInFeedAgent:
         # Per-source collection counts ("feed", "search: <q>") for the diagnostic.
         self._source_counts: dict[str, int] = {}
 
+        # Set by harvest(): whether a person can log in through the Live Browser
+        # (headed run) and which LinkedIn account's session to save after a login.
+        self._headless: bool = True
+        self._account:  str  = "1"
+
     def default_mode(self) -> str:
         """"both" when post search is enabled in settings, else "feed"."""
         return MODE_BOTH if self._settings.linkedin_feed_search_enabled else MODE_FEED
@@ -595,6 +610,8 @@ class LinkedInFeedAgent:
         _cfg           = ConfigService().load()
         chrome_profile = _cfg.browser.chrome_profile
         account        = _cfg.sources.linkedin_account
+        self._headless = headless
+        self._account  = str(account or "1")
         sm = SessionManager("linkedin", account)
         storage_state_arg = sm.storage_state_arg()
 
@@ -619,7 +636,7 @@ class LinkedInFeedAgent:
         async with browser_ctx as bm:
             page = await bm.new_page()
             if mode in (MODE_FEED, MODE_BOTH):
-                await self._open(page, FEED_URL)
+                await self._open(page, FEED_URL, on_status=on_status)
                 await self._collect_from_page(
                     page, collected, label="feed", max_new=self._max_posts,
                     max_scrolls=self._max_scrolls, min_scrolls=self._min_scrolls,
@@ -639,33 +656,155 @@ class LinkedInFeedAgent:
 
     # ── Open + auth-gate a page ─────────────────────────────────────────────────
 
-    async def _open(self, page: "Page", url: str) -> None:
+    async def _open(self, page: "Page", url: str, on_status: StatusCallback | None = None) -> None:
         """Navigate to `url`, dismiss overlays and verify the session is logged in.
 
-        Raises FeedAuthError if navigation fails, if there is no li_at cookie, or if
-        LinkedIn redirected to a gated (login/checkpoint) path."""
+        When the session is missing/expired on a headed run, waits up to
+        _LOGIN_WAIT_S for a person to log in through the Live Browser, saves the new
+        session and reopens `url`. Raises FeedAuthError if navigation fails, or if
+        the session is not authenticated and can't be (headless run, or the login
+        wait timed out / was stopped)."""
+        await self._goto(page, url)
+
+        if await self._is_authenticated(page):
+            logger.info("linkedin_feed_page_ready", url=page.url[:120])
+            return
+
+        logger.warning("linkedin_feed_not_authenticated", url=page.url[:80])
+        if self._headless:
+            # Nobody can type into a headless browser — fail fast as before.
+            self._flag_login_required(
+                "LinkedIn session expired — the LinkedIn Feed run stopped", waiting=False,
+            )
+            raise FeedAuthError(
+                "LinkedIn is not authenticated (no li_at cookie). "
+                "Run POST /linkedin-setup-session to log in once."
+            )
+
+        await self._wait_for_login(page, on_status)
+
+        # Logged in: back to the page this step wanted, and re-verify.
+        await self._goto(page, url)
+        if not await self._is_authenticated(page):
+            logger.warning("linkedin_feed_not_authenticated_after_login", url=page.url[:80])
+            raise FeedAuthError(
+                "LinkedIn still not authenticated after login (redirected to "
+                f"{page.url[:80]}). Run POST /linkedin-setup-session to log in."
+            )
+        logger.info("linkedin_feed_page_ready", url=page.url[:120], after_login=True)
+
+    async def _goto(self, page: "Page", url: str) -> None:
+        """Navigate to `url` and dismiss overlays. Raises FeedAuthError on failure."""
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
             await page.wait_for_timeout(3_000)
         except Exception as exc:
             logger.error("linkedin_feed_navigation_failed", url=url[:120], error=str(exc))
             raise FeedAuthError(f"Could not open LinkedIn ({url[:80]}): {exc}") from exc
-
         await self._dismiss_overlays(page)
 
-        # Auth is confirmed by the li_at cookie, not URL shape (LinkedIn will show
-        # a guest shell without redirecting) — same check as the other agents.
+    @staticmethod
+    async def _is_authenticated(page: "Page") -> bool:
+        """Logged in = li_at cookie present AND not parked on a login/checkpoint
+        page. Auth is confirmed by the cookie, not URL shape (LinkedIn will show a
+        guest shell without redirecting) — same check as the other agents."""
         try:
             cookies = await page.context.cookies()
         except Exception:
             cookies = []
-        if not any(c.get("name") == "li_at" for c in cookies) or any(p in page.url for p in _GATED_PATHS):
-            logger.warning("linkedin_feed_not_authenticated", url=page.url[:80])
-            raise FeedAuthError(
-                "LinkedIn is not authenticated (no li_at cookie). "
-                "Run POST /linkedin-setup-session to log in once."
+        has_li_at = any(c.get("name") == "li_at" for c in cookies)
+        return has_li_at and not any(p in page.url for p in _GATED_PATHS)
+
+    async def _wait_for_login(self, page: "Page", on_status: StatusCallback | None) -> None:
+        """Keep this run's (headed) browser on LinkedIn's login page for up to
+        _LOGIN_WAIT_S so a person can log in via the Live Browser (MFA/checkpoint
+        included). Raises a "login needed" banner whose button opens the Live
+        Browser. On success saves the session file (future runs reuse it) and
+        clears the banner; raises FeedAuthError on timeout or a stop request."""
+        minutes = max(1, _LOGIN_WAIT_S // 60)
+        logger.info(
+            "linkedin_feed_waiting_for_login", timeout_s=_LOGIN_WAIT_S, account=self._account,
+        )
+        self._flag_login_required(
+            "LinkedIn login needed — the LinkedIn Feed run is waiting in the Live Browser",
+            waiting=True,
+        )
+        if on_status:
+            await on_status(
+                f"LinkedIn login needed — open the Live Browser and log in "
+                f"(waiting up to {minutes} minutes)…"
             )
-        logger.info("linkedin_feed_page_ready", url=page.url[:120])
+
+        # Put the login form on screen unless LinkedIn already redirected there
+        # (a logged-out "guest shell" feed has no form to type into).
+        if not any(p in page.url for p in _GATED_PATHS):
+            try:
+                await page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=20_000)
+            except Exception as exc:
+                logger.debug("linkedin_feed_login_page_nav_failed", error=str(exc))
+
+        waited = 0
+        while waited < _LOGIN_WAIT_S:
+            if run_guard.is_stop_requested():
+                logger.info("linkedin_feed_login_wait_stopped_by_user", waited_s=waited)
+                self._clear_login_required()
+                raise FeedAuthError("Run stopped while waiting for LinkedIn login.")
+            await page.wait_for_timeout(_LOGIN_POLL_S * 1_000)
+            waited += _LOGIN_POLL_S
+            if await self._is_authenticated(page):
+                logger.info("linkedin_feed_login_detected", waited_s=waited, account=self._account)
+                await self._save_session(page)
+                self._clear_login_required()
+                if on_status:
+                    await on_status("LinkedIn login detected — starting the feed harvest…")
+                return
+
+        logger.error("linkedin_feed_login_timeout", timeout_s=_LOGIN_WAIT_S)
+        self._flag_login_required(
+            f"LinkedIn login not completed within {minutes} minutes — "
+            "the LinkedIn Feed run stopped",
+            waiting=False,
+        )
+        raise FeedAuthError(
+            f"LinkedIn login not completed within {minutes} minutes. "
+            "Start the run again and log in through the Live Browser."
+        )
+
+    async def _save_session(self, page: "Page") -> None:
+        """Persist the freshly logged-in session to the account's session file so
+        later runs (feed and jobs harvest) reuse it. Best-effort."""
+        try:
+            from app.services.session_manager import SessionManager
+            await SessionManager("linkedin", self._account).save_session(page)
+        except Exception as exc:
+            logger.warning("linkedin_feed_session_save_failed", error=str(exc))
+
+    def _flag_login_required(self, reason: str, *, waiting: bool) -> None:
+        """Raise the global "LinkedIn login needed" banner. waiting=True: this run's
+        own browser is on the login page (the banner opens the Live Browser, with a
+        countdown); False: nobody is waiting — the banner starts the setup flow."""
+        try:
+            from app.services import login_required as lr
+            lr.raise_login_required(
+                lr.SOURCE_LINKEDIN, account=self._account, reason=reason,
+                waiting_s=_LOGIN_WAIT_S if waiting else None,
+                action={"type": lr.ACTION_LIVE_BROWSER} if waiting else None,
+            )
+            if not waiting:
+                lr.set_waiting(
+                    lr.SOURCE_LINKEDIN, self._account, None,
+                    action=lr.default_action(lr.SOURCE_LINKEDIN, self._account, lr.KIND_LOGIN),
+                )
+        except Exception as exc:
+            logger.debug("linkedin_feed_login_required_flag_failed", error=str(exc))
+
+    def _clear_login_required(self) -> None:
+        """Clear this account's pending "LinkedIn login needed" banner (errors only logged)."""
+        try:
+            from app.services import login_required as lr
+            lr.clear(lr.SOURCE_LINKEDIN, self._account, kind=lr.KIND_LOGIN)
+        except Exception as exc:
+            logger.debug("linkedin_feed_login_required_clear_failed", error=str(exc))
 
     async def _dismiss_overlays(self, page: "Page") -> None:
         """Close any visible dismiss/close popups (e.g. messaging bubbles); failures are ignored."""
@@ -701,7 +840,7 @@ class LinkedInFeedAgent:
             if on_status:
                 await on_status(f"Searching LinkedIn posts: \"{query}\" ({i}/{len(queries)})…")
             try:
-                await self._open(page, _search_url(query, self._search_date))
+                await self._open(page, _search_url(query, self._search_date), on_status=on_status)
             except FeedAuthError:
                 raise
             except Exception as exc:

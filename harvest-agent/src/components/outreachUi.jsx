@@ -8,6 +8,18 @@ import {
 // the highest-value, act-on-this outcome, so it owns its own hue.
 export const REPLY_COLOR = "#4F46E5";
 export const REPLY_SOFT = "#EEF0FF";
+// Auto-reply accent — amber. Out-of-office / auto-acknowledgements read apart from
+// real replies (indigo) and from the delivery colours.
+export const AUTO_COLOR = "#B45309";
+export const AUTO_SOFT = "#FFF7ED";
+
+// Auto-reply sub-type (from the backend's classify_auto_reply) → label + colours.
+export const AUTO_KIND = {
+  ooo:  { label: "Out of office",        color: AUTO_COLOR, bg: AUTO_SOFT },
+  left: { label: "No longer here",       color: "#B91C1C",  bg: "#FEF2F2" },
+  ack:  { label: "Auto-acknowledgement", color: "#64748B",  bg: "#F1F5F9" },
+  auto: { label: "Auto-reply",           color: AUTO_COLOR, bg: AUTO_SOFT },
+};
 
 /* Shared outreach formatting + badges, used by both the Mail logs list
  * (OutreachHistoryPage) and the standalone thread page (OutreachThreadPage) so a
@@ -250,6 +262,28 @@ export function ReplyBadge({ it, size = "md" }) {
       }}
     >
       <Reply size={sm ? 11 : 13} strokeWidth={2.5} /> Replied
+    </span>
+  );
+}
+
+/** Amber "Auto-reply" pill for a sent row that only got an automatic response
+ * (OOO etc.). Hidden once a real reply arrives — the Replied badge wins. */
+export function AutoReplyBadge({ it }) {
+  if (!it || !it.auto_replied || it.replied_at) return null;
+  return (
+    <span title="Got an automatic reply (out of office or similar)"
+      style={{ display: "inline-flex", alignItems: "center", flex: "none", background: AUTO_SOFT, color: AUTO_COLOR, borderRadius: 999, padding: "2px 8px", fontSize: 11, fontWeight: 800, whiteSpace: "nowrap" }}>
+      Auto-reply
+    </span>
+  );
+}
+
+/** Chip naming an auto-reply's kind (Out of office / No longer here / …). */
+export function AutoKindChip({ kind }) {
+  const meta = AUTO_KIND[kind] || AUTO_KIND.auto;
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", flex: "none", background: meta.bg, color: meta.color, borderRadius: 6, padding: "2px 7px", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" }}>
+      {meta.label}
     </span>
   );
 }

@@ -25,6 +25,7 @@ from app.core.job_url import normalize_job_url
 from app.core.tenant_context import apply_tenant, get_current_tenant_id
 from app.models.harvest_run import ScrapedJobORM
 from app.models.outreach import EmailOutreachORM
+from app.models.outreach_reply import OutreachReplyORM
 from app.models.recruiter import RecruiterORM
 from app.services.email_service import outreach_sender_email
 
@@ -433,9 +434,24 @@ def _engagement_predicate(engagement: str | None):
         # Mirrors the "replied" count below: a send is "replied" once the inbound
         # reply webhook stamps its replied_at (denormalized from outreach_replies).
         return EmailOutreachORM.replied_at.isnot(None)
+    if key == "auto_replied":
+        return _has_auto_reply()
     if key in ("clicked", "unsubscribed", "blocked", "bounced"):
         return EmailOutreachORM.delivery_status == key
     return None
+
+
+def _has_auto_reply():
+    """Predicate: the send got at least one auto-reply (OOO, auto-acknowledgement…).
+    Auto-replies never stamp replied_at, so this is the only way to see them per send."""
+    return (
+        select(OutreachReplyORM.id)
+        .where(
+            OutreachReplyORM.outreach_id == EmailOutreachORM.id,
+            OutreachReplyORM.is_auto_reply.is_(True),
+        )
+        .exists()
+    )
 
 
 def _apply_list_filters(stmt, *, search=None, company=None, date_from=None, date_to=None, engagement=None):
@@ -526,6 +542,7 @@ async def outreach_list_stats(
       * blocked      — headline 'blocked'
       * bounced      — headline 'bounced' (soft/hard/invalid collapse here; shown as
                        "Soft bounce" since only soft bounces are enabled)
+      * auto_replied — sends that received at least one auto-reply (OOO etc.)
     """
     base = _apply_list_filters(
         select(EmailOutreachORM), search=search, company=company, date_from=date_from, date_to=date_to
@@ -547,6 +564,9 @@ async def outreach_list_stats(
         # Replies received — a send whose replied_at was stamped by the inbound-reply
         # webhook. Scoped to the same filtered set as every other count.
         "replied": await _count(base.where(EmailOutreachORM.replied_at.isnot(None))),
+        # Sends that got an automatic response (OOO etc.) — shown as its own card;
+        # mirrors _engagement_predicate("auto_replied").
+        "auto_replied": await _count(base.where(_has_auto_reply())),
         "unsubscribed": await _status("unsubscribed"),
         "blocked": await _status("blocked"),
         "bounced": await _status("bounced"),

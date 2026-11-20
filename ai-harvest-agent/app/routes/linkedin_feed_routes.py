@@ -139,6 +139,21 @@ async def _run_feed_background_impl(
         else:
             leads, token_usage, llm_calls = await _do_harvest()
     except FeedAuthError as exc:
+        if run_guard.is_stop_requested():
+            # Stopped by the user while waiting for a LinkedIn login — not an auth failure.
+            log.info("linkedin_feed_stopped_during_login_wait")
+            JobTracker.update(
+                job_id, status="stopped", progress=100,
+                message="Harvest stopped while waiting for LinkedIn login",
+                completed_at=datetime.now(timezone.utc).isoformat(),
+            )
+            if run_pk:
+                await db_write(lambda db: HarvestRunService(db).update_run(
+                    run_pk, status="stopped", progress=100,
+                    message="Harvest stopped while waiting for LinkedIn login",
+                    completed_at=datetime.now(timezone.utc),
+                ))
+            return
         log.warning("linkedin_feed_action_required", error=str(exc))
         JobTracker.update(
             job_id, status="action_required", progress=100,
