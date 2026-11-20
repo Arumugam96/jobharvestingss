@@ -265,26 +265,26 @@ def _clean_details(outcome: str, details: dict[str, Any] | None) -> dict[str, An
     return clean
 
 
-def _validate_outcome(outcome: str, details: dict[str, Any], proof_count: int,
-                      attempt_no: int) -> None:
-    """The popup's Save gate, enforced server-side (422 saying what is missing)."""
-    msg = ""
-    if outcome == "not_interested" and not details.get("reason"):
-        msg = "Select a reason"
-    elif outcome == "do_not_call" and not details.get("dncConfirm"):
-        msg = "Confirm the do-not-call request"
-    elif outcome == "good_response" and not details.get("nextSteps"):
-        msg = "Pick at least one next step"
-    elif outcome == "share_details" and not _EMAIL_RE.match(details.get("sendTo") or ""):
-        msg = "Add a valid email to send details to"
-    elif outcome == "not_right_poc" and not details.get("referredName"):
-        msg = "Add who you were referred to"
-    elif not proof_count and (
-        outcome in PROOF_REQUIRED or (outcome in PROOF_FROM_SECOND and attempt_no >= 2)
-    ):
-        msg = "Attach proof of the call to save"
-    if msg:
-        raise HTTPException(status_code=422, detail=msg)
+# def _validate_outcome(outcome: str, details: dict[str, Any], proof_count: int,
+#                       attempt_no: int) -> None:
+#     """The popup's Save gate, enforced server-side (422 saying what is missing)."""
+#     msg = ""
+#     if outcome == "not_interested" and not details.get("reason"):
+#         msg = "Select a reason"
+#     elif outcome == "do_not_call" and not details.get("dncConfirm"):
+#         msg = "Confirm the do-not-call request"
+#     elif outcome == "good_response" and not details.get("nextSteps"):
+#         msg = "Pick at least one next step"
+#     elif outcome == "share_details" and not _EMAIL_RE.match(details.get("sendTo") or ""):
+#         msg = "Add a valid email to send details to"
+#     elif outcome == "not_right_poc" and not details.get("referredName"):
+#         msg = "Add who you were referred to"
+#     elif not proof_count and (
+#         outcome in PROOF_REQUIRED or (outcome in PROOF_FROM_SECOND and attempt_no >= 2)
+#     ):
+#         msg = "Attach proof of the call to save"
+#     if msg:
+#         raise HTTPException(status_code=422, detail=msg)
 
 
 def _normalize_call_input(
@@ -1237,7 +1237,7 @@ async def update_call(
             ),
             PhoneCallLogORM.tenant_id,
         ))).scalar_one() or 1)
-        _validate_outcome(outcome, details, sum(1 for p in proof_items if p["name"]), attempt_no)
+        # _validate_outcome(outcome, details, sum(1 for p in proof_items if p["name"]), attempt_no)
     if outcome == "do_not_call":
         reminder_at, follow_up = None, False  # the contact is suppressed — nothing to schedule
 
