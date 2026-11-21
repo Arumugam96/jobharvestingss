@@ -15,6 +15,7 @@ GET    /phone-verifications/latest?job_ids=   — newest call per visible job (b
 GET    /phone-verifications/contact-history?phone= — every call on a number, across jobs
 GET    /phone-verifications/logs              — every call in the tenant (admins; filter by
                                                assignee) or a business lead's own calls
+GET    /phone-verifications/logs/{id}         — one logged call (admins: any; leads: their own)
 PATCH  /phone-verifications/logs/{id}         — edit one logged call in place (admins: any;
                                                business leads: their own)
 GET    /phone-verifications/assignees         — business leads for the assignee filter (admins)
@@ -461,6 +462,30 @@ async def assigned_jobs_list(
     """The Phone logs "Self-assigned jobs" drill-down: every currently assigned job,
     called or not, with its call count and latest call. Admins only."""
     return await pvs.list_assigned_jobs(db, q=q, page=page, page_size=page_size)
+
+
+@router.get(
+    "/phone-verifications/logs/{log_id:int}",
+    summary="One logged call (admins: any; business leads: their own)",
+    responses={403: {"description": "Not your call log"},
+               404: {"description": "Call log not found (or cleared)"}},
+)
+async def phone_call_log_detail(
+    log_id: int,
+    current_user: AuthenticatedUser = Depends(require_phone_logs_access),
+    db: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """The Phone logs call page (/phone-logs/:id): one call shaped exactly like a
+    GET /phone-verifications/logs item. Admins can open any call in the tenant; a
+    business lead only the calls they own (the same rows their list shows)."""
+    item = await pvs.get_log_item(db, log_id, current_user)
+    if item is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail=f"Call log {log_id} not found")
+    if not current_user.is_admin and not item.get("can_edit"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="You can only view your own phone logs.")
+    return item
 
 
 class XlsxExportRequest(BaseModel):
