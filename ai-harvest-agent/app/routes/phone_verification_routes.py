@@ -6,7 +6,10 @@ Endpoints
 POST   /jobs/{id}/phone-verification          — log a call (outcome, details, proof, reminder)
 DELETE /jobs/{id}/phone-verification?phone=   — "Clear status" for that number
 GET    /jobs/{id}/phone-verification/history  — every non-cleared call, newest first
-GET    /phone-verifications/latest?job_ids=   — newest call per visible job (badges)
+GET    /jobs/{id}/phone-verification/siblings?phone= — the contact's other jobs
+GET    /phone-verifications/latest?job_ids=   — newest call per visible job (badges; a job
+                                               with no call of its own gets its contact's
+                                               inherited call, `inherited: true`)
                                                + flags and per-number call summaries
                                                (`contacts`, across all jobs) of those numbers
 GET    /phone-verifications/contact-history?phone= — every call on a number, across jobs
@@ -21,6 +24,7 @@ GET    /phone-verifications/logs/phones       — every phone number held (admin
 GET    /phone-verifications/logs/assigned-jobs — every self-assigned job (admins only)
 POST   /phone-verifications/logs/xlsx         — the page's export rows as .xlsx (admins + leads)
 GET    /phone-verifications/flags?phones=     — invalid / do-not-call / warm per number
+DELETE /phone-verifications/flags?phone=&flag= — admin "Remove flag" (invalid|dnc|warm|reenrich)
 GET    /phone-verifications/follow-ups        — the caller's due follow-up reminders
 POST   /phone-verifications/follow-ups/{id}/done — dismiss one reminder
 POST   /phone-verifications/follow-ups/done-all  — dismiss all due reminders
@@ -151,7 +155,9 @@ async def log_phone_call(
     """Log one call on the job (status, outcome, details, proof, optional reminder).
 
     Closes any open follow-up on the same job + number before inserting the new row. Returns the
-    call view plus `attempts` (non-cleared calls on the job) and the number's `flags`. 403/404 per
+    call view plus `attempts` (non-cleared calls on the job), the number's `flags` and
+    `claimed_siblings` (the contact's unassigned other jobs now self-assigned to the caller —
+    0 when details.applyToContact is false or the outcome is position_closed). 403/404 per
     the assignment lock; 422 for an invalid status/outcome, missing required call fields, or oversized details.
     Proof attachments are optional; an empty proof list is accepted.
     """
@@ -169,7 +175,8 @@ async def log_phone_call(
     counts = await pvs.count_calls(db, [job_id])
     flags = await pvs.flags_for_phones(db, [row.phone])
     return {**pvs.call_view(row), "attempts": counts.get(job_id, 1),
-            "flags": flags.get(row.phone, pvs.flag_view(None))}
+            "flags": flags.get(row.phone, pvs.flag_view(None)),
+            "claimed_siblings": getattr(row, "claimed_siblings", 0)}
 
 
 @router.delete(
@@ -211,6 +218,27 @@ async def phone_call_history(
     return {"job_id": job_id, "items": await pvs.history(db, job_id)}
 
 
+@router.get(
+    "/jobs/{job_id}/phone-verification/siblings",
+    summary="The other jobs of this job's contact (same number + company)",
+    responses=_GUARDED_RESPONSES,
+)
+async def phone_contact_siblings(
+    job_id: str,
+    phone: str = Query(default="", max_length=pvs.PHONE_MAX_LEN,
+                       description="Number being dialed; blank = the job's primary number."),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """Jobs sharing this job's contact: the same phone key (trailing 10 digits of `phone`) as
+    their primary number and the same company. A call logged here stands for them too unless
+    it opts out (details.applyToContact = false). Returns `{"count", "uncalled", "items":
+    [{id, job_title, company, assigned_to: {email, name}|null, called}]}` (at most 50 items,
+    newest first); 403/404 per the assignment lock."""
+    job = await _load_job_guarded(db, job_id, current_user)
+    return await pvs.contact_siblings(db, job, phone if isinstance(phone, str) else "")
+
+
 @router.get("/phone-verifications/latest", summary="Latest call per job (batch, for table badges)")
 async def latest_phone_verifications(
     job_ids: str = Query(default="", description="Comma-separated scraped job ids (max 200)."),
@@ -228,6 +256,9 @@ async def latest_phone_verifications(
     summary is `{calls, jobs, latest: {id, status, outcome, reason, revisit, called_by, called_at,
     job_id, job_title, company, contact_name, phone}}` over every caller's calls to that number on
     any job (pvs.contact_summaries) — the "Contacted" badge. Numbers never called are absent.
+    A visible job with no call of its own gets its contact's newest inheritable call instead
+    (pvs.inherited_for_jobs): the call view plus `inherited: true`, `source_job_id` and
+    `source_job_title`.
     """
     ids = [j.strip() for j in job_ids.split(",") if j.strip()]
     ids = list(dict.fromkeys(ids))[:LATEST_MAX_IDS]
@@ -250,6 +281,7 @@ async def latest_phone_verifications(
         locked = {jid for jid, owner in locks if owner and owner.lower() != me}
         visible = [j for j in ids if j not in locked]
     items = await pvs.latest_for_jobs(db, visible)
+    items.update(await pvs.inherited_for_jobs(db, [j for j in visible if j not in items]))
     numbers = list(dict.fromkeys(extra_phones + [v["phone"] for v in items.values()]))
     flags = await pvs.flags_for_phones(db, numbers)
     contacts = await pvs.contact_summaries(db, numbers)
@@ -470,6 +502,22 @@ async def phone_flags(
     """{phone: {invalid, dnc, warm, reenrich_requested, correct_number}} — only
     numbers carrying a flag are listed."""
     return {"flags": await pvs.flags_for_phones(db, _split_phones(phones))}
+
+
+@router.delete("/phone-verifications/flags", summary="Remove one call-learned flag from a number (admins)")
+async def remove_phone_flag(
+    phone: str = Query(..., description="The number whose flag to remove."),
+    flag: str = Query(..., description="invalid | dnc | warm | reenrich"),
+    current_user: AuthenticatedUser = Depends(require_admin),
+    db: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """Clear that stamp on the number's flag row(s) in the caller's tenant scope; "dnc"
+    also lifts the do-not-call email suppression its calls created. 422 on a bad
+    phone/flag. Returns `{"phone", "flag", "cleared", "suppressions_removed"}`."""
+    result = await pvs.unflag_phone(db, phone, flag, current_user)
+    logger.info("phone_flag_removed", phone=phone, flag=result["flag"], user=current_user.email,
+                cleared=result["cleared"], suppressions_removed=result["suppressions_removed"])
+    return result
 
 
 @router.get("/phone-verifications/follow-ups", summary="My due follow-up call reminders")

@@ -38,6 +38,7 @@ import app.models.outreach_reply  # noqa: F401 — registers outreach_replies on
 import app.models.phone_call_log  # noqa: F401 — registers phone_call_logs on Base.metadata
 import app.models.phone_contact_flag  # noqa: F401 — registers phone_contact_flags on Base.metadata
 import app.models.job_assignment_rotation  # noqa: F401 — registers job_assignment_rotation on Base.metadata
+import app.models.company_override  # noqa: F401 — registers company_overrides / classification_keywords on Base.metadata
 import app.models.resdex  # noqa: F401 — registers resdex_searches / resdex_candidates / resdex_candidate_emails / resdex_daily_usage on Base.metadata
 import app.models.suppression  # noqa: F401 — registers email_suppressions on Base.metadata
 import app.models.tenant  # noqa: F401 — registers tenants on Base.metadata
@@ -55,6 +56,8 @@ from app.routes.dice_routes import router as dice_agent_router
 from app.routes.run_harvest_agent import router as run_harvest_agent_router
 from app.routes.frontend_routes import router as frontend_router
 from app.routes.job_assignment_routes import router as job_assignment_router
+from app.routes.job_edit_routes import router as job_edit_router
+from app.routes.company_classification_routes import router as company_classification_router
 from app.routes.phone_verification_routes import router as phone_verification_router
 from app.routes.prospect_routes import router as prospect_intelligence_router
 from app.routes.recruiter_routes import router as recruiter_discovery_router
@@ -612,6 +615,8 @@ _TENANT_CONTENT_TABLES = [
     "phone_call_logs",
     # Phone-level flags set by logged calls (invalid / do-not-call / warm).
     "phone_contact_flags",
+    # Company classification overrides + editable keyword lists (alembic 0041).
+    "company_overrides", "classification_keywords",
 ]
 
 
@@ -635,6 +640,32 @@ def _ensure_tenant_columns(sync_conn) -> None:
         sync_conn.execute(sa_text(
             f"CREATE INDEX IF NOT EXISTS ix_{table}_tenant_id ON {table} (tenant_id)"
         ))
+
+
+def _ensure_email_suppressions_scope(sync_conn) -> None:
+    """email_suppressions went from one row per address to one per (tenant_id, email,
+    reason) — a do-not-call row is tenant-scoped (app/models/suppression.py). Idempotent:
+    swap the old UNIQUE index on email for a plain one, then add the composite unique
+    index. Runs after _ensure_tenant_columns (needs tenant_id). Mirrors alembic 0042."""
+    inspector = sa_inspect(sync_conn)
+    if "email_suppressions" not in inspector.get_table_names():
+        return
+    for ix in inspector.get_indexes("email_suppressions"):
+        if ix["name"] == "ix_email_suppressions_email" and ix.get("unique"):
+            sync_conn.execute(sa_text("DROP INDEX ix_email_suppressions_email"))
+            logger.info("email_suppressions_email_unique_dropped")
+    if sync_conn.dialect.name == "postgresql":
+        for uc in inspector.get_unique_constraints("email_suppressions"):
+            if uc.get("column_names") == ["email"] and uc.get("name"):
+                sync_conn.execute(sa_text(
+                    f'ALTER TABLE email_suppressions DROP CONSTRAINT "{uc["name"]}"'))
+    sync_conn.execute(sa_text(
+        "CREATE INDEX IF NOT EXISTS ix_email_suppressions_email ON email_suppressions (email)"
+    ))
+    sync_conn.execute(sa_text(
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_email_suppressions_tenant_email_reason "
+        "ON email_suppressions (tenant_id, email, reason)"
+    ))
 
 
 def _ensure_tenants_seeded(sync_conn) -> None:
@@ -856,6 +887,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # to 'internal'), seed the tenants, and install the RLS policies. Order
         # matters — columns first, then seed, then policies.
         await conn.run_sync(_ensure_tenant_columns)
+        # email_suppressions: unique per (tenant, email, reason) — tenant-scoped DNC.
+        await conn.run_sync(_ensure_email_suppressions_scope)
         await conn.run_sync(_ensure_tenants_seeded)
         await conn.run_sync(_ensure_rls_policies)
 
@@ -1090,6 +1123,8 @@ def create_app() -> FastAPI:
     app.include_router(user_admin_router, dependencies=protected)             # GET /auth/users, PATCH /auth/users/{id}/role (admins only)
     app.include_router(frontend_router, dependencies=protected)               # GET /jobs, /lead-intelligence, /download/*, /health
     app.include_router(job_assignment_router, dependencies=protected)         # POST/DELETE /jobs/{id}/assign ("Assign to me")
+    app.include_router(job_edit_router, dependencies=protected)               # PATCH /jobs/{id} (edit job details)
+    app.include_router(company_classification_router, dependencies=protected) # /company-overrides, /classification-keywords (admins)
     app.include_router(phone_verification_router, dependencies=protected)     # /jobs/{id}/phone-verification, /phone-verifications/* (call log + follow-ups)
     app.include_router(run_harvest_agent_router, dependencies=protected)      # POST /run-harvest-agent, GET /harvest-status/{id}, /run-history
     app.include_router(linkedin_agent_router, dependencies=protected)         # POST /run-linkedin-agent  +  results endpoints

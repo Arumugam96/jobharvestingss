@@ -8,6 +8,7 @@ import ExportButton from "../components/ExportButton";
 import JobsTable, { PAGE_SIZE_OPTIONS } from "../components/JobsTable";
 import { mapApiJob, fetchAllJobs, jobContact, pocKindLabel, partSourceLabel } from "../lib/jobsData";
 import { csvCell } from "../lib/csv";
+import { linkProps, OpenInNewTab } from "../lib/openLink";
 import { cacheRef } from "../lib/pageCache";
 import { useHarvestData } from "../HarvestDataContext";
 import { useTenant } from "../TenantContext";
@@ -36,7 +37,10 @@ const BUCKETS = {
   staffing:  { label: "Staffing firms",    color: "#7C3AED",   params: { hiring_entity: "Staffing Firm" } },
   ambiguous: { label: "Needs review",      color: "#D97706",   params: { hiring_entity: "Ambiguous" } },
   // My Workspace only: has the job been phoned yet (any logged call in Phone logs)?
-  notcalled: { label: "Not called yet",    color: "#DC2626",   params: { called: "no" },  library: true },
+  // "Contact already called": no call of its own, but its contact (same number +
+  // company) was called on another job. "Not called yet" lists one row per contact.
+  notcalled: { label: "Not called yet",    color: "#DC2626",   params: { called: "no", group: "contact" }, library: true },
+  contactcalled: { label: "Contact already called", color: "#0E7490", params: { called: "contact" }, library: true },
   called:    { label: "Called",            color: "#047857",   params: { called: "yes" }, library: true },
 };
 
@@ -81,7 +85,9 @@ export default function JobsPage({ onNavigate, onBack, onView, pageSizeSel, onPa
   // Another page can open My Workspace on a card (Phone logs → "Not called yet") via
   // navigation state; a My-Workspace-only card never applies on the other pages.
   const [bucket, setBucket] = useState(() => {
-    const b = location.state?.bucket || rowsSeed?.bucket || "all";
+    // ?bucket= too, so a link opened in a new tab (no navigation state) lands on the card.
+    const b = location.state?.bucket || new URLSearchParams(location.search).get("bucket")
+      || rowsSeed?.bucket || "all";
     return BUCKETS[b] && (!BUCKETS[b].library || library) ? b : "all";
   });
   const [pageJobs, setPageJobs] = useState(rowsSeed?.jobs || []);
@@ -343,15 +349,14 @@ export default function JobsPage({ onNavigate, onBack, onView, pageSizeSel, onPa
         </div>
         <div className="ha-pagehead-actions">
           {/* Shown to every role (business leads included) — a solid, accented pill so
-              it isn't missed among the header actions. Opens in a new browser tab so
-              the Harvested Jobs list stays where it was. */}
-          {!library && !demand && (
+              it isn't missed among the header actions. A plain click opens it in this
+              tab (Back returns to this list); Ctrl/Cmd/middle-click or the ↗ icon
+              opens a new tab. */}
+          {!library && !demand && (<>
             <a
               className="ha-btn"
-              href="/library"
-              target="_blank"
-              rel="noopener noreferrer"
-              title="Open My Workspace in a new tab — the jobs assigned to you"
+              {...linkProps("/library", () => (onNavigate ? onNavigate("library") : window.location.assign("/library")))}
+              title="Open My Workspace — the jobs assigned to you (Ctrl/middle-click for a new tab)"
               style={{
                 textDecoration: "none",
                 display: "inline-flex", alignItems: "center", gap: 7,
@@ -364,7 +369,8 @@ export default function JobsPage({ onNavigate, onBack, onView, pageSizeSel, onPa
             >
               <Wrench size={14} /> My Workspace
             </a>
-          )}
+            <OpenInNewTab href="/library" size={15} label="Open My Workspace in a new tab" style={{ color: C.primary, opacity: 0.85 }} />
+          </>)}
           {!library && (
             <ExportButton format={exportFormat} onFormatChange={setExportFormat} onExport={doExport} exporting={exporting} />
           )}
@@ -417,7 +423,10 @@ export default function JobsPage({ onNavigate, onBack, onView, pageSizeSel, onPa
                 type="button"
                 className={"ha-runstat ha-runstat-btn" + (active ? " ha-runstat-active" : "")}
                 aria-pressed={active}
-                title={card.key === "all" ? "Show all jobs" : `Filter jobs to ${card.label}`}
+                title={card.key === "all" ? "Show all jobs"
+                  : card.key === "notcalled"
+                    ? `${card.value} contact${card.value === 1 ? "" : "s"} nobody has called (${stats.notcalled_jobs ?? card.value} jobs) — one row per contact`
+                    : `Filter jobs to ${card.label}`}
                 onClick={() => setBucket((b) => (b === card.key ? "all" : card.key))}
                 style={active ? { boxShadow: `inset 0 0 0 2px ${card.color}` } : undefined}
               >

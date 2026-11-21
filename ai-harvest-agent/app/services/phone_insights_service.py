@@ -14,13 +14,12 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-import re
-
 import structlog
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
+from app.core.contact_keys import phone_key
 from app.models.harvest_run import HarvestRunORM, ScrapedJobORM
 from app.models.phone_call_log import PhoneCallLogORM
 from app.models.recruiter import RecruiterORM
@@ -37,15 +36,10 @@ _SOURCE_ROWS = (
 )
 _DONE_STATUSES = ("success", "completed", "no_results")
 
-_DIGITS_RE = re.compile(r"\D")
-
-
 def _norm_phone(raw: str | None) -> str:
-    """Strip a phone string to its trailing 10 digits for dedup comparison."""
-    if not raw:
-        return ""
-    digits = _DIGITS_RE.sub("", raw.strip())
-    return digits[-10:] if len(digits) >= 10 else digits
+    """The number's shared contact key (trailing 10 digits) for dedup comparison —
+    the same key phone_call_logs rows are matched on (app.core.contact_keys)."""
+    return phone_key(raw)
 
 
 def _empty(run_id: str) -> dict[str, Any]:
@@ -65,8 +59,8 @@ async def compute_phone_outreach_insights(
     A job "has a phone" exactly as the jobs table shows it — its scraped number, its
     recruiter's (incl. Apollo-delivered) number, or its company HR contact's
     (``_contact_presence_exprs()["mobile"]``). Call activity uses the LATEST
-    non-cleared call per job (same rule as the Phone Tracker badge), counted only for
-    jobs that have a phone — so called + not_called == total_phones.
+    non-cleared call per number (matched on the call's own phone key), counted only
+    for jobs that have a phone — so called + not_called == total_phones.
     """
     J, R = ScrapedJobORM, RecruiterORM
     mobile = _contact_presence_exprs()["mobile"]
@@ -109,34 +103,34 @@ async def compute_phone_outreach_insights(
     for src_key in seen_phones.values():
         per_source[src_key] += 1
 
-    # Latest non-cleared call per job (ids are autoincrement → max(id) is newest).
+    # Latest non-cleared call per NUMBER (ids are autoincrement → highest id is newest).
+    # A call is matched to the number it was made on — its own phone's key — so a call
+    # on a job's second number never lands on the job's first one. A call whose number
+    # isn't one of the run's (edited/typed by hand) falls back to its job's number only
+    # when that job has exactly one, never to an arbitrary pick among several.
     C = PhoneCallLogORM
-    newest = (
-        select(func.max(C.id))
+    calls = (await db.execute(
+        select(C)
         .where(C.job_id.in_(list(phone_jobs)), C.tenant_id == tenant_id, C.cleared_at.is_(None))
-        .group_by(C.job_id)
-    )
-    latest = (await db.execute(select(C).where(C.id.in_(newest.scalar_subquery())))).scalars().all()
-    latest = [c for c in latest if c.job_id in phone_jobs]
+        .order_by(C.id.desc())
+    )).scalars().all()
+    job_numbers: dict[str, list[str]] = {}
+    for p, jids in phone_to_jobs.items():
+        for jid in jids:
+            job_numbers.setdefault(jid, []).append(p)
 
-    # Deduplicate call logs by normalised phone: one call per unique number.
+    # Deduplicate call logs by normalised phone: one (the newest) call per unique number.
     called_phones: set[str] = set()
     answered_phones: set[str] = set()
     unanswered_phones: set[str] = set()
-    call_by_phone: dict[str, Any] = {}  # norm_phone → call log row (for source attribution)
-    for c in latest:
-        norm = _norm_phone(c.phone_number) if hasattr(c, "phone_number") else ""
-        if not norm:
-            for p, jids in phone_to_jobs.items():
-                if c.job_id in jids:
-                    norm = p
-                    break
-        if not norm:
-            continue
-        if norm in called_phones:
+    for c in calls:
+        norm = _norm_phone(c.phone)
+        if norm not in seen_phones:
+            own = job_numbers.get(c.job_id, [])
+            norm = own[0] if len(own) == 1 else ""
+        if not norm or norm in called_phones:
             continue
         called_phones.add(norm)
-        call_by_phone[norm] = c
         if c.call_status == "answered":
             answered_phones.add(norm)
         elif c.call_status == "unanswered":

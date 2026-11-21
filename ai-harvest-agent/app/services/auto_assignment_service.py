@@ -9,6 +9,14 @@ dealt out in job order to the tenant's active Business Leads (users.role =
 business_lead), sorted by lower(email), continuing from where the previous
 harvest stopped.
 
+Sticky contact owner: before the rotation, a job whose contact (company + shared
+phone / recruiter / poster email / LinkedIn — phone_verification_service's
+ContactIdentity) already has an inheritable call on another job goes to that call's
+owner (the call's assigned_to_user_id, else its caller) when that owner is still one
+of the tenant's active Business Leads — assignment_source "contact", no rotation
+slot spent. Otherwise the job falls through to the round-robin. The owners of a
+whole batch are resolved in bulk (phone_verification_service.contact_call_owners).
+
 The rotation cursor lives in job_assignment_rotation (one row per tenant) and
 stores the LAST Business Lead assigned, not a counter, so adding or removing a
 Business Lead never skews the rotation. The row is locked with SELECT ... FOR
@@ -46,13 +54,16 @@ from app.services.harvest_run_service import (
     _not_demand_job,
 )
 from app.services.job_assignment_service import display_name_from_email
+from app.services.phone_verification_service import contact_call_owners
 
 logger = structlog.get_logger(__name__)
 
 AUTO_ASSIGN_NOTE = "Auto-assigned (round-robin)"
+CONTACT_ASSIGN_NOTE = "Auto-assigned (contact owner)"
 SEARCHER_ASSIGN_NOTE = "Auto-assigned (Demand search owner)"
 # scraped_jobs.assignment_source values ("" = manual claim).
 SOURCE_AUTO = "auto"
+SOURCE_CONTACT = "contact"  # sticky owner of an already-called contact
 SOURCE_DEMAND = "demand"
 
 # Keep IN (...) lists comfortably under every driver's bind-parameter limit.
@@ -163,14 +174,60 @@ async def _eligible_jobs(
     return [(jid, tid) for jid, tid in rows.all()]
 
 
+async def _assign_contact_owners(
+    db: AsyncSession, tenant_id: str, job_ids: list[str], leads: list[str], now: datetime,
+) -> tuple[set[str], int]:
+    """Give each job whose contact was already called to that call's owner when the
+    owner is one of ``leads`` (the tenant's active Business Leads). Returns (the ids
+    handled here — assigned, or lost to a concurrent claim — so the round-robin skips
+    them, how many were assigned); jobs whose owner isn't an active lead are not
+    handled."""
+    lead_by_key = {lead.lower(): lead for lead in leads}
+    by_lead: dict[str, list[str]] = {}
+    for job_id, owner in (await contact_call_owners(db, tenant_id, job_ids)).items():
+        lead = lead_by_key.get(owner.strip().lower())
+        if lead:
+            by_lead.setdefault(lead, []).append(job_id)
+    handled: set[str] = set()
+    total = 0
+    for lead, ids in sorted(by_lead.items()):
+        assigned = 0
+        for i in range(0, len(ids), _ID_CHUNK):
+            result = await db.execute(
+                update(ScrapedJobORM)
+                .where(ScrapedJobORM.id.in_(ids[i:i + _ID_CHUNK]), _unassigned())
+                .values(
+                    assigned_to_email=lead,
+                    assigned_to_name=display_name_from_email(lead),
+                    assigned_at=now,
+                    assignment_note=CONTACT_ASSIGN_NOTE,
+                    assignment_source=SOURCE_CONTACT,
+                    assignment_reminder_done_at=None,
+                )
+                .execution_options(synchronize_session=False)
+            )
+            assigned += result.rowcount or 0
+        handled.update(ids)
+        total += assigned
+        logger.info("job_contact_owner_assigned", tenant_id=tenant_id, lead=lead,
+                    assigned=assigned, matched=len(ids))
+    return handled, total
+
+
 async def _assign_tenant(db: AsyncSession, tenant_id: str, job_ids: list[str]) -> int:
-    """Deal ``job_ids`` (one tenant, job order) round-robin to its Business Leads.
+    """Give ``job_ids`` (one tenant, job order) to its Business Leads: first each
+    called contact's owner (_assign_contact_owners), then the rest round-robin.
     Returns how many jobs were assigned."""
     leads = await active_business_leads(db, tenant_id)
     if not leads:
         logger.info("job_auto_assign_skipped", reason="no_business_leads",
                     tenant_id=tenant_id, eligible=len(job_ids))
         return 0
+    sticky, sticky_assigned = await _assign_contact_owners(
+        db, tenant_id, job_ids, leads, datetime.now(timezone.utc))
+    job_ids = [j for j in job_ids if j not in sticky]
+    if not job_ids:
+        return sticky_assigned
     rotation = await _lock_rotation(db, tenant_id)
     last = rotation.last_assigned_email or ""
     now = datetime.now(timezone.utc)
@@ -201,7 +258,7 @@ async def _assign_tenant(db: AsyncSession, tenant_id: str, job_ids: list[str]) -
         await db.flush()
     logger.info("job_auto_assigned", tenant_id=tenant_id, assigned=assigned,
                 eligible=len(job_ids), per_lead=per_lead, last_assigned=last)
-    return assigned
+    return sticky_assigned + assigned
 
 
 async def _auto_assign(

@@ -23,13 +23,28 @@ log, in the same transaction (_apply_outcome_effects):
   * good_response   — the number is flagged warm (and its recruiter's crm_status).
   * wrong_number / invalid_number — the number is flagged invalid; invalid_number
     can also request re-enrichment (a flag only — no Apollo spend here).
-  * do_not_call     — the number is flagged DNC, the contact's email is added to
-    email_suppressions (every send path already checks it) and no reminder is kept.
+  * do_not_call     — the number is flagged DNC and no reminder is kept; only when
+    the caller ticked the confirmation (dncConfirm) is the contact's email added to
+    email_suppressions too (every send path already checks it) — a TENANT-scoped
+    row (the job's tenant), see suppression_service.suppress_do_not_call.
   * not_right_poc   — the referred person becomes a recruiters row.
   * language_barrier + reassign — the caller's assignment on the job is released.
 
 Number-level state lives in phone_contact_flags (one row per tenant + digits), so
 it follows the number onto every job that shows it (flags_for_phones).
+
+Contact-level inheritance (derived at read time, never copied): a job with no call
+of its own takes the latest *inheritable* call on the same contact from another job.
+Same contact (ContactIdentity) = same company (lower(trim(company)) of the call's own
+job) AND at least one shared identity: the dialed number's phone key is the job's
+primary phone key (job_phone_key_expr), or the same linked recruiter (recruiter_id),
+or the same poster email (job_email_key_expr), or the same poster LinkedIn profile
+(job_linkedin_key_expr) — so a recruiter who changed numbers still matches.
+Inheritable = non-cleared, not position_closed, and not opted out with
+details.applyToContact = false (inheritable_call_cond). Logging an inheritable call
+also self-assigns the contact's still-unassigned sibling jobs to the caller
+(_claim_contact_siblings), and newly harvested jobs of a called contact are
+auto-assigned to that call's owner (auto_assignment_service via contact_call_picks).
 
 job_id is a soft link to scraped_jobs.id; a run reconcile that rewrites a run's
 rows re-points it via relink_job_ids(). Matching on the caller is
@@ -39,26 +54,27 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any
 
 from fastapi import HTTPException
 from fastapi import status as http_status
-from sqlalchemy import String, and_, func, or_, select, update
+from sqlalchemy import String, and_, case, exists, func, or_, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import aliased
 from sqlalchemy.sql.functions import FunctionElement
 
 from app.config import get_settings
-from app.core.contact_keys import phone_key
+from app.core.contact_keys import email_key, linkedin_key, phone_key
 from app.core.tenant_context import apply_tenant, get_current_tenant_id
 from app.models.auth import BUSINESS_LEAD_ROLE, AuthenticatedUser, UserORM
 from app.models.harvest_run import ScrapedJobORM
 from app.models.phone_call_log import PhoneCallLogORM
 from app.models.phone_contact_flag import PhoneContactFlagORM
 from app.models.recruiter import RecruiterORM
-from app.models.suppression import EmailSuppressionORM
 from app.services import recruiter_service, suppression_service
 from app.services.job_assignment_service import display_name_from_email
 
@@ -83,6 +99,7 @@ PHONE_SOURCE_MAX_LEN = 20
 CONTACT_NAME_MAX_LEN = 255
 DETAIL_TEXT_MAX_LEN = 255
 DETAIL_LIST_MAX_ITEMS = 10
+SIBLINGS_MAX = 50
 FLAGS_MAX_PHONES = 200
 
 # Outcome-specific detail fields the popup sends (OutcomePanel in PhoneVerify.jsx),
@@ -99,6 +116,9 @@ _PANEL_FIELDS: dict[str, dict[str, str]] = {
     "retry": {"preset": "str"},
     "invalid": {"markInvalid": "bool", "reenrich": "bool"},
 }
+# Kept for every outcome (and for calls without one): false = this call is for this
+# job only — it does not stand for the contact's other jobs (inheritable_call_cond).
+_CONTACT_FIELDS: dict[str, str] = {"applyToContact": "bool"}
 # outcome → its panel (None: no outcome-specific fields).
 _OUTCOME_PANEL: dict[str, str | None] = {
     "good_response": "next", "connect_back": "callback", "share_details": "email",
@@ -189,8 +209,300 @@ def _phone_key_sql_pg(element, compiler, **kw):
 
 
 def phone_key_sql(col=None):
-    """SQL expression for a call's phone key (contact_keys.phone_key in SQL)."""
+    """SQL expression for a call's phone key (contact_keys.phone_key in SQL) — or, given
+    any text expression ``col``, that expression's key."""
     return _PhoneKeySQL(col if col is not None else PhoneCallLogORM.phone)
+
+
+# ── Contact-level inheritance (one contact = phone key + company) ──────────────
+
+# Outcomes that describe the job, not the contact: never inherited by its other jobs.
+NON_INHERITABLE_OUTCOMES = frozenset({"position_closed"})
+# outcome_details is json.dumps text (default separators → '"applyToContact": false');
+# the compact form is matched too, in case a row was ever written without spaces.
+_OPT_OUT_LIKE = ('%"applyToContact": false%', '%"applyToContact":false%')
+
+
+def company_key(company: str | None) -> str:
+    """Python twin of company_key_sql: lower-cased, edge spaces trimmed ("" when blank)."""
+    return (company or "").strip(" ").lower()
+
+
+def company_key_sql(col):
+    """SQL lower(trim(company)) — the company half of a contact key (NULL → "")."""
+    return func.lower(func.trim(func.coalesce(col, "")))
+
+
+def _first_filled(*values: str | None) -> str:
+    """The first value that isn't blank after trimming, else ""."""
+    return next((v.strip() for v in values if (v or "").strip()), "")
+
+
+def job_phone_key(contact_number: str | None, recruiter_phone: str | None,
+                  company_contact_phone: str | None) -> str:
+    """The phone key of a job's primary number — Python twin of job_phone_key_expr."""
+    return phone_key(_first_filled(contact_number, recruiter_phone, company_contact_phone))
+
+
+def job_phone_key_expr(J=ScrapedJobORM, R=RecruiterORM):
+    """SQL phone key of the job's PRIMARY number — the one the jobs table shows first
+    (deriveJobContact in harvest-agent/src/lib/jobsData.js): the job's own scraped
+    number, else its linked recruiter's, else the Company-tagged contact's. "" when
+    none has digits. The statement must outerjoin RecruiterORM on recruiter_id."""
+    def filled(col):
+        """NULL when ``col`` is NULL or blank after trimming, else the trimmed value."""
+        return func.nullif(func.trim(func.coalesce(col, "")), "")
+    return phone_key_sql(func.coalesce(filled(J.contact_number), filled(R.contact_number),
+                                       filled(J.company_contact_phone), ""))
+
+
+# The other contact identities (besides the phone key): poster email and LinkedIn.
+# Placeholder values ("N/A", "Not found"…) must not glue unrelated jobs together, so an
+# email key needs an "@" and a LinkedIn key needs "linkedin.<…>/" in the raw URL.
+_LINKEDIN_RAW_LIKE = "%linkedin.%/%"
+_LINKEDIN_RAW_RE = re.compile(r"linkedin\..*/")
+
+
+def job_email_key(email_id: str | None, recruiter_email: str | None) -> str:
+    """The poster email key of a job — Python twin of job_email_key_expr: the job's own
+    scraped email, else its recruiter's official email, trimmed and lower-cased; only
+    values with an "@" count ("" when neither has one)."""
+    return next((k for k in map(email_key, (email_id, recruiter_email)) if "@" in k), "")
+
+
+def job_email_key_expr(J=ScrapedJobORM, R=RecruiterORM):
+    """SQL poster email key of a job (see job_email_key). No regexp — lower/trim only.
+    ``R`` is the job's recruiter, outer-joined on recruiter_id."""
+    def key(col):
+        v = func.lower(func.trim(func.coalesce(col, "")))
+        return case((v.like("%@%"), v), else_=None)
+    return func.coalesce(key(J.email_id), key(R.official_email_id), "")
+
+
+def job_linkedin_key(url: str | None) -> str:
+    """The poster LinkedIn key of a job — contact_keys.linkedin_key of
+    linkedin_profile_url (no scheme / www / query / fragment / trailing "/",
+    lower-cased), "" unless the raw URL looks like a LinkedIn link."""
+    return linkedin_key(url) if _LINKEDIN_RAW_RE.search((url or "").lower()) else ""
+
+
+class _LinkedInKeySQL(FunctionElement):
+    """SQL twin of contact_keys.linkedin_key over a column (see job_linkedin_key_expr)."""
+    type = String()
+    inherit_cache = True
+    name = "linkedin_key"
+
+
+@compiles(_LinkedInKeySQL)
+def _linkedin_key_sql_default(element, compiler, **kw):
+    """SQLite (tests): instr/substr string surgery. The column is repeated in the
+    output, so only pass a column (never a bound value)."""
+    u = f"lower(trim({compiler.process(list(element.clauses)[0], **kw)}))"
+    u = f"substr({u}, 1, instr({u} || '#', '#') - 1)"
+    u = f"substr({u}, 1, instr({u} || '?', '?') - 1)"
+    u = f"rtrim({u}, '/')"
+    u = (f"substr({u}, 1 + 8 * (substr({u}, 1, 8) = 'https://')"
+         f" + 7 * (substr({u}, 1, 7) = 'http://'))")
+    return f"substr({u}, 1 + 4 * (substr({u}, 1, 4) = 'www.'))"
+
+
+@compiles(_LinkedInKeySQL, "postgresql")
+def _linkedin_key_sql_pg(element, compiler, **kw):
+    """PostgreSQL: split_part drops fragment / query, rtrim the trailing "/", then one
+    anchored regexp strips the scheme and "www."."""
+    expr = compiler.process(list(element.clauses)[0], **kw)
+    return (f"regexp_replace(rtrim(split_part(split_part(lower(trim({expr})), '#', 1), "
+            f"'?', 1), '/'), '^(https?://)?(www\\.)?', '')")
+
+
+def job_linkedin_key_expr(J=ScrapedJobORM):
+    """SQL poster LinkedIn key of a job (see job_linkedin_key); "" when none."""
+    url = J.linkedin_profile_url
+    return case((func.lower(func.coalesce(url, "")).like(_LINKEDIN_RAW_LIKE), _LinkedInKeySQL(url)),
+                else_="")
+
+
+@dataclass(frozen=True)
+class ContactIdentity:
+    """Who a job's contact is. Two jobs are the same contact when they share the tenant
+    and company key AND at least one non-empty identity: phone key (the job's primary
+    number, or the dialed number for a call), recruiter_id, poster email key or
+    LinkedIn key. It is an OR over identities, so not transitive (A~B by phone and
+    B~C by email does not make A~C)."""
+    tenant_id: str
+    company: str
+    phone: str = ""
+    recruiter_id: str = ""
+    email: str = ""
+    linkedin: str = ""
+
+    @property
+    def usable(self) -> bool:
+        """A company and at least one identity — otherwise the job matches nothing."""
+        return bool(self.company and (self.phone or self.recruiter_id or self.email
+                                      or self.linkedin))
+
+    def matches(self, other: "ContactIdentity") -> bool:
+        """Same contact (see the class docstring)."""
+        if (self.tenant_id, self.company) != (other.tenant_id, other.company) or not self.company:
+            return False
+        return any(a and a == b for a, b in (
+            (self.phone, other.phone), (self.recruiter_id, other.recruiter_id),
+            (self.email, other.email), (self.linkedin, other.linkedin)))
+
+
+def identity_columns(J=ScrapedJobORM, R=RecruiterORM) -> tuple:
+    """The SELECT columns contact_identity() reads (``R`` outer-joined on recruiter_id)."""
+    return (J.tenant_id, J.company, J.contact_number, R.contact_number.label("rec_phone"),
+            J.company_contact_phone, J.recruiter_id, J.email_id,
+            R.official_email_id.label("rec_email"), J.linkedin_profile_url)
+
+
+def contact_identity(row: Any, phone: str = "") -> ContactIdentity:
+    """ContactIdentity of a job row carrying identity_columns(). ``phone`` (a dialed
+    number) replaces the job's primary phone key when it has digits."""
+    return ContactIdentity(
+        tenant_id=row.tenant_id or "",
+        company=company_key(row.company),
+        phone=normalize_phone(phone) or job_phone_key(
+            row.contact_number, row.rec_phone, row.company_contact_phone),
+        recruiter_id=(row.recruiter_id or "").strip(),
+        email=job_email_key(row.email_id, row.rec_email),
+        linkedin=job_linkedin_key(row.linkedin_profile_url),
+    )
+
+
+_IN_CHUNK = 500  # keep IN (...) lists under every driver's bind-parameter limit
+
+
+async def contact_call_picks(
+    db: AsyncSession, targets: dict[str, ContactIdentity],
+) -> dict[str, int]:
+    """{job_id: id of the newest inheritable call on the same contact logged on ANOTHER
+    job} for each ``targets`` job (job_id → its ContactIdentity). Reads the inheritable
+    calls whose own job is at one of the targets' companies (in the targets' tenants)
+    once, then matches identities in Python (ContactIdentity.matches) — one query per
+    500 companies, no per-job query. Not tenant-scoped beyond the targets' tenants:
+    callers pass identities of jobs they may see."""
+    targets = {j: c for j, c in targets.items() if c.usable}
+    if not targets:
+        return {}
+    L, Src, SR = PhoneCallLogORM, aliased(ScrapedJobORM), aliased(RecruiterORM)
+    sck = company_key_sql(Src.company)
+    tenants = sorted({c.tenant_id for c in targets.values()})
+    companies = sorted({c.company for c in targets.values()})
+    cols = (Src.tenant_id, Src.company, Src.contact_number, SR.contact_number.label("rec_phone"),
+            Src.company_contact_phone, Src.recruiter_id, Src.email_id,
+            SR.official_email_id.label("rec_email"), Src.linkedin_profile_url)
+    by_company: dict[tuple[str, str], list[tuple[int, str, ContactIdentity]]] = {}
+    for i in range(0, len(companies), _IN_CHUNK):
+        rows = (await db.execute(
+            # Newest inheritable call per (source job, dialed number).
+            select(func.max(L.id).label("id"), L.job_id, L.phone, *cols)
+            .select_from(L)
+            .join(Src, and_(Src.id == L.job_id, Src.tenant_id == L.tenant_id))
+            .outerjoin(SR, Src.recruiter_id == SR.id)
+            .where(inheritable_call_cond(L), L.tenant_id.in_(tenants),
+                   sck.in_(companies[i:i + _IN_CHUNK]))
+            .group_by(L.job_id, L.phone, Src.tenant_id, Src.company, Src.contact_number,
+                      SR.contact_number, Src.company_contact_phone, Src.recruiter_id,
+                      Src.email_id, SR.official_email_id, Src.linkedin_profile_url)
+        )).all()
+        for r in rows:
+            # A call's phone identity is the number DIALED (as in contact_call_exists).
+            ident = replace(contact_identity(r), phone=normalize_phone(r.phone))
+            by_company.setdefault((ident.tenant_id, ident.company), []).append(
+                (r.id, r.job_id, ident))
+    picks: dict[str, int] = {}
+    for job_id, ident in targets.items():
+        cands = [cid for cid, src_job, src in by_company.get((ident.tenant_id, ident.company), ())
+                 if src_job != job_id and ident.matches(src)]
+        if cands:
+            picks[job_id] = max(cands)
+    return picks
+
+
+async def contact_call_owners(
+    db: AsyncSession, tenant_id: str, job_ids: list[str],
+) -> dict[str, str]:
+    """{job_id: owner email} for the ``job_ids`` (of ``tenant_id``) whose contact has an
+    inheritable call on another job (contact_call_picks): the owner of the newest such
+    call — its assigned_to_user_id's users.email, else its called_by_email. Jobs with
+    no such call, or a call with no owner, are left out. Bulk: one identity query and
+    one owner query per 500 jobs, plus contact_call_picks' per-500-companies query."""
+    J, R, L = ScrapedJobORM, RecruiterORM, PhoneCallLogORM
+    targets: dict[str, ContactIdentity] = {}
+    for i in range(0, len(job_ids), _IN_CHUNK):
+        rows = (await db.execute(
+            select(J.id, *identity_columns(J, R)).outerjoin(R, J.recruiter_id == R.id)
+            .where(J.id.in_(job_ids[i:i + _IN_CHUNK]), J.tenant_id == tenant_id)
+        )).all()
+        targets.update({r.id: contact_identity(r) for r in rows})
+    picks = await contact_call_picks(db, targets)
+    call_ids = sorted(set(picks.values()))
+    owner_of: dict[int, str] = {}
+    for i in range(0, len(call_ids), _IN_CHUNK):
+        rows = (await db.execute(
+            select(L.id, L.called_by_email, UserORM.email)
+            .outerjoin(UserORM, UserORM.id == L.assigned_to_user_id)
+            .where(L.id.in_(call_ids[i:i + _IN_CHUNK]))
+        )).all()
+        for call_id, called_by, user_email in rows:
+            owner = (user_email or "").strip() or (called_by or "").strip()
+            if owner:
+                owner_of[call_id] = owner
+    return {job_id: owner_of[cid] for job_id, cid in picks.items() if cid in owner_of}
+
+
+def applies_to_contact(outcome: str, details: dict[str, Any] | None) -> bool:
+    """Does a call with this outcome/details stand for the contact's other jobs?"""
+    return ((outcome or "") not in NON_INHERITABLE_OUTCOMES
+            and (details or {}).get("applyToContact", True) is not False)
+
+
+def inheritable_call_cond(L=PhoneCallLogORM):
+    """SQL: call ``L`` may be inherited by the contact's other jobs — not cleared, not a
+    NON_INHERITABLE_OUTCOMES outcome, and not opted out (applyToContact: false)."""
+    details = func.coalesce(L.outcome_details, "")
+    return and_(L.cleared_at.is_(None),
+                func.coalesce(L.call_outcome, "").notin_(list(NON_INHERITABLE_OUTCOMES)),
+                *(details.notlike(p) for p in _OPT_OUT_LIKE))
+
+
+def contact_call_exists(J=ScrapedJobORM, R=RecruiterORM):
+    """SQL condition: J's contact has an inheritable call — some inheritable call whose
+    own job has J's company (lower(trim)) and shares one identity with J
+    (ContactIdentity): its dialed phone key is J's primary phone key, or its job has
+    J's recruiter_id / poster email key / LinkedIn key. Jobs with no company, or none
+    of the four identities, never match. The outer statement must outerjoin
+    RecruiterORM (job_phone_key_expr / job_email_key_expr).
+
+    Built as four UNCORRELATED ``(tenant, company, key) IN (SELECT …)`` tests — one
+    per identity — so PostgreSQL hashes each called-identity set once per query
+    instead of re-scanning the calls for every job row. Being uncorrelated, a call on
+    J itself counts too: callers pair this with "J has no call of its own"
+    (job_called_expr), which every caller does (job_contact_called_expr and GET /jobs'
+    called="no"); with that guard it means "a call on ANOTHER job of the contact"."""
+    L, Src, SR = PhoneCallLogORM, aliased(ScrapedJobORM), aliased(RecruiterORM)
+    ck = company_key_sql(J.company)
+
+    def called(key_sql, *, recruiter: bool = False):
+        """(tenant, company key, identity key) of every inheritable call's own job. No
+        NULL/blank keys, so ``NOT (… IN …)`` never turns NULL."""
+        stmt = (select(L.tenant_id, company_key_sql(Src.company), key_sql).select_from(L)
+                .join(Src, and_(Src.id == L.job_id, Src.tenant_id == L.tenant_id)))
+        if recruiter:
+            stmt = stmt.outerjoin(SR, Src.recruiter_id == SR.id)
+        return stmt.where(inheritable_call_cond(L), key_sql != "")
+
+    arms = (
+        (job_phone_key_expr(J, R), called(phone_key_sql(L.phone))),
+        (func.coalesce(J.recruiter_id, ""), called(Src.recruiter_id)),
+        (job_email_key_expr(J, R), called(job_email_key_expr(Src, SR), recruiter=True)),
+        (job_linkedin_key_expr(J), called(job_linkedin_key_expr(Src))),
+    )
+    return and_(ck != "", or_(*(and_(key != "", tuple_(J.tenant_id, ck, key).in_(sub))
+                                for key, sub in arms)))
 
 
 # ── One-time re-key of phone_contact_flags (Step 0 of per-contact history) ──────
@@ -246,8 +558,9 @@ def rekey_phone_contact_flags(sync_conn) -> int:
 
 def _clean_details(outcome: str, details: dict[str, Any] | None) -> dict[str, Any]:
     """Keep only the detail fields the outcome's panel defines, coerced to their
-    type (text capped, lists of text, booleans). Unknown keys are dropped."""
-    fields = _PANEL_FIELDS.get(_OUTCOME_PANEL.get(outcome) or "", {})
+    type (text capped, lists of text, booleans), plus the contact-wide
+    applyToContact flag. Unknown keys are dropped."""
+    fields = {**_PANEL_FIELDS.get(_OUTCOME_PANEL.get(outcome) or "", {}), **_CONTACT_FIELDS}
     details = details or {}
     clean: dict[str, Any] = {}
     for key, kind in fields.items():
@@ -318,6 +631,8 @@ def _normalize_call_input(
         raise HTTPException(status_code=422, detail="Remarks are required for an answered call")
     # Calls without an outcome (older clients) keep their details as sent.
     details = _clean_details(outcome, details) if outcome else dict(details or {})
+    if "applyToContact" in details:
+        details["applyToContact"] = bool(details["applyToContact"])
     details_json = json.dumps(details, ensure_ascii=False)
     if len(details_json) > DETAILS_MAX_LEN:
         raise HTTPException(status_code=422, detail="Outcome details are too long")
@@ -364,13 +679,21 @@ def call_view(row: PhoneCallLogORM, *, proof_src: bool = True) -> dict[str, Any]
     }
 
 
+def _same_number_cond(phone: str):
+    """SQL: the call was made on ``phone`` — by phone key, so "+91 98400 12345" and
+    "9840012345" are one number; a value with no digits matches only itself."""
+    key = normalize_phone(phone)
+    return phone_key_sql(PhoneCallLogORM.phone) == key if key else PhoneCallLogORM.phone == phone
+
+
 def _close_open_followups_stmt(job_id: str, phone: str, now: datetime):
-    """Tenant-scoped UPDATE marking all open follow-ups for this job+phone done at ``now``."""
+    """Tenant-scoped UPDATE marking all open follow-ups for this job+phone (by phone
+    key) done at ``now``."""
     return apply_tenant(
         update(PhoneCallLogORM)
         .where(
             PhoneCallLogORM.job_id == job_id,
-            PhoneCallLogORM.phone == phone,
+            _same_number_cond(phone),
             PhoneCallLogORM.follow_up_due_at.is_not(None),
             PhoneCallLogORM.follow_up_done_at.is_(None),
         )
@@ -397,7 +720,9 @@ async def log_call(
 ) -> PhoneCallLogORM:
     """Record one call against `job`'s `phone`. Supersedes (closes) any open
     follow-up on the same job+phone, then inserts the new row. `reminder_at`
-    schedules the follow-up at that time (any status)."""
+    schedules the follow-up at that time (any status). When the call stands for the
+    contact (applies_to_contact), the contact's unassigned sibling jobs are claimed
+    for the caller too; their number is on the returned row as ``claimed_siblings``."""
     phone = (phone or "").strip()[:PHONE_MAX_LEN]
     call_status, remarks, outcome, details, details_json, proof_items = _normalize_call_input(
         status=status, remarks=remarks, outcome=outcome, details=details, proof=proof,
@@ -449,8 +774,13 @@ async def log_call(
     if outcome:
         await db.flush()  # row.id, for the flag's last_call_id
         await _apply_outcome_effects(db, job, user, row, details, now)
+    claimed = 0
+    if applies_to_contact(outcome, details) and not (
+            outcome == "language_barrier" and details.get("reassign")):
+        claimed = await _claim_contact_siblings(db, job, user, phone, now)
     await db.commit()
     await db.refresh(row)
+    row.claimed_siblings = claimed  # transient — read by the POST route
     return row
 
 
@@ -492,6 +822,77 @@ async def _claim_job_if_unassigned(
         job.assignment_reminder_done_at = None
 
 
+async def _job_identity(db: AsyncSession, job: ScrapedJobORM, phone: str = "") -> ContactIdentity:
+    """`job`'s ContactIdentity (its linked recruiter read for the fallback phone and
+    email); a dialed `phone` with digits stands in for the primary phone key."""
+    rec = await _job_recruiter(db, job)
+    return contact_identity(SimpleNamespace(
+        tenant_id=getattr(job, "tenant_id", None) or get_current_tenant_id(),
+        company=job.company, contact_number=job.contact_number,
+        rec_phone=rec.contact_number if rec else "", company_contact_phone=job.company_contact_phone,
+        recruiter_id=job.recruiter_id, email_id=job.email_id,
+        rec_email=rec.official_email_id if rec else "",
+        linkedin_profile_url=job.linkedin_profile_url,
+    ), phone)
+
+
+def _contact_sibling_conds(job_id: str, ident: ContactIdentity) -> list:
+    """SQL conditions selecting the OTHER jobs of a contact: same tenant, same company
+    (company_key) and at least one shared identity (ContactIdentity: primary phone key,
+    recruiter_id, poster email key or LinkedIn key); Demand Search jobs left out. The
+    statement must outerjoin RecruiterORM. [] when the contact has no usable identity."""
+    if not ident.usable:
+        return []
+    J = ScrapedJobORM
+    same = []
+    if ident.phone:
+        same.append(job_phone_key_expr() == ident.phone)
+    if ident.recruiter_id:
+        same.append(J.recruiter_id == ident.recruiter_id)
+    if ident.email:
+        same.append(job_email_key_expr() == ident.email)
+    if ident.linkedin:
+        same.append(job_linkedin_key_expr() == ident.linkedin)
+    return [J.id != job_id,
+            J.tenant_id == ident.tenant_id,
+            company_key_sql(J.company) == ident.company,
+            or_(*same),
+            func.lower(func.coalesce(J.source, "")) != "demand"]
+
+
+async def _claim_contact_siblings(
+    db: AsyncSession, job: ScrapedJobORM, user: AuthenticatedUser, phone: str, now: datetime,
+) -> int:
+    """Self-assign the still-unassigned other jobs of the dialed contact (`job`'s
+    company + any shared identity — phone key of `phone`, recruiter, poster email,
+    LinkedIn; see _contact_sibling_conds) to the caller, like
+    _claim_job_if_unassigned: a conditional UPDATE, so jobs held by anyone else are
+    never touched. Returns the number of jobs claimed. Does not commit."""
+    if not user.email:
+        return 0
+    conds = _contact_sibling_conds(job.id, await _job_identity(db, job, phone))
+    if not conds:
+        return 0
+    J = ScrapedJobORM
+    unassigned = or_(J.assigned_to_email.is_(None), J.assigned_to_email == "")
+    ids = list((await db.execute(
+        select(J.id).outerjoin(RecruiterORM, J.recruiter_id == RecruiterORM.id)
+        .where(*conds, unassigned)
+    )).scalars().all())
+    if not ids:
+        return 0
+    result = await db.execute(apply_tenant(
+        update(J)
+        .where(J.id.in_(ids), unassigned)
+        .values(assigned_to_email=user.email,
+                assigned_to_name=display_name_from_email(user.email),
+                assigned_at=now, assignment_note="", assignment_reminder_done_at=None)
+        .execution_options(synchronize_session=False),
+        J.tenant_id,
+    ))
+    return result.rowcount or 0
+
+
 # ── Outcome side effects ───────────────────────────────────────────────────────
 
 async def _upsert_flag(
@@ -499,14 +900,34 @@ async def _upsert_flag(
     *, stamps: tuple[str, ...] = (), correct_number: str = "",
 ) -> PhoneContactFlagORM | None:
     """Create or update the called number's flag row. Each stamp (invalid_at,
-    dnc_at…) is set once — the first call that established it keeps its time."""
+    dnc_at…) is set once — the first call that established it keeps its time.
+
+    Race-safe: the row is created with INSERT … ON CONFLICT (tenant_id, phone_key) DO
+    NOTHING (ux_phone_contact_flags_tenant_phone), then read back and updated, so two
+    first calls on one number at the same moment both land on the one row instead of
+    the loser raising IntegrityError."""
     key = normalize_phone(row.phone)
     if not key:
         return None
+    dialect = db.get_bind().dialect.name
+    if dialect == "postgresql":
+        from sqlalchemy.dialects.postgresql import insert as dialect_insert
+    elif dialect == "sqlite":
+        from sqlalchemy.dialects.sqlite import insert as dialect_insert
+    else:  # pragma: no cover — only Postgres (prod) and SQLite (tests) are used
+        dialect_insert = None
+    if dialect_insert is not None:
+        await db.execute(
+            dialect_insert(PhoneContactFlagORM)
+            .values(tenant_id=row.tenant_id, phone_key=key, phone=row.phone,
+                    correct_number="", last_outcome="", updated_by_email="",
+                    created_at=now, updated_at=now)
+            .on_conflict_do_nothing(index_elements=["tenant_id", "phone_key"])
+        )
     flag = (await db.execute(select(PhoneContactFlagORM).where(
         PhoneContactFlagORM.tenant_id == row.tenant_id, PhoneContactFlagORM.phone_key == key,
     ))).scalar_one_or_none()
-    if flag is None:
+    if flag is None:  # pragma: no cover — other dialects: plain select-then-insert
         flag = PhoneContactFlagORM(tenant_id=row.tenant_id, phone_key=key, phone=row.phone,
                                    correct_number="", created_at=now)
         db.add(flag)
@@ -541,6 +962,111 @@ async def _contact_email_for(db: AsyncSession, job: ScrapedJobORM, phone_source:
     return (getattr(job, field, "") or "").strip()
 
 
+# Outcomes whose effects live on the number's phone_contact_flags row.
+_FLAG_OUTCOMES = frozenset({"good_response", "wrong_number", "invalid_number", "do_not_call"})
+_INVALID_OUTCOMES = frozenset({"wrong_number", "invalid_number"})
+
+
+def _outcome_stamps(outcome: str, details: dict[str, Any]) -> tuple[str, ...]:
+    """The flag stamps a call with this outcome/details sets (_apply_outcome_effects)."""
+    if outcome == "good_response":
+        return ("warm_at",)
+    if outcome in _INVALID_OUTCOMES:
+        stamps: tuple[str, ...] = ("invalid_at",) if details.get("markInvalid", True) else ()
+        if outcome == "invalid_number" and details.get("reenrich"):
+            stamps += ("reenrich_requested_at",)
+        return stamps
+    if outcome == "do_not_call":
+        return ("dnc_at",)
+    return ()
+
+
+def _confirms_dnc(outcome: str, details: dict[str, Any]) -> bool:
+    """Does this call suppress the contact's email (do_not_call + the confirmation)?"""
+    return outcome == "do_not_call" and bool(details.get("dncConfirm"))
+
+
+def _correct_number(outcome: str, details: dict[str, Any]) -> str:
+    """The correct number a wrong/invalid-number call reported ("" otherwise)."""
+    return (details.get("correctNumber") or "")[:50] if outcome in _INVALID_OUTCOMES else ""
+
+
+async def _other_flag_calls(db: AsyncSession, row: PhoneCallLogORM, key: str) -> list[tuple]:
+    """(id, outcome, details) of the OTHER non-cleared flag-setting calls on the same
+    number (phone key) in ``row``'s tenant, newest first — what can still justify a
+    flag after ``row`` stops doing so."""
+    L = PhoneCallLogORM
+    rows = (await db.execute(
+        select(L.id, L.call_outcome, L.outcome_details)
+        .where(L.tenant_id == row.tenant_id, L.id != row.id, L.cleared_at.is_(None),
+               L.call_outcome.in_(list(_FLAG_OUTCOMES)), phone_key_sql(L.phone) == key)
+        .order_by(L.id.desc())
+    )).all()
+    return [(r.id, r.call_outcome, _loads(r.outcome_details, {})) for r in rows]
+
+
+async def _undo_outcome_effects(
+    db: AsyncSession, row: PhoneCallLogORM, user: AuthenticatedUser,
+    old_outcome: str, old_details: dict[str, Any], now: datetime,
+) -> None:
+    """update_call: reverse what ``row``'s previous outcome/details set on its number
+    that its new outcome/details (already on ``row``) no longer set.
+
+      * a flag stamp (warm_at / invalid_at / reenrich_requested_at / dnc_at) is cleared
+        when this call set it — it is the flag's last_call_id, or the stamp carries
+        this call's time — and no other non-cleared call on the number still justifies
+        it (then it is kept);
+      * correct_number reported by this call falls back to the newest other call's, or "";
+      * the do-not-call email suppression this call created (raw_payload.call_id) is
+        handed to another non-cleared confirmed do_not_call on the number, else deleted.
+
+    The recruiter's crm_status "Warm" (good_response) is NOT reverted: it is a CRM
+    field people also set by hand, and the previous value isn't recorded. Does not
+    commit."""
+    new_outcome, new_details = row.call_outcome or "", _loads(row.outcome_details, {})
+    removed = set(_outcome_stamps(old_outcome, old_details)) - set(
+        _outcome_stamps(new_outcome, new_details))
+    old_correct = _correct_number(old_outcome, old_details)
+    drop_correct = bool(old_correct) and old_correct != _correct_number(new_outcome, new_details)
+    lift_email = _confirms_dnc(old_outcome, old_details) and not _confirms_dnc(
+        new_outcome, new_details)
+    key = normalize_phone(row.phone)
+    if not key or not (removed or drop_correct or lift_email):
+        return
+    others = await _other_flag_calls(db, row, key)
+
+    flag = (await db.execute(select(PhoneContactFlagORM).where(
+        PhoneContactFlagORM.tenant_id == row.tenant_id, PhoneContactFlagORM.phone_key == key,
+    ))).scalar_one_or_none()
+    if flag is not None:
+        mine = flag.last_call_id == row.id
+        for stamp in sorted(removed):
+            at = getattr(flag, stamp)
+            if at is None or not (mine or _aware(at) == _aware(row.created_at)):
+                continue
+            if any(stamp in _outcome_stamps(o, d) for _, o, d in others):
+                continue
+            setattr(flag, stamp, None)
+        if drop_correct and flag.correct_number == old_correct:
+            flag.correct_number = next(
+                (c for c in (_correct_number(o, d) for _, o, d in others) if c), "")
+        if mine:
+            flag.last_outcome = new_outcome
+        flag.updated_by_email = user.email or ""
+        flag.updated_at = now
+
+    if lift_email:
+        heir = next((cid for cid, o, d in others if _confirms_dnc(o, d)), None)
+        for sup in await suppression_service.do_not_call_rows(db, [row.tenant_id]):
+            payload = sup.raw_payload if isinstance(sup.raw_payload, dict) else {}
+            if payload.get("call_id") != row.id:
+                continue
+            if heir is not None:
+                sup.raw_payload = {**payload, "call_id": heir}
+            else:
+                await db.delete(sup)
+
+
 async def _apply_outcome_effects(
     db: AsyncSession, job: ScrapedJobORM, user: AuthenticatedUser,
     row: PhoneCallLogORM, details: dict[str, Any], now: datetime,
@@ -550,34 +1076,31 @@ async def _apply_outcome_effects(
     outcome = row.call_outcome
 
     if outcome == "good_response":
-        await _upsert_flag(db, row, user, now, stamps=("warm_at",))
+        await _upsert_flag(db, row, user, now, stamps=_outcome_stamps(outcome, details))
         if row.phone_source == "recruiter":
             recruiter = await _job_recruiter(db, job)
             if recruiter is not None:
                 recruiter.crm_status = "Warm"
 
     elif outcome in ("wrong_number", "invalid_number"):
-        stamps: tuple[str, ...] = ("invalid_at",) if details.get("markInvalid", True) else ()
-        if outcome == "invalid_number" and details.get("reenrich"):
-            stamps += ("reenrich_requested_at",)
-        await _upsert_flag(db, row, user, now, stamps=stamps,
+        await _upsert_flag(db, row, user, now, stamps=_outcome_stamps(outcome, details),
                            correct_number=details.get("correctNumber", ""))
 
     elif outcome == "do_not_call":
-        await _upsert_flag(db, row, user, now, stamps=("dnc_at",))
-        email = await _contact_email_for(db, job, row.phone_source)
-        if email and await suppression_service.suppress_bounced(
-            db, email=email, reason="do_not_call", source="phone_dnc",
-            recruiter_id=job.recruiter_id if row.phone_source == "recruiter" else None,
-            raw_payload={"call_id": row.id, "job_id": job.id, "phone": row.phone,
-                         "by": user.email or ""},
-            event_time=now,
-        ):
-            # suppress_bounced leaves the 'internal' server default; own the new row
-            # to the job's tenant so that tenant's suppression list shows it.
-            for obj in db.new:
-                if isinstance(obj, EmailSuppressionORM):
-                    obj.tenant_id = row.tenant_id
+        await _upsert_flag(db, row, user, now, stamps=_outcome_stamps(outcome, details))
+        # Stopping outreach emails too is opt-in: only with the popup's confirmation.
+        # The row is tenant-scoped (the job's tenant) and remembers this call, so an
+        # outcome edit or an admin unflag can lift it again.
+        email = (await _contact_email_for(db, job, row.phone_source)
+                 if _confirms_dnc(outcome, details) else "")
+        if email:
+            await suppression_service.suppress_do_not_call(
+                db, email=email, tenant_id=row.tenant_id, source="phone_dnc",
+                recruiter_id=job.recruiter_id if row.phone_source == "recruiter" else None,
+                raw_payload={"call_id": row.id, "job_id": job.id, "phone": row.phone,
+                             "by": user.email or ""},
+                event_time=now,
+            )
 
     elif outcome == "not_right_poc":
         recruiter = await recruiter_service.upsert_recruiter(
@@ -639,14 +1162,61 @@ async def flags_for_phones(db: AsyncSession, phones: list[str]) -> dict[str, dic
     return out
 
 
+# DELETE /phone-verifications/flags?flag= → the stamp it clears.
+UNFLAG_STAMPS = {"invalid": "invalid_at", "dnc": "dnc_at", "warm": "warm_at",
+                 "reenrich": "reenrich_requested_at"}
+
+
+async def unflag_phone(db: AsyncSession, phone: str, flag: str,
+                       user: AuthenticatedUser) -> dict[str, Any]:
+    """Admin "Remove flag": clear one stamp (UNFLAG_STAMPS) on the number's flag rows
+    visible to the caller (apply_tenant — the caller's tenant; every tenant's for an
+    all-access admin). Removing "dnc" also deletes the do-not-call email suppressions
+    that calls on this number created in those tenants (raw_payload.phone's key).
+    The calls themselves are untouched — a new call can set the flag again. Commits.
+
+    422 on a blank/digitless number or an unknown flag. Returns
+    ``{"phone", "flag", "cleared": <flag rows changed>, "suppressions_removed": n}``."""
+    key = normalize_phone(phone)
+    stamp = UNFLAG_STAMPS.get((flag or "").strip().lower())
+    if not key:
+        raise HTTPException(status_code=422, detail="phone is required")
+    if stamp is None:
+        raise HTTPException(status_code=422,
+                            detail=f"flag must be one of {', '.join(UNFLAG_STAMPS)}")
+    rows = (await db.execute(apply_tenant(
+        select(PhoneContactFlagORM).where(PhoneContactFlagORM.phone_key == key),
+        PhoneContactFlagORM.tenant_id,
+    ))).scalars().all()
+    now = _now()
+    cleared = 0
+    for row in rows:
+        if getattr(row, stamp) is not None:
+            setattr(row, stamp, None)
+            row.updated_by_email = user.email or ""
+            row.updated_at = now
+            cleared += 1
+    removed = 0
+    if stamp == "dnc_at" and rows:
+        for sup in await suppression_service.do_not_call_rows(db, {r.tenant_id for r in rows}):
+            payload = sup.raw_payload if isinstance(sup.raw_payload, dict) else {}
+            if normalize_phone(str(payload.get("phone") or "")) == key:
+                await db.delete(sup)
+                removed += 1
+    await db.commit()
+    return {"phone": phone, "flag": (flag or "").strip().lower(), "cleared": cleared,
+            "suppressions_removed": removed}
+
+
 async def clear_calls(db: AsyncSession, job_id: str, phone: str | None = None) -> int:
     """"Clear status": soft-delete the job's active rows for `phone` (all phones
-    when blank) and close their open follow-ups. Returns rows cleared."""
+    when blank; matched by phone key, so any formatting of the number clears it) and
+    close their open follow-ups. Returns rows cleared."""
     now = _now()
     conds = [PhoneCallLogORM.job_id == job_id, PhoneCallLogORM.cleared_at.is_(None)]
     phone = (phone or "").strip()
     if phone:
-        conds.append(PhoneCallLogORM.phone == phone)
+        conds.append(_same_number_cond(phone))
 
     await db.execute(apply_tenant(
         update(PhoneCallLogORM)
@@ -680,6 +1250,85 @@ async def latest_for_jobs(db: AsyncSession, job_ids: list[str]) -> dict[str, dic
     )).scalars().all()
     counts = await count_calls(db, [r.job_id for r in rows])
     return {r.job_id: {**call_view(r, proof_src=False), "attempts": counts.get(r.job_id, 1)} for r in rows}
+
+
+async def inherited_for_jobs(db: AsyncSession, job_ids: list[str]) -> dict[str, dict[str, Any]]:
+    """{job_id: call_view + {"inherited": True, "source_job_id", "source_job_title",
+    "attempts"}} — for each of `job_ids`, the newest inheritable call
+    (inheritable_call_cond) on the same contact logged on ANOTHER job: same tenant,
+    same company (company_key) and a shared identity — the call's dialed phone key is
+    the job's primary phone key, or the call's job has the job's recruiter_id, poster
+    email key or LinkedIn key (ContactIdentity, contact_call_picks). Jobs with no
+    company or no identity get nothing. Callers pass only jobs without a call of their
+    own (latest_for_jobs wins). Tenant-scoped."""
+    ids = [j for j in dict.fromkeys(job_ids) if j]
+    if not ids:
+        return {}
+    J, R = ScrapedJobORM, RecruiterORM
+    jobs = (await db.execute(apply_tenant(
+        select(J.id, *identity_columns(J, R))
+        .outerjoin(R, J.recruiter_id == R.id).where(J.id.in_(ids)),
+        J.tenant_id,
+    ))).all()
+    pick = await contact_call_picks(db, {j.id: contact_identity(j) for j in jobs})
+    if not pick:
+        return {}
+    L, Src = PhoneCallLogORM, aliased(ScrapedJobORM)
+    rows = {r.id: (r, title) for r, title in (await db.execute(
+        select(L, Src.job_title).outerjoin(Src, Src.id == L.job_id)
+        .where(L.id.in_(set(pick.values())))
+    )).all()}
+    counts = await count_calls(db, [r.job_id for r, _ in rows.values()])
+    out: dict[str, dict[str, Any]] = {}
+    for job_id, call_id in pick.items():
+        if call_id not in rows:
+            continue
+        row, title = rows[call_id]
+        out[job_id] = {**call_view(row, proof_src=False), "attempts": counts.get(row.job_id, 1),
+                       "inherited": True, "source_job_id": row.job_id,
+                       "source_job_title": title or ""}
+    return out
+
+
+async def contact_siblings(db: AsyncSession, job: ScrapedJobORM, phone: str = "") -> dict[str, Any]:
+    """The OTHER jobs of `job`'s contact — the job's company + any shared identity
+    (`phone`'s key, the job's primary number when blank; its recruiter_id, poster
+    email, LinkedIn — _contact_sibling_conds): ``{"count", "uncalled", "items": [{id,
+    job_title, company, assigned_to: {email, name}|None, called}]}``. `count` /
+    `uncalled` cover every sibling (uncalled = no call of its own); items are the
+    newest SIBLINGS_MAX. `called` = the sibling has a non-cleared call of its own."""
+    empty = {"count": 0, "uncalled": 0, "items": []}
+    conds = _contact_sibling_conds(job.id, await _job_identity(db, job, phone))
+    if not conds:
+        return empty
+    J, L = ScrapedJobORM, PhoneCallLogORM
+    own_call = exists().where(L.job_id == J.id, L.tenant_id == J.tenant_id,
+                              L.cleared_at.is_(None))
+
+    def base(*cols):
+        """SELECT ``cols`` over the sibling jobs (recruiter outer-joined for the key)."""
+        return (select(*cols).select_from(J)
+                .outerjoin(RecruiterORM, J.recruiter_id == RecruiterORM.id).where(*conds))
+
+    count, called = (await db.execute(base(
+        func.count(J.id), func.coalesce(func.sum(case((own_call, 1), else_=0)), 0),
+    ))).one()
+    rows = (await db.execute(
+        base(J.id, J.job_title, J.company, J.assigned_to_email, J.assigned_to_name,
+             own_call.label("called"))
+        .order_by(J.created_at.desc(), J.id).limit(SIBLINGS_MAX)
+    )).all()
+    items = [{
+        "id": r.id,
+        "job_title": r.job_title or "",
+        "company": r.company or "",
+        "assigned_to": ({"email": r.assigned_to_email,
+                         "name": r.assigned_to_name or display_name_from_email(r.assigned_to_email)}
+                        if r.assigned_to_email else None),
+        "called": bool(r.called),
+    } for r in rows]
+    return {"count": int(count or 0), "uncalled": int(count or 0) - int(called or 0),
+            "items": items}
 
 
 async def count_calls(db: AsyncSession, job_ids: list[str]) -> dict[str, int]:
@@ -1202,14 +1851,15 @@ async def update_call(
 ) -> dict[str, Any]:
     """Edit an existing call log IN PLACE (PATCH /phone-verifications/logs/{id}).
 
-    Same validation as log_call (_normalize_call_input + _validate_outcome, with the
-    attempt number = this call's position among the job's non-cleared calls). The
-    reminder is recomputed like log_call's; when its due time changes,
-    follow_up_done_at is reset so it fires again. do_not_call clears it. When the
-    outcome changed, _apply_outcome_effects re-runs (idempotent: flag upsert keyed on
-    the number, stamps set once, suppression / recruiter upserts) — the previous
-    outcome's effects are not undone. phone, phone_source, contact_name, job_id,
-    called_by_*, the owner and created_at are never touched.
+    Same validation as log_call (_normalize_call_input). The reminder is
+    recomputed like log_call's; when its due time changes,
+    follow_up_done_at is reset so it fires again. do_not_call clears it. What the
+    previous outcome/details set on the number and the new ones no longer do is
+    reversed first (_undo_outcome_effects — unless another call still justifies it);
+    then, when the outcome changed (or a flag outcome's details now set more),
+    _apply_outcome_effects re-runs (idempotent: flag upsert keyed on the number,
+    stamps set once, suppression / recruiter upserts). phone, phone_source,
+    contact_name, job_id, called_by_*, the owner and created_at are never touched.
 
     404 when missing, cleared or another tenant's; 403 unless can_edit_log. Returns
     the updated row as a Phone logs item (_log_item)."""
@@ -1227,17 +1877,6 @@ async def update_call(
     call_status, remarks, outcome, details, details_json, proof_items = _normalize_call_input(
         status=status, remarks=remarks, outcome=outcome, details=details, proof=proof,
     )
-    if outcome:
-        # This call's own attempt number: its position among the job's live calls.
-        attempt_no = int((await db.execute(apply_tenant(
-            select(func.count(PhoneCallLogORM.id)).where(
-                PhoneCallLogORM.job_id == row.job_id,
-                PhoneCallLogORM.cleared_at.is_(None),
-                PhoneCallLogORM.id <= row.id,
-            ),
-            PhoneCallLogORM.tenant_id,
-        ))).scalar_one() or 1)
-        # _validate_outcome(outcome, details, sum(1 for p in proof_items if p["name"]), attempt_no)
     if outcome == "do_not_call":
         reminder_at, follow_up = None, False  # the contact is suppressed — nothing to schedule
 
@@ -1253,6 +1892,7 @@ async def update_call(
         due = old_due or now + timedelta(hours=get_settings().phone_followup_delay_hours)
 
     old_outcome = row.call_outcome or ""
+    old_details = _loads(row.outcome_details, {})
     row.call_status = call_status
     row.call_outcome = outcome
     row.outcome_details = details_json
@@ -1264,7 +1904,14 @@ async def update_call(
         row.follow_up_done_at = None  # a new reminder time fires again
     row.updated_at = now
 
-    if outcome and outcome != old_outcome:
+    if old_outcome:
+        await _undo_outcome_effects(db, row, user, old_outcome, old_details, now)
+    gains = outcome in _FLAG_OUTCOMES and (
+        bool(set(_outcome_stamps(outcome, details)) - set(_outcome_stamps(old_outcome, old_details)))
+        or (_confirms_dnc(outcome, details) and not _confirms_dnc(old_outcome, old_details))
+        or _correct_number(outcome, details) not in ("", _correct_number(old_outcome, old_details))
+    )
+    if outcome and (outcome != old_outcome or gains):
         job = (await db.execute(apply_tenant(
             select(ScrapedJobORM).where(ScrapedJobORM.id == row.job_id),
             ScrapedJobORM.tenant_id,

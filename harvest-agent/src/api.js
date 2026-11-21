@@ -163,6 +163,65 @@ export function getJob(id) {
   return request(`/jobs/${encodeURIComponent(id)}`);
 }
 
+/** PATCH /jobs/{id} — edit hiring_entity / company / company_size / domain /
+ * job_poster_name / job_poster_designation (only the keys sent change; admins and
+ * business leads). `apply_to_company: true` also copies the hiring_entity /
+ * company_size / domain sent to every job of the same company and saves them as the
+ * company's manual override for future harvests. Returns
+ * { job: <GET /jobs/{id} shape>, updated_other_jobs, company_override }; 403 not
+ * allowed, 422 bad value. */
+export function updateJob(jobId, body) {
+  return request(`/jobs/${encodeURIComponent(jobId)}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+}
+
+// ── Company classification (admins only — 403 otherwise) ─────────────────────
+
+/** GET /company-overrides — the tenant's company classification overrides, newest
+ * first. params: { q, source ("manual"|"llm"), page, page_size }. Returns
+ * { items: [{id, company_key, company_name, hiring_entity, company_size, domain,
+ * source, updated_by_email, created_at, updated_at}], total, page, page_size }. */
+export function listCompanyOverrides(params = {}) {
+  return request(`/company-overrides${qs(params)}`);
+}
+
+/** PUT /company-overrides/{key} — create / replace a manual override (`key` = an
+ * existing company_key or a company name). body: { company_name?, hiring_entity,
+ * company_size, domain } — null/"" clears a field. Returns the override. 422 bad value. */
+export function saveCompanyOverride(companyKey, body) {
+  return request(`/company-overrides/${encodeURIComponent(companyKey)}`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
+}
+
+/** DELETE /company-overrides/{key} — remove an override (404 when none). */
+export function deleteCompanyOverride(companyKey) {
+  return request(`/company-overrides/${encodeURIComponent(companyKey)}`, { method: "DELETE" });
+}
+
+/** GET /classification-keywords — the tenant's added terms:
+ * { lists: { staffing: [{id, list, term, created_by_email, created_at}], direct: [...], gcc: [...] } }. */
+export function listClassificationKeywords() {
+  return request("/classification-keywords");
+}
+
+/** POST /classification-keywords — add `term` to list "staffing" | "direct" | "gcc".
+ * Returns the keyword plus `created` (false when it already existed). 422 bad list/term. */
+export function addClassificationKeyword(list, term) {
+  return request("/classification-keywords", {
+    method: "POST",
+    body: JSON.stringify({ list, term }),
+  });
+}
+
+/** DELETE /classification-keywords/{id} — remove a term (404 when none). */
+export function deleteClassificationKeyword(id) {
+  return request(`/classification-keywords/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
 /** GET /jobs/{id}/outreach-detail — the job detail page's Resdex candidates (latest
  * search: status, Boolean query, filters, candidate profiles) plus every outreach
  * email sent for the job (initial + follow-ups, with delivery status and which
@@ -251,10 +310,19 @@ export function clearPhoneCall(jobId, phone) {
   return request(`/jobs/${encodeURIComponent(jobId)}/phone-verification${qs({ phone })}`, { method: "DELETE" });
 }
 
+/** DELETE /phone-verifications/flags?phone=…&flag=… — admin "Remove flag": clears one
+ * call-learned flag ("invalid" | "dnc" | "warm" | "reenrich") from the number; "dnc" also
+ * lifts the do-not-call email suppression. Returns { phone, flag, cleared, suppressions_removed }. */
+export function removePhoneFlag(phone, flag) {
+  return request(`/phone-verifications/flags${qs({ phone, flag })}`, { method: "DELETE" });
+}
+
 /** GET /phone-verifications/latest?job_ids=…&phones=… — latest call per job for the
  * visible rows. Returns { items: { job_id: callView }, flags: { phone: flags } }
  * (proof images omitted; flags only for numbers that carry one, covering the calls'
- * numbers and `phones`); jobs locked to other users are omitted. */
+ * numbers and `phones`); jobs locked to other users are omitted. A job with no call
+ * of its own may carry its contact's call from another job instead: callView +
+ * { inherited: true, source_job_id, source_job_title }. */
 export function getPhoneVerifications(jobIds = [], phones = []) {
   const ids = (jobIds || []).filter(Boolean).join(",");
   const nums = (phones || []).filter(Boolean).join(",");
@@ -265,6 +333,15 @@ export function getPhoneVerifications(jobIds = [], phones = []) {
  * first. Returns { job_id, items: [callView] }. */
 export function getPhoneCallHistory(jobId) {
   return request(`/jobs/${encodeURIComponent(jobId)}/phone-verification/history`);
+}
+
+/** GET /jobs/{id}/phone-verification/siblings?phone=… — the other jobs of this job's
+ * contact (same number, matched on its trailing 10 digits, + same company); a call
+ * logged here stands for them too unless details.applyToContact is false.
+ * Returns { count, uncalled, items: [{ id, job_title, company, assigned_to: {email,
+ * name}|null, called }] } (at most 50 items). */
+export function getPhoneSiblings(jobId, phone) {
+  return request(`/jobs/${encodeURIComponent(jobId)}/phone-verification/siblings${qs({ phone })}`);
 }
 
 /* Per-number call history (across jobs, every caller's calls). getPhoneVerifications'

@@ -464,7 +464,26 @@ async def _run_harvest_background_impl(
         except Exception as exc:
             log.warning("harvest_source_dedup_load_failed", error=str(exc))
 
-    orch = OrchestratorAgent(config, already_harvested=already_harvested)
+    # The tenant's company overrides + DB keyword terms — read once per run (so
+    # admin edits apply to the next harvest without a restart). Best-effort: a
+    # load failure (None) classifies with the JSON lists only and skips the LLM
+    # hiring-entity check (it needs the cache to know who was already asked).
+    from app.services.company_classification_service import load_classification_context
+
+    classification_context = await db_read(lambda db: load_classification_context(db))
+    if classification_context is None:
+        log.warning("harvest_classification_context_load_failed")
+    else:
+        log.info(
+            "harvest_classification_context_loaded",
+            overrides=len(classification_context.overrides),
+            keywords=sum(len(v) for v in classification_context.keywords.values()),
+        )
+
+    orch = OrchestratorAgent(
+        config, already_harvested=already_harvested,
+        classification_context=classification_context,
+    )
 
     async def _on_status(msg: str) -> None:
         """Mirror an orchestrator status message onto the JobTracker entry and the log."""
@@ -771,6 +790,14 @@ async def _run_harvest_background_impl(
     if run_pk:
         await db_write(lambda db: HarvestRunService(db).bulk_insert_llm_calls(run_pk, result.llm_calls))
         await _persist_reenrich_queue(run_pk, result.reenrich_queue, log)
+    if result.company_llm_overrides:
+        # Cache the LLM's hiring-entity verdicts (source "llm") so each company is
+        # asked once per tenant — never overwrites an existing (manual) row.
+        from app.services.company_classification_service import save_llm_overrides
+
+        cached = await db_write(lambda db: save_llm_overrides(db, result.company_llm_overrides))
+        log.info("harvest_company_llm_overrides_cached",
+                 verdicts=len(result.company_llm_overrides), added=cached)
     state["saved"] = True
 
     # A cooperative user-stop lets run_all() return normally with the jobs

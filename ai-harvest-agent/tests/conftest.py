@@ -36,6 +36,16 @@ def _naukri_llm_enrichment_off(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _company_llm_classify_off(monkeypatch):
+    """The Ambiguous-company LLM check defaults ON and would reach whatever provider
+    the developer's .env configures. Tests that exercise it pass a fake LLM and
+    switch it back on explicitly."""
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "company_llm_classify_enabled", False)
+
+
+@pytest.fixture(autouse=True)
 def _outreach_sender_override_off(monkeypatch):
     """ACTIVE_SENDER_EMAIL is a deploy-time choice (whose name signs every outreach
     email). Tests assert identities derived from the per-send address, so it is
@@ -81,6 +91,7 @@ async def engine():
     import app.models.phone_call_log  # noqa: F401 — registers phone_call_logs
     import app.models.phone_contact_flag  # noqa: F401 — registers phone_contact_flags
     import app.models.job_assignment_rotation  # noqa: F401 — registers job_assignment_rotation
+    import app.models.company_override  # noqa: F401 — registers company_overrides / classification_keywords
 
     eng = create_async_engine(TEST_DB_URL, echo=False)
     async with eng.begin() as conn:

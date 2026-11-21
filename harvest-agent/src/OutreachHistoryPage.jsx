@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { RefreshCw, Send, X, Download, Search, Calendar, ChevronDown, Check, Building2 } from "lucide-react";
 import { getOutreachHistory, getOutreachStats, getOutreachReplies, markReplyRead, ApiError } from "./api";
 // `engagement` (the delivery-status → label helper) is imported as `engagementOf`
@@ -10,13 +10,16 @@ import {
   fmtAbs, fmtRel, initials, avatarColor, engagement as engagementOf, EngagementStack, ReplyBadge,
   AutoReplyBadge, AutoKindChip, AUTO_KIND, AUTO_COLOR, REPLY_COLOR, REPLY_SOFT,
 } from "./components/outreachUi";
+import { rowNav, OpenInNewTab } from "./lib/openLink";
 
 /* Mail logs (route /outreach) — the log of every outreach email sent from
  * HarvestAgent, read from the backend (GET /outreach/history). It's the DB source
  * of truth for what's been sent: initial emails, follow-ups, and manually logged
  * LinkedIn messages. Each row shows the contact, company, subject, tone, delivery
  * engagement (Mailjet events), and when it was sent; clicking a row opens the full
- * message + thread on its own page (route /mail/:id) where you can follow up.
+ * message + thread on its own page (route /mail/:id) where you can follow up —
+ * in this tab (filters/page live in the URL, so Back restores the list), or in a
+ * new tab via Ctrl/Cmd/middle-click or the row's ↗ icon.
  * Renders inside the shared layout (ha-root → Sidebar → this <main>), reusing the
  * app's ha-* container styles. */
 
@@ -204,6 +207,7 @@ function replyThreadHref(r) {
 
 export default function OutreachHistoryPage() {
   const [searchParams, setSearchParams] = useSearchParams();
+  const navigate = useNavigate();
 
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -313,20 +317,20 @@ export default function OutreachHistoryPage() {
     return () => window.removeEventListener("mousedown", onDown);
   }, [dateOpen]);
 
-  // Open a row → the standalone thread page in a NEW browser tab, so this list
-  // stays open and untouched. The new tab has no in-memory navigation state, so
-  // job_id/recruiter_id ride along in the query (?job=/?recruiter=) and the thread
-  // page fetches the thread from there; the row id in the path anchors the header.
-  const openDetail = useCallback((it) => {
+  // A row → the standalone thread page: a plain click opens it in THIS tab (the
+  // filter/page state is mirrored to the URL above, so Back restores the list);
+  // Ctrl/Cmd/middle-click or the row's ↗ icon opens a new tab. The page resolves
+  // from the URL alone — job_id/recruiter_id ride along in the query
+  // (?job=/?recruiter=); the row id in the path anchors the header.
+  const detailHref = (it) => {
     const q = it.job_id ? `?job=${encodeURIComponent(it.job_id)}`
       : it.recruiter_id ? `?recruiter=${encodeURIComponent(it.recruiter_id)}` : "";
-    window.open(`/mail/${encodeURIComponent(it.id)}${q}`, "_blank", "noopener");
-  }, []);
+    return `/mail/${encodeURIComponent(it.id)}${q}`;
+  };
 
-  // Open a reply row → its thread in a new tab. An unread person reply is marked read
-  // (same as opening it from the bell); the row updates locally right away.
-  const openReply = useCallback((r) => {
-    window.open(replyThreadHref(r), "_blank", "noopener");
+  // Opening a reply row (either way) marks an unread person reply read (same as
+  // opening it from the bell); the row updates locally right away.
+  const markOpened = useCallback((r) => {
     if (!r.is_read && !r.is_auto_reply) {
       setItems((cur) => cur.map((x) => (x.id === r.id ? { ...x, is_read: true } : x)));
       markReplyRead(r.id, true).catch(() => { /* best-effort */ });
@@ -537,7 +541,8 @@ export default function OutreachHistoryPage() {
                 const unread = !auto && !r.is_read;
                 const stripe = auto ? AUTO_COLOR : unread ? REPLY_COLOR : null;
                 return (
-                  <tr key={r.id} onClick={() => openReply(r)} title="Open the thread in a new tab"
+                  <tr key={r.id} {...rowNav(replyThreadHref(r), navigate, undefined, () => markOpened(r))}
+                    title="Open the thread (Ctrl/middle-click for a new tab)"
                     style={{ cursor: "pointer", borderBottom: "1px solid #EDF1F6", boxShadow: stripe ? `inset 3px 0 0 ${stripe}` : undefined }}
                     onMouseEnter={(e) => { e.currentTarget.style.background = "#F8FAFC"; }}
                     onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}>
@@ -551,6 +556,7 @@ export default function OutreachHistoryPage() {
                           <span style={{ fontWeight: unread ? 800 : 700, fontSize: 13.5, color: "#0F172A" }}>{name}</span>
                           {r.from_name && <span style={{ color: "#64748B", fontSize: 12.5 }}> · {r.from_email}</span>}
                         </div>
+                        <OpenInNewTab href={replyThreadHref(r)} onOpen={() => markOpened(r)} label="Open the thread in a new tab" style={{ color: "#64748B" }} />
                       </div>
                     </td>
                     {/* Company */}
@@ -589,7 +595,8 @@ export default function OutreachHistoryPage() {
                   ? { color: "#0E7C5A", background: "#E7F7F0" }
                   : { color: "#64748B", background: "#F1F5F9" };
                 return (
-                  <tr key={it.id} onClick={() => openDetail(it)} title="Open message + thread in a new tab"
+                  <tr key={it.id} {...rowNav(detailHref(it), navigate)}
+                    title="Open message + thread (Ctrl/middle-click for a new tab)"
                     style={{ cursor: "pointer", borderBottom: "1px solid #EDF1F6", boxShadow: it.replied_at ? "inset 3px 0 0 #4F46E5" : undefined }}
                     onMouseEnter={(e) => { e.currentTarget.style.background = "#F8FAFC"; }}
                     onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}>
@@ -603,6 +610,7 @@ export default function OutreachHistoryPage() {
                           <span style={{ fontWeight: 700, fontSize: 13.5, color: "#0F172A" }}>{name}</span>
                           <span style={{ color: "#64748B", fontSize: 12.5 }}> · {it.to_email || (it.channel === "linkedin" ? "(LinkedIn)" : "—")}</span>
                         </div>
+                        <OpenInNewTab href={detailHref(it)} label="Open message + thread in a new tab" style={{ color: "#64748B" }} />
                       </div>
                     </td>
                     {/* From — sender glyph + mailbox, one line */}

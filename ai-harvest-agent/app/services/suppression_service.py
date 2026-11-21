@@ -14,6 +14,13 @@ webhook) also lands here — via suppress_bounced() with reason "hard_bounce"/"b
 unsubscribe: it only adds the do-not-contact row, leaving the recruiter flag and the
 "bounced"/"blocked" delivery status untouched. Soft bounces and spam do not suppress.
 
+A "do_not_call" row (phone_verification_service: a contact asked on a logged call not
+to be approached again) is the one TENANT-scoped kind — suppress_do_not_call writes it
+under the calling job's tenant, and is_suppressed honours it only for that tenant (an
+all-access/internal context honours every tenant's). Unsubscribes and terminal
+bounces stay global: the link token / provider event identify only the address, and
+a dead or opted-out address is a property of the address itself.
+
 Unsubscribe links carry a stateless HMAC token of the email (no per-send storage);
 this module signs and verifies them.
 """
@@ -23,20 +30,38 @@ import base64
 import hashlib
 import hmac
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Iterable
 
 import structlog
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.core.contact_normalize import normalize_email
+from app.core.tenant_context import get_current_tenant_id, is_all_access
 from app.models.outreach import EmailOutreachORM
 from app.models.recruiter import RecruiterORM
 from app.models.suppression import EmailSuppressionORM
 
 logger = structlog.get_logger(__name__)
 _warned_fallback_secret = False
+
+# Reasons whose row applies only to its own tenant (see the module docstring).
+DO_NOT_CALL_REASON = "do_not_call"
+TENANT_SCOPED_REASONS = frozenset({DO_NOT_CALL_REASON})
+
+
+def _global_row():
+    """SQL: a suppression that applies to every tenant (unsubscribe / bounce / block)."""
+    return EmailSuppressionORM.reason.not_in(TENANT_SCOPED_REASONS)
+
+
+def _scoped_row(tenant_id: str | None):
+    """SQL: a tenant-scoped suppression that applies to ``tenant_id`` (the current
+    context's tenant when None) — any tenant's for an all-access context."""
+    tid = tenant_id or get_current_tenant_id()
+    cond = EmailSuppressionORM.reason.in_(TENANT_SCOPED_REASONS)
+    return cond if is_all_access(tid) else and_(cond, EmailSuppressionORM.tenant_id == tid)
 
 
 def _norm(email: str | None) -> str:
@@ -101,13 +126,18 @@ def verify_unsubscribe_token(token: str | None) -> str | None:
 
 # ── Store ────────────────────────────────────────────────────────────────────────
 
-async def is_suppressed(db: AsyncSession, email: str | None) -> bool:
-    """True if this email is on the do-not-contact list."""
+async def is_suppressed(db: AsyncSession, email: str | None,
+                        tenant_id: str | None = None) -> bool:
+    """True if this email is on the do-not-contact list for ``tenant_id`` (the current
+    context's tenant when None): any global row, or a do-not-call row of that tenant
+    (of any tenant for an all-access context)."""
     e = _norm(email)
     if not e:
         return False
     row = (
-        await db.execute(select(EmailSuppressionORM.id).where(EmailSuppressionORM.email == e))
+        await db.execute(select(EmailSuppressionORM.id).where(
+            EmailSuppressionORM.email == e, or_(_global_row(), _scoped_row(tenant_id)),
+        ).limit(1))
     ).first()
     return row is not None
 
@@ -136,8 +166,11 @@ async def suppress_bounced(
     e = _norm(email)
     if not e:
         return False
+    # Only a GLOBAL row makes this a no-op: a tenant's do-not-call row on the same
+    # address must not stop the dead address being suppressed for everyone.
     existing = (
-        await db.execute(select(EmailSuppressionORM.id).where(EmailSuppressionORM.email == e))
+        await db.execute(select(EmailSuppressionORM.id).where(
+            EmailSuppressionORM.email == e, _global_row()).limit(1))
     ).first()
     if existing is not None:
         return False
@@ -178,8 +211,9 @@ async def add_suppression(
     when = event_time or datetime.now(timezone.utc)
 
     existing = (
-        await db.execute(select(EmailSuppressionORM).where(EmailSuppressionORM.email == e))
-    ).scalar_one_or_none()
+        await db.execute(select(EmailSuppressionORM.id).where(
+            EmailSuppressionORM.email == e, _global_row()).limit(1))
+    ).first()
     created = existing is None
     if created:
         db.add(EmailSuppressionORM(
@@ -210,3 +244,55 @@ async def add_suppression(
         row.events = [*(row.events or []), {"event": "unsub", "at": when.isoformat()}]
 
     return created
+
+
+async def suppress_do_not_call(
+    db: AsyncSession,
+    *,
+    email: str,
+    tenant_id: str,
+    source: str = "phone_dnc",
+    recruiter_id: str | None = None,
+    raw_payload: dict[str, Any] | None = None,
+    event_time: datetime | None = None,
+) -> bool:
+    """Idempotently add a TENANT-scoped do-not-call suppression (a contact asked, on a
+    call logged in ``tenant_id``, not to be approached again). Like suppress_bounced it
+    leaves the recruiter flag and outreach rows alone. A no-op (False) when the address
+    is already suppressed globally or for this tenant; True when a row was created.
+    ``raw_payload`` carries the call that asked (call_id / phone) so the row can be
+    found again and lifted (phone_verification_service: outcome edit, admin unflag)."""
+    e = _norm(email)
+    if not e or not tenant_id:
+        return False
+    existing = (
+        await db.execute(select(EmailSuppressionORM.id).where(
+            EmailSuppressionORM.email == e,
+            or_(_global_row(), and_(EmailSuppressionORM.reason == DO_NOT_CALL_REASON,
+                                    EmailSuppressionORM.tenant_id == tenant_id)),
+        ).limit(1))
+    ).first()
+    if existing is not None:
+        return False
+    db.add(EmailSuppressionORM(
+        tenant_id=tenant_id,
+        email=e,
+        reason=DO_NOT_CALL_REASON,
+        source=(source or "")[:30],
+        recruiter_id=recruiter_id,
+        raw_payload=raw_payload,
+        unsubscribed_at=event_time or datetime.now(timezone.utc),
+    ))
+    return True
+
+
+async def do_not_call_rows(db: AsyncSession, tenant_ids: Iterable[str]) -> list[EmailSuppressionORM]:
+    """The do-not-call suppressions of these tenants (raw_payload says which call/number
+    created each). Explicitly tenant-filtered — never another tenant's rows."""
+    tids = [t for t in dict.fromkeys(tenant_ids) if t]
+    if not tids:
+        return []
+    return list((await db.execute(select(EmailSuppressionORM).where(
+        EmailSuppressionORM.reason == DO_NOT_CALL_REASON,
+        EmailSuppressionORM.tenant_id.in_(tids),
+    ))).scalars().all())

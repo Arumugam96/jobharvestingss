@@ -44,7 +44,7 @@ from app.models.harvest_config import HarvestConfig
 from app.models.response_models import HarvestJob
 from app.models.unified_job import UnifiedJob
 from app.services import run_guard
-from app.services.business_filter_service import BusinessFilterService
+from app.services.business_filter_service import BusinessFilterService, ClassificationContext
 from app.services.source_status import (
     REASON_BLOCKED,
     REASON_ERROR,
@@ -303,6 +303,10 @@ class OrchestratorResult:
     # LinkedIn partial jobs / LLM log / re-enrich queue are in the fields above).
     # "" when there was no isolated outage.
     llm_outage:       str                          = ""
+    # LLM hiring-entity verdicts for this run's Ambiguous companies
+    # (company_classification_service.llm_classify_ambiguous) — the caller caches
+    # them as source "llm" company_overrides rows. [] when the check didn't run.
+    company_llm_overrides: list                    = field(default_factory=list)
 
     @property
     def total_jobs(self) -> int:
@@ -356,9 +360,18 @@ class OrchestratorAgent:
         jobs, src  = await orch.run()   # list[HarvestJob], str
     """
 
-    def __init__(self, config: HarvestConfig, already_harvested: set[str] | None = None) -> None:
-        """Keep the harvest config and the job URLs to skip at the source (cross-run dedup)."""
+    def __init__(
+        self,
+        config: HarvestConfig,
+        already_harvested: set[str] | None = None,
+        classification_context: ClassificationContext | None = None,
+    ) -> None:
+        """Keep the harvest config, the job URLs to skip at the source (cross-run
+        dedup) and the tenant's classification context (company overrides + DB
+        keyword terms, loaded once per run by the caller — None = JSON lists only
+        and no LLM hiring-entity check)."""
         self._config = config
+        self._classification_context = classification_context
         # Normalized job_urls to skip at the source (LinkedIn + Naukri) — loaded from
         # the DB by the route for cross-run dedup, so a posting harvested within
         # the lookback window isn't re-scraped/re-emailed. Empty ⇒ no source skip.
@@ -490,7 +503,7 @@ class OrchestratorAgent:
                              note="jobs kept without cross-source enrichment")
 
         # ── Step 3: classify + apply business filters ─────────────────────────
-        svc = BusinessFilterService()
+        svc = BusinessFilterService(self._classification_context)
         try:
             classified: list[UnifiedJob] | None = svc.classify_all(all_unified, config.filters)
         except Exception as exc:
@@ -499,6 +512,21 @@ class OrchestratorAgent:
                              note="jobs kept unclassified; business filters skipped")
         if classified is not None:
             all_unified = classified
+            # ── Step 3a: LLM check for the companies keywords left Ambiguous ──
+            # Only with a loaded context (it says which companies were already
+            # asked); before the filters so they see the LLM's label. Never raises.
+            if self._classification_context is not None:
+                from app.services.company_classification_service import llm_classify_ambiguous
+
+                outcome = await llm_classify_ambiguous(all_unified, self._classification_context)
+                result.company_llm_overrides = outcome.overrides
+                if outcome.call_log:
+                    result.llm_calls = list(result.llm_calls or []) + list(outcome.call_log)
+                if outcome.token_usage:
+                    try:
+                        result.token_usage = _merge_token_usage(result.token_usage or {}, outcome.token_usage)
+                    except Exception:
+                        pass
             # Filters only run on classified jobs — filtering unclassified ones
             # could wrongly drop them.
             try:

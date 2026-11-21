@@ -346,6 +346,17 @@ class Settings(BaseSettings):
     naukri_llm_concurrency: int = 2           # LLM calls in flight alongside the detail loop
     naukri_llm_max_calls_per_run: int = 1000  # cost backstop (0 = unlimited)
 
+    # ── Company hiring-entity LLM check (company_classification_service) ────────
+    # After keyword classification, the run's distinct "Ambiguous" companies with
+    # no company_overrides row are sent to the extraction LLM (EXTRACTION_LLM_MODEL
+    # chain) in batched prompts; answers are cached per tenant as source "llm"
+    # overrides, so each company is asked once. Skipped automatically when no LLM
+    # provider is configured; never fails the harvest.
+    company_llm_classify_enabled: bool = True
+    company_llm_classify_max_companies: int = 50   # cost cap: companies asked per run (0 = off)
+    company_llm_classify_batch_size: int = 25      # companies per LLM call
+    company_llm_classify_timeout_s: float = 90.0   # per LLM call
+
     # ---------------       DICE Configurations     -------------
     dice_email:    str = ""
     dice_password: str = ""

@@ -5,7 +5,8 @@ import {
   CornerUpRight, Ban, Upload, ChevronRight, ChevronDown, Paperclip, RefreshCw, AlertCircle,
 } from "lucide-react";
 import { GLASS_MODAL } from "../theme";
-import { getPhoneCallHistory, updatePhoneCallLog } from "../api";
+import { getPhoneCallHistory, getPhoneSiblings, getPhoneVerifications, removePhoneFlag, updatePhoneCallLog } from "../api";
+import { phoneKey } from "../lib/jobsData";
 
 /* Manual call log for a Harvested Jobs mobile number. The shield button in front
  * of the Mobile cell opens PhoneVerifyModal, where the user logs one call attempt:
@@ -130,6 +131,11 @@ const suggestedWhen = (c) => (c?.preset ? RETRY_PRESETS[c.preset]() : c?.when ? 
 const fmtTime = (iso) => {
   try { return new Date(iso).toLocaleString(undefined, { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }); } catch { return ""; }
 };
+/** `call` when it was made to `phone` (same trailing-10-digit key — an inherited call was
+ * dialed as formatted on its own job), else null. `own`: null for an inherited call. */
+export const callForPhone = (call, phone, { own = false } = {}) =>
+  (call && phone && phoneKey(call.phone) === phoneKey(phone) && !(own && call.inherited) ? call : null);
+
 // Server call view → the call shape the badge, history and modal read.
 export const callFromView = (v) => (v ? {
   id: v.id,
@@ -143,6 +149,11 @@ export const callFromView = (v) => (v ? {
   at: v.called_at,
   by: v.called_by?.name || "",
   attempts: v.attempts || 1,
+  // Logged on another job of the same contact (number + company) — /latest's
+  // contact-level inheritance; this job has no call of its own.
+  inherited: !!v.inherited,
+  sourceJobId: v.source_job_id || null,
+  sourceJobTitle: v.source_job_title || "",
 } : null);
 
 const styles = `
@@ -154,9 +165,17 @@ const styles = `
 .pvm-cell { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .pvm-cell > .pvm-val { min-width: 0; overflow: hidden; }
 .pvm-badge { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; border-radius: 999px; border: 1px solid; padding: 0; cursor: pointer; }
+.pvm-badge.inherited { border-style: dashed; background: transparent !important; opacity: .75; }
+.pvm-pop-src { font-size: 11.5px; color: #64748B; margin: -2px 0 8px; }
+.pvm-pop-src a { color: #2563EB; font-weight: 600; text-decoration: none; }
+.pvm-pop-src a:hover { text-decoration: underline; }
+.pvm-contact-apply { margin-bottom: 12px; color: #475569; }
 .pvm-flag { flex: none; font-size: 9.5px; font-weight: 800; letter-spacing: .04em; padding: 1.5px 6px; border-radius: 999px; border: 1px solid; }
 .pvm-flag.bad { background: #FEF2F2; border-color: #FECACA; color: #DC2626; }
 .pvm-flag.good { background: #ECFDF5; border-color: #A7F3D0; color: #059669; }
+.pvm-flag-x { margin-left: 3px; padding: 0 1px; border: 0; background: none; color: inherit; font: inherit; line-height: 1; cursor: pointer; opacity: .65; }
+.pvm-flag-x:hover, .pvm-flag-x:focus-visible { opacity: 1; }
+.pvm-flag-x:disabled { cursor: default; opacity: .35; }
 .pvm-pop { position: fixed; z-index: 1000; width: 280px; ${GLASS_MODAL} border-radius: 10px; padding: 12px 14px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #1E293B; white-space: normal; }
 .pvm-pop-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
 .pvm-pop-status { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 600; }
@@ -351,16 +370,47 @@ export function PhoneVerifyButton({ onClick, verified = false }) {
 // What logged calls established about the number itself (server `flags`):
 // do-not-call wins over invalid, which wins over warm.
 export const phoneBlocked = (flags) => !!(flags && (flags.dnc || flags.invalid));
-/** DNC / Invalid / Warm tag for a number's call-derived `flags` (first that applies). */
-export function PhoneFlagTag({ flags }) {
+/** DNC / Invalid / Warm tag for a number's call-derived `flags` (first that applies).
+ * `onRemoved` (admins only — the caller decides) adds a small "×" that, after a
+ * confirm, clears that flag from `phone` (DELETE /phone-verifications/flags) and then
+ * calls onRemoved() so the parent re-fetches. */
+export function PhoneFlagTag({ flags, phone, onRemoved }) {
+  const [busy, setBusy] = useState(false);
   if (!flags) return null;
-  if (flags.dnc) return <span className="pvm-flag bad" title="Asked not to be contacted again — suppressed for calls, email and WhatsApp">DNC</span>;
-  if (flags.invalid) {
-    const title = "Marked invalid on a logged call" + (flags.correct_number ? ` · correct number: ${flags.correct_number}` : "");
-    return <span className="pvm-flag bad" title={title}>Invalid</span>;
+  let kind, label, cls, title;
+  if (flags.dnc) {
+    [kind, label, cls, title] = ["dnc", "DNC", "bad", "Asked not to be contacted again — suppressed for calls, email and WhatsApp"];
+  } else if (flags.invalid) {
+    [kind, label, cls] = ["invalid", "Invalid", "bad"];
+    title = "Marked invalid on a logged call" + (flags.correct_number ? ` · correct number: ${flags.correct_number}` : "");
+  } else if (flags.warm) {
+    [kind, label, cls, title] = ["warm", "Warm", "good", "Good response on a logged call"];
+  } else {
+    return null;
   }
-  if (flags.warm) return <span className="pvm-flag good" title="Good response on a logged call">Warm</span>;
-  return null;
+  /** Confirm, then clear this flag server-side and let the parent refresh. */
+  const remove = async (e) => {
+    e.stopPropagation();
+    if (busy || !window.confirm(`Remove the "${label}" flag from ${phone}?`)) return;
+    setBusy(true);
+    try {
+      await removePhoneFlag(phone, kind);
+      onRemoved();
+    } catch (err) {
+      window.alert(`Could not remove the flag: ${err?.message || err}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <span className={"pvm-flag " + cls} title={title}>
+      {label}
+      {onRemoved && phone && (
+        <button type="button" className="pvm-flag-x" aria-label={`Remove ${label} flag`}
+          title="Remove flag (admin)" disabled={busy} onClick={remove}>×</button>
+      )}
+    </span>
+  );
 }
 
 // Outcome icon next to the number for the latest attempt; hovering (or
@@ -424,8 +474,8 @@ export function PhoneVerifyBadge({ result, onEdit, mark = false }) {
   const count = last.attempts;
   return (
     <>
-      <button ref={btnRef} type="button" className="pvm-badge" aria-expanded={open}
-        aria-label={`${st.label}${oc ? ` — ${oc.l}` : ""} — view comments`}
+      <button ref={btnRef} type="button" className={"pvm-badge" + (last.inherited ? " inherited" : "")} aria-expanded={open}
+        aria-label={`${st.label}${oc ? ` — ${oc.l}` : ""}${last.inherited ? " — via another job of this contact" : ""} — view comments`}
         style={{ color: st.color, background: st.bg, borderColor: st.border }}
         onMouseEnter={show} onMouseLeave={hideSoon} onFocus={show}
         onClick={show}>
@@ -445,6 +495,13 @@ export function PhoneVerifyBadge({ result, onEdit, mark = false }) {
             </div>
             <button className="pvm-close" style={{ width: 24, height: 24 }} onClick={() => setOpen(false)} aria-label="Close"><X size={14} /></button>
           </div>
+          {last.inherited && (
+            <div className="pvm-pop-src">
+              Logged on {last.sourceJobId
+                ? <a href={"/jobs/" + encodeURIComponent(last.sourceJobId)}>{last.sourceJobTitle || "another job"}</a>
+                : (last.sourceJobTitle || "another job")} — same contact
+            </div>
+          )}
           <div className="pvm-pop-label">Comments</div>
           {last.remarks
             ? <div className="pvm-pop-text">{last.remarks}</div>
@@ -456,12 +513,39 @@ export function PhoneVerifyBadge({ result, onEdit, mark = false }) {
           </div>
           <div className="pvm-pop-foot">
             <span>{last.at ? fmtTime(last.at) : ""}{last.by ? ` · ${last.by}` : ""}</span>
-            {onEdit && <button className="pvm-link" onClick={() => { setOpen(false); onEdit(); }}><PhoneCall size={12} /> Log call</button>}
+            {onEdit && <button className="pvm-link" onClick={() => { setOpen(false); onEdit(); }}><PhoneCall size={12} /> {last.inherited ? "Call again" : "Log call"}</button>}
           </div>
         </div>,
         document.body
       )}
     </>
+  );
+}
+
+/** "Contacted via {other job}: {outcome} · {caller} · {date}" for a job with no call of
+ * its own whose contact (same number + company) was called on another job — the
+ * inherited item of GET /phone-verifications/latest. Renders nothing otherwise. */
+export function InheritedCallLine({ jobId }) {
+  const [call, setCall] = useState(null);
+  useEffect(() => {
+    if (!jobId) return undefined;
+    let cancelled = false;
+    getPhoneVerifications([jobId])
+      .then((res) => { const v = res?.items?.[jobId]; if (!cancelled) setCall(v?.inherited ? v : null); })
+      .catch(() => { if (!cancelled) setCall(null); });
+    return () => { cancelled = true; };
+  }, [jobId]);
+  if (!call) return null;
+  const label = outcomeOf(call)?.l || PHONE_STATUSES[call.status]?.label || "Called";
+  let date = "";
+  try { date = call.called_at ? new Date(call.called_at).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" }) : ""; } catch { date = ""; }
+  return (
+    <div style={{ marginTop: 10, fontSize: 12, color: "#64748B" }}>
+      Contacted via{" "}
+      <a href={"/jobs/" + encodeURIComponent(call.source_job_id)} style={{ color: "#2563EB", fontWeight: 600, textDecoration: "none" }}>
+        {call.source_job_title || "another job"}
+      </a>: {[label, call.called_by?.name, date].filter(Boolean).join(" · ")}
+    </div>
   );
 }
 
@@ -570,9 +654,9 @@ function OutcomePanel({ c, d, set, ctx, onPreset }) {
       );
     case "dnc":
       return (<>
-        <div className="pvm-note bad"><Ban size={13} /><span><b>Do-not-call.</b> Suppressed across calls, email and WhatsApp.</span></div>
+        <div className="pvm-note bad"><Ban size={13} /><span><b>Do-not-call.</b> The number is suppressed for calls.</span></div>
         <CheckRow danger on={d.dncConfirm} onChange={(v) => set({ dncConfirm: v })}>
-          I confirm the contact asked not to be approached again <Req />
+          I confirm the contact asked not to be approached again — this also stops outreach emails to them
         </CheckRow>
       </>);
     case "retry":
@@ -711,13 +795,28 @@ export default function PhoneVerifyModal({ jobId, phone: phoneProp, pocName: poc
   const fileInput = useRef(null);
 
   const c = status && outcome ? OUTCOMES[status].find((o) => o.v === outcome) : null;
+  // The contact's other jobs (same number + company): a call here stands for them too
+  // unless "Also applies to…" is unticked (details.applyToContact = false).
+  // position_closed is about this job only and never applies to them.
+  const contactWide = !!c && c.v !== "position_closed";
+  const [siblings, setSiblings] = useState(null); // { count, uncalled } once loaded
+  useEffect(() => {
+    if (!contactWide || siblings || !jobId) return undefined;
+    let cancelled = false;
+    getPhoneSiblings(jobId, phone)
+      .then((res) => { if (!cancelled) setSiblings({ count: res?.count || 0, uncalled: res?.uncalled ?? res?.count ?? 0 }); })
+      .catch(() => { if (!cancelled) setSiblings({ count: 0, uncalled: 0 }); });
+    return () => { cancelled = true; };
+  }, [contactWide, siblings, jobId, phone]);
+  const otherJobs = siblings ? siblings.uncalled : 0;
   /** Merges `patch` into the outcome-specific details object. */
   const set = (patch) => setDetails((prev) => ({ ...prev, ...patch }));
 
   /** Clears outcome details, proof files and the reminder. */
   const resetOutcome = () => { setDetails({}); setFiles([]); setRemState({ on: false, date: "", time: "" }); };
-  /** Picks Answered/Unanswered and resets the outcome and everything that depends on it. */
-  const setStatus = (s) => { setStatusRaw(s); setOutcomeRaw(null); resetOutcome(); };
+  /** Picks Answered/Unanswered and resets the outcome and everything that depends on it
+   * (re-clicking the selected status changes nothing). */
+  const setStatus = (s) => { if (s === status) return; setStatusRaw(s); setOutcomeRaw(null); resetOutcome(); };
   /**
    * Picks an outcome: seeds its retry preset into details, clears proof, and turns the
    * reminder on at the outcome's suggested time (or off if the outcome has none).
@@ -725,7 +824,9 @@ export default function PhoneVerifyModal({ jobId, phone: phoneProp, pocName: poc
   const setOutcome = (v) => {
     setOutcomeRaw(v || null);
     const oc = v ? OUTCOMES[status].find((o) => o.v === v) : null;
-    setDetails(oc?.preset ? { preset: oc.preset } : {});
+    // An unticked "Also applies to…" survives switching the outcome.
+    setDetails((prev) => ({ ...(oc?.preset ? { preset: oc.preset } : {}),
+      ...(prev.applyToContact === false ? { applyToContact: false } : {}) }));
     setFiles([]);
     if (oc?.rem) { const [date, time] = suggestedWhen(oc); setRemState({ on: true, date, time }); }
     else setRemState({ on: false, date: "", time: "" });
@@ -873,6 +974,16 @@ export default function PhoneVerifyModal({ jobId, phone: phoneProp, pocName: poc
           {c?.panel && (
             <div className="pvm-panel">
               <OutcomePanel c={c} d={details} set={set} ctx={ctx} onPreset={applyPreset} />
+            </div>
+          )}
+
+          {contactWide && (otherJobs > 0 || (editing && details.applyToContact === false)) && (
+            <div className="pvm-contact-apply">
+              <CheckRow on={details.applyToContact !== false} onChange={(v) => set({ applyToContact: v })}>
+                {otherJobs > 0
+                  ? <>Also applies to {otherJobs} other job{otherJobs > 1 ? "s" : ""}{pocName ? ` from ${pocName}` : ""}{company ? ` at ${company}` : ""}</>
+                  : <>Also applies to this contact&rsquo;s other jobs</>}
+              </CheckRow>
             </div>
           )}
 

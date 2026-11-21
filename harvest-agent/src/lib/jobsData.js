@@ -243,6 +243,9 @@ function mapApiJobFields(j) {
     companyCountry: j.company_country || "",
     companyState: j.company_state || "",
     posterTitle: j.job_poster_designation || "",
+    // Point-of-contact location (linked recruiter: Apollo city/state/country, else
+    // the scraped profile location); "" when unknown.
+    recruiterLocation: j.recruiter_location || "",
     domain: j.domain || "",
     hiringEntity: j.hiring_entity || "",
     verificationStatus: j.verification_status || "",
@@ -253,6 +256,8 @@ function mapApiJobFields(j) {
     filterReason: j.filter_reason || "",
     // Self-assignment lock: {email, name, assigned_at, note} or null (unassigned).
     assignedTo: j.assigned_to || null,
+    // GET /jobs?called=no&group=contact: the contact's other not-called jobs.
+    siblingCount: j.sibling_count || 0,
   };
 }
 
@@ -285,6 +290,7 @@ export function mapJobToDetail(j) {
     posterName: j.poc || "",
     posterLinkedIn: j.linkedin || "",
     posterTitle: j.posterTitle || "",
+    recruiterLocation: j.recruiterLocation || "",
     posterContact: {
       email: j.email || "",
       mobile: j.mobile || "",

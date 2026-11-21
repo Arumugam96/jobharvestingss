@@ -3,7 +3,7 @@ import { ArrowLeft, FileSpreadsheet, PencilLine, Search, Info, Square, Check, Lo
 import { SourceChip } from "../components/ui";
 import { demandError, getDemandBatch, getDemandUsage, stopDemandBatch } from "./demandApi";
 import {
-  BatchStatusPill, Switch, ROW_META, isActiveRow, fmtWhen, fmtDuration, QUOTA_TIP, subStepLabel,
+  BatchStatusPill, Switch, ROW_META, isActiveRow, fmtWhen, fmtDuration, QUOTA_TIP, subStepLabel, demandJobHref,
 } from "./demandUi";
 import DemandJobsTable from "./DemandJobsTable";
 
@@ -115,6 +115,7 @@ export default function DemandBatchView({ runId, onBack, onOpenJob }) {
     <DemandJobsTable
       rows={batch.rows || []} uploadedOn={batch.uploaded_on} status={status} onStatusChange={setStatus}
       onOpenJob={(r) => onOpenJob(batch.run_id, r.job_id)}
+      jobHref={(r) => demandJobHref(batch.run_id, r.job_id)}
     />
   );
 

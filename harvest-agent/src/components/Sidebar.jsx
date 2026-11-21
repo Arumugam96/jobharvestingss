@@ -1,9 +1,10 @@
 import React, { useState } from "react";
 import {
   SlidersHorizontal, LayoutList, History, Send, BarChart3, Radar, UserSearch, LogOut,
-  ChevronsLeft, ChevronsRight, Contact, FileSpreadsheet, Phone, ShieldCheck,
+  ChevronsLeft, ChevronsRight, Contact, FileSpreadsheet, Phone, ShieldCheck, Building2,
 } from "lucide-react";
 import HealthBadge from "./HealthBadge";
+import { linkProps } from "../lib/openLink";
 import { useTenant } from "../TenantContext";
 
 /*
@@ -38,14 +39,27 @@ import { useTenant } from "../TenantContext";
  * current one as `activePage` to highlight it. "Analytics" has no target yet,
  * so it renders as an inert item (no onClick).
  */
-function NavItem({ glyph: Glyph, children, active, badge, onClick }) {
-  return (
-    <button className={"ha-nav" + (active ? " ha-nav-active" : "")} onClick={onClick} title={typeof children === "string" ? children : undefined}>
+function NavItem({ glyph: Glyph, children, active, badge, onClick, href }) {
+  const body = (
+    <>
       <Glyph size={18} />
       <span className="ha-nav-label">{children}</span>
       {badge != null && <span className="ha-badge">{badge}</span>}
-    </button>
+    </>
   );
+  const className = "ha-nav" + (active ? " ha-nav-active" : "");
+  const title = typeof children === "string" ? children : undefined;
+  // With an in-app `href` the item is a real link: a plain click navigates in this
+  // tab, Ctrl/Cmd/middle-click or "Open link in new tab" opens a new one.
+  if (href && onClick) {
+    return (
+      <a className={className} {...linkProps(href, onClick)} title={title}
+        style={{ boxSizing: "border-box", textDecoration: "none", lineHeight: "normal" }}>
+        {body}
+      </a>
+    );
+  }
+  return <button className={className} onClick={onClick} title={title}>{body}</button>;
 }
 
 // Convert #RRGGBB to [r, g, b]; null when the hex doesn't parse.
@@ -163,39 +177,42 @@ export default function Sidebar({ activePage, onNavigate = () => {}, jobsCount, 
           {showConfiguration && (
             <div>
               <div className="ha-navhead"><span>Configuration</span></div>
-              <NavItem glyph={SlidersHorizontal} active={activePage === "rules"} onClick={() => go("rules")}>Rule Engine</NavItem>
+              <NavItem glyph={SlidersHorizontal} active={activePage === "rules"} href="/rules" onClick={() => go("rules")}>Rule Engine</NavItem>
             </div>
           )}
           <div>
             <div className="ha-navhead"><span>Operations</span></div>
             {hasFeature("jobs") && (
-              <NavItem glyph={LayoutList} active={activePage === "jobs"} badge={jobsCount} onClick={() => go("jobs")}>Harvested Jobs</NavItem>
+              <NavItem glyph={LayoutList} active={activePage === "jobs"} badge={jobsCount} href="/jobs" onClick={() => go("jobs")}>Harvested Jobs</NavItem>
             )}
             {hasFeature("demand") && (
-              <NavItem glyph={FileSpreadsheet} active={activePage === "demand"} onClick={() => go("demand")}>Demand Search</NavItem>
+              <NavItem glyph={FileSpreadsheet} active={activePage === "demand"} href="/demand" onClick={() => go("demand")}>Demand Search</NavItem>
             )}
             {hasFeature("history") && (
-              <NavItem glyph={History} active={activePage === "history"} badge={runsCount} onClick={() => go("history")}>Run History</NavItem>
+              <NavItem glyph={History} active={activePage === "history"} badge={runsCount} href="/history" onClick={() => go("history")}>Run History</NavItem>
             )}
             {hasFeature("sources") && (
-              <NavItem glyph={Radar} active={activePage === "sources"} onClick={() => go("sources")}>Source Runs</NavItem>
+              <NavItem glyph={Radar} active={activePage === "sources"} href="/sources" onClick={() => go("sources")}>Source Runs</NavItem>
             )}
             {hasFeature("leads") && (
-              <NavItem glyph={UserSearch} active={activePage === "leads"} onClick={() => go("leads")}>Lead Intelligence</NavItem>
+              <NavItem glyph={UserSearch} active={activePage === "leads"} href="/leads" onClick={() => go("leads")}>Lead Intelligence</NavItem>
             )}
             {hasFeature("contacts") && (
-              <NavItem glyph={Contact} active={activePage === "contacts"} onClick={() => go("contacts")}>Contact Enrichment</NavItem>
+              <NavItem glyph={Contact} active={activePage === "contacts"} href="/contacts" onClick={() => go("contacts")}>Contact Enrichment</NavItem>
             )}
             {hasFeature("outreach") && (
-              <NavItem glyph={Send} active={activePage === "outreach"} onClick={() => go("outreach")}>Mail logs</NavItem>
+              <NavItem glyph={Send} active={activePage === "outreach"} href="/outreach" onClick={() => go("outreach")}>Mail logs</NavItem>
             )}
           </div>
           {canViewPhoneLogs && (
             <div>
               <div className="ha-navhead"><span>{isAdmin ? "Admin" : "Business"}</span></div>
-              <NavItem glyph={Phone} active={activePage === "phone-logs"} onClick={() => go("phone-logs")}>Phone logs</NavItem>
+              <NavItem glyph={Phone} active={activePage === "phone-logs"} href="/phone-logs" onClick={() => go("phone-logs")}>Phone logs</NavItem>
               {isAdmin && (
-                <NavItem glyph={ShieldCheck} active={activePage === "user-roles"} onClick={() => go("user-roles")}>User roles</NavItem>
+                <NavItem glyph={ShieldCheck} active={activePage === "user-roles"} href="/user-roles" onClick={() => go("user-roles")}>User roles</NavItem>
+              )}
+              {isAdmin && (
+                <NavItem glyph={Building2} active={activePage === "company-classification"} href="/company-classification" onClick={() => go("company-classification")}>Company classification</NavItem>
               )}
             </div>
           )}

@@ -19,12 +19,23 @@ staffing_firm_master_list.json – known staffing firm names (incl. IT-services
 direct_client_master_list.json – known direct client company names
 (all list entries are matched as whole words — see _PhraseMatcher)
 ambiguous_companies.json   – append-only log of unclassified companies
+
+Per-tenant additions (read per run — no restart needed)
+───────────────────────────────────────────────────────
+A ClassificationContext (app/services/company_classification_service.py loads it
+from the DB) can be handed to BusinessFilterService:
+  • overrides — company_overrides rows keyed by normalize_company_key: a company's
+    hiring_entity / company_size / domain wins over every keyword rule (and over a
+    value the job already carries) — see classify_all.
+  • keywords  — classification_keywords terms merged into the staffing (generic
+    keyword phrases) / direct / gcc lists, matched whole-word like the JSON entries.
 """
 from __future__ import annotations
 
 import json
 import re
 from collections.abc import Iterable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -35,7 +46,7 @@ from app.core.domain_keywords import (
     domain_matches as _domain_matches,
     infer_domain as _infer_domain_shared,
 )
-from app.core.job_url import normalize_job_url
+from app.core.job_url import normalize_company_key, normalize_job_url
 from app.models.harvest_config import FiltersConfig
 from app.models.unified_job import UnifiedJob
 
@@ -143,10 +154,17 @@ _STAFFING_KW_MATCHER = _PhraseMatcher(_STAFFING_KW)
 _DIRECT_MATCHER      = _PhraseMatcher(_KNOWN_DIRECT)
 _GCC_PHRASE_MATCHER  = _PhraseMatcher(_GCC_PHRASES)
 
-# Generic staffing single-token keywords
+# Generic staffing single-token keywords. "consulting" is deliberately NOT here
+# (nor in staffing_firm_master_list.json "keywords"): "Deloitte Consulting",
+# "Acme Consulting", "Boston Consulting Group"… are consultancies / product
+# companies at least as often as body shops, so the bare word made every
+# "<X> Consulting" a Staffing Firm. Such names now fall through to Ambiguous,
+# where the per-run LLM check (company_classification_service) or an override
+# decides. "placement" / "outsourcing" stay: as a word in a company name they
+# almost always mean a placement agency / outsourcing vendor.
 _STAFFING_TOKENS: frozenset[str] = frozenset({
     "staffing", "recruitment", "recruiter", "manpower",
-    "placement", "outsourcing", "consulting",
+    "placement", "outsourcing",
 })
 
 # ── Source-aware search-time enforcement ──────────────────────────────────────
@@ -175,6 +193,37 @@ _JT_ENFORCED: dict[str, frozenset[str]] = {
     "Full-time": frozenset({"LinkedIn", "Dice"}),
     "Freelance": frozenset({"LinkedIn", "Dice"}),
 }
+
+
+# ── Per-tenant classification context ─────────────────────────────────────────
+
+HIRING_ENTITY_VALUES: tuple[str, ...] = ("Direct Client", "GCC", "Staffing Firm", "Ambiguous")
+
+
+@dataclass(frozen=True)
+class CompanyOverride:
+    """A company-level classification override (company_overrides row). A None
+    field means "no override for that field" — the normal rules apply."""
+    company_key:   str
+    company_name:  str = ""
+    hiring_entity: str | None = None
+    company_size:  str | None = None
+    domain:        str | None = None
+    source:        str = "manual"   # "manual" | "llm"
+
+
+@dataclass
+class ClassificationContext:
+    """Per-run, per-tenant classification inputs loaded from the DB:
+    ``overrides`` keyed by normalize_company_key, ``keywords`` keyed by list name
+    ("staffing" | "direct" | "gcc") → lower-cased terms."""
+    overrides: dict[str, CompanyOverride] = field(default_factory=dict)
+    keywords:  dict[str, frozenset[str]] = field(default_factory=dict)
+
+    def override_for(self, company: str | None) -> CompanyOverride | None:
+        """The override for ``company`` (matched by normalize_company_key), or None."""
+        key = normalize_company_key(company or "")
+        return self.overrides.get(key) if key else None
 
 
 # ── Ambiguous company tracker ──────────────────────────────────────────────────
@@ -208,7 +257,34 @@ class BusinessFilterService:
     """
     Annotate and filter a list of UnifiedJob instances according to
     the active FiltersConfig rules.
+
+    ``context`` (optional) adds the tenant's company overrides and DB keyword terms
+    (see ClassificationContext); without it only the JSON master lists apply.
     """
+
+    def __init__(self, context: ClassificationContext | None = None) -> None:
+        """Build the hiring-entity matchers: the import-time JSON lists, plus the
+        context's DB terms when there are any (the shared matchers are reused
+        otherwise, so the common no-extra-terms path costs nothing)."""
+        self._context = context or ClassificationContext()
+        kw = self._context.keywords
+        extra_staffing = kw.get("staffing") or frozenset()
+        extra_direct   = kw.get("direct") or frozenset()
+        extra_gcc      = kw.get("gcc") or frozenset()
+        self._gcc_matcher = (
+            _PhraseMatcher(_KNOWN_GCC | extra_gcc) if extra_gcc else _GCC_MATCHER
+        )
+        self._staffing_kw_matcher = (
+            _PhraseMatcher(_STAFFING_KW | extra_staffing) if extra_staffing else _STAFFING_KW_MATCHER
+        )
+        self._direct_matcher = (
+            _PhraseMatcher(_KNOWN_DIRECT | extra_direct) if extra_direct else _DIRECT_MATCHER
+        )
+
+    @property
+    def context(self) -> ClassificationContext:
+        """The classification context in use (empty when none was given)."""
+        return self._context
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -218,11 +294,24 @@ class BusinessFilterService:
 
         ``track_ambiguous=False`` classifies without appending unknown companies to
         ambiguous_companies.json — Demand Search passes it so client names never
-        land in that harvest master list."""
+        land in that harvest master list.
+
+        A company override (context) is consulted FIRST and wins over the keyword
+        rules and over any value the job already carries: its hiring_entity (with
+        is_gcc), company_size and domain replace the job's. Fields the override
+        leaves NULL fall back to the normal rules."""
         for j in jobs:
-            if not j.domain or j.domain == "Any":
+            ov = self._context.override_for(j.company)
+            if ov is not None and ov.domain:
+                j.domain = ov.domain
+            elif not j.domain or j.domain == "Any":
                 j.domain = self._infer_domain(j)
-            if not j.hiring_entity or j.hiring_entity == "Any":
+            if ov is not None and ov.company_size:
+                j.company_size = ov.company_size
+            if ov is not None and ov.hiring_entity:
+                j.hiring_entity = ov.hiring_entity
+                j.is_gcc = ov.hiring_entity == "GCC"
+            elif not j.hiring_entity or j.hiring_entity == "Any":
                 j.is_gcc, j.hiring_entity = self._infer_hiring_entity(
                     j, track_ambiguous=track_ambiguous,
                 )
@@ -304,9 +393,9 @@ class BusinessFilterService:
         staffing-brand hit and no "staffing" hiring_hint."""
         c_words = _words(j.company)
         c_set   = set(c_words)
-        gcc_hit      = _GCC_MATCHER.longest(c_words)
+        gcc_hit      = self._gcc_matcher.longest(c_words)
         staffing_hit = _STAFFING_MATCHER.longest(c_words)
-        direct_hit   = _DIRECT_MATCHER.longest(c_words)
+        direct_hit   = self._direct_matcher.longest(c_words)
 
         # ── GCC: well-known brand match ───────────────────────────────────────
         # Unless a staffing / direct-client entry names the company MORE
@@ -343,7 +432,7 @@ class BusinessFilterService:
             return False, "Staffing Firm"
 
         # ── Staffing: generic keyword phrases ─────────────────────────────────
-        if _STAFFING_KW_MATCHER.longest(c_words):
+        if self._staffing_kw_matcher.longest(c_words):
             return False, "Staffing Firm"
 
         # ── Staffing: single-token match ──────────────────────────────────────

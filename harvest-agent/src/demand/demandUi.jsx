@@ -21,6 +21,10 @@ export const QUOTA_TIP =
   "One account-wide Resdex quota per UTC day (resets 5:30 AM IST), shared with harvest outreach.";
 export const RESDEX_SEARCH_URL = "https://resdex.naukri.com/v3?activeTab=advSrch";
 
+/** In-app URLs of a Demand batch page and a batch job's detail page (/demand?batch=…&job=…). */
+export const demandBatchHref = (runId) => `/demand?batch=${encodeURIComponent(runId)}`;
+export const demandJobHref = (runId, jobId) => `${demandBatchHref(runId)}&job=${encodeURIComponent(jobId)}`;
+
 // Row statuses (GET /demand/batches/{run_id} rows[].status).
 export const ROW_META = {
   matched:         { label: "Matched", Icon: CheckCircle2, tone: "good", chip: "done" },

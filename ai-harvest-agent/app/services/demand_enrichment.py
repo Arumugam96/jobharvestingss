@@ -15,8 +15,10 @@ requirements extraction:
     description          job_description_html (llm_restructure_description for a
                          flat blob, else the deterministic formatting)
     classification       BusinessFilterService.classify_all (track_ambiguous=False,
-                         so client names never reach ambiguous_companies.json) →
-                         domain, hiring_entity, is_gcc, job_type
+                         so client names never reach ambiguous_companies.json) with
+                         the tenant's company override + DB keyword terms →
+                         domain, hiring_entity, is_gcc, job_type (a manual override's
+                         hiring_entity also replaces an earlier derived one)
     the rest             company_size (parse_company_size_band), work_mode
                          (_infer_work_mode), employment_type (metadata only)
   backfill_from_requirements   (after the search) — skills, experience, location,
@@ -122,6 +124,18 @@ async def _write(job_id: str, values: dict) -> list[str]:
     return sorted(values) if ok else []
 
 
+async def _classification_context(company: str):
+    """The tenant's ClassificationContext limited to ``company``'s override (plus all
+    DB keyword terms), or None when the read failed."""
+    from app.core.job_url import normalize_company_key
+    from app.services.company_classification_service import load_classification_context
+
+    key = normalize_company_key(company or "")
+    return await db_read(
+        lambda db: load_classification_context(db, company_keys=[key] if key else [])
+    )
+
+
 async def _llm_contacts(llm: Any, text: str, ref: str, timeout_s: float) -> GroundedContacts:
     """LLM contact extraction from the JD, grounded against the JD text itself.
 
@@ -198,10 +212,19 @@ async def enrich_from_jd(job_id: str | None, row: dict, *, run_pk: str | None = 
         _fill(job, values, "job_description_html",
               description_text_to_html(formatted or format_job_description(text)))
 
-    # Stated values (metadata) win over inference from the JD.
+    # The tenant's company override + DB keyword terms for this job's company
+    # (company_overrides / classification_keywords) — best-effort, None on failure.
+    classification_company = values.get("company", job.company or "")
+    context = await _classification_context(classification_company)
+    override = context.override_for(classification_company) if context is not None else None
+
+    # Stated values (metadata) win over the company override, which wins over
+    # inference from the JD.
     size = normalize_company_size(_meta(row, _META_COMPANY_SIZE))
     _fill(job, values, "company_size",
-          f"{size} employees" if size else parse_company_size_band(text))
+          f"{size} employees" if size
+          else ((override.company_size if override is not None else None)
+                or parse_company_size_band(text)))
     _fill(job, values, "employment_type", _meta(row, _META_EMPLOYMENT)[:100])
     for source in (_meta(row, _META_WORK_MODE), job.location or "", text):
         mode = _infer_work_mode(source)
@@ -219,13 +242,18 @@ async def enrich_from_jd(job_id: str | None, row: dict, *, run_pk: str | None = 
         source=job.source or "", employment_type=employment,
         job_type=employment,                 # a stated type is scanned before the JD
     )
-    BusinessFilterService().classify_all([uj], FiltersConfig(), track_ambiguous=False)
+    BusinessFilterService(context).classify_all([uj], FiltersConfig(), track_ambiguous=False)
     if _empty(job.domain):
         _fill(job, values, "domain", uj.domain)
     if _empty(job.hiring_entity):
         _fill(job, values, "hiring_entity", uj.hiring_entity)
         if "hiring_entity" in values:
             values["is_gcc"] = bool(uj.is_gcc)
+    elif (override is not None and override.hiring_entity
+          and override.source == "manual" and job.hiring_entity != override.hiring_entity):
+        # A manual company override beats an earlier derived label.
+        values["hiring_entity"] = override.hiring_entity
+        values["is_gcc"] = override.hiring_entity == "GCC"
     _fill(job, values, "job_type", uj.job_type)
 
     written = await _write(job_id, values)

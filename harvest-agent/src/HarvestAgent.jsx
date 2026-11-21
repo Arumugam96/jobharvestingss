@@ -3,6 +3,7 @@ import {
   Routes, Route, Navigate, Outlet, useNavigate, useLocation, useParams,
 } from "react-router-dom";
 import JobDetailsView from "./JobDetailsView";
+import EditJobModal from "./components/EditJobModal";
 import RuleEngineConfig from "./RuleEngineConfig";
 import OutreachHistoryPage from "./OutreachHistoryPage";
 import OutreachThreadPage from "./OutreachThreadPage";
@@ -26,6 +27,7 @@ import RuleEngineRedesign from "./pages/RuleEngineRedesign";
 import DemandSearchPage from "./demand/DemandSearchPage";
 import PhoneLogsPage from "./pages/PhoneLogsPage";
 import UserRolesPage from "./pages/UserRolesPage";
+import CompanyClassificationPage from "./pages/CompanyClassificationPage";
 
 /* Per-tenant route guard: a page whose feature flag is off for the current
  * tenant redirects to /jobs. Presentation-level only — the backend enforces
@@ -64,6 +66,7 @@ function activeKeyFromPath(pathname) {
   if (pathname.startsWith("/demand")) return "demand";
   if (pathname.startsWith("/phone-logs")) return "phone-logs";
   if (pathname.startsWith("/user-roles")) return "user-roles";
+  if (pathname.startsWith("/company-classification")) return "company-classification";
   return "jobs"; // "/", "/jobs", "/jobs/:id"
 }
 
@@ -137,6 +140,13 @@ function JobDetailRoute() {
   const [loadState, setLoadState] = useState(stateJob ? "done" : "loading");
   // Server message when the job can't be opened (a 403 names who it's assigned to).
   const [loadError, setLoadError] = useState("");
+  // Edit job details (admins + business leads; the backend 403s a lead on a job
+  // assigned to someone else). A save replaces the shown job in place.
+  const { isAdmin, isBusinessLead } = useTenant();
+  const canEdit = isAdmin || isBusinessLead;
+  const [editing, setEditing] = useState(false);
+  const [editedJob, setEditedJob] = useState(null);
+  useEffect(() => { setEditing(false); setEditedJob(null); }, [jobId]);
 
   useEffect(() => {
     if (stateJob) return undefined;
@@ -161,7 +171,7 @@ function JobDetailRoute() {
     return () => { cancelled = true; };
   }, [jobId, stateJob]);
 
-  const job = stateJob || fetchedJob;
+  const job = editedJob || stateJob || fetchedJob;
 
   if (!job) {
     // Rendered outside the shared layout (no ThemeStyles here), so keep it
@@ -184,7 +194,21 @@ function JobDetailRoute() {
   }
   // Detail views are full-page (own root, no sidebar) — render outside the layout
   // chrome by returning them directly from a route mounted above AppLayout.
-  return <JobDetailsView job={job} onBack={goBack} />;
+  return (
+    <>
+      <JobDetailsView job={job} onBack={goBack} onEdit={canEdit && job.id ? () => setEditing(true) : undefined} />
+      {editing && (
+        <EditJobModal
+          job={job}
+          onClose={() => setEditing(false)}
+          onSaved={(res) => setEditedJob({
+            ...mapJobToDetail(mapApiJob(res.job)),
+            assignedTo: res.job.assigned_to || null,
+          })}
+        />
+      )}
+    </>
+  );
 }
 
 /** /library — JobsPage in My Workspace mode (only jobs assigned to the current user). */
@@ -317,6 +341,7 @@ export default function HarvestAgent({ onLogout }) {
           <Route path="/demand" element={<FeatureGate feature="demand"><DemandSearchPage /></FeatureGate>} />
           <Route path="/phone-logs" element={<PhoneLogsGate><PhoneLogsPage /></PhoneLogsGate>} />
           <Route path="/user-roles" element={<AdminGate><UserRolesPage /></AdminGate>} />
+          <Route path="/company-classification" element={<AdminGate><CompanyClassificationPage /></AdminGate>} />
           <Route path="*" element={<NotFound />} />
         </Route>
       </Routes>

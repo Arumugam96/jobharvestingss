@@ -5,10 +5,11 @@ import LiveBrowserView from "../components/LiveBrowserView";
 import { Select } from "../components/ui";
 import JobsPage from "../pages/JobsPage";
 import { useHarvestData } from "../HarvestDataContext";
+import { linkProps } from "../lib/openLink";
 import { createManual, demandError, demandUpload, listBatches /* , listJobs */ } from "./demandApi";
 import {
   DemandStyles, SessionQuotaPills, BatchStatusPill, Note, useDemandUsage, fmtWhen, HarvestRunningModal,
-  SourceKindChip,
+  SourceKindChip, demandBatchHref, demandJobHref,
 } from "./demandUi";
 // Review + pre-flight steps are skipped for now (see DemandLanding.startBatch).
 // import { ValidationStep, PreflightStep, ManualReviewStep } from "./DemandUploadFlow";
@@ -46,10 +47,10 @@ export default function DemandSearchPage() {
   const here = location.pathname + location.search;
 
   const openBatch = useCallback((runId) => navigate(
-    `/demand?batch=${encodeURIComponent(runId)}`, { state: { from: here } },
+    demandBatchHref(runId), { state: { from: here } },
   ), [navigate, here]);
   const openJob = useCallback((runId, jobId) => navigate(
-    `/demand?batch=${encodeURIComponent(runId)}&job=${encodeURIComponent(jobId)}`,
+    demandJobHref(runId, jobId),
     { state: { from: here } },
   ), [navigate, here]);
 
@@ -456,9 +457,9 @@ function BatchesTab({ onOpenBatch }) {
               ) : batches.map((b) => (
                 <tr key={b.run_id} className="ha-row">
                   <td className="ha-td">
-                    <button type="button" className="ha-link" onClick={() => onOpenBatch(b.run_id)} style={{ display: "inline-flex", alignItems: "center", gap: 6, textAlign: "left" }}>
+                    <a className="ha-link" {...linkProps(demandBatchHref(b.run_id), () => onOpenBatch(b.run_id))} style={{ display: "inline-flex", alignItems: "center", gap: 6, textAlign: "left" }}>
                       {b.source_kind === "manual" ? <PencilLine size={14} /> : <FileSpreadsheet size={14} />} {b.batch_name || b.filename || b.run_id}
-                    </button>
+                    </a>
                     <div className="dm-sub">{b.source_kind !== "manual" && b.filename && b.filename !== b.batch_name ? `${b.filename} · ` : ""}{b.run_id}</div>
                   </td>
                   <td className="ha-td"><SourceKindChip kind={b.source_kind} /></td>

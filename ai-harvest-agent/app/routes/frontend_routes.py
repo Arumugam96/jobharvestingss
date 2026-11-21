@@ -363,7 +363,8 @@ async def list_jobs(
     date_from:     str = Query("",                        description="Filter jobs posted on or after this date (YYYY-MM-DD)"),
     date_to:       str = Query("",                        description="Filter jobs posted on or before this date (YYYY-MM-DD)"),
     assigned_to_me: bool = Query(False,                   description="When true, return only jobs assigned to the authenticated user"),
-    called:        str = Query("", pattern="^(|yes|no)$", description="yes = jobs with a logged phone call; no = not called yet (DB only)"),
+    called:        str = Query("", pattern="^(|yes|contact|no)$", description="yes = jobs with a logged phone call of their own; contact = none of their own, but their contact (same number + company) was called on another job; no = neither (DB only)"),
+    group:         str = Query("", pattern="^(|contact)$", description="contact (with called=no): one row per contact — its newest job, with `sibling_count` = the contact's other not-called jobs (DB only)"),
     current_user: AuthenticatedUser = Depends(get_current_user),
 ) -> dict:
     """
@@ -444,6 +445,7 @@ async def list_jobs(
             assigned_to_email = current_user.email if assigned_to_me else None,
             # A direct (non-HTTP) call gets the Query() default object, not a str.
             called        = called if isinstance(called, str) and called else None,
+            group         = group if isinstance(group, str) and group else None,
             sort_by       = sort_by,
             sort_order    = sort_order,
             page          = page,
@@ -459,6 +461,9 @@ async def list_jobs(
         # equivalent read does.
         orm_jobs, total = result if result else ([], 0)
         page_items  = [scraped_job_view(j) for j in orm_jobs]
+        for item, j in zip(page_items, orm_jobs):
+            if hasattr(j, "sibling_count"):  # group=contact rows only
+                item["sibling_count"] = j.sibling_count
         total_pages = max(1, math.ceil(total / page_size)) if page_size > 0 else 1
     else:
         page_items, total, total_pages = result
@@ -488,6 +493,7 @@ async def list_jobs(
             "date_to":       date_to       or None,
             "assigned_to_me": assigned_to_me,
             "called":        called if isinstance(called, str) and called else None,
+            "group":         group if isinstance(group, str) and group else None,
         },
         "sort": {"by": sort_by, "order": sort_order},
         "jobs": page_items,
@@ -531,7 +537,7 @@ async def job_facets(
     date_from:     str = Query("",    description="Same as GET /jobs"),
     date_to:       str = Query("",    description="Same as GET /jobs"),
     assigned_to_me: bool = Query(False, description="Same as GET /jobs"),
-    called:        str = Query("", pattern="^(|yes|no)$", description="Same as GET /jobs"),
+    called:        str = Query("", pattern="^(|yes|contact|no)$", description="Same as GET /jobs"),
     current_user: AuthenticatedUser = Depends(get_current_user),
 ) -> dict:
     """Distinct Company / Job title / POC filter values (global) and filter-aware stats.

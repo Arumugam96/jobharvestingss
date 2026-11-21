@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { useParams, useLocation, useNavigate, useSearchParams } from "react-router-dom";
-import { Copy, Check, CornerUpRight, Link2, Reply, UserRound } from "lucide-react";
+import { ArrowLeft, Copy, Check, CornerUpRight, Link2, Reply, UserRound } from "lucide-react";
 import { getOutreachHistory, ApiError } from "./api";
 import OutreachThread from "./components/OutreachThread";
 import EmailComposeModal from "./components/EmailComposeModal";
@@ -11,7 +11,8 @@ import {
 
 /* Standalone, full-page view of one sent outreach + its full thread (route
  * /mail/:id) — the page form of what used to be the Mail logs row popup. Opened in
- * a new tab from a row click, so it resolves entirely from the URL (?job=/?recruiter=)
+ * this tab from a row click (or a new tab via Ctrl/middle-click), so it resolves
+ * entirely from the URL (?job=/?recruiter=)
  * rather than navigation state. Renders inside the shared sidebar layout
  * (ha-root → Sidebar → this <main>): subject as the page title, actions top-right,
  * the conversation as the main column, and delivery + details in a right panel. */
@@ -154,8 +155,16 @@ export default function OutreachThreadPage() {
     </div>
   );
 
+  // Back = history POP when opened in-app (Mail logs restores its filters/page from
+  // its URL); on a fresh tab / direct link there's no earlier entry → Mail logs.
+  const canGoBack = (window.history.state?.idx ?? 0) > 0;
+
   return (
     <main className="ha-main" style={{ padding: "24px 24px 32px" }}>
+      <button className="ha-btn ha-btn-secondary" style={{ marginBottom: 14 }}
+        onClick={() => (canGoBack ? navigate(-1) : navigate("/outreach"))}>
+        <ArrowLeft size={15} /> {canGoBack ? "Back" : "Back to Mail logs"}
+      </button>
       {/* Page header — subject as title + engagement/tone. The title uses the full
           available width (no artificial cap) so it stays on one line where it fits
           and only wraps the overflow onto a second line when it truly must. */}

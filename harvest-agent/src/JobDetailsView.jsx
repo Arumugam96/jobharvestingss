@@ -5,9 +5,12 @@ import LinkedInMessageModal from "./components/LinkedInMessageModal";
 import { getOutreachStatus, getJobOutreachDetail, runJobResdexSearch, openLoginRequired, ApiError } from "./api";
 import LiveBrowserView from "./components/LiveBrowserView";
 import { ContactTimeline } from "./components/ContactHistory";
+import { InheritedCallLine } from "./components/PhoneVerify";
 import { useCurrentUserEmail, isAssignedToOther } from "./components/AssignJob";
 import { GLASS, GLASS_BTN, PAGE_BG, GLASS_FALLBACK } from "./theme";
 import { copyText } from "./lib/clipboard";
+import { useNavigate } from "react-router-dom";
+import { linkProps } from "./lib/openLink";
 import {
   ArrowLeft,
   MapPin,
@@ -698,8 +701,10 @@ function EmailStep({ tone, children }) {
 }
 
 // Hero box: latest outreach email + "View email" (opens the existing /mail/:id
-// thread page in a new tab — the body is never rendered on the job page).
+// thread page in this tab, Ctrl/middle-click for a new one — the body is never
+// rendered on the job page).
 function OutreachEmailStrip({ emails, onCompose }) {
+  const navigate = useNavigate();
   const list = emails || [];
   if (!list.length) {
     return (
@@ -719,8 +724,8 @@ function OutreachEmailStrip({ emails, onCompose }) {
   const failed = e.status === "failed";
   const q = e.job_id ? `?job=${encodeURIComponent(e.job_id)}`
     : e.recruiter_id ? `?recruiter=${encodeURIComponent(e.recruiter_id)}` : "";
-  /** Open the /mail/:id thread page for the newest email in a new tab. */
-  const openMail = () => window.open(`/mail/${encodeURIComponent(e.id)}${q}`, "_blank", "noopener");
+  /** The /mail/:id thread page for the newest email. */
+  const mailHref = `/mail/${encodeURIComponent(e.id)}${q}`;
   const kinds = list.some((m) => m.outreach_kind === "followup") ? "initial + follow-up" : "initial";
   return (
     <aside className="ha-em-strip" aria-label="Outreach email">
@@ -740,9 +745,10 @@ function OutreachEmailStrip({ emails, onCompose }) {
       </div>
       <div className="ha-em-row">
         <span className="ha-em-to" title={e.to_email || ""}>To {e.to_email || "—"}</span>
-        <button type="button" className="ha-rx-btn ha-rx-btn-primary" onClick={openMail}>
-          View email <ExternalLink size={13} />
-        </button>
+        <a className="ha-rx-btn ha-rx-btn-primary" {...linkProps(mailHref, () => navigate(mailHref))}
+          title="View email (Ctrl/middle-click for a new tab)">
+          View email <Eye size={13} />
+        </a>
       </div>
     </aside>
   );
@@ -895,9 +901,11 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
                 Edit
               </button>
             )}
-            <span className="ha-viewbadge">
-              <Eye size={13} /> View only
-            </span>
+            {!onEdit && (
+              <span className="ha-viewbadge">
+                <Eye size={13} /> View only
+              </span>
+            )}
           </div>
         </div>
 
@@ -954,6 +962,14 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
             </div>
 
             <div className="ha-poc-fields">
+              <div className="ha-field">
+                <span className="ha-key">Location</span>
+                <span className="ha-val">
+                  {job.recruiterLocation || (
+                    <span className="ha-muted">{job.location ? `Hiring location: ${job.location}` : "—"}</span>
+                  )}
+                </span>
+              </div>
               <div className="ha-field">
                 <span className="ha-key">Email</span>
                 <span className="ha-val">
@@ -1021,6 +1037,8 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
             <CallHistoryBlock jobId={job.id}
               phones={[job.posterContact?.mobileScraped, job.posterContact?.mobileRecruiter, job.posterContact?.mobile]} />
           )}
+          {/* No call of its own, but its contact was called on another job. */}
+          {!isDemand && job.id && <InheritedCallLine jobId={job.id} />}
         </section>
 
         {!isDemand && hasCompanyContact && (

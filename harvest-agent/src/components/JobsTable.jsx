@@ -5,17 +5,19 @@ import EmailComposeModal from "./EmailComposeModal";
 import LinkedInMessageModal from "./LinkedInMessageModal";
 import PhoneVerifyModal, {
   PhoneVerifyStyles, PhoneVerifyButton, PhoneVerifyBadge, PhoneFlagTag, phoneBlocked, callFromView,
+  callForPhone,
 } from "./PhoneVerify";
 import AssignJobModal, { AssignJobStyles, AssignCell, useCurrentUserEmail, isAssignedToOther } from "./AssignJob";
 import { getOutreachStatus, getPhoneVerifications, logPhoneCall } from "../api";
 import { ContactedBadge, hasEarlierCalls } from "./ContactHistory";
 import { C } from "../theme";
+import { isPlainLeftClick } from "../lib/openLink";
 import { useTenant } from "../TenantContext";
 import {
   WhatsAppIcon, LinkedInIcon, SourceChip, SortHeader, PlainHeader,
   Select, SearchableSelect, MultiSelect, ContactActionBtn, DualContact, CompanySizeCell, PocCell,
 } from "./ui";
-import { mapJobToDetail, jobContact, sortSources, SOURCE_ORDER } from "../lib/jobsData";
+import { mapJobToDetail, jobContact, phoneKey, sortSources, SOURCE_ORDER } from "../lib/jobsData";
 import { CONTACT_FILTER_OPTIONS, CLIENT_CONTACT_FILTER_OPTIONS, jobMatchesContact } from "../lib/contactFilter";
 
 // Apollo phone status of the job's recruiter: "Verified" when Apollo marked the
@@ -91,11 +93,8 @@ const DEFAULT_DISPLAY_PAGE_SIZE = 100;
 
 const NO_OUTREACH_TITLE = "No outreach for Demand Search jobs";
 
-/** True for an unmodified primary-button click — the only click an in-app link
- *  should intercept (modifier/middle clicks keep the browser's new-tab behaviour). */
-export function isPlainLeftClick(e) {
-  return !e.defaultPrevented && e.button === 0 && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey;
-}
+// Re-exported so existing `import { isPlainLeftClick } from "../components/JobsTable"` keep working.
+export { isPlainLeftClick };
 
 /**
  * The harvested-jobs table: filter bar (source, company, size, locations, job, contact,
@@ -206,11 +205,27 @@ export default function JobsTable({
         return current ? prev : { ...prev, [modal.job.id]: me };
       });
     }
+    // The server also claimed the contact's unassigned sibling jobs (same number +
+    // company) — show those chips on the visible rows too, until the next fetch.
+    const sibKey = phoneKey(modal.phone);
+    const sibCo = (modal.job.company || "").trim().toLowerCase();
+    if (me && view?.claimed_siblings > 0 && sibKey && sibCo && sibCo !== "—") {
+      const key = sibKey;
+      const co = sibCo;
+      setAssignOverrides((prev) => {
+        const next = { ...prev };
+        (jobs || []).forEach((j) => {
+          if (j.id === modal.job.id || (j.id in prev ? prev[j.id] : j.assignedTo)) return;
+          if ((j.company || "").trim().toLowerCase() === co && phoneKey(jobContact(j).phone) === key) next[j.id] = me;
+        });
+        return next;
+      });
+    }
     // Language barrier + "Reassign recruiter" released the caller's lock server-side.
     if (call.outcome === "language_barrier" && call.details?.reassign) {
       setAssignOverrides((prev) => ({ ...prev, [modal.job.id]: null }));
     }
-  }, []);
+  }, [jobs]);
   // "Assign to me": the logged-in user, the open modal, and assignments changed
   // in this session (overlaid on the server's row.assignedTo until the next fetch).
   const myEmail = useCurrentUserEmail();
@@ -553,10 +568,17 @@ export default function JobsTable({
                     <CompanySizeCell band={j.companySize} tier={j.companySizeTier} />
                   </td>
                   <td className="ha-td" style={{ color: C.text }}>
-                    {c.phone && hasEarlierCalls(phoneContacts[c.phone], j.id) ? (
+                    {(c.phone && hasEarlierCalls(phoneContacts[c.phone], j.id)) || j.siblingCount > 0 ? (
                       <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                         <PocCell name={c.pocName} kind={c.pocKind} />
-                        <ContactedBadge summary={phoneContacts[c.phone]} />
+                        {c.phone && hasEarlierCalls(phoneContacts[c.phone], j.id) && <ContactedBadge summary={phoneContacts[c.phone]} />}
+                        {/* "Not called yet" grouped by contact: the rest of this contact's jobs. */}
+                        {j.siblingCount > 0 && (
+                          <span className="pvm-hbadge info" style={{ flex: "none", whiteSpace: "nowrap", cursor: "default" }}
+                            title={`${j.siblingCount} more not-called job${j.siblingCount > 1 ? "s" : ""} from this contact`}>
+                            +{j.siblingCount} job{j.siblingCount > 1 ? "s" : ""}
+                          </span>
+                        )}
                       </div>
                     ) : <PocCell name={c.pocName} kind={c.pocKind} />}
                   </td>
@@ -566,13 +588,14 @@ export default function JobsTable({
                   <td className={"ha-td" + (locked && isAdmin ? " ajm-keep" : "")} style={{ whiteSpace: "nowrap" }}>
                     {c.phone && !locked ? (
                       <div className="pvm-cell">
-                        <PhoneVerifyButton verified={phoneVerify[j.id]?.phone === c.phone}
+                        <PhoneVerifyButton verified={!!callForPhone(phoneVerify[j.id], c.phone, { own: true })}
                           onClick={() => setPhoneModal({ job: j, phone: c.phone, phoneSource: c.phoneParts[0]?.variant || "", pocName: c.pocName, pocKind: c.pocKind, email: c.email })} />
                         <div className="pvm-val"><DualContact parts={c.phoneParts} link="tel:" cls="ha-tel" /></div>
-                        {/* A stored result only applies while the row still shows the same number. */}
-                        <PhoneVerifyBadge result={phoneVerify[j.id]?.phone === c.phone ? phoneVerify[j.id] : null}
+                        {/* A stored result only applies while the row still shows the same number
+                            (by its trailing 10 digits — also an inherited call from another job). */}
+                        <PhoneVerifyBadge result={callForPhone(phoneVerify[j.id], c.phone)}
                           onEdit={() => setPhoneModal({ job: j, phone: c.phone, phoneSource: c.phoneParts[0]?.variant || "", pocName: c.pocName, pocKind: c.pocKind, email: c.email })} />
-                        <PhoneFlagTag flags={phoneFlags[c.phone]} />
+                        <PhoneFlagTag flags={phoneFlags[c.phone]} phone={c.phone} onRemoved={isAdmin ? refreshPhoneVerifications : undefined} />
                         <ApolloPhoneChip job={j} contact={c} />
                       </div>
                     ) : c.phone && locked && isAdmin ? (
@@ -580,8 +603,8 @@ export default function JobsTable({
                       // for the assignee's latest call — no shield, no "Log call".
                       <div className="pvm-cell">
                         <div className="pvm-val"><DualContact parts={c.phoneParts} link="tel:" cls="ha-tel" /></div>
-                        <PhoneVerifyBadge mark result={phoneVerify[j.id]?.phone === c.phone ? phoneVerify[j.id] : null} />
-                        <PhoneFlagTag flags={phoneFlags[c.phone]} />
+                        <PhoneVerifyBadge mark result={callForPhone(phoneVerify[j.id], c.phone)} />
+                        <PhoneFlagTag flags={phoneFlags[c.phone]} phone={c.phone} onRemoved={isAdmin ? refreshPhoneVerifications : undefined} />
                         <ApolloPhoneChip job={j} contact={c} />
                       </div>
                     ) : (
@@ -717,8 +740,12 @@ export default function JobsTable({
           pocTitle={phoneModal.pocKind === "poster" ? phoneModal.job.posterTitle : ""}
           email={phoneModal.email}
           company={phoneModal.job.company}
-          latest={phoneVerify[phoneModal.job.id]?.phone === phoneModal.phone ? phoneVerify[phoneModal.job.id] : null}
-          onSave={(result) => savePhoneResult(phoneModal, result)}
+          latest={callForPhone(phoneVerify[phoneModal.job.id], phoneModal.phone, { own: true })}
+          onSave={async (result) => {
+            await savePhoneResult(phoneModal, result);
+            // The call may now stand for this contact's other jobs on the page too.
+            refreshPhoneVerifications();
+          }}
           onClose={() => setPhoneModal(null)}
         />
       )}

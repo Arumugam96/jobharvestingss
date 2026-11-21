@@ -253,6 +253,7 @@ class LlmCallType:
     LINKEDIN_GENERATION = "linkedin_generation"
     RESDEX_REQUIREMENTS = "resdex_requirements"
     RESDEX_PROFILE_EXTRACT = "resdex_profile_extract"
+    COMPANY_CLASSIFY = "company_classify"  # hiring-entity check for Ambiguous companies
 
 
 class LlmCallORM(Base):

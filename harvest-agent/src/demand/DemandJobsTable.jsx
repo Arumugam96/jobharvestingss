@@ -1,7 +1,8 @@
 import { useMemo, useState } from "react";
 import { Search } from "lucide-react";
 import { Select, SortHeader, PlainHeader, SourceChip } from "../components/ui";
-import { RowStatusPill, ATTENTION, isActiveRow, pct, subStepLabel } from "./demandUi";
+import { RowStatusPill, ATTENTION, isActiveRow, pct, subStepLabel, demandJobHref } from "./demandUi";
+import { linkProps } from "../lib/openLink";
 
 /* The Demand jobs table of one batch: the jobs of the batch (live and final
  * statuses), Resdex-only columns and filters — no Company / POC / Email / Mobile
@@ -55,8 +56,10 @@ function CoverageCell({ value }) {
  * @param {string} props.status - controlled STATUS_FILTERS value (set by the batch stat cards).
  * @param {Function} props.onStatusChange - setter for `status`.
  * @param {Function} props.onOpenJob - called with the row to open its job page.
+ * @param {Function} [props.jobHref] - the row's job page URL (default: from r.run_id/r.job_id); the
+ *   title is a real link, so Ctrl/middle-click opens a new tab and a plain click calls onOpenJob.
  */
-export default function DemandJobsTable({ rows, uploadedOn, status, onStatusChange, onOpenJob }) {
+export default function DemandJobsTable({ rows, uploadedOn, status, onStatusChange, onOpenJob, jobHref = (r) => demandJobHref(r.run_id, r.job_id) }) {
   const [jobFilter, setJobFilter] = useState("all");
   const [q, setQ] = useState("");
   const [sort, setSort] = useState({ col: "row", dir: "asc" });
@@ -121,7 +124,7 @@ export default function DemandJobsTable({ rows, uploadedOn, status, onStatusChan
                       {active || !r.job_id ? (
                         <span className="dm-ttl-off">{r.job_title}<small>{r.status === "queued" ? "Opens when searched" : subStepLabel(r)}</small></span>
                       ) : (
-                        <button type="button" className="ha-link" title="View details" onClick={() => onOpenJob(r)}>{r.job_title}</button>
+                        <a className="ha-link" title="View details" {...linkProps(jobHref(r), () => onOpenJob(r))}>{r.job_title}</a>
                       )}
                     </td>
                     <td className="ha-td">{r.client || <span className="dm-muted">—</span>}</td>

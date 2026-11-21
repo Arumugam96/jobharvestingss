@@ -11,6 +11,7 @@ import PhoneVerifyModal, { PHONE_STATUSES, OUTCOME_OPTIONS, outcomeInfo, outcome
 import { ContactTimeline, callLabel, callTone, shortDate } from "../components/ContactHistory";
 import { downloadCsv, downloadJson, saveBlob, fetchAllPages } from "../lib/csv";
 import { getCached, setCached } from "../lib/pageCache";
+import { linkProps, rowNav, OpenInNewTab } from "../lib/openLink";
 
 /* Phone logs (admins + Business Leads): admins see every call logged in
  * the tenant, including jobs self-assigned by someone else, and can narrow it to one
@@ -304,11 +305,11 @@ function AssigneePill({ user }) {
   );
 }
 
-/** Job title over company, the table's two-line job cell. */
-function JobCell({ title, company }) {
+/** Job title over company, the table's two-line job cell (`after` sits beside the title). */
+function JobCell({ title, company, after = null }) {
   return (
     <>
-      <div style={{ fontWeight: 600, color: C.text }}>{title || "—"}</div>
+      <div style={{ fontWeight: 600, color: C.text }}>{title || "—"}{after}</div>
       <div style={{ fontSize: 12.5, color: C.textSoft }}>{company}</div>
     </>
   );
@@ -761,11 +762,12 @@ export default function PhoneLogsPage() {
   // "own" = a business lead's own calls (no tenant-wide drill-downs). Until the first
   // response lands, fall back to the role.
   const ownScope = data?.scope ? data.scope === "own" : !isAdmin;
-  /** Open the call's job on its details page (Back returns here). */
-  const openJob = (row) => {
-    if (!row.job_id) return;
-    navigate(`/jobs/${encodeURIComponent(row.job_id)}`, { state: { from: "/phone-logs" } });
-  };
+  /** The call's job details page; a plain row click opens it here (Back returns
+   *  here), Ctrl/Cmd/middle-click or the ↗ icon in a new tab. */
+  const jobHref = (row) => `/jobs/${encodeURIComponent(row.job_id)}`;
+  const jobRowNav = (row) => (row.job_id
+    ? rowNav(jobHref(row), navigate, () => navigate(jobHref(row), { state: { from: "/phone-logs" } }))
+    : {});
   // Columns: the "Assigned to" column is admin-only (a business lead's list is already theirs).
   const callCols = ownScope ? 9 : 10;
 
@@ -836,11 +838,20 @@ export default function PhoneLogsPage() {
             onClick={() => showCalls("answered")} active={callsAt("answered")} />
           <StatCard value={summary.unanswered} label="Unanswered" color="#DC2626"
             onClick={() => showCalls("unanswered")} active={callsAt("unanswered")} />
-          <StatCard value={summary.assigned_jobs} label={ownScope ? "My self-assigned jobs" : "Self-assigned jobs"} color="#7C3AED"
-            sub={`${summary.called_assigned_jobs ?? 0} called`}
-            title={ownScope ? "Open My Workspace on the jobs you haven't called yet" : undefined}
-            onClick={ownScope ? () => navigate("/library", { state: { bucket: "notcalled" } }) : () => setView("assigned")}
-            active={!ownScope && view === "assigned"} />
+          {ownScope ? (
+            // A real link to My Workspace: a plain click opens it here on the
+            // not-called bucket; Ctrl/middle-click / "Open in new tab" also work.
+            <a {...linkProps("/library?bucket=notcalled", () => navigate("/library", { state: { bucket: "notcalled" } }))}
+              title="Open My Workspace on the jobs you haven't called yet (Ctrl/middle-click for a new tab)"
+              style={{ display: "flex", flex: 1, minWidth: 150, textDecoration: "none", color: "inherit" }}>
+              <StatCard value={summary.assigned_jobs} label="My self-assigned jobs" color="#7C3AED"
+                sub={`${summary.called_assigned_jobs ?? 0} called`} />
+            </a>
+          ) : (
+            <StatCard value={summary.assigned_jobs} label="Self-assigned jobs" color="#7C3AED"
+              sub={`${summary.called_assigned_jobs ?? 0} called`}
+              onClick={() => setView("assigned")} active={view === "assigned"} />
+          )}
           {!ownScope && summary.repeat_calls != null && (
             <StatCard value={summary.repeat_calls} label="Repeat calls" color="#B45309"
               title="Calls placed to a number whose previous call was “Not interested”, inside its revisit window" />
@@ -891,10 +902,8 @@ export default function PhoneLogsPage() {
                     {!loading && items.length === 0 && <tr><td className="ha-td" colSpan={callCols} style={EMPTY_CELL}>No calls match these filters.</td></tr>}
                     {items.map((row) => (
                       <tr key={row.id} className={`ha-row${row.job_id ? " ha-row-link" : ""}`}
-                        title={row.job_id ? "Open this job" : undefined}
-                        tabIndex={row.job_id ? 0 : undefined}
-                        onClick={() => openJob(row)}
-                        onKeyDown={(e) => { if (e.key === "Enter" && e.target === e.currentTarget) openJob(row); }}>
+                        title={row.job_id ? "Open this job (Ctrl/middle-click for a new tab)" : undefined}
+                        {...jobRowNav(row)}>
                         <td className="ha-td" style={{ textAlign: "center" }}>
                           {/* Shown unless the server says no; it still enforces (403). */}
                           {row.can_edit !== false && (
@@ -907,7 +916,8 @@ export default function PhoneLogsPage() {
                           )}
                         </td>
                         <td className="ha-td"><StatusPill status={row.status} /></td>
-                        <td className="ha-td"><JobCell title={row.job_title} company={row.company} /></td>
+                        <td className="ha-td"><JobCell title={row.job_title} company={row.company}
+                          after={row.job_id && <OpenInNewTab href={jobHref(row)} label="Open this job in a new tab" style={{ color: C.textSoft, marginLeft: 4 }} />} /></td>
                         <td className="ha-td" style={{ whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>
                           {row.phone}
                           <RepeatTag repeat={row.repeat} />
