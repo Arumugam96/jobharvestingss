@@ -915,6 +915,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception as exc:
         logger.warning("stale_finder_reconcile_failed", error=str(exc))
 
+    # Re-check stored replies still filed as human ones against the current auto-reply
+    # detection (OOO / auto-responders captured before a pattern was known), moving them
+    # to Auto-replies and fixing their send's replied_at. Idempotent; best-effort.
+    try:
+        from app.services.harvest_run_service import db_write
+        from app.services.outreach_reply_service import reclassify_auto_replies
+        await db_write(reclassify_auto_replies, timeout=120)
+    except Exception as exc:
+        logger.warning("auto_reply_reclassify_failed", error=str(exc))
+
     # ── Playwright pool (optional — demo routes create their own browser) ─────
     # On Windows with --reload, uvicorn forces SelectorEventLoop which cannot
     # spawn Playwright's browser subprocess.  The pool is skipped gracefully;

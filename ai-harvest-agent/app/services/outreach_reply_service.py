@@ -23,6 +23,7 @@ from app.config import get_settings
 from app.core.tenant_context import apply_tenant, get_current_tenant_id
 from app.models.outreach import EmailOutreachORM
 from app.models.outreach_reply import OutreachReplyORM
+from app.services.auto_reply_detector import detect_auto_reply, header_getter
 from app.services.email_html_sanitizer import sanitize_email_html
 from app.services.email_service import EmailSender
 
@@ -33,19 +34,6 @@ _MSGID_RE = re.compile(r"<[^>]+>")
 _PREVIEW_LEN = 160
 # String(255) columns on OutreachReplyORM — inbound values are truncated to fit.
 _SHORT_COL_LEN = 255
-_AUTO_REPLY_SUBJECT_PREFIXES = (
-    "automatic reply:",
-    "out of office:",
-    "out of office",
-    "auto:",
-    "autoreply:",
-    "auto-reply:",
-    "automatische antwort:",
-    "réponse automatique:",
-    "risposta automatica:",
-    "respuesta automática:",
-    "abwesenheitsnotiz:",
-)
 
 
 # ── Inbound payload parsing ──────────────────────────────────────────────────
@@ -156,36 +144,22 @@ def _body_text(item: dict) -> str:
 
 
 def _detect_auto_reply(item: dict) -> bool:
-    """Detect if the inbound message is an auto-reply (Out-of-Office, delivery
-    notification, auto-responder, etc.) based on RFC 3834 headers, Microsoft-specific
-    headers, Precedence, and well-known subject prefixes."""
-    # RFC 3834 — the definitive signal: "auto-replied", "auto-generated", etc.
-    auto_sub = _header_value(item, "Auto-Submitted", "auto-submitted").lower()
-    if auto_sub and auto_sub != "no":
-        return True
-
-    # Microsoft Exchange / Outlook auto-response suppression header.
-    if _header_value(item, "X-Auto-Response-Suppress", "x-auto-response-suppress"):
-        return True
-
-    # Microsoft-specific OOF header.
-    if _header_value(
-        item, "X-MS-Exchange-Organization-AutoReply", "x-ms-exchange-organization-autoreply"
-    ):
-        return True
-
-    # Precedence: auto_reply / bulk / junk (common auto-responder convention).
-    prec = _header_value(item, "Precedence", "precedence").lower()
-    if prec in ("auto_reply", "bulk", "junk"):
-        return True
-
-    # Subject-line patterns used by major mail systems.
-    subject = str(item.get("Subject") or item.get("subject") or "").strip().lower()
-    for prefix in _AUTO_REPLY_SUBJECT_PREFIXES:
-        if subject.startswith(prefix):
-            return True
-
-    return False
+    """Is this inbound item an auto-reply (out-of-office, auto-responder, delivery
+    report …)? Headers (top-level keys or the Headers map), then the subject, then the
+    body's fresh text — see app/services/auto_reply_detector.py."""
+    subject = str(item.get("Subject") or item.get("subject") or "")
+    # Score the full text body (not only the provider's extracted message), so wording
+    # the extraction drops still counts; detection cuts the quoted history itself.
+    body = ""
+    for key in ("RawTextBody", "TextBody", "text", "ExtractedMarkdownMessage",
+                "RawHtmlBody", "HtmlBody", "html"):
+        v = item.get(key)
+        if isinstance(v, str) and v.strip():
+            body = v
+            break
+    return detect_auto_reply(
+        subject=subject, body=body, header=header_getter(item, _headers(item)),
+    )
 
 
 def _clean(value: Any, limit: int | None = None) -> str:
@@ -408,6 +382,80 @@ async def record_inbound_replies(
         "received": len(items), "stored": stored, "matched": matched,
         "forwarded": forwarded, "duplicates": duplicates,
     }
+
+
+async def reclassify_auto_replies(db: AsyncSession, *, batch: int = 500) -> dict[str, int]:
+    """Re-run auto-reply detection over every stored reply still filed as a human one
+    and move the auto-replies it finds to the Auto-replies view. Catches replies stored
+    before detection existed (or before it learnt a pattern). Uses the stored ``raw``
+    item (headers included) when present, else the stored subject/body.
+
+    For each flipped reply ``is_auto_reply`` is set (so it leaves the Replies view and
+    the bell), and its send's ``replied_at`` is recomputed from the replies that are
+    still human (None when none are left). Never flips auto → human.
+    Runs across every tenant (call it under all-access). Does NOT commit.
+    Returns {scanned, reclassified, sends_updated}."""
+    scanned = reclassified = 0
+    touched_sends: set[str] = set()
+    last_id: str | None = None
+    while True:
+        stmt = (
+            select(OutreachReplyORM)
+            .where(OutreachReplyORM.is_auto_reply.is_(False))
+            .order_by(OutreachReplyORM.id)
+            .limit(batch)
+        )
+        if last_id is not None:
+            stmt = stmt.where(OutreachReplyORM.id > last_id)
+        rows = (await db.execute(stmt)).scalars().all()
+        if not rows:
+            break
+        for row in rows:
+            scanned += 1
+            raw = row.raw if isinstance(row.raw, dict) else None
+            if raw:
+                item = dict(raw)
+                item.setdefault("Subject", row.subject or "")
+                if not any(isinstance(item.get(k), str) and item.get(k).strip() for k in (
+                        "RawTextBody", "TextBody", "text", "ExtractedMarkdownMessage",
+                        "RawHtmlBody", "HtmlBody", "html")):
+                    item["RawTextBody"] = row.body or ""
+                is_auto = _detect_auto_reply(item)
+            else:
+                is_auto = detect_auto_reply(subject=row.subject, body=row.body or row.body_html)
+            if not is_auto:
+                continue
+            row.is_auto_reply = True
+            reclassified += 1
+            if row.outreach_id:
+                touched_sends.add(row.outreach_id)
+        last_id = rows[-1].id
+        if len(rows) < batch:
+            break
+
+    sends_updated = 0
+    if touched_sends:
+        await db.flush()
+        for send_id in touched_sends:
+            send = (await db.execute(
+                select(EmailOutreachORM).where(EmailOutreachORM.id == send_id)
+            )).scalar_one_or_none()
+            if send is None:
+                continue
+            latest_human = (await db.execute(
+                select(func.max(OutreachReplyORM.received_at)).where(
+                    OutreachReplyORM.outreach_id == send_id,
+                    OutreachReplyORM.is_auto_reply.is_(False),
+                )
+            )).scalar_one_or_none()
+            if send.replied_at != latest_human:
+                send.replied_at = latest_human
+                sends_updated += 1
+
+    if reclassified:
+        logger.info("auto_replies_reclassified", scanned=scanned,
+                    reclassified=reclassified, sends_updated=sends_updated)
+    return {"scanned": scanned, "reclassified": reclassified, "sends_updated": sends_updated}
 
 
 async def _forward_reply(

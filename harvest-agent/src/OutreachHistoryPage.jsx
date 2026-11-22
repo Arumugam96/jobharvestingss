@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { RefreshCw, Send, X, Download, Search, Calendar, ChevronDown, Check, Building2 } from "lucide-react";
+import { RefreshCw, Send, X, Download, Search, Calendar, ChevronDown, Check, Building2, ExternalLink } from "lucide-react";
 import { getOutreachHistory, getOutreachStats, getOutreachReplies, markReplyRead, ApiError } from "./api";
 // `engagement` (the delivery-status → label helper) is imported as `engagementOf`
 // because this component also has an `engagement` state var (the active filter key)
@@ -10,7 +10,7 @@ import {
   fmtAbs, fmtRel, initials, avatarColor, engagement as engagementOf, EngagementStack, ReplyBadge,
   AutoReplyBadge, AutoKindChip, AUTO_KIND, AUTO_COLOR, REPLY_COLOR, REPLY_SOFT,
 } from "./components/outreachUi";
-import { rowNav, OpenInNewTab } from "./lib/openLink";
+import { rowNav } from "./lib/openLink";
 
 /* Mail logs (route /outreach) — the log of every outreach email sent from
  * HarvestAgent, read from the backend (GET /outreach/history). It's the DB source
@@ -205,6 +205,22 @@ function replyThreadHref(r) {
   return `/mail/${encodeURIComponent(anchor)}?reply=${encodeURIComponent(r.id)}`;
 }
 
+/** Bordered ↗ button in a row's first column: opens that row's thread page in a new tab.
+ *  A real link (right-click → "Open link in new tab" works too) that doesn't trigger the
+ *  row's own click (which opens the thread in this tab). */
+function NewTabButton({ href, label, onOpen }) {
+  return (
+    <a href={href} target="_blank" rel="noopener" title={label} aria-label={label}
+      className="ha-btn ha-btn-secondary"
+      onClick={(e) => { e.stopPropagation(); onOpen?.(); }}
+      onAuxClick={(e) => { e.stopPropagation(); if (e.button === 1) onOpen?.(); }}
+      onKeyDown={(e) => e.stopPropagation()}
+      style={{ width: 30, height: 30, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", textDecoration: "none" }}>
+      <ExternalLink size={14} />
+    </a>
+  );
+}
+
 export default function OutreachHistoryPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
@@ -357,11 +373,12 @@ export default function OutreachHistoryPage() {
     setEngagement((cur) => (cur === key ? "" : key));
   };
 
+  // The first, unlabelled column holds each row's "open in a new tab" button.
   const columns = view === "sent"
-    ? ["To", "From", "Company", "Subject", "Engagement", "Sent"]
+    ? ["", "To", "From", "Company", "Subject", "Engagement", "Sent"]
     : view === "auto"
-      ? ["From", "Company", "Type", "Message", "In reply to", "Received"]
-      : ["From", "Company", "Reply", "In reply to", "Received"];
+      ? ["", "From", "Company", "Type", "Message", "In reply to", "Received"]
+      : ["", "From", "Company", "Reply", "In reply to", "Received"];
 
   // Export the WHOLE filtered set (every page), not just the loaded page.
   const exportCsv = async () => {
@@ -518,11 +535,11 @@ export default function OutreachHistoryPage() {
 
       <div className="ha-card" style={{ overflow: "hidden" }}>
         <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 860 }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 900 }}>
             <thead>
               <tr>
-                {columns.map((h) => (
-                  <th key={h} style={{ textAlign: "left", fontSize: 11.5, letterSpacing: ".04em", textTransform: "uppercase", color: "#94A3B8", fontWeight: 700, padding: "13px 18px", borderBottom: "1px solid #E2E8F0", whiteSpace: "nowrap" }}>{h}</th>
+                {columns.map((h, i) => (
+                  <th key={h || `col-${i}`} style={{ textAlign: "left", fontSize: 11.5, letterSpacing: ".04em", textTransform: "uppercase", color: "#94A3B8", fontWeight: 700, padding: "13px 18px", borderBottom: "1px solid #E2E8F0", whiteSpace: "nowrap", ...(h ? null : { width: 46, padding: "13px 0 13px 14px" }) }}>{h}</th>
                 ))}
               </tr>
             </thead>
@@ -546,6 +563,9 @@ export default function OutreachHistoryPage() {
                     style={{ cursor: "pointer", borderBottom: "1px solid #EDF1F6", boxShadow: stripe ? `inset 3px 0 0 ${stripe}` : undefined }}
                     onMouseEnter={(e) => { e.currentTarget.style.background = "#F8FAFC"; }}
                     onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}>
+                    <td style={{ padding: "9px 0 9px 14px" }}>
+                      <NewTabButton href={replyThreadHref(r)} onOpen={() => markOpened(r)} label="Open the thread in a new tab" />
+                    </td>
                     {/* From — avatar + name · email */}
                     <td style={{ padding: "9px 16px" }}>
                       <div style={{ display: "flex", alignItems: "center", gap: 9, minWidth: 0 }}>
@@ -556,7 +576,6 @@ export default function OutreachHistoryPage() {
                           <span style={{ fontWeight: unread ? 800 : 700, fontSize: 13.5, color: "#0F172A" }}>{name}</span>
                           {r.from_name && <span style={{ color: "#64748B", fontSize: 12.5 }}> · {r.from_email}</span>}
                         </div>
-                        <OpenInNewTab href={replyThreadHref(r)} onOpen={() => markOpened(r)} label="Open the thread in a new tab" style={{ color: "#64748B" }} />
                       </div>
                     </td>
                     {/* Company */}
@@ -600,6 +619,9 @@ export default function OutreachHistoryPage() {
                     style={{ cursor: "pointer", borderBottom: "1px solid #EDF1F6", boxShadow: it.replied_at ? "inset 3px 0 0 #4F46E5" : undefined }}
                     onMouseEnter={(e) => { e.currentTarget.style.background = "#F8FAFC"; }}
                     onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}>
+                    <td style={{ padding: "9px 0 9px 14px" }}>
+                      <NewTabButton href={detailHref(it)} label="Open message + thread in a new tab" />
+                    </td>
                     {/* To — avatar + name · email, one line */}
                     <td style={{ padding: "9px 16px" }}>
                       <div style={{ display: "flex", alignItems: "center", gap: 9, minWidth: 0 }}>
@@ -610,7 +632,6 @@ export default function OutreachHistoryPage() {
                           <span style={{ fontWeight: 700, fontSize: 13.5, color: "#0F172A" }}>{name}</span>
                           <span style={{ color: "#64748B", fontSize: 12.5 }}> · {it.to_email || (it.channel === "linkedin" ? "(LinkedIn)" : "—")}</span>
                         </div>
-                        <OpenInNewTab href={detailHref(it)} label="Open message + thread in a new tab" style={{ color: "#64748B" }} />
                       </div>
                     </td>
                     {/* From — sender glyph + mailbox, one line */}

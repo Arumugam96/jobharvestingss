@@ -51,7 +51,7 @@ class OutreachReplyORM(Base):
     is_read: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false", index=True)
     forwarded: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     # True when the message is an auto-reply (Out-of-Office, delivery notification,
-    # etc.) — detected by RFC 3834 / Microsoft headers and subject patterns.
+    # etc.) — see app/services/auto_reply_detector.py (headers, subject, body).
     is_auto_reply: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     # When the prospect sent the reply (from the inbound payload), distinct from
     # created_at (our row-insert time).

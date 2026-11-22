@@ -39,6 +39,7 @@ from app.config import Settings, get_settings
 from app.core.dependencies import get_session_factory
 from app.core.tenant_context import bind_session_tenant
 from app.models.outreach_reply import OutreachReplyORM
+from app.services.auto_reply_detector import pick_headers
 from app.services.email_service import EmailSender
 from app.services.outreach_reply_service import record_inbound_replies
 
@@ -159,11 +160,9 @@ def _to_item(raw_bytes: bytes) -> dict[str, Any]:
         "Date": (msg.get("Date") or "").strip(),
         "RawTextBody": text,
         "RawHtmlBody": html,
-        # Auto-reply detection headers (RFC 3834 + Microsoft).
-        "Auto-Submitted": (msg.get("Auto-Submitted") or "").strip(),
-        "X-Auto-Response-Suppress": (msg.get("X-Auto-Response-Suppress") or "").strip(),
-        "X-MS-Exchange-Organization-AutoReply": (msg.get("X-MS-Exchange-Organization-AutoReply") or "").strip(),
-        "Precedence": (msg.get("Precedence") or "").strip(),
+        # Auto-reply detection headers (RFC 3834, vendor auto-reply headers, Precedence,
+        # Return-Path, Content-Type) — kept on the stored `raw` for later re-checks.
+        **pick_headers(lambda name: str(msg.get(name) or "")),
     }
 
 

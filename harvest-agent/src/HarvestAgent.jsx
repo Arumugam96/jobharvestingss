@@ -26,6 +26,7 @@ import RecruiterContactFinderPage from "./pages/RecruiterContactFinderPage";
 import RuleEngineRedesign from "./pages/RuleEngineRedesign";
 import DemandSearchPage from "./demand/DemandSearchPage";
 import PhoneLogsPage from "./pages/PhoneLogsPage";
+import PhoneCallPage from "./pages/PhoneCallPage";
 import UserRolesPage from "./pages/UserRolesPage";
 import CompanyClassificationPage from "./pages/CompanyClassificationPage";
 
@@ -340,6 +341,7 @@ export default function HarvestAgent({ onLogout }) {
               one route: /demand/... itself is proxied to the API by nginx. */}
           <Route path="/demand" element={<FeatureGate feature="demand"><DemandSearchPage /></FeatureGate>} />
           <Route path="/phone-logs" element={<PhoneLogsGate><PhoneLogsPage /></PhoneLogsGate>} />
+          <Route path="/phone-logs/:logId" element={<PhoneLogsGate><PhoneCallPage /></PhoneLogsGate>} />
           <Route path="/user-roles" element={<AdminGate><UserRolesPage /></AdminGate>} />
           <Route path="/company-classification" element={<AdminGate><CompanyClassificationPage /></AdminGate>} />
           <Route path="*" element={<NotFound />} />

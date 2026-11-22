@@ -378,6 +378,13 @@ export function getPhoneLogs(params = {}) {
   return request(`/phone-verifications/logs${qs(params)}`);
 }
 
+/** GET /phone-verifications/logs/{id} — one logged call, in the GET /phone-verifications/logs
+ * item shape (the Phone logs call page). Admins: any call; business leads: their own.
+ * 403 not theirs, 404 missing or cleared. */
+export function getPhoneCallLog(logId) {
+  return request(`/phone-verifications/logs/${encodeURIComponent(logId)}`);
+}
+
 /** PATCH /phone-verifications/logs/{id} — edit a logged call in place (no new record).
  * body: { status, outcome, details, remarks, proof: [{name, size, type, src}], follow_up,
  * reminder_at (ISO|null) } — the same fields as logPhoneCall. Returns the updated row in

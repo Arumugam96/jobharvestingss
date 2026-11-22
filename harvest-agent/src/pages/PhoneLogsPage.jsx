@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useNavigate } from "react-router-dom";
-import { ChevronDown, ChevronRight, Lock, Pencil, RefreshCw, Search, X } from "lucide-react";
+import { ChevronDown, ChevronRight, ExternalLink, Lock, Pencil, RefreshCw, Search, X } from "lucide-react";
 import { getPhoneLogs, getPhoneInventory, getAssignedJobs, exportPhoneLogsXlsx, getPhoneLogAssignees, getPhoneLogContacts } from "../api";
 import { useTenant } from "../TenantContext";
 import { C } from "../theme";
@@ -63,7 +63,7 @@ const REMINDER_OPTIONS = [
 /* Reminder state -> chip. No message is sent: a reminder shows in the caller's bell once
  * due ("Delivered" = due, still open). The time under the chip is the due time while
  * open, the close time once closed (see list_logs in phone_verification_service). */
-const REMINDERS = {
+export const REMINDERS = {
   scheduled: { label: "Scheduled", tone: "info" },
   delivered: { label: "Delivered", tone: "warn" },
   dismissed: { label: "Dismissed", tone: "good" },
@@ -77,7 +77,7 @@ const TONES = {
   bad: { color: "#DC2626", bg: "#FEF2F2" },
   muted: { color: "#64748B", bg: "#F1F5F9" },
 };
-const PHONE_SOURCES = {
+export const PHONE_SOURCES = {
   job: { label: "Job poster", color: "#2563EB", bg: "#EFF6FF" },
   company: { label: "Company HR", color: "#B45309", bg: "#FFFBEB" },
   recruiter: { label: "Recruiter", color: "#7C3AED", bg: "#F5F3FF" },
@@ -91,19 +91,21 @@ const LATEST_OUTCOME_OPTIONS = [
   ...OUTCOME_OPTIONS.map((o) => ({ value: o.value, label: o.label })),
 ];
 const VIEW_MODES = [{ value: "calls", label: "Calls" }, { value: "contacts", label: "By contact" }];
+// The square icon buttons in a call row's first column (edit, open in a new tab).
+const ROW_ICON_BTN = { width: 30, height: 30, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center" };
 const EMPTY_CELL = { textAlign: "center", padding: "48px 16px", color: "#94A3B8" };
 const SUBLINE = { marginTop: 3, fontSize: 12, color: C.textSoft };
 const statusLabel = (s) => PHONE_STATUSES[s]?.label || s || "";
 const today = () => new Date().toISOString().slice(0, 10);
 
 /** Locale date + time for an ISO timestamp; "—" when empty. */
-const fmtTime = (iso) => {
+export const fmtTime = (iso) => {
   if (!iso) return "—";
   try { return new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }); } catch { return "—"; }
 };
 
 /** "Answered" / "Unanswered" pill in the PHONE_STATUSES colours; nothing for unknown statuses. */
-function StatusPill({ status }) {
+export function StatusPill({ status }) {
   const st = PHONE_STATUSES[status];
   if (!st) return null;
   return (
@@ -117,7 +119,7 @@ function StatusPill({ status }) {
 }
 
 /** Small tinted label (TONES colours). */
-function Chip({ tone, children }) {
+export function Chip({ tone, children }) {
   const t = TONES[tone] || TONES.muted;
   return (
     <span style={{ display: "inline-block", padding: "2px 8px", borderRadius: 6, fontSize: 12.5, fontWeight: 600, color: t.color, background: t.bg }}>
@@ -127,7 +129,7 @@ function Chip({ tone, children }) {
 }
 
 /** The call's outcome label with its details underneath; a dash for calls without one. */
-function OutcomeCell({ status, outcome, details }) {
+export function OutcomeCell({ status, outcome, details }) {
   const info = outcomeInfo(status, outcome);
   if (!info) return <span style={{ color: "#94A3B8" }}>—</span>;
   const detail = outcomeDetailText(details);
@@ -148,7 +150,7 @@ const ordinal = (n) => {
 
 /** Repeat tag under a call's number: the same number had an earlier call on a different
  * job (server `repeat`). Coloured by that earlier call's outcome tone. */
-function RepeatTag({ repeat }) {
+export function RepeatTag({ repeat }) {
   if (!repeat) return null;
   const prev = callLabel(repeat.prev_status, repeat.prev_outcome);
   const title = `${ordinal(repeat.n)} call to this number · previous: ${[prev, repeat.prev_by, shortDate(repeat.prev_at)].filter(Boolean).join(" · ")}`;
@@ -281,7 +283,7 @@ function CommentCell({ text }) {
 }
 
 /** The reminder's state chip with its one time underneath. */
-function ReminderCell({ reminder }) {
+export function ReminderCell({ reminder }) {
   const r = REMINDERS[reminder?.state];
   if (!r) return <span style={{ color: "#94A3B8", fontSize: 12.5 }}>No reminder</span>;
   return (
@@ -293,7 +295,7 @@ function ReminderCell({ reminder }) {
 }
 
 /** Grey lock pill with the assignee's name (email on hover). */
-function AssigneePill({ user }) {
+export function AssigneePill({ user }) {
   if (!user) return <span style={{ color: "#94A3B8", fontSize: 12.5 }}>Unassigned</span>;
   return (
     <span title={user.email} style={{
@@ -762,9 +764,15 @@ export default function PhoneLogsPage() {
   // "own" = a business lead's own calls (no tenant-wide drill-downs). Until the first
   // response lands, fall back to the role.
   const ownScope = data?.scope ? data.scope === "own" : !isAdmin;
+  // Before the first response every tile shows "—", and the admin-only tiles (Total
+  // contacts, Repeat calls) already hold their slot, so nothing pops in and reflows.
+  const pending = !data;
+  const tileValue = (v) => (pending ? "—" : v ?? 0);
   /** The call's job details page; a plain row click opens it here (Back returns
    *  here), Ctrl/Cmd/middle-click or the ↗ icon in a new tab. */
   const jobHref = (row) => `/jobs/${encodeURIComponent(row.job_id)}`;
+  // The call's own page (/phone-logs/:id), opened in a new tab from the row's first column.
+  const callHref = (row) => `/phone-logs/${encodeURIComponent(row.id)}`;
   const jobRowNav = (row) => (row.job_id
     ? rowNav(jobHref(row), navigate, () => navigate(jobHref(row), { state: { from: "/phone-logs" } }))
     : {});
@@ -827,33 +835,35 @@ export default function PhoneLogsPage() {
       <div className="ha-pagebody">
         {error && <div className="ha-errbanner">{error}</div>}
 
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
-          {!ownScope && summary.total_phones != null && (
-            <StatCard value={summary.total_phones} label="Total contacts" color="#0891B2"
+        {/* A grid, not a wrapping flex row: every tile gets an equal column and a narrow
+            window wraps into even rows (never one stretched tile on a row of its own). */}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10 }}>
+          {!ownScope && (pending || summary.total_phones != null) && (
+            <StatCard value={tileValue(summary.total_phones)} label="Total contacts" color="#0891B2"
               onClick={() => setView("phones")} active={view === "phones"} />
           )}
-          <StatCard value={summary.total} label="Total calls" color={C.primary}
+          <StatCard value={tileValue(summary.total)} label="Total calls" color={C.primary}
             onClick={() => showCalls("")} active={callsAt("")} />
-          <StatCard value={summary.answered} label="Answered" color="#047857"
+          <StatCard value={tileValue(summary.answered)} label="Answered" color="#047857"
             onClick={() => showCalls("answered")} active={callsAt("answered")} />
-          <StatCard value={summary.unanswered} label="Unanswered" color="#DC2626"
+          <StatCard value={tileValue(summary.unanswered)} label="Unanswered" color="#DC2626"
             onClick={() => showCalls("unanswered")} active={callsAt("unanswered")} />
           {ownScope ? (
             // A real link to My Workspace: a plain click opens it here on the
             // not-called bucket; Ctrl/middle-click / "Open in new tab" also work.
             <a {...linkProps("/library?bucket=notcalled", () => navigate("/library", { state: { bucket: "notcalled" } }))}
               title="Open My Workspace on the jobs you haven't called yet (Ctrl/middle-click for a new tab)"
-              style={{ display: "flex", flex: 1, minWidth: 150, textDecoration: "none", color: "inherit" }}>
-              <StatCard value={summary.assigned_jobs} label="My self-assigned jobs" color="#7C3AED"
-                sub={`${summary.called_assigned_jobs ?? 0} called`} />
+              style={{ display: "flex", minWidth: 150, textDecoration: "none", color: "inherit" }}>
+              <StatCard value={tileValue(summary.assigned_jobs)} label="My self-assigned jobs" color="#7C3AED"
+                sub={pending ? "" : `${summary.called_assigned_jobs ?? 0} called`} />
             </a>
           ) : (
-            <StatCard value={summary.assigned_jobs} label="Self-assigned jobs" color="#7C3AED"
-              sub={`${summary.called_assigned_jobs ?? 0} called`}
+            <StatCard value={tileValue(summary.assigned_jobs)} label="Self-assigned jobs" color="#7C3AED"
+              sub={pending ? "" : `${summary.called_assigned_jobs ?? 0} called`}
               onClick={() => setView("assigned")} active={view === "assigned"} />
           )}
-          {!ownScope && summary.repeat_calls != null && (
-            <StatCard value={summary.repeat_calls} label="Repeat calls" color="#B45309"
+          {!ownScope && (pending || summary.repeat_calls != null) && (
+            <StatCard value={tileValue(summary.repeat_calls)} label="Repeat calls" color="#B45309"
               title="Calls placed to a number whose previous call was “Not interested”, inside its revisit window" />
           )}
         </div>
@@ -882,10 +892,10 @@ export default function PhoneLogsPage() {
             {mode === "calls" && (<>
             <div className="ha-card" style={{ overflow: "hidden" }}>
               <div className="ha-table-scroll">
-                <table className="ha-table ha-table-compact" style={{ minWidth: ownScope ? 1150 : 1270 }}>
+                <table className="ha-table ha-table-compact" style={{ minWidth: ownScope ? 1190 : 1310 }}>
                   <thead className="ha-thead">
                     <tr>
-                      <PlainHeader label="" width={48} />
+                      <PlainHeader label="" width={84} />
                       <PlainHeader label="Status" width={112} />
                       <PlainHeader label="Job / Company" width={200} />
                       <PlainHeader label="Phone" width={130} />
@@ -904,16 +914,28 @@ export default function PhoneLogsPage() {
                       <tr key={row.id} className={`ha-row${row.job_id ? " ha-row-link" : ""}`}
                         title={row.job_id ? "Open this job (Ctrl/middle-click for a new tab)" : undefined}
                         {...jobRowNav(row)}>
-                        <td className="ha-td" style={{ textAlign: "center" }}>
-                          {/* Shown unless the server says no; it still enforces (403). */}
-                          {row.can_edit !== false && (
-                            <button type="button" className="ha-btn ha-btn-secondary" title="Edit call log"
-                              aria-label={`Edit call log for ${row.phone || "this call"}`}
-                              style={{ width: 30, height: 30, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center" }}
-                              onClick={(e) => { e.stopPropagation(); setEditing(row); }}>
-                              <Pencil size={14} />
-                            </button>
-                          )}
+                        <td className="ha-td" style={{ whiteSpace: "nowrap" }}>
+                          <div style={{ display: "inline-flex", gap: 6 }}>
+                            {/* Shown unless the server says no; it still enforces (403). */}
+                            {row.can_edit !== false && (
+                              <button type="button" className="ha-btn ha-btn-secondary" title="Edit call log"
+                                aria-label={`Edit call log for ${row.phone || "this call"}`}
+                                style={ROW_ICON_BTN}
+                                onClick={(e) => { e.stopPropagation(); setEditing(row); }}>
+                                <Pencil size={14} />
+                              </button>
+                            )}
+                            {/* A real link, so right-click → "Open link in new tab" works too. */}
+                            <a href={callHref(row)} target="_blank" rel="noopener" className="ha-btn ha-btn-secondary"
+                              title="Open this call log in a new tab"
+                              aria-label={`Open call log for ${row.phone || "this call"} in a new tab`}
+                              style={{ ...ROW_ICON_BTN, textDecoration: "none" }}
+                              onClick={(e) => e.stopPropagation()}
+                              onAuxClick={(e) => e.stopPropagation()}
+                              onKeyDown={(e) => e.stopPropagation()}>
+                              <ExternalLink size={14} />
+                            </a>
+                          </div>
                         </td>
                         <td className="ha-td"><StatusPill status={row.status} /></td>
                         <td className="ha-td"><JobCell title={row.job_title} company={row.company}

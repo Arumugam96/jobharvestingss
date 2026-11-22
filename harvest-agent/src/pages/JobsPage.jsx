@@ -8,7 +8,7 @@ import ExportButton from "../components/ExportButton";
 import JobsTable, { PAGE_SIZE_OPTIONS } from "../components/JobsTable";
 import { mapApiJob, fetchAllJobs, jobContact, pocKindLabel, partSourceLabel } from "../lib/jobsData";
 import { csvCell } from "../lib/csv";
-import { linkProps, OpenInNewTab } from "../lib/openLink";
+import { linkProps } from "../lib/openLink";
 import { cacheRef } from "../lib/pageCache";
 import { useHarvestData } from "../HarvestDataContext";
 import { useTenant } from "../TenantContext";
@@ -350,8 +350,7 @@ export default function JobsPage({ onNavigate, onBack, onView, pageSizeSel, onPa
         <div className="ha-pagehead-actions">
           {/* Shown to every role (business leads included) — a solid, accented pill so
               it isn't missed among the header actions. A plain click opens it in this
-              tab (Back returns to this list); Ctrl/Cmd/middle-click or the ↗ icon
-              opens a new tab. */}
+              tab (Back returns to this list); Ctrl/Cmd/middle-click opens a new tab. */}
           {!library && !demand && (<>
             <a
               className="ha-btn"
@@ -369,7 +368,6 @@ export default function JobsPage({ onNavigate, onBack, onView, pageSizeSel, onPa
             >
               <Wrench size={14} /> My Workspace
             </a>
-            <OpenInNewTab href="/library" size={15} label="Open My Workspace in a new tab" style={{ color: C.primary, opacity: 0.85 }} />
           </>)}
           {!library && (
             <ExportButton format={exportFormat} onFormatChange={setExportFormat} onExport={doExport} exporting={exporting} />
