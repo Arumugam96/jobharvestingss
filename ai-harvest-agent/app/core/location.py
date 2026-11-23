@@ -172,7 +172,7 @@ def parse_location(text: str) -> tuple[str, str, str]:
     # "· On-site", "(On-site)".
     geo = re.split(r"[;·(]", text, maxsplit=1)[0]
 
-    tokens = [t.strip() for t in geo.split(",") if t.strip()]
+    tokens = [t for t in geo.split(",") if t.strip()]
     # Drop pure work-mode / "anywhere" tokens ("Chennai, India, Remote").
     tokens = [t for t in tokens if t.lower() not in _WORK_MODE_TOKENS]
     if not tokens:
@@ -225,7 +225,7 @@ def normalize_location_key(text: str) -> str:
     real locations are never merged (a city alone vs a city+state+country produce
     different keys — a harmless re-search, never a wrong-location contact)."""
     city, state, country = parse_location(text)
-    parts = [re.sub(r"\s+", " ", p).strip().lower() for p in (city, state, country) if p and p.strip()]
+    parts = [re.sub(r"\s+", " ", p).lower() for p in (city, state, country) if p and p.strip()]
     return "|".join(parts)
 
 

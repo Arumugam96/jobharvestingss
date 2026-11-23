@@ -180,11 +180,11 @@ function StatsPanel({ stats, engagement, onToggle }) {
 
 // The three lists the page can show. `count(stats)` is the tab badge, read from the
 // /stats response (sends for Sent; reply rows — not sends — for the other two).
-const VIEWS = [
-  { key: "sent",    label: "Sent",         count: (s) => (s.sent || 0) + (s.failed || 0) },
-  { key: "replies", label: "Replies",      count: (s) => s.views?.replies || 0 },
-  { key: "auto",    label: "Auto-replies", count: (s) => s.views?.auto_replies || 0 },
-];
+// const VIEWS = [
+//   { key: "sent",    label: "Sent",         count: (s) => (s.sent || 0) + (s.failed || 0) },
+//   { key: "replies", label: "Replies",      count: (s) => s.views?.replies || 0 },
+//   { key: "auto",    label: "Auto-replies", count: (s) => s.views?.auto_replies || 0 },
+// ];
 
 const EMPTY_TEXT = {
   sent: "No outreach sent yet.",
@@ -236,8 +236,8 @@ export default function OutreachHistoryPage() {
   const [companyQ, setCompanyQ] = useState(() => searchParams.get("company") || "");     // company
   const [engagement, setEngagement] = useState(() => searchParams.get("eng") || "");     // clickable stat-card bucket
   // Which list is shown: sent mail, replies from a person, or auto-replies (OOO etc.).
-  const [view, setView] = useState(() => (VIEWS.some((v) => v.key === searchParams.get("view")) ? searchParams.get("view") : "sent"));
-  const [unreadOnly, setUnreadOnly] = useState(() => searchParams.get("unread") === "1"); // Replies view only
+  const view = "sent";
+  const unreadOnly = false;
   const [rangeKey, setRangeKey] = useState(() => searchParams.get("range") || "all");
   const [customFrom, setCustomFrom] = useState(() => searchParams.get("from") || "");
   const [customTo, setCustomTo] = useState(() => searchParams.get("to") || "");
@@ -276,7 +276,7 @@ export default function OutreachHistoryPage() {
   useEffect(() => {
     if (firstFilterRun.current) { firstFilterRun.current = false; return; }
     setPage(1);
-  }, [dq, dCompany, dateParams, engagement, view, unreadOnly]);
+  }, [dq, dCompany, dateParams, engagement, unreadOnly]);
 
   // Mirror the filter/page state back to the URL (replace, so it doesn't spam the
   // history stack). This is what makes `location.pathname + location.search` — the
@@ -286,14 +286,14 @@ export default function OutreachHistoryPage() {
     if (search.trim()) sp.set("search", search.trim());
     if (companyQ.trim()) sp.set("company", companyQ.trim());
     if (engagement) sp.set("eng", engagement);
-    if (view !== "sent") sp.set("view", view);
-    if (view === "replies" && unreadOnly) sp.set("unread", "1");
+    // if (view !== "sent") sp.set("view", view);
+    // if (view === "replies" && unreadOnly) sp.set("unread", "1");
     if (rangeKey && rangeKey !== "all") sp.set("range", rangeKey);
     if (customFrom) sp.set("from", customFrom);
     if (customTo) sp.set("to", customTo);
     if (page > 1) sp.set("page", String(page));
     setSearchParams(sp, { replace: true });
-  }, [search, companyQ, engagement, view, unreadOnly, rangeKey, customFrom, customTo, page, setSearchParams]);
+  }, [search, companyQ, engagement, unreadOnly, rangeKey, customFrom, customTo, page, setSearchParams]);
 
   const load = useCallback(async () => {
     const seq = ++seqRef.current;
@@ -303,9 +303,7 @@ export default function OutreachHistoryPage() {
     // additionally narrows to the selected engagement bucket across the whole dataset.
     // The Replies / Auto-replies views list inbound reply rows over the same filters.
     const filters = { search: dq, company: dCompany, ...dateParams };
-    const listCall = view === "sent"
-      ? getOutreachHistory({ ...filters, engagement, page, page_size: PAGE_SIZE })
-      : getOutreachReplies({ ...filters, kind: view === "auto" ? "auto" : "human", unread: view === "replies" && unreadOnly, page, page_size: PAGE_SIZE });
+    const listCall = getOutreachHistory({ ...filters, engagement, page, page_size: PAGE_SIZE });
     try {
       const [res, st] = await Promise.all([listCall, getOutreachStats(filters)]);
       if (seq !== seqRef.current) return; // a newer request superseded this one
@@ -320,7 +318,7 @@ export default function OutreachHistoryPage() {
     } finally {
       if (seq === seqRef.current) setLoading(false);
     }
-  }, [page, dq, dCompany, dateParams, engagement, view, unreadOnly]);
+  }, [page, dq, dCompany, dateParams, engagement]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -353,23 +351,12 @@ export default function OutreachHistoryPage() {
     }
   }, []);
 
-  /** Switch list views; clear the old rows so the new table never renders the other shape. */
-  // The engagement cards filter the Sent list only, so leaving Sent drops that filter.
-  const switchView = (key) => {
-    if (key === view) return;
-    setItems([]);
-    setLoading(true);
-    if (key !== "sent") setEngagement("");
-    setView(key);
-  };
-
-  const anyFilter = !!(dq || dCompany || hasDateFilter || engagement || (view === "replies" && unreadOnly));
+  const anyFilter = !!(dq || dCompany || hasDateFilter || engagement);
   /** Clear search, company, engagement, unread and date-range filters. */
-  const resetFilters = () => { setSearch(""); setCompanyQ(""); setEngagement(""); setUnreadOnly(false); setRangeKey("all"); setCustomFrom(""); setCustomTo(""); };
+  const resetFilters = () => { setSearch(""); setCompanyQ(""); setEngagement(""); setRangeKey("all"); setCustomFrom(""); setCustomTo(""); };
   // Single-select: clicking the active card clears the filter, any other card switches
   // to it. The cards filter the Sent list, so picking one from another view jumps there.
   const toggleEngagement = (key) => {
-    switchView("sent");
     setEngagement((cur) => (cur === key ? "" : key));
   };
 
@@ -386,9 +373,7 @@ export default function OutreachHistoryPage() {
     try {
       const base = { search: dq, company: dCompany, ...dateParams };
       // Same list call the view uses, paged through to the end.
-      const fetchPage = (p) => (view === "sent"
-        ? getOutreachHistory({ ...base, engagement, page: p, page_size: PAGE_SIZE })
-        : getOutreachReplies({ ...base, kind: view === "auto" ? "auto" : "human", unread: view === "replies" && unreadOnly, page: p, page_size: PAGE_SIZE }));
+      const fetchPage = (p) => getOutreachHistory({ ...base, engagement, page: p, page_size: PAGE_SIZE });
       const first = await fetchPage(1);
       let all = first.items || [];
       const pages = Math.min(first.total_pages || 1, 200); // safety cap (~20k rows)
@@ -420,7 +405,7 @@ export default function OutreachHistoryPage() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      const suffix = view === "sent" ? "" : view === "auto" ? "-auto-replies" : "-replies";
+      const suffix = "";
       a.download = `mail-logs${suffix}-${new Date().toISOString().slice(0, 10)}.csv`;
       document.body.appendChild(a);
       a.click();
@@ -439,7 +424,7 @@ export default function OutreachHistoryPage() {
         <div className="ha-pagehead-titles">
           <h1>Mail logs</h1>
           <div className="ha-sub" style={{ maxWidth: "56ch" }}>
-            Every outreach email sent using HarvestAgent, with delivery status and engagement per point of contact. Replies and auto-replies have their own views. Open a row to read the thread and follow up.
+            Every outreach email sent using HarvestAgent.
           </div>
         </div>
         <div className="ha-pagehead-actions">
@@ -462,14 +447,14 @@ export default function OutreachHistoryPage() {
             date popover paints above the sibling table card (same fix as .ha-filterbar). */}
         <div style={{ position: "relative", zIndex: 30, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
         {/* View switcher — Sent mail · Replies from a person · Auto-replies (OOO etc.) */}
-        <div className="ha-views" role="tablist" aria-label="Mail logs view">
+        {/*<div className="ha-views" role="tablist" aria-label="Mail logs view">
           {VIEWS.map((v) => (
             <button key={v.key} type="button" role="tab" className="ha-view" data-v={v.key}
               aria-selected={view === v.key} onClick={() => switchView(v.key)}>
               {v.label} <span className="n">{v.count(stats)}</span>
             </button>
           ))}
-        </div>
+        </div>*/}
         <div ref={dateRef} style={{ position: "relative" }}>
           <button
             className="ha-btn ha-btn-secondary"
@@ -517,12 +502,12 @@ export default function OutreachHistoryPage() {
             style={{ border: 0, outline: "none", background: "transparent", fontSize: 13, width: "100%", fontFamily: "inherit", color: "#0F172A" }} />
         </div>
 
-        {view === "replies" && (
+        {/* {view === "replies" && (
           <button type="button" aria-pressed={unreadOnly} onClick={() => setUnreadOnly((u) => !u)}
             style={{ border: `1px solid ${unreadOnly ? REPLY_COLOR : "rgba(148,163,184,.5)"}`, background: unreadOnly ? REPLY_SOFT : "rgba(255,255,255,.72)", color: unreadOnly ? REPLY_COLOR : "#334155", borderRadius: 999, padding: "7px 12px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>
             Unread only · {stats.views?.replies_unread || 0}
           </button>
-        )}
+        )} */}
 
         {anyFilter && (
           <button onClick={resetFilters} style={{ border: 0, background: "transparent", color: "#64748B", fontSize: 13, fontWeight: 600, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 6, fontFamily: "inherit" }}>
