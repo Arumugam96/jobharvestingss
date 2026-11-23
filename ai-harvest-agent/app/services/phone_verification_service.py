@@ -702,6 +702,19 @@ def _close_open_followups_stmt(job_id: str, phone: str, now: datetime):
     )
 
 
+# How far ahead of the server clock a user-entered call time may be (device clock drift).
+CALLED_AT_MAX_SKEW = timedelta(minutes=5)
+
+
+def _called_at(value: datetime | None, now: datetime) -> datetime | None:
+    """The user-entered time the call was made (aware), or None when not sent.
+    422 when it is in the future."""
+    value = _aware(value)
+    if value is not None and value > now + CALLED_AT_MAX_SKEW:
+        raise HTTPException(status_code=422, detail="The call time can't be in the future")
+    return value
+
+
 async def log_call(
     db: AsyncSession,
     job: ScrapedJobORM,
@@ -717,10 +730,13 @@ async def log_call(
     details: dict[str, Any] | None = None,
     proof: list[dict[str, Any]] | None = None,
     reminder_at: datetime | None = None,
+    called_at: datetime | None = None,
 ) -> PhoneCallLogORM:
     """Record one call against `job`'s `phone`. Supersedes (closes) any open
     follow-up on the same job+phone, then inserts the new row. `reminder_at`
-    schedules the follow-up at that time (any status). When the call stands for the
+    schedules the follow-up at that time (any status). `called_at` is when the call
+    was made (entered by the user; defaults to now) and is stored as the row's
+    created_at — the call time everything else reads. When the call stands for the
     contact (applies_to_contact), the contact's unassigned sibling jobs are claimed
     for the caller too; their number is on the returned row as ``claimed_siblings``."""
     phone = (phone or "").strip()[:PHONE_MAX_LEN]
@@ -735,6 +751,7 @@ async def log_call(
         reminder_at, follow_up = None, False  # the contact is suppressed — nothing to schedule
 
     now = _now()
+    called_at = _called_at(called_at, now) or now
     await db.execute(_close_open_followups_stmt(job.id, phone, now))
     # Logging a status claims the record for the caller, in this same transaction:
     # the call row's owner is the authenticated user (never a client-supplied id),
@@ -767,7 +784,7 @@ async def log_call(
         called_by_email=user.email or "",
         called_by_name=display_name_from_email(user.email or ""),
         assigned_to_user_id=owner_id,
-        created_at=now,
+        created_at=called_at,
         updated_at=now,
     )
     db.add(row)
@@ -1848,6 +1865,7 @@ async def update_call(
     details: dict[str, Any] | None = None,
     proof: list[dict[str, Any]] | None = None,
     reminder_at: datetime | None = None,
+    called_at: datetime | None = None,
 ) -> dict[str, Any]:
     """Edit an existing call log IN PLACE (PATCH /phone-verifications/logs/{id}).
 
@@ -1858,8 +1876,9 @@ async def update_call(
     reversed first (_undo_outcome_effects — unless another call still justifies it);
     then, when the outcome changed (or a flag outcome's details now set more),
     _apply_outcome_effects re-runs (idempotent: flag upsert keyed on the number,
-    stamps set once, suppression / recruiter upserts). phone, phone_source,
-    contact_name, job_id, called_by_*, the owner and created_at are never touched.
+    stamps set once, suppression / recruiter upserts). `called_at`, when sent,
+    corrects when the call was made (created_at). phone, phone_source,
+    contact_name, job_id, called_by_* and the owner are never touched.
 
     404 when missing, cleared or another tenant's; 403 unless can_edit_log. Returns
     the updated row as a Phone logs item (_log_item)."""
@@ -1881,6 +1900,7 @@ async def update_call(
         reminder_at, follow_up = None, False  # the contact is suppressed — nothing to schedule
 
     now = _now()
+    called_at = _called_at(called_at, now)
     old_due = _aware(row.follow_up_due_at)
     due = None
     if reminder_at is not None:
@@ -1899,6 +1919,8 @@ async def update_call(
     row.proof = json.dumps(proof_items, ensure_ascii=False) if proof_items else ""
     row.remarks = remarks
     row.follow_up = bool(follow_up)
+    if called_at is not None:
+        row.created_at = called_at
     if due != old_due:
         row.follow_up_due_at = due
         row.follow_up_done_at = None  # a new reminder time fires again

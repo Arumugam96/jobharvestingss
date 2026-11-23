@@ -202,6 +202,12 @@ const styles = `
 .pvm-foot { display: flex; align-items: center; gap: 9px; padding: 11px 16px; border-top: 1px solid #EEF2F7; background: #FCFDFE; }
 
 .pvm-contact { display: flex; align-items: center; gap: 10px; padding-bottom: 12px; border-bottom: 1px solid #EEF2F7; margin-bottom: 13px; }
+.pvm-called { margin-left: auto; }
+.pvm-called .pvm-lbl { margin-bottom: 5px; }
+.pvm-called-when { display: flex; gap: 6px; }
+.pvm-card .pvm-called-when input[type=date] { width: 132px; padding: 6px 9px; font-size: 12px; border-radius: 8px; }
+.pvm-card .pvm-called-when input[type=time] { width: 104px; padding: 6px 9px; font-size: 12px; border-radius: 8px; }
+.pvm-called-err { font-size: 11px; color: #DC2626; margin-top: 4px; }
 .pvm-num { font-size: 19px; font-weight: 700; letter-spacing: -.02em; line-height: 1.1; }
 .pvm-nm { font-size: 12.5px; color: #64748B; margin-top: 1px; }
 
@@ -348,6 +354,8 @@ const styles = `
   .pvm-prow > * { flex-basis: 100%; }
   .pvm-rem { flex-wrap: wrap; }
   .pvm-rem-when { margin-left: 0; width: 100%; }
+  .pvm-contact { flex-wrap: wrap; }
+  .pvm-called { margin-left: 0; width: 100%; }
   .pvm-hint { display: none; }
 }
 `;
@@ -789,6 +797,13 @@ export default function PhoneVerifyModal({ jobId, phone: phoneProp, pocName: poc
     }))
     : []));
   const [rem, setRemState] = useState(() => (editing ? remFromIso(editCall.reminder_at) : { on: false, date: "", time: "" }));
+  // When the call was made — mandatory, can't be in the future. Defaults to now
+  // (or the logged time when editing).
+  const [calledAt, setCalledAt] = useState(() => {
+    const d = editing && editCall.called_at ? new Date(editCall.called_at) : new Date();
+    const [date, time] = toParts(isNaN(d) ? new Date() : d);
+    return { date, time };
+  });
   const [sheetOpen, setSheetOpen] = useState(false);
   const [zoom, setZoom] = useState(null);
   const [dragOver, setDragOver] = useState(false);
@@ -888,15 +903,18 @@ export default function PhoneVerifyModal({ jobId, phone: phoneProp, pocName: poc
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose, zoom, sheetOpen, busy]);
 
-  // Call status and outcome are the only UI-level requirements. Proof and
+  // Call date/time, status and outcome are the only UI-level requirements. Proof and
   // outcome-specific supporting fields (including next steps) are optional.
+  const calledAtDate = calledAt.date && calledAt.time ? new Date(`${calledAt.date}T${calledAt.time}`) : null;
+  const calledAtFuture = !!calledAtDate && calledAtDate.getTime() > Date.now() + 60e3;
+  const calledAtOk = !!calledAtDate && !isNaN(calledAtDate) && !calledAtFuture;
 
   /**
-   * Builds the call payload (status, outcome, details, comments, proof, reminder_at ISO)
+   * Builds the call payload (called_at, status, outcome, details, comments, proof, reminder_at ISO)
    * and awaits onSave; closes on success, otherwise shows the error and stays open.
    */
   const save = async () => {
-    if (!status || !c || busy) return;
+    if (!status || !c || !calledAtOk || busy) return;
     const reminderAt = rem.on && rem.date ? new Date(`${rem.date}T${rem.time || "10:00"}`) : null;
     setBusy(true);
     setSaveError("");
@@ -909,6 +927,7 @@ export default function PhoneVerifyModal({ jobId, phone: phoneProp, pocName: poc
         const updated = await updatePhoneCallLog(editCall.id, {
           status, outcome, details, remarks: remarks.trim(), proof,
           follow_up: !!reminderIso, reminder_at: reminderIso,
+          called_at: calledAtDate.toISOString(),
         });
         await onSave(updated);
       } else {
@@ -916,6 +935,7 @@ export default function PhoneVerifyModal({ jobId, phone: phoneProp, pocName: poc
           phone, status, outcome, details, remarks: remarks.trim(),
           proof,
           reminder_at: reminderIso,
+          called_at: calledAtDate.toISOString(),
         });
       }
       onClose();
@@ -946,6 +966,18 @@ export default function PhoneVerifyModal({ jobId, phone: phoneProp, pocName: poc
             <div>
               <div className="pvm-num">{phone}</div>
               {(pocName || pocTitle) && <div className="pvm-nm">{[pocName, pocTitle].filter(Boolean).join(" · ")}</div>}
+            </div>
+            <div className="pvm-called">
+              <p className="pvm-lbl">Called on <Req /></p>
+              <div className="pvm-called-when">
+                <input type="date" aria-label="Call date" required max={toParts(new Date())[0]} value={calledAt.date}
+                  style={!calledAt.date || calledAtFuture ? { borderColor: "#FCA5A5" } : undefined}
+                  onChange={(e) => setCalledAt((v) => ({ ...v, date: e.target.value }))} />
+                <input type="time" aria-label="Call time" required value={calledAt.time}
+                  style={!calledAt.time || calledAtFuture ? { borderColor: "#FCA5A5" } : undefined}
+                  onChange={(e) => setCalledAt((v) => ({ ...v, time: e.target.value }))} />
+              </div>
+              {calledAtFuture && <div className="pvm-called-err">Can't be in the future</div>}
             </div>
           </div>
 
@@ -1076,7 +1108,7 @@ export default function PhoneVerifyModal({ jobId, phone: phoneProp, pocName: poc
 
         <div className="pvm-foot">
           <button className="pvm-fbtn" onClick={onClose} disabled={busy}>Cancel</button>
-          <button className="pvm-fbtn primary" onClick={save} disabled={!status || !c || busy}>
+          <button className="pvm-fbtn primary" onClick={save} disabled={!status || !c || !calledAtOk || busy}>
             {busy ? <RefreshCw size={14} className="pvm-spin" /> : <Check size={14} />} {busy ? "Saving…" : "Save"}
           </button>
         </div>

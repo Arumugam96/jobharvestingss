@@ -99,6 +99,8 @@ class LogCallRequest(BaseModel):
     remarks: str = Field(default="", description="Required for an answered call without an outcome.")
     reminder_at: datetime | None = Field(default=None,
                                          description="Remind me at this time (any status).")
+    called_at: datetime | None = Field(default=None,
+                                       description="When the call was made (not in the future); defaults to now.")
     follow_up: bool = Field(default=False,
                             description="Older clients: remind me in 24h (unanswered calls only).")
 
@@ -112,6 +114,8 @@ class UpdateCallRequest(BaseModel):
     proof: list[ProofFile] = Field(default_factory=list, max_length=pvs.PROOF_MAX_FILES)
     remarks: str = Field(default="")
     reminder_at: datetime | None = Field(default=None)
+    called_at: datetime | None = Field(default=None,
+                                       description="Corrected call time (not in the future); omit to keep it.")
     follow_up: bool = Field(default=False)
 
 
@@ -169,6 +173,7 @@ async def log_phone_call(
         status=body.status, remarks=body.remarks, follow_up=body.follow_up,
         outcome=body.outcome, details=body.details,
         proof=[p.model_dump() for p in body.proof], reminder_at=body.reminder_at,
+        called_at=body.called_at,
     )
     logger.info("phone_call_logged", job_id=job_id, user=current_user.email,
                 status=row.call_status, outcome=row.call_outcome,
@@ -417,6 +422,7 @@ async def update_phone_call_log(
         status=body.status, remarks=body.remarks, follow_up=body.follow_up,
         outcome=body.outcome, details=body.details,
         proof=[p.model_dump() for p in body.proof], reminder_at=body.reminder_at,
+        called_at=body.called_at,
     )
     logger.info("phone_call_log_updated", log_id=log_id, user=current_user.email,
                 status=item["status"], outcome=item["outcome"])

@@ -285,7 +285,7 @@ export function dismissAssignmentReminders() {
  * applies its side effects (number flags, do-not-call email suppression, referred
  * POC, releasing the job). Returns the saved call view plus `flags` for the number. */
 export function logPhoneCall(jobId, {
-  phone, phone_source, contact_name, status, outcome, details, proof, remarks, reminder_at, follow_up,
+  phone, phone_source, contact_name, status, outcome, details, proof, remarks, reminder_at, follow_up, called_at,
 } = {}) {
   return request(`/jobs/${encodeURIComponent(jobId)}/phone-verification`, {
     method: "POST",
@@ -299,6 +299,7 @@ export function logPhoneCall(jobId, {
       proof: proof || [],
       remarks: remarks || "",
       reminder_at: reminder_at || null,
+      called_at: called_at || null,
       follow_up: !!follow_up,
     }),
   });
@@ -390,7 +391,7 @@ export function getPhoneCallLog(logId) {
  * reminder_at (ISO|null) } — the same fields as logPhoneCall. Returns the updated row in
  * the GET /phone-verifications/logs item shape. 403 not allowed, 404 gone, 422 invalid. */
 export function updatePhoneCallLog(logId, {
-  status, outcome, details, remarks, proof, follow_up, reminder_at,
+  status, outcome, details, remarks, proof, follow_up, reminder_at, called_at,
 } = {}) {
   return request(`/phone-verifications/logs/${encodeURIComponent(logId)}`, {
     method: "PATCH",
@@ -402,6 +403,7 @@ export function updatePhoneCallLog(logId, {
       remarks: remarks || "",
       follow_up: !!follow_up,
       reminder_at: reminder_at || null,
+      called_at: called_at || null,
     }),
   });
 }
