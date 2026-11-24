@@ -102,10 +102,13 @@ async def _run_feed_background_impl(
         """Await a DB write coroutine on the main loop (whose asyncpg pool it needs) when running in
         the proactor worker thread; otherwise await it directly.
         """
+        await _do_write_result(coro)
+
+    async def _do_write_result(coro):
+        """Like _do_write but returns the coroutine's result (db_write: None = failed)."""
         if needs_proactor():
-            await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(coro, main_loop))
-        else:
-            await coro
+            return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(coro, main_loop))
+        return await coro
 
     async def _on_status(msg: str) -> None:
         """Mirror an agent status message into the JobTracker entry."""
@@ -117,9 +120,25 @@ async def _run_feed_background_impl(
         No-op when there is no run row or the batch is empty.
         """
         if not run_pk or not leads:
+            log.warning("linkedin_feed_batch_skipped", run_pk=run_pk, leads=len(leads or []))
             return
         dicts = [lead.to_scraped_job_dict() for lead in leads]
-        await _do_write(db_write(lambda db: HarvestRunService(db).bulk_insert_scraped_jobs(run_pk, dicts)))
+
+        async def _insert(db) -> bool:
+            await HarvestRunService(db).bulk_insert_scraped_jobs(run_pk, dicts)
+            return True
+
+        # db_write swallows errors and returns None — log it so a lost batch is visible.
+        ok = await _do_write_result(db_write(_insert))
+        if not ok:
+            log.error(
+                "linkedin_feed_batch_insert_failed", run_pk=run_pk, batch=len(dicts),
+                urls=[d.get("job_url") for d in dicts],
+                hint="see the preceding harvest_db_mirror_failed / harvest_db_write_timeout",
+            )
+            return
+        log.info("linkedin_feed_batch_inserted", run_pk=run_pk, batch=len(dicts),
+                 total_saved=saved["n"] + len(dicts))
         saved["n"] += len(dicts)
         n = saved["n"]
         JobTracker.update(job_id, combined=n, progress=45, message=f"Harvesting… {n} leads saved so far")
@@ -197,19 +216,41 @@ async def _run_feed_background_impl(
 
     # ── Reconcile final set + persist LLM audit ───────────────────────────────
     stopped = run_guard.is_stop_requested()
+    interrupted = agent.collection_error
     final_dicts = [lead.to_scraped_job_dict() for lead in leads]
+    log.info(
+        "linkedin_feed_reconcile_start", run_pk=run_pk, leads=len(final_dicts),
+        incrementally_saved=saved["n"], llm_calls=len(llm_calls),
+        collection_error=interrupted or None,
+    )
     if run_pk:
-        await db_write(lambda db: HarvestRunService(db).replace_run_jobs(run_pk, final_dicts))
+        replaced = await db_write(lambda db: HarvestRunService(db).replace_run_jobs(run_pk, final_dicts))
+        if replaced:
+            log.info("linkedin_feed_reconcile_saved", run_pk=run_pk, leads=len(final_dicts))
+        else:
+            log.error(
+                "linkedin_feed_reconcile_failed", run_pk=run_pk, leads=len(final_dicts),
+                incrementally_saved=saved["n"],
+                hint="final replace_run_jobs failed; only incremental batches (if any) are stored",
+            )
         await db_write(lambda db: HarvestRunService(db).bulk_insert_llm_calls(run_pk, llm_calls))
+    else:
+        log.error("linkedin_feed_no_run_row", leads=len(final_dicts),
+                  hint="harvest_runs row was not created — leads cannot be stored")
 
     status_str = "stopped" if stopped else ("success" if leads else "no_results")
-    final_message = (
-        f"Harvest stopped — {len(leads)} leads saved" if stopped
-        else f"Harvest complete — {len(leads)} vendor leads"
-    )
+    if stopped:
+        final_message = f"Harvest stopped — {len(leads)} leads saved"
+    elif interrupted:
+        final_message = (
+            f"Browser closed early — {len(leads)} vendor leads saved from the posts collected"
+        )
+    else:
+        final_message = f"Harvest complete — {len(leads)} vendor leads"
     log.info(
         "linkedin_feed_completed",
         leads=len(leads), status=status_str, token_usage=token_usage.get("total", {}),
+        collection_error=interrupted or None,
     )
     JobTracker.update(
         job_id, status=status_str, progress=100, combined=len(leads),

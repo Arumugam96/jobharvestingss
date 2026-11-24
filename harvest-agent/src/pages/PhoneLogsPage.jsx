@@ -317,6 +317,17 @@ function JobCell({ title, company, after = null }) {
   );
 }
 
+/** Company (bold, the thing people scan/search by) over the job title in normal weight
+ * (`after` sits beside the job title). */
+function CompanyJobCell({ company, title, after = null }) {
+  return (
+    <>
+      <div style={{ fontWeight: 600, color: C.text }}>{company || "—"}</div>
+      <div style={{ fontSize: 12.5, color: C.textSoft }}>{title || "—"}{after}</div>
+    </>
+  );
+}
+
 /** Search box for a filter bar. */
 function SearchBox({ value, onChange, placeholder, label }) {
   return (
@@ -551,7 +562,7 @@ function PhonesPanel({ reloadKey, exportRef }) {
                 <PlainHeader label="Phone" width={170} />
                 <PlainHeader label="Source" width={130} />
                 <PlainHeader label="Name" width={180} />
-                <PlainHeader label="Job / Company" />
+                <PlainHeader label="Company / Job" />
                 <PlainHeader label="Added" width={160} />
               </tr>
             </thead>
@@ -569,7 +580,7 @@ function PhonesPanel({ reloadKey, exportRef }) {
                       </span>
                     </td>
                     <td className="ha-td" style={{ color: C.text }}>{row.name || "—"}</td>
-                    <td className="ha-td"><JobCell title={row.job_title || (row.source === "recruiter" ? "" : "—")} company={row.company} /></td>
+                    <td className="ha-td"><CompanyJobCell company={row.company} title={row.job_title || (row.source === "recruiter" ? "" : "—")} /></td>
                     <td className="ha-td" style={{ whiteSpace: "nowrap", color: C.textSoft }}>{fmtTime(row.added_at)}</td>
                   </tr>
                 );
@@ -613,7 +624,7 @@ function AssignedJobsPanel({ reloadKey, exportRef }) {
           <table className="ha-table" style={{ minWidth: 980 }}>
             <thead className="ha-thead">
               <tr>
-                <PlainHeader label="Job / Company" width={260} />
+                <PlainHeader label="Company / Job" width={260} />
                 <PlainHeader label="Assigned to" width={160} />
                 <PlainHeader label="Assigned on" width={160} />
                 <PlainHeader label="Phone" width={150} />
@@ -626,7 +637,7 @@ function AssignedJobsPanel({ reloadKey, exportRef }) {
               {!loading && items.length === 0 && <tr><td className="ha-td" colSpan={6} style={EMPTY_CELL}>No self-assigned jobs match.</td></tr>}
               {items.map((row) => (
                 <tr key={row.job_id} className="ha-row">
-                  <td className="ha-td"><JobCell title={row.job_title} company={row.company} /></td>
+                  <td className="ha-td"><CompanyJobCell company={row.company} title={row.job_title} /></td>
                   <td className="ha-td"><AssigneePill user={row.assigned_to} /></td>
                   <td className="ha-td" style={{ whiteSpace: "nowrap", color: C.textSoft }}>{fmtTime(row.assigned_at)}</td>
                   <td className="ha-td" style={{ whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>{row.phone || "—"}</td>
@@ -897,7 +908,7 @@ export default function PhoneLogsPage() {
                     <tr>
                       <PlainHeader label="" width={84} />
                       <PlainHeader label="Status" width={112} />
-                      <PlainHeader label="Job / Company" width={200} />
+                      <PlainHeader label="Company / Job" width={200} />
                       <PlainHeader label="Phone" width={130} />
                       <PlainHeader label="POC" width={110} />
                       <PlainHeader label="Call outcome" width={190} />
@@ -938,7 +949,7 @@ export default function PhoneLogsPage() {
                           </div>
                         </td>
                         <td className="ha-td"><StatusPill status={row.status} /></td>
-                        <td className="ha-td"><JobCell title={row.job_title} company={row.company}
+                        <td className="ha-td"><CompanyJobCell company={row.company} title={row.job_title}
                           after={row.job_id && <OpenInNewTab href={jobHref(row)} label="Open this job in a new tab" style={{ color: C.textSoft, marginLeft: 4 }} />} /></td>
                         <td className="ha-td" style={{ whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>
                           {row.phone}

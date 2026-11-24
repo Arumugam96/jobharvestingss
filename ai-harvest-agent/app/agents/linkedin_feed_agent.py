@@ -198,6 +198,47 @@ class FeedAuthError(RuntimeError):
     POST /linkedin-setup-session."""
 
 
+class FeedBrowserClosedError(RuntimeError):
+    """Raised when the browser / tab / context went away mid-run (window closed in
+    the Live Browser, Chrome crash, OOM). NOT an auth problem: posts already
+    collected are still processed and saved."""
+
+
+_BROWSER_CLOSED_MARKERS = (
+    "target page, context or browser has been closed",
+    "target closed",
+    "browser has been closed",
+    "context has been closed",
+    "page has been closed",
+    "browser has disconnected",
+    "connection closed",
+)
+
+
+def _is_browser_closed_error(exc: BaseException) -> bool:
+    """True when a Playwright error means the page/context/browser is gone."""
+    if isinstance(exc, FeedBrowserClosedError):
+        return True
+    msg = str(exc).lower()
+    return any(m in msg for m in _BROWSER_CLOSED_MARKERS)
+
+
+def _safe_url(page: Any) -> str:
+    """page.url for logging; never raises (the page may already be closed)."""
+    try:
+        return str(page.url)[:120]
+    except Exception:
+        return "?"
+
+
+def _page_closed(page: Any) -> bool | None:
+    """page.is_closed() for logging; None when it can't be determined."""
+    try:
+        return bool(page.is_closed())
+    except Exception:
+        return None
+
+
 @dataclass
 class FeedLead:
     """One validated vendor-opportunity lead extracted from a LinkedIn post."""
@@ -569,6 +610,13 @@ class LinkedInFeedAgent:
         self._headless: bool = True
         self._account:  str  = "1"
 
+        # Set by harvest() when post collection stopped early (browser closed,
+        # navigation/auth failure mid-search) but already-collected posts were
+        # still processed. "" = collection finished normally. Read by the route.
+        self.collection_error: str = ""
+        # Why/when the browser went away (page/context close or crash events).
+        self._browser_events: list[str] = []
+
     def default_mode(self) -> str:
         """"both" when post search is enabled in settings, else "feed"."""
         return MODE_BOTH if self._settings.linkedin_feed_search_enabled else MODE_FEED
@@ -632,27 +680,96 @@ class LinkedInFeedAgent:
                 profile_dir=account_profile, headless=headless, slow_mo=slow_mo,
             )
 
+        logger.info(
+            "linkedin_feed_harvest_start",
+            mode=mode, headless=headless, account=self._account,
+            session=("session_file" if storage_state_arg else "chrome_profile"),
+            search_queries=self._search_queries if mode != MODE_FEED else [],
+            search_date=self._search_date or "any",
+            max_posts=self._max_posts, max_scrolls=self._max_scrolls,
+            search_max_scrolls=self._search_scrolls,
+            search_max_posts_per_query=self._search_max_posts,
+            llm_max_calls=self._llm_max_calls, min_confidence=self._min_confidence,
+            has_on_batch=on_batch is not None,
+        )
+
+        # ── Phase 1: collect posts (needs the browser) ─────────────────────────
+        # Posts are only held in memory until Phase 2, so a failure here used to
+        # discard everything collected so far. Now an interruption after some posts
+        # were collected is logged and Phase 2 still runs on what we have.
         collected: dict[str, dict] = {}
-        async with browser_ctx as bm:
-            page = await bm.new_page()
-            if mode in (MODE_FEED, MODE_BOTH):
-                await self._open(page, FEED_URL, on_status=on_status)
-                await self._collect_from_page(
-                    page, collected, label="feed", max_new=self._max_posts,
-                    max_scrolls=self._max_scrolls, min_scrolls=self._min_scrolls,
-                    on_status=on_status,
-                )
-            if mode in (MODE_SEARCH, MODE_BOTH):
-                await self._run_searches(page, collected, on_status=on_status)
-            raw_posts = list(collected.values())
-            leads = await self._process_posts(raw_posts, on_status=on_status, on_batch=on_batch)
+        try:
+            async with browser_ctx as bm:
+                page = await bm.new_page()
+                self._watch_browser(page)
+                if mode in (MODE_FEED, MODE_BOTH):
+                    await self._open(page, FEED_URL, on_status=on_status)
+                    await self._collect_from_page(
+                        page, collected, label="feed", max_new=self._max_posts,
+                        max_scrolls=self._max_scrolls, min_scrolls=self._min_scrolls,
+                        on_status=on_status,
+                    )
+                if mode in (MODE_SEARCH, MODE_BOTH):
+                    await self._run_searches(page, collected, on_status=on_status)
+        except Exception as exc:
+            logger.warning(
+                "linkedin_feed_collection_interrupted",
+                error_type=type(exc).__name__, error=str(exc)[:500],
+                posts_collected=len(collected), sources=dict(self._source_counts),
+                browser_events=self._browser_events,
+                will_process_collected=bool(collected),
+            )
+            if not collected:
+                if isinstance(exc, FeedAuthError) or not _is_browser_closed_error(exc):
+                    raise
+                raise FeedBrowserClosedError(
+                    f"Browser closed before any posts were collected: {exc}"
+                ) from exc
+            self.collection_error = f"{type(exc).__name__}: {str(exc)[:300]}"
+
+        raw_posts = list(collected.values())
+        logger.info(
+            "linkedin_feed_collection_done",
+            posts_collected=len(raw_posts), sources=dict(self._source_counts),
+            interrupted=bool(self.collection_error),
+        )
+        if on_status and self.collection_error:
+            await on_status(
+                f"Browser stopped early — processing the {len(raw_posts)} posts already collected…"
+            )
+
+        # ── Phase 2: classify + extract + persist (no browser needed) ──────────
+        leads = await self._process_posts(raw_posts, on_status=on_status, on_batch=on_batch)
 
         logger.info(
             "linkedin_feed_harvest_completed",
             mode=mode, posts_collected=len(raw_posts), leads=len(leads),
             llm_calls=self._llm_calls_made, sources=self._source_counts,
+            collection_error=self.collection_error or None,
         )
         return leads
+
+    def _watch_browser(self, page: "Page") -> None:
+        """Log page/context close + crash events so a "browser has been closed"
+        error can be traced to its cause (window closed in the Live Browser, renderer
+        crash, context shut down…)."""
+        def _record(event: str) -> None:
+            stamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
+            self._browser_events.append(f"{stamp} {event}")
+            logger.warning("linkedin_feed_browser_event", event=event, url=_safe_url(page))
+
+        try:
+            page.on("close", lambda *_: _record("page_closed"))
+            page.on("crash", lambda *_: _record("page_crashed"))
+            page.context.on("close", lambda *_: _record("context_closed"))
+            page.context.on("page", lambda p: logger.info(
+                "linkedin_feed_browser_new_tab", url=_safe_url(p),
+            ))
+            browser = page.context.browser
+            if browser is not None:
+                browser.on("disconnected", lambda *_: _record("browser_disconnected"))
+        except Exception as exc:
+            logger.debug("linkedin_feed_browser_watch_failed", error=str(exc))
 
     # ── Open + auth-gate a page ─────────────────────────────────────────────────
 
@@ -694,12 +811,23 @@ class LinkedInFeedAgent:
         logger.info("linkedin_feed_page_ready", url=page.url[:120], after_login=True)
 
     async def _goto(self, page: "Page", url: str) -> None:
-        """Navigate to `url` and dismiss overlays. Raises FeedAuthError on failure."""
+        """Navigate to `url` and dismiss overlays. Raises FeedBrowserClosedError when
+        the browser/tab is gone, FeedAuthError on any other navigation failure."""
+        logger.info("linkedin_feed_navigate", url=url[:160], page_closed=_page_closed(page))
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
             await page.wait_for_timeout(3_000)
         except Exception as exc:
-            logger.error("linkedin_feed_navigation_failed", url=url[:120], error=str(exc))
+            closed = _is_browser_closed_error(exc)
+            logger.error(
+                "linkedin_feed_navigation_failed", url=url[:120], error=str(exc)[:500],
+                browser_closed=closed, page_closed=_page_closed(page),
+                browser_events=self._browser_events,
+            )
+            if closed:
+                raise FeedBrowserClosedError(
+                    f"Browser was closed while opening {url[:80]}: {exc}"
+                ) from exc
             raise FeedAuthError(f"Could not open LinkedIn ({url[:80]}): {exc}") from exc
         await self._dismiss_overlays(page)
 
@@ -837,18 +965,31 @@ class LinkedInFeedAgent:
             if run_guard.is_stop_requested():
                 logger.info("linkedin_feed_search_stopped_by_user", query=query)
                 break
+            logger.info(
+                "linkedin_feed_search_query_start",
+                query=query, n=i, of=len(queries), collected_so_far=len(collected),
+            )
             if on_status:
                 await on_status(f"Searching LinkedIn posts: \"{query}\" ({i}/{len(queries)})…")
             try:
                 await self._open(page, _search_url(query, self._search_date), on_status=on_status)
-            except FeedAuthError:
+            except (FeedAuthError, FeedBrowserClosedError):
+                # The browser is gone / not logged in: later queries would fail the
+                # same way. harvest() still processes the posts collected so far.
+                logger.warning(
+                    "linkedin_feed_search_aborted", query=query, n=i, of=len(queries),
+                    remaining_queries=queries[i:], collected_so_far=len(collected),
+                )
                 raise
             except Exception as exc:
                 logger.warning("linkedin_feed_search_open_failed", query=query, error=str(exc))
                 continue
-            await self._collect_from_page(
+            new = await self._collect_from_page(
                 page, collected, label=f"search: {query}", max_new=self._search_max_posts,
                 max_scrolls=self._search_scrolls, min_scrolls=0, on_status=on_status,
+            )
+            logger.info(
+                "linkedin_feed_search_query_done", query=query, new=new, total=len(collected),
             )
 
     # ── Scroll-collect a page ───────────────────────────────────────────────────
@@ -1053,6 +1194,15 @@ class LinkedInFeedAgent:
         stop_reason = ""
         last_idx = -1
 
+        logger.info(
+            "linkedin_feed_processing_start",
+            posts=len(raw_posts), llm_calls_made=self._llm_calls_made,
+            llm_max_calls=self._llm_max_calls, min_confidence=self._min_confidence,
+            persist=on_batch is not None,
+        )
+        if on_status and raw_posts:
+            await on_status(f"Classifying {len(raw_posts)} collected posts…")
+
         for idx, raw in enumerate(raw_posts):
             last_idx = idx
             if run_guard.is_stop_requested():
@@ -1075,8 +1225,16 @@ class LinkedInFeedAgent:
             if not _is_candidate(text):
                 rec["stage"] = "filtered_out_not_candidate"
                 diag.append(rec)
+                logger.info(
+                    "linkedin_feed_post_filtered", idx=idx, urn=rec["urn"][:40],
+                    author=rec["author"][:60], text_len=len(text), snippet=text[:120],
+                )
                 continue
             candidates += 1
+            logger.info(
+                "linkedin_feed_post_candidate", idx=idx, urn=rec["urn"][:40],
+                author=rec["author"][:60], found_via=rec["found_via"], snippet=text[:120],
+            )
 
             if self._llm_calls_made >= self._llm_max_calls:
                 logger.warning("linkedin_feed_llm_cap_reached", cap=self._llm_max_calls, idx=idx)
@@ -1096,7 +1254,17 @@ class LinkedInFeedAgent:
                     reason=classification.get("reason"),
                 )
                 cat_counts[cat] = cat_counts.get(cat, 0) + 1
-                if not self._is_keeper(classification):
+                keeper = self._is_keeper(classification)
+                logger.info(
+                    "linkedin_feed_post_classified", idx=idx, urn=rec["urn"][:40],
+                    category=cat, keeper=keeper,
+                    is_vendor_opportunity=classification.get("is_vendor_opportunity"),
+                    it_relevance=classification.get("it_relevance"),
+                    confidence=classification.get("confidence"),
+                    reason=str(classification.get("reason") or "")[:200],
+                    empty_reply=not classification,
+                )
+                if not keeper:
                     rec["stage"] = "classified_not_vendor_opportunity"
                     diag.append(rec)
                     continue
@@ -1128,7 +1296,10 @@ class LinkedInFeedAgent:
                 continue
             except Exception as exc:
                 # One bad post must never abort the whole harvest.
-                logger.warning("linkedin_feed_post_failed", idx=idx, error=str(exc))
+                logger.warning(
+                    "linkedin_feed_post_failed", idx=idx, urn=rec["urn"][:40],
+                    error_type=type(exc).__name__, error=str(exc), exc_info=True,
+                )
                 rec["stage"] = "error"
                 rec["error"] = str(exc)[:300]
                 diag.append(rec)
@@ -1205,7 +1376,7 @@ class LinkedInFeedAgent:
             )
             logger.info("linkedin_feed_diag_written", path=str(d / "feed_diag.json"), summary_leads=leads)
         except Exception as exc:
-            logger.debug("linkedin_feed_diag_write_failed", error=str(exc))
+            logger.warning("linkedin_feed_diag_write_failed", error=str(exc))
 
     async def _flush(
         self,
@@ -1218,12 +1389,19 @@ class LinkedInFeedAgent:
 
         Persistence errors are logged and swallowed so the harvest keeps going.
         """
+        logger.info(
+            "linkedin_feed_batch_flush", batch=len(pending), total_leads=total,
+            titles=[lead.job_title[:60] for lead in pending],
+        )
         try:
             await on_batch(list(pending))
             if on_status:
                 await on_status(f"Extracting vendor leads… {total} saved")
         except Exception as exc:
-            logger.warning("linkedin_feed_batch_flush_failed", error=str(exc))
+            logger.warning(
+                "linkedin_feed_batch_flush_failed", batch=len(pending),
+                error_type=type(exc).__name__, error=str(exc), exc_info=True,
+            )
 
     def _is_keeper(self, c: dict) -> bool:
         """Accept only a genuine vendor opportunity above the confidence gate. A

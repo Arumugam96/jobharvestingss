@@ -187,8 +187,8 @@ class Settings(BaseSettings):
         "contract staffing requirement|implementation partner IT"
     )
     linkedin_feed_search_date_posted:        str = "past-week"   # past-24h | past-week | past-month | "" (any)
-    linkedin_feed_search_max_scrolls:        int = 6
-    linkedin_feed_search_max_posts_per_query: int = 40
+    linkedin_feed_search_max_scrolls:        int = 10
+    linkedin_feed_search_max_posts_per_query: int = 20
 
     @property
     def linkedin_feed_search_query_list(self) -> list[str]:
