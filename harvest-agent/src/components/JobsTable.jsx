@@ -5,12 +5,11 @@ import EmailComposeModal from "./EmailComposeModal";
 import LinkedInMessageModal from "./LinkedInMessageModal";
 import PhoneVerifyModal, {
   PhoneVerifyStyles, PhoneVerifyButton, PhoneVerifyBadge, PhoneFlagTag, phoneBlocked, callFromView,
-  callForPhone,
+  callForPhone, outcomeDetailText,
 } from "./PhoneVerify";
 import AssignJobModal, { AssignJobStyles, AssignCell, useCurrentUserEmail, isAssignedToOther } from "./AssignJob";
 import { getOutreachStatus, getPhoneVerifications, logPhoneCall } from "../api";
-import { ContactedBadge, hasEarlierCalls } from "./ContactHistory";
-import { C } from "../theme";
+import { ContactedBadge, hasEarlierCalls, callLabel, callTone, shortDate } from "./ContactHistory";import { C } from "../theme";
 import { isPlainLeftClick } from "../lib/openLink";
 import { useTenant } from "../TenantContext";
 import {
@@ -19,6 +18,44 @@ import {
 } from "./ui";
 import { mapJobToDetail, jobContact, phoneKey, sortSources, SOURCE_ORDER } from "../lib/jobsData";
 import { CONTACT_FILTER_OPTIONS, CLIENT_CONTACT_FILTER_OPTIONS, jobMatchesContact } from "../lib/contactFilter";
+
+// Same chip colours as the Phone logs page's call outcomes.
+const OUTCOME_TONES = {
+  good: { color: "#047857", bg: "#ECFDF3" },
+  info: { color: "#1D4ED8", bg: "#EFF6FF" },
+  warn: { color: "#B45309", bg: "#FFFBEB" },
+  bad: { color: "#DC2626", bg: "#FEF2F2" },
+};
+const MUTED_DASH = <span style={{ color: "#94A3B8" }}>—</span>;
+
+// My Workspace: the latest call's outcome chip, its details, and who called when.
+function CallOutcomeCell({ call }) {
+  if (!call) return <span style={{ color: "#94A3B8", fontSize: 12.5 }}>Not called yet</span>;
+  const t = OUTCOME_TONES[callTone(call.status, call.outcome)] || OUTCOME_TONES.bad;
+  const detail = outcomeDetailText(call.details);
+  const meta = [call.by && `by ${call.by}`, shortDate(call.at), call.inherited && "on another job"].filter(Boolean).join(" · ");
+  return (
+    <div style={{ whiteSpace: "normal" }}>
+      <span style={{ display: "inline-block", padding: "2px 8px", borderRadius: 6, fontSize: 12.5, fontWeight: 600, color: t.color, background: t.bg }}>
+        {callLabel(call.status, call.outcome)}
+      </span>
+      {detail && <div style={{ marginTop: 3, fontSize: 12, color: C.textSoft }}>{detail}</div>}
+      {meta && <div style={{ marginTop: 2, fontSize: 11.5, color: "#94A3B8" }}>{meta}</div>}
+    </div>
+  );
+}
+
+// My Workspace: the latest call's comments (remarks), up to 3 lines; full text on hover.
+function CallCommentCell({ call }) {
+  const text = call?.remarks;
+  if (!text) return MUTED_DASH;
+  return (
+    <div title={text} style={{
+      whiteSpace: "normal", color: C.text, fontSize: 13, overflow: "hidden",
+      display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical",
+    }}>{text}</div>
+  );
+}
 
 // Apollo phone status of the job's recruiter: "Verified" when Apollo marked the
 // recruiter's (shown) number valid, "Phone pending" while an async Apollo phone is
@@ -140,6 +177,10 @@ export default function JobsTable({
   // Pins the Source filter to one source (the Demand jobs page: "Demand") — the
   // dropdown offers only that source.
   lockedSource = "",
+  // My Workspace: drop Contact / Source / Posted date / Action, freeze Mobile on
+  // horizontal scroll, and show the latest call's outcome + comments beside it so
+  // the caller needn't open each job to see how their calls went.
+  workspace = false,
 }) {
   // When `urlState`, the filter/search/sort/page state is mirrored to the URL
   // query string (so /jobs?company=…&page=2 is shareable and survives a refresh).
@@ -470,9 +511,9 @@ export default function JobsTable({
   }, [pageRowIdsKey, pagePhonesKey]);
   useEffect(() => { refreshPhoneVerifications(); }, [refreshPhoneVerifications]);
 
-  // Columns: Job title, Company, Company size, POC, Email,
-  // Mobile, Contact,Source, Posted date, Action
-  const colCount = 10;
+  // Columns: Job title, Company, Company size, POC, Email, Mobile, then
+  // Contact, Source, Posted date, Action — or, in My Workspace, Call outcome, Comments.
+  const colCount = workspace ? 8 : 10;
 
   return (
     <>
@@ -518,11 +559,17 @@ export default function JobsTable({
                 <PlainHeader label="Company size" width={130} />
                 <SortHeader label="POC" col="poc" sort={sort} setSort={setSort} width={140} />
                 <PlainHeader label="Email" width={230} />
-                <PlainHeader label="Mobile" width={190} />
-                <th className="ha-th ha-th-pin" style={{ textAlign: "center", width: 130, minWidth: 130 }}>Contact</th>
-                <SortHeader label="Source" col="source" sort={sort} setSort={setSort} width={100} />
-                <SortHeader label="Posted date" col="posted" sort={sort} setSort={setSort} width={120} />
-                <PlainHeader label="Action" width={150} />
+                {workspace ? (<>
+                  <th className="ha-th ha-th-pinl" style={{ width: 190, minWidth: 190 }}>Mobile</th>
+                  <PlainHeader label="Call outcome" width={230} />
+                  <PlainHeader label="Comments" width={260} />
+                </>) : (<>
+                  <PlainHeader label="Mobile" width={190} />
+                  <th className="ha-th ha-th-pin" style={{ textAlign: "center", width: 130, minWidth: 130 }}>Contact</th>
+                  <SortHeader label="Source" col="source" sort={sort} setSort={setSort} width={100} />
+                  <SortHeader label="Posted date" col="posted" sort={sort} setSort={setSort} width={120} />
+                  <PlainHeader label="Action" width={150} />
+                </>)}
               </tr>
             </thead>
             <tbody>
@@ -585,7 +632,7 @@ export default function JobsTable({
                   <td className="ha-td">
                     <DualContact parts={c.emailParts} link="mailto:" cls="ha-mail" />
                   </td>
-                  <td className={"ha-td" + (locked && isAdmin ? " ajm-keep" : "")} style={{ whiteSpace: "nowrap" }}>
+                  <td className={"ha-td" + (locked && isAdmin ? " ajm-keep" : "") + (workspace ? " ha-td-pinl" : "")} style={{ whiteSpace: "nowrap" }}>
                     {c.phone && !locked ? (
                       <div className="pvm-cell">
                         <PhoneVerifyButton verified={!!callForPhone(phoneVerify[j.id], c.phone, { own: true })}
@@ -614,6 +661,10 @@ export default function JobsTable({
                       </>
                     )}
                   </td>
+                  {workspace ? (<>
+                    <td className="ha-td"><CallOutcomeCell call={callForPhone(phoneVerify[j.id], c.phone)} /></td>
+                    <td className="ha-td"><CallCommentCell call={callForPhone(phoneVerify[j.id], c.phone)} /></td>
+                  </>) : (<>
                   <td className="ha-td ha-td-pin">
                     <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
                       {locked ? (
@@ -687,6 +738,7 @@ export default function JobsTable({
                   <td className="ha-td ajm-action">
                     <AssignCell assignedTo={assignedTo} myEmail={myEmail} onOpen={() => setAssignModalJob(j)} />
                   </td>
+                  </>)}
                 </tr>
                 );
               })}

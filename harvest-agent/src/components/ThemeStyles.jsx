@@ -129,6 +129,12 @@ const ThemeStyles = () => (
     .ha-th.ha-th-pin{z-index:2;}
     .ha-td-pin{z-index:0;background:#FCFDFF;box-shadow:-10px 0 12px -12px rgba(15,23,42,.35);}
     .ha-row:hover .ha-td-pin{background:#F1F5FE;}
+    /* My Workspace: the Mobile column freezes at the scroller's left edge once the
+       table scrolls right, so the number stays beside its call outcome / comments. */
+    .ha-th-pinl,.ha-td-pinl{position:sticky;left:0;}
+    .ha-th.ha-th-pinl{z-index:2;}
+    .ha-td-pinl{z-index:1;background:#FCFDFF;box-shadow:10px 0 12px -12px rgba(15,23,42,.35);}
+    .ha-row:hover .ha-td-pinl{background:#F1F5FE;}
     .ha-cbtn{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:8px;border:1px solid;transition:.15s;text-decoration:none;}
     .ha-cbtn-on{border-color:${C.primary};color:${C.primary};background:rgba(255,255,255,.85);cursor:pointer;}
     .ha-cbtn-on:hover{background:${C.primary};color:#fff;}

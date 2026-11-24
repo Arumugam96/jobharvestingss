@@ -463,7 +463,8 @@ export default function JobsPage({ onNavigate, onBack, onView, pageSizeSel, onPa
           facets={facets}
           onParamsChange={handleParamsChange}
           serverExtraParams={serverExtraParams}
-          minWidth={1410}
+          minWidth={library ? 1300 : 1410}
+          workspace={library}
           pageSize={Number(pageSizeSel)}
           urlState={urlState}
           lockedSource={demand ? DEMAND_SOURCE : ""}
