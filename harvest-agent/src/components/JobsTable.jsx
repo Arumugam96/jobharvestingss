@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Search, Mail, Lock, Pencil, ExternalLink } from "lucide-react";
+import { Search, Mail, Lock, Pencil, ExternalLink, UserMinus } from "lucide-react";
 import EmailComposeModal from "./EmailComposeModal";
 import LinkedInMessageModal from "./LinkedInMessageModal";
 import PhoneVerifyModal, {
@@ -8,7 +8,7 @@ import PhoneVerifyModal, {
   callForPhone, outcomeDetailText,
 } from "./PhoneVerify";
 import AssignJobModal, { AssignJobStyles, AssignCell, useCurrentUserEmail, isAssignedToOther } from "./AssignJob";
-import { getOutreachStatus, getPhoneVerifications, logPhoneCall, getPhoneCallLog, getLatestJobComments } from "../api";
+import { getOutreachStatus, getPhoneVerifications, logPhoneCall, getPhoneCallLog, getLatestJobComments, unassignJob, deletePhoneCallLog } from "../api";
 import JobCommentModal, { JobCommentStyles, WorkspaceCommentCell, pickWorkspaceComment } from "./JobComments";
 import { ContactedBadge, hasEarlierCalls, callLabel, callTone, shortDate } from "./ContactHistory";import { C } from "../theme";
 import { isPlainLeftClick } from "../lib/openLink";
@@ -268,6 +268,21 @@ export default function JobsTable({
   // Fresh rows carry the server's assignedTo — drop the session overlay so a
   // stale override never masks a newer server state.
   useEffect(() => { setAssignOverrides({}); }, [jobs]);
+
+  // Unassign from the table: the assignee (My Workspace) or an admin (any job).
+  // In My Workspace the released row leaves the list; elsewhere it shows "Self-assign".
+  const [releaseError, setReleaseError] = useState(null); // { jobId, text }
+  const releaseJob = useCallback(async (j, ownerName) => {
+    const who = ownerName ? ` from ${ownerName}` : "";
+    if (!window.confirm(`Unassign "${j.title}"${who}? It goes back to the unassigned pool.`)) return;
+    setReleaseError(null);
+    try {
+      await unassignJob(j.id);
+      setAssignOverrides((prev) => ({ ...prev, [j.id]: null }));
+    } catch (err) {
+      setReleaseError({ jobId: j.id, text: err?.message || "Couldn't unassign this job." });
+    }
+  }, []);
   const noDataTimer = useRef(null);
   const showRowMsg = useCallback((jobId, text) => {
     setNoDataMsg({ jobId, text });
@@ -584,7 +599,7 @@ export default function JobsTable({
               <tr>
                 {/* Widths rebalanced so Email gets room for a full address and the pinned
                     Contact column stays visible; contact cells ellipsize within these. */}
-                {workspace && <PlainHeader label="" width={84} />}
+                {workspace && <PlainHeader label="" width={120} />}
                 <SortHeader label="Job title" col="title" sort={sort} setSort={setSort} width={220} />
                 <SortHeader label="Company" col="company" sort={sort} setSort={setSort} width={160} />
                 <PlainHeader label="Company size" width={130} />
@@ -610,6 +625,8 @@ export default function JobsTable({
                 </td></tr>
               )}
               {!loading && pageRows.map((j) => {
+                // My Workspace lists my assigned jobs only — a row just unassigned here leaves it.
+                if (workspace && assignOverrides[j.id] === null) return null;
                 // One normalized contact view per row — the cells below read the
                 // same values the filters, run stats and CSV export count.
                 const c = jobContact(j);
@@ -637,7 +654,17 @@ export default function JobsTable({
                           aria-label={`Open ${j.title} in a new tab`} style={{ ...ROW_ICON_BTN, textDecoration: "none" }}>
                           <ExternalLink size={14} />
                         </a>
+                        {assignedTo && (!isAssignedToOther(assignedTo, myEmail) || isAdmin) && (
+                          <button type="button" className="ha-btn ha-btn-secondary" title="Unassign this job"
+                            aria-label={`Unassign ${j.title}`} style={{ ...ROW_ICON_BTN, color: "#B91C1C" }}
+                            onClick={() => releaseJob(j, isAssignedToOther(assignedTo, myEmail) ? assignedTo.name : "")}>
+                            <UserMinus size={14} />
+                          </button>
+                        )}
                       </div>
+                      {releaseError && releaseError.jobId === j.id && (
+                        <small style={{ display: "block", marginTop: 3, color: "#B91C1C", fontSize: 11, whiteSpace: "normal" }}>{releaseError.text}</small>
+                      )}
                     </td>
                   )}
                   <td className="ha-td">
@@ -796,7 +823,11 @@ export default function JobsTable({
                   <td className="ha-td"><SourceChip source={c.source} /></td>
                   <td className="ha-td" style={{ whiteSpace: "nowrap", color: C.textSoft }}>{j.postedDate || "—"}</td>
                   <td className="ha-td ajm-action">
-                    <AssignCell assignedTo={assignedTo} myEmail={myEmail} isAdmin={isAdmin} onOpen={() => setAssignModalJob(j)} />
+                    <AssignCell assignedTo={assignedTo} myEmail={myEmail} isAdmin={isAdmin} onOpen={() => setAssignModalJob(j)}
+                      onRelease={isAdmin && assignedTo ? () => releaseJob(j, assignedTo.name) : undefined} />
+                    {releaseError && releaseError.jobId === j.id && (
+                      <small style={{ display: "block", marginTop: 3, color: "#B91C1C", fontSize: 11, whiteSpace: "normal" }}>{releaseError.text}</small>
+                    )}
                   </td>
                   </>)}
                 </tr>
@@ -858,6 +889,14 @@ export default function JobsTable({
             const call = callForPhone(phoneVerify[cj.id], jobContact(cj).phone);
             setCommentModalJob(null);
             if (call?.id) openEditCall(cj, call);
+          } : undefined}
+          onDeleteCall={isAdmin ? async () => {
+            const cj = commentModalJob;
+            const call = callForPhone(phoneVerify[cj.id], jobContact(cj).phone);
+            if (!call?.id || !window.confirm("Delete this call log? It is removed from Phone logs and the job's history, and any flag it alone set on the number (invalid, do-not-call, warm) is lifted.")) return;
+            await deletePhoneCallLog(call.id);
+            setCommentModalJob(null);
+            refreshPhoneVerifications();
           } : undefined}
           onChanged={refreshJobComments}
           onClose={() => setCommentModalJob(null)}

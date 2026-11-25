@@ -423,6 +423,14 @@ export function getPhoneCallLog(logId) {
   return request(`/phone-verifications/logs/${encodeURIComponent(logId)}`);
 }
 
+/** DELETE /phone-verifications/logs/{id} — delete one logged call (admins only). A soft
+ * delete: it leaves Phone logs, the job's history and the tables; what its outcome set on
+ * the number is reversed unless another call still justifies it. Returns
+ * { id, job_id, deleted: true }. 403 non-admin, 404 missing / already deleted. */
+export function deletePhoneCallLog(logId) {
+  return request(`/phone-verifications/logs/${encodeURIComponent(logId)}`, { method: "DELETE" });
+}
+
 /** PATCH /phone-verifications/logs/{id} — edit a logged call in place (no new record).
  * body: { status, outcome, details, remarks, proof: [{name, size, type, src}], follow_up,
  * reminder_at (ISO|null) } — the same fields as logPhoneCall. Returns the updated row in

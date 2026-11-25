@@ -5,7 +5,7 @@ Endpoints
 ─────────
 POST   /jobs/{id}/assign — claim the job for the current user (optional note);
                            409 if someone else already holds it
-DELETE /jobs/{id}/assign — release the job; only the assignee may do this
+DELETE /jobs/{id}/assign — release the job; the assignee or an admin may do this
 GET    /jobs/assignment-reminders/summary — how many of my self-assigned jobs
                            reached N days (default 7) without a dismissed reminder
 POST   /jobs/assignment-reminders/dismiss — dismiss every reminder due now
@@ -70,7 +70,7 @@ async def unassign_job_route(
     """Release the job from the current user.
 
     Releasing an unassigned job is a no-op that still returns 200. Returns
-    `{"job_id", "assigned_to": null}`; 404 if the job does not exist, 403 if another user holds it.
+    `{"job_id", "assigned_to": null}`; 404 if the job does not exist, 403 if another user holds it (admins may release any job).
     """
     job = await unassign_job(db, job_id, current_user)
     logger.info("job_unassigned", job_id=job_id, user=current_user.email)

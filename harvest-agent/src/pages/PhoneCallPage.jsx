@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { useNavigate, useParams } from "react-router-dom";
-import { ArrowLeft, Briefcase, Paperclip, Pencil, RefreshCw } from "lucide-react";
-import { getPhoneCallLog } from "../api";
+import { ArrowLeft, Briefcase, Paperclip, Pencil, RefreshCw, Trash2 } from "lucide-react";
+import { getPhoneCallLog, deletePhoneCallLog } from "../api";
+import { useTenant } from "../TenantContext";
 import { C } from "../theme";
 import PhoneVerifyModal, { outcomeDetailText } from "../components/PhoneVerify";
 import { ContactTimeline } from "../components/ContactHistory";
@@ -40,6 +41,19 @@ export default function PhoneCallPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null); // { status, message }
   const [editing, setEditing] = useState(false);
+  const { isAdmin } = useTenant();
+  const [deleting, setDeleting] = useState(false);
+  const deleteCall = async () => {
+    if (!window.confirm("Delete this call log? It is removed from Phone logs and the job's history, and any flag it alone set on the number (invalid, do-not-call, warm) is lifted.")) return;
+    setDeleting(true);
+    try {
+      await deletePhoneCallLog(logId);
+      navigate("/phone-logs", { replace: true });
+    } catch (err) {
+      setDeleting(false);
+      window.alert(err?.message || "Couldn't delete this call log.");
+    }
+  };
   // Bumped after an edit so the history below re-fetches with the new outcome.
   const [historyKey, setHistoryKey] = useState(0);
 
@@ -122,6 +136,12 @@ export default function PhoneCallPage() {
               <button className="ha-btn" onClick={() => setEditing(true)}
                 style={{ background: C.primary, color: "#fff", border: `1px solid ${C.primary}` }}>
                 <Pencil size={15} /> Edit call log
+              </button>
+            )}
+            {isAdmin && (
+              <button className="ha-btn ha-btn-secondary" onClick={deleteCall} disabled={deleting}
+                style={{ color: "#B91C1C", borderColor: "#FCA5A5" }} title="Delete this call log (admins)">
+                <Trash2 size={15} /> {deleting ? "Deleting…" : "Delete"}
               </button>
             )}
           </div>

@@ -4,7 +4,7 @@ A user claims a job for themselves, optionally with a note. Once claimed, the jo
 is locked to that user: everyone can still see the row (and who owns it) in
 GET /jobs, but only the assignee (or an admin) can open its detail or run
 outreach on it — the routes call ensure_job_access() before doing either. The
-assignee can release the job again; nobody else can (admins included).
+assignee can release the job again, and so can an admin; nobody else can.
 
 Identity is the user's email (users have no separate display name); the shown
 name is derived from it at claim time. Matching is case-insensitive.
@@ -56,7 +56,7 @@ def ensure_job_access(assigned_to: dict[str, Any] | str | None, user: Authentica
 
     Accepts either an assignment_view() block or the raw assigned_to_email.
     Admins bypass the lock: they can open and work on any assigned job (but
-    only the assignee can release it — see unassign_job)."""
+    the assignee or an admin can release it — see unassign_job)."""
     if not assigned_to or user.is_admin:
         return
     email = assigned_to.get("email") if isinstance(assigned_to, dict) else assigned_to
@@ -118,17 +118,20 @@ async def assign_job(db: AsyncSession, job_id: str, user: AuthenticatedUser, not
 
 
 async def unassign_job(db: AsyncSession, job_id: str, user: AuthenticatedUser) -> ScrapedJobORM:
-    """Release `job_id`. Only the current assignee may do this."""
-    row = await db.execute(select(ScrapedJobORM).where(ScrapedJobORM.id == job_id))
+    """Release `job_id`. The current assignee or an admin may do this (My Workspace
+    "Unassign"); anyone else gets 403. Tenant-scoped: another tenant's job is a 404."""
+    row = await db.execute(
+        apply_tenant(select(ScrapedJobORM).where(ScrapedJobORM.id == job_id), ScrapedJobORM.tenant_id)
+    )
     job = row.scalar_one_or_none()
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Job {job_id} not found")
     if not job.assigned_to_email:
         return job
-    if not _same_user(job.assigned_to_email, user):
+    if not user.is_admin and not _same_user(job.assigned_to_email, user):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Only {job.assigned_to_name or job.assigned_to_email} can release this job.",
+            detail=f"Only {job.assigned_to_name or job.assigned_to_email} or an admin can release this job.",
         )
     job.assigned_to_email = None
     job.assigned_to_name = ""

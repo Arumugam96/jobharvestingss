@@ -428,6 +428,28 @@ async def update_phone_call_log(
     return item
 
 
+@router.delete(
+    "/phone-verifications/logs/{log_id}",
+    status_code=status.HTTP_200_OK,
+    summary="Delete a logged call (admins only)",
+    responses={403: {"description": "Admins only"},
+               404: {"description": "Call log not found (or already deleted)"}},
+)
+async def delete_phone_call_log(
+    log_id: int,
+    current_user: AuthenticatedUser = Depends(require_admin),
+    db: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """Soft-delete one call log: it disappears from Phone logs, the job's history and the
+    tables, its open reminder closes, and what its outcome set on the number (flags,
+    correct number, do-not-call suppression) is reversed unless another call still
+    justifies it. Returns `{"id", "job_id", "deleted": true}`."""
+    result = await pvs.delete_call(db, log_id, current_user)
+    logger.info("phone_call_log_deleted", log_id=log_id, job_id=result["job_id"],
+                user=current_user.email)
+    return result
+
+
 @router.get("/phone-verifications/assignees",
             summary="Business leads for the Phone logs assignee filter (admins only)")
 async def phone_log_assignees(

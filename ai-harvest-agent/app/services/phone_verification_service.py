@@ -1949,6 +1949,42 @@ async def update_call(
     return item
 
 
+async def delete_call(db: AsyncSession, log_id: int, user: AuthenticatedUser) -> dict[str, Any]:
+    """Delete one call log (DELETE /phone-verifications/logs/{id}) — admins only.
+
+    A soft delete like "Clear status": the row gets cleared_at (so every read drops
+    it) and its open follow-up is closed. What the call's outcome set on the number
+    is reversed first via _undo_outcome_effects — flag stamps it alone justified,
+    its correct_number, its do-not-call email suppression — while a flag another
+    non-cleared call still justifies is kept. The row keeps its original outcome
+    for audit. 404 when missing, already cleared or another tenant's; 403 for
+    non-admins. Returns {"id", "job_id", "deleted": True}."""
+    if not user.is_admin:
+        raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN,
+                            detail="Only admins can delete call logs.")
+    row = (await db.execute(apply_tenant(
+        select(PhoneCallLogORM).where(PhoneCallLogORM.id == log_id), PhoneCallLogORM.tenant_id,
+    ))).scalar_one_or_none()
+    if row is None or row.cleared_at is not None:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND, detail=f"Call log {log_id} not found"
+        )
+    now = _now()
+    row.cleared_at = now
+    row.updated_at = now
+    if row.follow_up_due_at is not None and row.follow_up_done_at is None:
+        row.follow_up_done_at = now
+    old_outcome, old_details_raw = row.call_outcome or "", row.outcome_details or ""
+    if old_outcome:
+        # _undo_outcome_effects reverses what the OLD outcome set and the row's CURRENT
+        # one no longer sets — blank the current outcome for the undo, then restore it.
+        row.call_outcome, row.outcome_details = "", ""
+        await _undo_outcome_effects(db, row, user, old_outcome, _loads(old_details_raw, {}), now)
+        row.call_outcome, row.outcome_details = old_outcome, old_details_raw
+    await db.commit()
+    return {"id": log_id, "job_id": row.job_id, "deleted": True}
+
+
 async def list_logs(
     db: AsyncSession,
     *,

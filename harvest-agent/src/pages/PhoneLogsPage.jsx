@@ -1,8 +1,8 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useNavigate } from "react-router-dom";
-import { ChevronDown, ChevronRight, ExternalLink, Lock, Pencil, RefreshCw, Search, X } from "lucide-react";
-import { getPhoneLogs, getPhoneInventory, getAssignedJobs, exportPhoneLogsXlsx, getPhoneLogAssignees, getPhoneLogContacts } from "../api";
+import { ChevronDown, ChevronRight, ExternalLink, Lock, Pencil, RefreshCw, Search, Trash2, X } from "lucide-react";
+import { getPhoneLogs, getPhoneInventory, getAssignedJobs, exportPhoneLogsXlsx, getPhoneLogAssignees, getPhoneLogContacts, deletePhoneCallLog } from "../api";
 import { useTenant } from "../TenantContext";
 import { C } from "../theme";
 import { StatCard, Select, PlainHeader } from "../components/ui";
@@ -762,6 +762,21 @@ export default function PhoneLogsPage() {
       })
       .catch(() => {});
   };
+  /** Admins: delete one call log, drop it from the current page, refresh the tiles. */
+  const deleteCall = async (row) => {
+    if (!window.confirm("Delete this call log? It is removed from Phone logs and the job's history, and any flag it alone set on the number (invalid, do-not-call, warm) is lifted.")) return;
+    try {
+      await deletePhoneCallLog(row.id);
+      setData((prev) => (prev ? {
+        ...prev,
+        items: (prev.items || []).filter((r) => String(r.id) !== String(row.id)),
+        total: Math.max(0, (prev.total || 0) - 1),
+      } : prev));
+      refreshSummaryQuietly();
+    } catch (err) {
+      window.alert(err?.message || "Couldn't delete this call log.");
+    }
+  };
   /** After an edit: swap the updated call into the current page in place, then refresh the tiles. */
   const onCallEdited = (updated) => {
     if (updated && updated.id != null) {
@@ -953,6 +968,14 @@ export default function PhoneLogsPage() {
                               onKeyDown={(e) => e.stopPropagation()}>
                               <ExternalLink size={14} />
                             </a>
+                            {isAdmin && (
+                              <button type="button" className="ha-btn ha-btn-secondary" title="Delete call log (admins)"
+                                aria-label={`Delete call log for ${row.phone || "this call"}`}
+                                style={{ ...ROW_ICON_BTN, color: "#B91C1C" }}
+                                onClick={(e) => { e.stopPropagation(); deleteCall(row); }}>
+                                <Trash2 size={14} />
+                              </button>
+                            )}
                           </div>
                         </td>
                         <td className="ha-td"><StatusPill status={row.status} /></td>

@@ -59,6 +59,8 @@ const styles = `
 .ajm-chip.mine { background: #ECFDF5; border-color: #86EFAC; color: #047857; cursor: pointer; }
 .ajm-chip.mine:hover { background: #D1FAE5; }
 .ajm-chip.other { background: #F8FAFC; border-color: #E2E8F0; color: #475569; cursor: default; }
+.ajm-chip.other.admin { cursor: pointer; }
+.ajm-chip.other.admin:hover { background: #FEF2F2; border-color: #FCA5A5; color: #B91C1C; }
 .ajm-chip span.nm { overflow: hidden; text-overflow: ellipsis; }
 .ajm-av { flex: none; width: 22px; height: 22px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; color: #fff; }
 .ajm-locked > td:not(.ajm-action):not(.ajm-keep) { opacity: .55; }
@@ -100,7 +102,7 @@ export function AssignJobStyles() {
  * (click to update/release), a grey lock chip with the owner's name otherwise.
  * The "You" chip only renders once `myEmail` is known (isAssignedToOther treats
  * an unknown user as "someone else"). */
-export function AssignCell({ assignedTo, myEmail, onOpen, isAdmin = false }) {
+export function AssignCell({ assignedTo, myEmail, onOpen, isAdmin = false, onRelease }) {
   if (!assignedTo) {
     return (
       <button type="button" className="ajm-btn" onClick={onOpen}>
@@ -121,9 +123,20 @@ export function AssignCell({ assignedTo, myEmail, onOpen, isAdmin = false }) {
       </button>
     );
   }
+  if (isAdmin && onRelease) {
+    // Admin: someone else's job — click to unassign it (DELETE /jobs/{id}/assign allows admins).
+    return (
+      <button type="button" className="ajm-chip other admin" onClick={onRelease}
+        title={`${tip}\nAdmin: you can open and work on this job. Click to unassign it.`}>
+        <span className="ajm-av" style={{ background: "#64748B" }}>{initials(assignedTo.name)}</span>
+        <span className="nm">{assignedTo.name}</span>
+        <UserMinus size={12} style={{ flex: "none" }} />
+      </button>
+    );
+  }
   return (
     <span className="ajm-chip other" title={isAdmin
-      ? `${tip}\nAdmin access: you can open and work on this job; only they can release it.`
+      ? `${tip}\nAdmin access: you can open and work on this job.`
       : `${tip}\nOnly they can open or work on this job.`}>
       <span className="ajm-av" style={{ background: "#64748B" }}>{initials(assignedTo.name)}</span>
       <span className="nm">{assignedTo.name}</span>

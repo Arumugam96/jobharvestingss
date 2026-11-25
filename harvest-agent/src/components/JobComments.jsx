@@ -42,7 +42,7 @@ const styles = `
  *   call: the row's latest call (callFromView shape + `label`), or null when not called.
  *   onEditCall: opens the call editor; omitted for roles that can't edit calls.
  */
-export default function JobCommentModal({ job, call = null, onEditCall, onChanged = () => {}, onClose = () => {} }) {
+export default function JobCommentModal({ job, call = null, onEditCall, onDeleteCall, onChanged = () => {}, onClose = () => {} }) {
   const [data, setData] = useState({ loading: true, comments: [], note: "", error: "" });
   const [draft, setDraft] = useState("");
   const [editing, setEditing] = useState(null); // { id, body }
@@ -125,10 +125,18 @@ export default function JobCommentModal({ job, call = null, onEditCall, onChange
               <div className="jcm-text" style={{ fontWeight: 600 }}>{call.label}</div>
               {call.remarks && <div className="jcm-text" style={{ marginTop: 3 }}>{call.remarks}</div>}
               {onEditCall ? (
-                <button type="button" className="ajm-fbtn ajm-ghost" style={{ marginTop: 8, padding: "6px 11px" }}
-                  disabled={!!busy} onClick={onEditCall}>
-                  <PhoneCall size={13} /> Edit call log
-                </button>
+                <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
+                  <button type="button" className="ajm-fbtn ajm-ghost" style={{ padding: "6px 11px" }}
+                    disabled={!!busy} onClick={onEditCall}>
+                    <PhoneCall size={13} /> Edit call log
+                  </button>
+                  {onDeleteCall && (
+                    <button type="button" className="ajm-fbtn ajm-danger" style={{ padding: "6px 11px" }}
+                      disabled={!!busy} onClick={() => run("delcall", onDeleteCall)}>
+                      {busy === "delcall" ? <RefreshCw size={13} className="ajm-spin" /> : <Trash2 size={13} />} Delete call log
+                    </button>
+                  )}
+                </div>
               ) : (
                 <div className="jcm-src" style={{ marginTop: 6 }}>Only admins and business leads can edit call logs.</div>
               )}
