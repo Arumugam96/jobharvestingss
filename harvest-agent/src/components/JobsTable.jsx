@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Search, Mail, Lock, Pencil } from "lucide-react";
+import { Search, Mail, Lock, Pencil, ExternalLink } from "lucide-react";
 import EmailComposeModal from "./EmailComposeModal";
 import LinkedInMessageModal from "./LinkedInMessageModal";
 import PhoneVerifyModal, {
@@ -28,8 +28,11 @@ const OUTCOME_TONES = {
   bad: { color: "#DC2626", bg: "#FEF2F2" },
 };
 
+// Square icon button for the My Workspace row actions (same as Phone Logs).
+const ROW_ICON_BTN = { width: 30, height: 30, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center" };
+
 // My Workspace: the latest call's outcome chip, its details, and who called when.
-function CallOutcomeCell({ call, onEdit }) {
+function CallOutcomeCell({ call }) {
   if (!call) return <span style={{ color: "#94A3B8", fontSize: 12.5 }}>Not called yet</span>;
   const t = OUTCOME_TONES[callTone(call.status, call.outcome)] || OUTCOME_TONES.bad;
   const detail = outcomeDetailText(call.details);
@@ -41,13 +44,6 @@ function CallOutcomeCell({ call, onEdit }) {
       </span>
       {detail && <div style={{ marginTop: 3, fontSize: 12, color: C.textSoft }}>{detail}</div>}
       {meta && <div style={{ marginTop: 2, fontSize: 11.5, color: "#94A3B8" }}>{meta}</div>}
-      {/* Edit THIS call in place (no new attempt) — admins: any call; business
-          leads: their own (the server re-checks via GET/PATCH /phone-verifications/logs/{id}). */}
-      {onEdit && (
-        <button type="button" className="jcm-cell-btn" onClick={onEdit} title="Edit this call's outcome and comments">
-          <Pencil size={11} /> Edit
-        </button>
-      )}
     </div>
   );
 }
@@ -547,7 +543,7 @@ export default function JobsTable({
 
   // Columns: Job title, Company, Company size, POC, Email, Mobile, then
   // Contact, Source, Posted date, Action — or, in My Workspace, Call outcome, Comments.
-  const colCount = workspace ? 8 : 10;
+  const colCount = workspace ? 9 : 10;
 
   return (
     <>
@@ -588,6 +584,7 @@ export default function JobsTable({
               <tr>
                 {/* Widths rebalanced so Email gets room for a full address and the pinned
                     Contact column stays visible; contact cells ellipsize within these. */}
+                {workspace && <PlainHeader label="" width={84} />}
                 <SortHeader label="Job title" col="title" sort={sort} setSort={setSort} width={220} />
                 <SortHeader label="Company" col="company" sort={sort} setSort={setSort} width={160} />
                 <PlainHeader label="Company size" width={130} />
@@ -624,6 +621,25 @@ export default function JobsTable({
                 const lockedMsg = locked ? `Assigned to ${assignedTo.name}` : "";
                 return (
                 <tr key={j.id} className={"ha-row" + (locked ? " ajm-locked" : "")}>
+                  {workspace && (
+                    // Same row actions as Phone Logs: edit (call log + comments) and open in a new tab.
+                    <td className="ha-td" style={{ whiteSpace: "nowrap" }}>
+                      <div style={{ display: "inline-flex", gap: 6 }}>
+                        {!locked && (
+                          <button type="button" className="ha-btn ha-btn-secondary" title="Edit call log and comments"
+                            aria-label={`Edit call log and comments for ${j.title}`} style={ROW_ICON_BTN}
+                            onClick={() => setCommentModalJob(j)}>
+                            <Pencil size={14} />
+                          </button>
+                        )}
+                        <a href={"/jobs/" + encodeURIComponent(j.id)} target="_blank" rel="noopener noreferrer"
+                          className="ha-btn ha-btn-secondary" title="Open this job in a new tab"
+                          aria-label={`Open ${j.title} in a new tab`} style={{ ...ROW_ICON_BTN, textDecoration: "none" }}>
+                          <ExternalLink size={14} />
+                        </a>
+                      </div>
+                    </td>
+                  )}
                   <td className="ha-td">
                     {locked ? (
                       <span title={`${lockedMsg} — only they can open it`} style={{ display: "inline-flex", alignItems: "center", gap: 6, color: C.textSoft }}>
@@ -691,9 +707,8 @@ export default function JobsTable({
                     <td className="ha-td">
                       {(() => {
                         const call = callForPhone(phoneVerify[j.id], c.phone);
-                        const editable = call && call.id && !call.inherited && canViewPhoneLogs && !locked;
                         return (<>
-                          <CallOutcomeCell call={call} onEdit={editable ? () => openEditCall(j, call) : undefined} />
+                          <CallOutcomeCell call={call} />
                           {editCallError && editCallError.jobId === j.id && (
                             <small style={{ display: "block", marginTop: 3, color: "#B91C1C", fontSize: 11 }}>{editCallError.text}</small>
                           )}
@@ -707,8 +722,7 @@ export default function JobsTable({
                           comment: jobComments[j.id]?.latest,
                           note: assignedTo?.note,
                         })}
-                        count={jobComments[j.id]?.count || 0}
-                        onOpen={() => setCommentModalJob(j)} />
+                      />
                     </td>
                   </>) : (<>
                   <td className="ha-td ha-td-pin">
@@ -834,6 +848,17 @@ export default function JobsTable({
       {commentModalJob && (
         <JobCommentModal
           job={commentModalJob}
+          call={(() => {
+            const cj = commentModalJob;
+            const call = callForPhone(phoneVerify[cj.id], jobContact(cj).phone);
+            return call ? { ...call, label: callLabel(call.status, call.outcome) } : null;
+          })()}
+          onEditCall={canViewPhoneLogs ? () => {
+            const cj = commentModalJob;
+            const call = callForPhone(phoneVerify[cj.id], jobContact(cj).phone);
+            setCommentModalJob(null);
+            if (call?.id) openEditCall(cj, call);
+          } : undefined}
           onChanged={refreshJobComments}
           onClose={() => setCommentModalJob(null)}
         />

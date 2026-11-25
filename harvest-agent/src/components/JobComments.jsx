@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { X, Check, RefreshCw, AlertCircle, Pencil, Trash2, MessageSquarePlus, MessageSquare } from "lucide-react";
+import { X, Check, RefreshCw, AlertCircle, Pencil, Trash2, MessageSquarePlus, PhoneCall } from "lucide-react";
 import { getJobComments, addJobComment, updateJobComment, deleteJobComment, ApiError } from "../api";
 import { AssignJobStyles } from "./AssignJob";
 import { C } from "../theme";
@@ -29,17 +29,20 @@ const styles = `
 .jcm-ibtn:hover:not(:disabled) { background: #E2E8F0; color: #1E293B; }
 .jcm-ibtn.del:hover:not(:disabled) { background: #FEF2F2; color: #B91C1C; }
 .jcm-empty { font-size: 12.5px; color: #94A3B8; }
-.jcm-cell-btn { display: inline-flex; align-items: center; gap: 4px; margin-top: 4px; padding: 1px 7px; height: 22px; border-radius: 999px; border: 1px solid #CBD5E1; background: rgba(255,255,255,.85); color: #475569; font-size: 11.5px; font-weight: 600; cursor: pointer; font-family: inherit; }
-.jcm-cell-btn:hover { background: #EFF4FF; border-color: #93C5FD; color: #2563EB; }
+.jcm-item.jcm-call { background: #F5F8FF; border-color: #C7D7FE; }
 .jcm-src { font-size: 11px; color: #94A3B8; margin-top: 2px; }
 `;
 
 /**
- * Comment history for one job: list (newest first), add, and edit / delete your own
- * (admins: any). The job's assignment note is shown last, read-only.
- * @param {{ job: {id, title, company}, onChanged?: () => void, onClose: () => void }} props
+ * The My Workspace row editor: the job's call log (edit it in place via the Phone Logs
+ * call editor) and its comment history — list (newest first), add, and edit / delete
+ * your own (admins: any). The job's assignment note is shown last, read-only.
+ * @param {{ job: {id, title, company}, call?: object|null, onEditCall?: () => void,
+ *   onChanged?: () => void, onClose: () => void }} props
+ *   call: the row's latest call (callFromView shape + `label`), or null when not called.
+ *   onEditCall: opens the call editor; omitted for roles that can't edit calls.
  */
-export default function JobCommentModal({ job, onChanged = () => {}, onClose = () => {} }) {
+export default function JobCommentModal({ job, call = null, onEditCall, onChanged = () => {}, onClose = () => {} }) {
   const [data, setData] = useState({ loading: true, comments: [], note: "", error: "" });
   const [draft, setDraft] = useState("");
   const [editing, setEditing] = useState(null); // { id, body }
@@ -97,10 +100,10 @@ export default function JobCommentModal({ job, onChanged = () => {}, onClose = (
     <div className="ajm-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget && !busy) onClose(); }}>
       <AssignJobStyles />
       <style>{styles}</style>
-      <div className="ajm-card jcm-card" role="dialog" aria-modal="true" aria-label="Job comments">
+      <div className="ajm-card jcm-card" role="dialog" aria-modal="true" aria-label="Edit call log and comments">
         <div className="ajm-head">
           <span className="ajm-title" style={{ display: "inline-flex", alignItems: "center", gap: 7 }}>
-            <MessageSquare size={15} /> Comments
+            <Pencil size={15} /> Call log &amp; comments
           </span>
           <button className="ajm-close" onClick={onClose} disabled={!!busy} aria-label="Close"><X size={17} /></button>
         </div>
@@ -110,6 +113,29 @@ export default function JobCommentModal({ job, onChanged = () => {}, onClose = (
             <strong>{job.title}</strong>
             <span>{job.company}</span>
           </div>
+
+          <span className="ajm-label">Call log</span>
+          {call ? (
+            <div className="jcm-item jcm-call">
+              <div className="jcm-meta">
+                <span>
+                  {[call.by && `by ${call.by}`, call.at && fmtTime(call.at), call.inherited && "on another job"].filter(Boolean).join(" · ")}
+                </span>
+              </div>
+              <div className="jcm-text" style={{ fontWeight: 600 }}>{call.label}</div>
+              {call.remarks && <div className="jcm-text" style={{ marginTop: 3 }}>{call.remarks}</div>}
+              {onEditCall ? (
+                <button type="button" className="ajm-fbtn ajm-ghost" style={{ marginTop: 8, padding: "6px 11px" }}
+                  disabled={!!busy} onClick={onEditCall}>
+                  <PhoneCall size={13} /> Edit call log
+                </button>
+              ) : (
+                <div className="jcm-src" style={{ marginTop: 6 }}>Only admins and business leads can edit call logs.</div>
+              )}
+            </div>
+          ) : (
+            <span className="jcm-empty">Not called yet. Log a call from the phone button in the Mobile column.</span>
+          )}
 
           <span className="ajm-label">Add a comment</span>
           <textarea className="ajm-textarea" value={draft} maxLength={MAX_LEN} disabled={!!busy}
@@ -203,24 +229,17 @@ export function pickWorkspaceComment({ call, comment, note }) {
 
 const SOURCE_LABEL = { call: "Call remarks", comment: "Comment", note: "Assignment note" };
 
-/** The My Workspace Comments cell: the picked text (3 lines, full on hover), where it
- * came from, and a button opening the job's comment history. */
-export function WorkspaceCommentCell({ picked, count = 0, onOpen }) {
+/** The My Workspace Comments cell: the picked text (3 lines, full on hover) and where it
+ * came from. Editing happens from the row's leading pencil (JobCommentModal). */
+export function WorkspaceCommentCell({ picked }) {
+  if (!picked) return <span style={{ color: "#94A3B8" }}>—</span>;
   return (
     <div style={{ whiteSpace: "normal" }}>
-      {picked ? (
-        <>
-          <div title={picked.text} style={{
-            color: C.text, fontSize: 13, overflow: "hidden",
-            display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical",
-          }}>{picked.text}</div>
-          <div className="jcm-src">{SOURCE_LABEL[picked.source]}{picked.by ? ` · ${picked.by}` : ""}</div>
-        </>
-      ) : <span style={{ color: "#94A3B8" }}>—</span>}
-      <button type="button" className="jcm-cell-btn" onClick={onOpen}
-        title={count ? `${count} comment${count > 1 ? "s" : ""} — view, add or edit` : "Add a comment"}>
-        {count ? <><MessageSquare size={11} /> {count}</> : <><MessageSquarePlus size={11} /> Add</>}
-      </button>
+      <div title={picked.text} style={{
+        color: C.text, fontSize: 13, overflow: "hidden",
+        display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical",
+      }}>{picked.text}</div>
+      <div className="jcm-src">{SOURCE_LABEL[picked.source]}{picked.by ? ` · ${picked.by}` : ""}</div>
     </div>
   );
 }
