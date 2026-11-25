@@ -92,6 +92,7 @@ async def engine():
     import app.models.phone_contact_flag  # noqa: F401 — registers phone_contact_flags
     import app.models.job_assignment_rotation  # noqa: F401 — registers job_assignment_rotation
     import app.models.company_override  # noqa: F401 — registers company_overrides / classification_keywords
+    import app.models.job_comment  # noqa: F401 — registers job_comments
 
     eng = create_async_engine(TEST_DB_URL, echo=False)
     async with eng.begin() as conn:

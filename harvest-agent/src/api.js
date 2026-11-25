@@ -252,6 +252,43 @@ export function assignJob(jobId, note = "") {
   });
 }
 
+/** GET /jobs/{id}/comments — the job's comments, newest first:
+ * { job_id, comments: [{id, body, author_name, author_email, created_at, updated_at, edited, can_edit}],
+ *   assignment_note }. 403 if the job is locked to someone else (admins pass). */
+export function getJobComments(jobId) {
+  return request(`/jobs/${encodeURIComponent(jobId)}/comments`);
+}
+
+/** POST /jobs/{id}/comments — add a comment; returns the new comment. */
+export function addJobComment(jobId, body) {
+  return request(`/jobs/${encodeURIComponent(jobId)}/comments`, {
+    method: "POST",
+    body: JSON.stringify({ body }),
+  });
+}
+
+/** PATCH /jobs/{id}/comments/{commentId} — edit a comment (author or admin). */
+export function updateJobComment(jobId, commentId, body) {
+  return request(`/jobs/${encodeURIComponent(jobId)}/comments/${encodeURIComponent(commentId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ body }),
+  });
+}
+
+/** DELETE /jobs/{id}/comments/{commentId} — delete a comment (author or admin). */
+export function deleteJobComment(jobId, commentId) {
+  return request(`/jobs/${encodeURIComponent(jobId)}/comments/${encodeURIComponent(commentId)}`, {
+    method: "DELETE",
+  });
+}
+
+/** GET /jobs/comments/latest?job_ids=… — { items: { job_id: { latest: comment, count } } }
+ * for the visible rows; jobs without comments (or locked to someone else) are absent. */
+export function getLatestJobComments(jobIds = []) {
+  const ids = jobIds.slice(0, 200).join(",");
+  return request(`/jobs/comments/latest?job_ids=${encodeURIComponent(ids)}`);
+}
+
 /** DELETE /jobs/{id}/assign — release a job you assigned to yourself (403 for anyone else). */
 export function unassignJob(jobId) {
   return request(`/jobs/${encodeURIComponent(jobId)}/assign`, { method: "DELETE" });

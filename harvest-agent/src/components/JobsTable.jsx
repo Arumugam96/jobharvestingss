@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Search, Mail, Lock } from "lucide-react";
+import { Search, Mail, Lock, Pencil } from "lucide-react";
 import EmailComposeModal from "./EmailComposeModal";
 import LinkedInMessageModal from "./LinkedInMessageModal";
 import PhoneVerifyModal, {
@@ -8,7 +8,8 @@ import PhoneVerifyModal, {
   callForPhone, outcomeDetailText,
 } from "./PhoneVerify";
 import AssignJobModal, { AssignJobStyles, AssignCell, useCurrentUserEmail, isAssignedToOther } from "./AssignJob";
-import { getOutreachStatus, getPhoneVerifications, logPhoneCall } from "../api";
+import { getOutreachStatus, getPhoneVerifications, logPhoneCall, getPhoneCallLog, getLatestJobComments } from "../api";
+import JobCommentModal, { JobCommentStyles, WorkspaceCommentCell, pickWorkspaceComment } from "./JobComments";
 import { ContactedBadge, hasEarlierCalls, callLabel, callTone, shortDate } from "./ContactHistory";import { C } from "../theme";
 import { isPlainLeftClick } from "../lib/openLink";
 import { useTenant } from "../TenantContext";
@@ -26,10 +27,9 @@ const OUTCOME_TONES = {
   warn: { color: "#B45309", bg: "#FFFBEB" },
   bad: { color: "#DC2626", bg: "#FEF2F2" },
 };
-const MUTED_DASH = <span style={{ color: "#94A3B8" }}>—</span>;
 
 // My Workspace: the latest call's outcome chip, its details, and who called when.
-function CallOutcomeCell({ call }) {
+function CallOutcomeCell({ call, onEdit }) {
   if (!call) return <span style={{ color: "#94A3B8", fontSize: 12.5 }}>Not called yet</span>;
   const t = OUTCOME_TONES[callTone(call.status, call.outcome)] || OUTCOME_TONES.bad;
   const detail = outcomeDetailText(call.details);
@@ -41,19 +41,14 @@ function CallOutcomeCell({ call }) {
       </span>
       {detail && <div style={{ marginTop: 3, fontSize: 12, color: C.textSoft }}>{detail}</div>}
       {meta && <div style={{ marginTop: 2, fontSize: 11.5, color: "#94A3B8" }}>{meta}</div>}
+      {/* Edit THIS call in place (no new attempt) — admins: any call; business
+          leads: their own (the server re-checks via GET/PATCH /phone-verifications/logs/{id}). */}
+      {onEdit && (
+        <button type="button" className="jcm-cell-btn" onClick={onEdit} title="Edit this call's outcome and comments">
+          <Pencil size={11} /> Edit
+        </button>
+      )}
     </div>
-  );
-}
-
-// My Workspace: the latest call's comments (remarks), up to 3 lines; full text on hover.
-function CallCommentCell({ call }) {
-  const text = call?.remarks;
-  if (!text) return MUTED_DASH;
-  return (
-    <div title={text} style={{
-      whiteSpace: "normal", color: C.text, fontSize: 13, overflow: "hidden",
-      display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical",
-    }}>{text}</div>
   );
 }
 
@@ -270,7 +265,7 @@ export default function JobsTable({
   // "Assign to me": the logged-in user, the open modal, and assignments changed
   // in this session (overlaid on the server's row.assignedTo until the next fetch).
   const myEmail = useCurrentUserEmail();
-  const { isAdmin } = useTenant();
+  const { isAdmin, canViewPhoneLogs } = useTenant();
   const [assignModalJob, setAssignModalJob] = useState(null);
   const [assignOverrides, setAssignOverrides] = useState({}); // { [jobId]: assignedTo | null }
   const assignedOf = (j) => (j.id in assignOverrides ? assignOverrides[j.id] : j.assignedTo);
@@ -511,6 +506,45 @@ export default function JobsTable({
   }, [pageRowIdsKey, pagePhonesKey]);
   useEffect(() => { refreshPhoneVerifications(); }, [refreshPhoneVerifications]);
 
+  // My Workspace: newest job comment (+ count) per visible row — the Comments cell
+  // shows the newer of it and the latest call's remarks, else the assignment note.
+  const [jobComments, setJobComments] = useState({});
+  const [commentModalJob, setCommentModalJob] = useState(null);
+  const refreshJobComments = useCallback(async () => {
+    const ids = workspace && pageRowIdsKey ? pageRowIdsKey.split(",") : [];
+    if (!ids.length) return;
+    try {
+      const res = await getLatestJobComments(ids);
+      const items = (res && res.items) || {};
+      setJobComments((prev) => {
+        const next = { ...prev };
+        ids.forEach((id) => { if (items[id]) next[id] = items[id]; else delete next[id]; });
+        return next;
+      });
+    } catch {
+      // best-effort — the cell falls back to call remarks / assignment note
+    }
+  }, [workspace, pageRowIdsKey]);
+  useEffect(() => { refreshJobComments(); }, [refreshJobComments]);
+
+  // Editing an existing call in place: load the full log row (it carries can_edit and
+  // the fields the modal pre-fills), then open PhoneVerifyModal in edit mode.
+  const [editCallModal, setEditCallModal] = useState(null); // { job, row }
+  const [editCallError, setEditCallError] = useState(null); // { jobId, text }
+  const openEditCall = useCallback(async (job, call) => {
+    setEditCallError(null);
+    try {
+      const row = await getPhoneCallLog(call.id);
+      if (row && row.can_edit === false) {
+        setEditCallError({ jobId: job.id, text: "Only the caller or an admin can edit this call." });
+        return;
+      }
+      setEditCallModal({ job, row });
+    } catch (err) {
+      setEditCallError({ jobId: job.id, text: err?.message || "Couldn't open this call." });
+    }
+  }, []);
+
   // Columns: Job title, Company, Company size, POC, Email, Mobile, then
   // Contact, Source, Posted date, Action — or, in My Workspace, Call outcome, Comments.
   const colCount = workspace ? 8 : 10;
@@ -654,8 +688,28 @@ export default function JobsTable({
                     )}
                   </td>
                   {workspace ? (<>
-                    <td className="ha-td"><CallOutcomeCell call={callForPhone(phoneVerify[j.id], c.phone)} /></td>
-                    <td className="ha-td"><CallCommentCell call={callForPhone(phoneVerify[j.id], c.phone)} /></td>
+                    <td className="ha-td">
+                      {(() => {
+                        const call = callForPhone(phoneVerify[j.id], c.phone);
+                        const editable = call && call.id && !call.inherited && canViewPhoneLogs && !locked;
+                        return (<>
+                          <CallOutcomeCell call={call} onEdit={editable ? () => openEditCall(j, call) : undefined} />
+                          {editCallError && editCallError.jobId === j.id && (
+                            <small style={{ display: "block", marginTop: 3, color: "#B91C1C", fontSize: 11 }}>{editCallError.text}</small>
+                          )}
+                        </>);
+                      })()}
+                    </td>
+                    <td className="ha-td">
+                      <WorkspaceCommentCell
+                        picked={pickWorkspaceComment({
+                          call: callForPhone(phoneVerify[j.id], c.phone),
+                          comment: jobComments[j.id]?.latest,
+                          note: assignedTo?.note,
+                        })}
+                        count={jobComments[j.id]?.count || 0}
+                        onOpen={() => setCommentModalJob(j)} />
+                    </td>
                   </>) : (<>
                   <td className="ha-td ha-td-pin">
                     <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
@@ -774,6 +828,26 @@ export default function JobsTable({
           assignedTo={assignedOf(assignModalJob)}
           onChange={(next) => setAssignOverrides((prev) => ({ ...prev, [assignModalJob.id]: next }))}
           onClose={() => setAssignModalJob(null)}
+        />
+      )}
+      {workspace && <JobCommentStyles />}
+      {commentModalJob && (
+        <JobCommentModal
+          job={commentModalJob}
+          onChanged={refreshJobComments}
+          onClose={() => setCommentModalJob(null)}
+        />
+      )}
+      {editCallModal && (
+        <PhoneVerifyModal
+          key={editCallModal.row.id}
+          editCall={editCallModal.row}
+          jobId={editCallModal.job.id}
+          phone={editCallModal.row.phone}
+          pocName={editCallModal.row.contact_name}
+          company={editCallModal.job.company}
+          onSave={async () => { refreshPhoneVerifications(); }}
+          onClose={() => setEditCallModal(null)}
         />
       )}
       {phoneModal && (

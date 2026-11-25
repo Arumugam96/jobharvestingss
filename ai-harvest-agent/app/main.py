@@ -37,6 +37,7 @@ import app.models.outreach  # noqa: F401 — registers email_outreach on Base.me
 import app.models.outreach_reply  # noqa: F401 — registers outreach_replies on Base.metadata
 import app.models.phone_call_log  # noqa: F401 — registers phone_call_logs on Base.metadata
 import app.models.phone_contact_flag  # noqa: F401 — registers phone_contact_flags on Base.metadata
+import app.models.job_comment  # noqa: F401 — registers job_comments on Base.metadata
 import app.models.job_assignment_rotation  # noqa: F401 — registers job_assignment_rotation on Base.metadata
 import app.models.company_override  # noqa: F401 — registers company_overrides / classification_keywords on Base.metadata
 import app.models.resdex  # noqa: F401 — registers resdex_searches / resdex_candidates / resdex_candidate_emails / resdex_daily_usage on Base.metadata
@@ -56,6 +57,7 @@ from app.routes.dice_routes import router as dice_agent_router
 from app.routes.run_harvest_agent import router as run_harvest_agent_router
 from app.routes.frontend_routes import router as frontend_router
 from app.routes.job_assignment_routes import router as job_assignment_router
+from app.routes.job_comment_routes import router as job_comment_router
 from app.routes.job_edit_routes import router as job_edit_router
 from app.routes.company_classification_routes import router as company_classification_router
 from app.routes.phone_verification_routes import router as phone_verification_router
@@ -617,6 +619,8 @@ _TENANT_CONTENT_TABLES = [
     "phone_contact_flags",
     # Company classification overrides + editable keyword lists (alembic 0041).
     "company_overrides", "classification_keywords",
+    # Job comments (My Workspace "Comments" column; alembic 0043).
+    "job_comments",
 ]
 
 
@@ -1133,6 +1137,7 @@ def create_app() -> FastAPI:
     app.include_router(user_admin_router, dependencies=protected)             # GET /auth/users, PATCH /auth/users/{id}/role (admins only)
     app.include_router(frontend_router, dependencies=protected)               # GET /jobs, /lead-intelligence, /download/*, /health
     app.include_router(job_assignment_router, dependencies=protected)         # POST/DELETE /jobs/{id}/assign ("Assign to me")
+    app.include_router(job_comment_router, dependencies=protected)            # /jobs/{id}/comments, /jobs/comments/latest (My Workspace)
     app.include_router(job_edit_router, dependencies=protected)               # PATCH /jobs/{id} (edit job details)
     app.include_router(company_classification_router, dependencies=protected) # /company-overrides, /classification-keywords (admins)
     app.include_router(phone_verification_router, dependencies=protected)     # /jobs/{id}/phone-verification, /phone-verifications/* (call log + follow-ups)
