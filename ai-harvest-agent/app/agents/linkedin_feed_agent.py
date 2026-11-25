@@ -57,6 +57,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from html import escape as html_escape
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
@@ -68,6 +69,7 @@ from app.config import Settings, get_settings
 from app.core.contact_grounding import ground_email, ground_phone
 from app.core.contact_normalize import normalize_email, normalize_phone
 from app.core.dependencies import get_llm_service
+from app.core.text_formatting import description_text_to_html, sanitize_description_html
 from app.core.exceptions import LLMUnavailableError
 from app.models.harvest_run import LlmCallType
 from app.services import run_guard
@@ -240,6 +242,49 @@ def _page_closed(page: Any) -> bool | None:
         return None
 
 
+def _post_text_to_html(text: str) -> str:
+    """Plain post text → escaped HTML that keeps the author's line breaks: blank
+    lines split paragraphs, single newlines become <br> (bullets → <ul> via
+    description_text_to_html would reflow casual posts, so it isn't used here)."""
+    paras = [p.strip() for p in re.split(r"\n\s*\n", (text or "").replace("\r", ""))]
+    return "".join(
+        "<p>" + "<br>".join(html_escape(line.strip()) for line in p.split("\n")) + "</p>"
+        for p in paras if p
+    )
+
+
+def _build_description_html(
+    *, summary: str, details: list[tuple[str, str]], skills: list[str],
+    post_html: str, post_text: str,
+) -> str:
+    """Rich job_description_html for a feed lead, in the same sanitized subset the
+    LinkedIn Jobs agent stores: the LLM's requirement summary, a "Key details"
+    list, skills, then the ORIGINAL post — its own DOM markup when captured
+    (line breaks, links, hashtags), else its text with line breaks kept."""
+    parts: list[str] = []
+    if summary:
+        parts.append(description_text_to_html(summary))
+    rows = []
+    for label, value in details:
+        if not value:
+            continue
+        if label == "Registration link" and re.match(r"^https?://", value, re.I):
+            v = f'<a href="{html_escape(value, quote=True)}">{html_escape(value)}</a>'
+        else:
+            v = html_escape(value)
+        rows.append(f"<li><strong>{html_escape(label)}:</strong> {v}</li>")
+    if rows:
+        parts.append("<h3>Key details</h3><ul>" + "".join(rows) + "</ul>")
+    if skills:
+        parts.append("<h3>Skills</h3><p>" + html_escape(", ".join(skills)) + "</p>")
+    post = sanitize_description_html(post_html) if post_html else ""
+    if not post:
+        post = _post_text_to_html(post_text)
+    if post:
+        parts.append("<h3>Original post</h3>" + post)
+    return sanitize_description_html("".join(parts)) if parts else ""
+
+
 @dataclass
 class FeedLead:
     """One validated vendor-opportunity lead extracted from a LinkedIn post."""
@@ -252,6 +297,7 @@ class FeedLead:
     work_mode:        str = "not_specified"
     skills:           list[str] = field(default_factory=list)
     description:      str = ""
+    description_html: str = ""             # sanitized rich HTML (summary + details + original post)
     posted_date:      str = ""             # YYYY-MM-DD (resolved in Python) or ""
     domain:           str = "IT"           # IT sub-domain (display only)
     opportunity_type: str = ""             # vendor_registration | vendor_requirement
@@ -292,7 +338,7 @@ class FeedLead:
             "posted_date":            self.posted_date[:100],
             "job_url":                self.post_url,
             "job_description":        self.description,
-            "job_description_html":   "",
+            "job_description_html":   self.description_html,
             "skills":                 self.skills,
             "work_mode":              self.work_mode,
             "company_url":            "",
@@ -469,6 +515,16 @@ _COLLECT_POSTS_JS = r"""() => {
         }
         return '';
     }
+    // Inner HTML of the first non-empty match — the post body's own markup
+    // (line breaks, links, hashtags), sanitized server-side like the LinkedIn
+    // Jobs agent's job_description_html.
+    function pickHtml(root, sels) {
+        for (const s of sels) {
+            const el = root.querySelector(s);
+            if (el && el.textContent && el.textContent.trim()) return el.innerHTML || '';
+        }
+        return '';
+    }
     function outermost(arr) {
         return arr.filter(el => !arr.some(o => o !== el && o.contains(el)));
     }
@@ -559,6 +615,13 @@ _COLLECT_POSTS_JS = r"""() => {
                 '[data-test-id="main-feed-activity-card__commentary"]',
                 'span.break-words',
             ]);
+            let textHtml = text && text.length >= 20 ? pickHtml(el, [
+                '.update-components-text',
+                '.feed-shared-update-v2__description',
+                '.feed-shared-inline-show-more-text',
+                '[data-test-id="main-feed-activity-card__commentary"]',
+                'span.break-words',
+            ]) : '';
             if (!text || text.length < 20) text = fullText;
 
             const head = fullText.slice(0, 400);
@@ -601,6 +664,7 @@ _COLLECT_POSTS_JS = r"""() => {
                 timestamp: timestamp,
                 text: text,
                 full_text: fullText.slice(0, 8000),
+                text_html: (textHtml || '').slice(0, 40000),
                 is_repost: isRepost,
                 is_promoted: isPromoted,
                 links: links,
@@ -1722,6 +1786,15 @@ class LinkedInFeedAgent:
             + ["", "--- Original post ---", body[:_POST_TEXT_MAX_CHARS]]
         ).strip()[:20_000]
 
+        description_html = _build_description_html(
+            summary=_s("requirement_summary"),
+            details=details,
+            skills=skills,
+            post_html=str(raw.get("text_html") or ""),
+            # Unflattened text keeps the author's line breaks (body is _clean()ed).
+            post_text=(str(raw.get("text") or "").strip() or body)[:_POST_TEXT_MAX_CHARS],
+        )
+
         domain = _classify_hiring_domain("", _clean(raw.get("author_headline", "")), [job_title, description])
         domain = (domain.split(",")[0].strip() if domain and domain != "NOT_FOUND" else "IT")
 
@@ -1734,6 +1807,7 @@ class LinkedInFeedAgent:
             work_mode=_infer_work_mode(f"{location} {description}"),
             skills=skills,
             description=description,
+            description_html=description_html,
             posted_date=posted,
             domain=domain,
             opportunity_type=opportunity,
