@@ -65,3 +65,19 @@ async def bind_session_tenant(db) -> None:
         )
     except Exception:  # pragma: no cover — RLS binding is best-effort
         pass
+
+
+async def bind_session_all_access(db) -> None:
+    """Best-effort: rebind this session's transaction to the all-access sentinel, so
+    RLS (when active) lets a SYSTEM writer touch rows of several tenants — e.g. the
+    LinkedIn Feed harvest, which files each lead under its market's client tenant
+    regardless of who started the run. Only for trusted background writers; request
+    handlers keep bind_session_tenant. No-op on non-Postgres."""
+    from sqlalchemy import text as _text
+
+    try:
+        await db.execute(
+            _text("SELECT set_config('app.tenant_id', :t, true)"), {"t": ALL_ACCESS},
+        )
+    except Exception:  # pragma: no cover — RLS binding is best-effort
+        pass

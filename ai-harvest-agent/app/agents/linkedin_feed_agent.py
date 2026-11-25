@@ -71,6 +71,7 @@ from app.core.dependencies import get_llm_service
 from app.core.exceptions import LLMUnavailableError
 from app.models.harvest_run import LlmCallType
 from app.services import run_guard
+from app.services.feed_tenant_classifier import normalize_market
 from app.agents.linkedin_agent import (
     _clean,
     _infer_work_mode,
@@ -272,6 +273,9 @@ class FeedLead:
     found_via:       list[str] = field(default_factory=list)  # "feed" / "search: <query>"
     category:        str = ""
     lead_confidence: float = 0.0
+    # Client market judged by the extraction LLM ("US" | "IN" | "unknown"); used only
+    # as the LLM step of app/services/feed_tenant_classifier.py (phone/location win).
+    market:          str = "unknown"
 
     def to_scraped_job_dict(self) -> dict[str, Any]:
         """Map onto ScrapedJobORM's canonical dict shape (see
@@ -1597,7 +1601,13 @@ class LinkedInFeedAgent:
             '"recruiter_email": str or null (ONLY if an email appears verbatim in the '
             "text — never guess or construct one; if masked/partial, null), "
             '"recruiter_phone": str or null (ONLY if a phone number appears verbatim — '
-            "never guess; E.164 with country code when unambiguous; if masked/partial, null)}"
+            "never guess; E.164 with country code when unambiguous; if masked/partial, null), "
+            '"market": "US" | "IN" | "unknown" (the ONE field you may judge rather than copy: '
+            "which client market this opportunity is for. US = United States/Canada market "
+            "(USD or $/hr rates, W2 / C2C / 1099 / H1B / GC / USC / EAD / OPT visa terms, "
+            "EST/CST/PST time zones, US cities/states, US-style phone numbers). IN = India "
+            "(INR / LPA / lakh / crore, Indian cities/states, IST, +91 numbers, notice period, "
+            "PF / third-party payroll in India). unknown when the cues are absent or mixed)}"
         )
         system = (
             "You extract structured data from a single LinkedIn post in which a company "
@@ -1636,7 +1646,11 @@ class LinkedInFeedAgent:
         The LLM's email/phone/registration link are kept only when grounded in the
         content it was sent (extracted["_source_text"], else the post text + mailto)
         or the post's own links; a DOM mailto address is the email fallback."""
-        if not any(not str(k).startswith("_") and v for k, v in extracted.items()):
+        # "market" is always filled ("unknown" at worst) — it doesn't make an empty
+        # extraction non-empty.
+        if not any(
+            not str(k).startswith("_") and k != "market" and v for k, v in extracted.items()
+        ):
             logger.info("linkedin_feed_lead_dropped_empty_extraction", urn=str(raw.get("urn", ""))[:40])
             return None
 
@@ -1738,6 +1752,7 @@ class LinkedInFeedAgent:
             is_promoted=bool(raw.get("is_promoted")),
             found_via=list(raw.get("found_via") or []),
             category=opportunity,
+            market=normalize_market(extracted.get("market")),
         )
         lead.lead_confidence = self._score(lead, classification, text, roles)
         logger.info(

@@ -31,8 +31,8 @@ POST   /phone-verifications/follow-ups/{id}/done — dismiss one reminder
 POST   /phone-verifications/follow-ups/done-all  — dismiss all due reminders
 
 The per-job endpoints honour the self-assignment lock (ensure_job_access → 403
-when the job is assigned to someone else); /latest omits such jobs except for
-admins, who get read-only visibility of them. Call views
+when the job is assigned to someone else, admins exempt); /latest omits such
+jobs except for admins. Call views
 are documented on phone_verification_service.call_view, number flags on
 phone_verification_service.flag_view (keyed by the number as given).
 
@@ -274,8 +274,7 @@ async def latest_phone_verifications(
                 "contacts": await pvs.contact_summaries(db, extra_phones)}
 
     # Drop jobs locked to someone else (same rule as ensure_job_access). Admins
-    # keep them: they read the assignee's call results (read-only — every write
-    # endpoint above still goes through ensure_job_access).
+    # keep them: ensure_job_access lets admins open and work on any assigned job.
     visible = ids
     if not current_user.is_admin:
         me = (current_user.email or "").lower()

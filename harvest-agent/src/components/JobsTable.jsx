@@ -584,8 +584,9 @@ export default function JobsTable({
                 const c = jobContact(j);
                 // Assigned to someone else: the row stays visible but locked — no
                 // detail, phone verification or outreach (the backend enforces it too).
+                // Admins are exempt: they can open and work on any assigned job.
                 const assignedTo = assignedOf(j);
-                const locked = isAssignedToOther(assignedTo, myEmail);
+                const locked = !isAdmin && isAssignedToOther(assignedTo, myEmail);
                 const lockedMsg = locked ? `Assigned to ${assignedTo.name}` : "";
                 return (
                 <tr key={j.id} className={"ha-row" + (locked ? " ajm-locked" : "")}>
@@ -632,7 +633,7 @@ export default function JobsTable({
                   <td className="ha-td">
                     <DualContact parts={c.emailParts} link="mailto:" cls="ha-mail" />
                   </td>
-                  <td className={"ha-td" + (locked && isAdmin ? " ajm-keep" : "") + (workspace ? " ha-td-pinl" : "")} style={{ whiteSpace: "nowrap" }}>
+                  <td className={"ha-td" + (workspace ? " ha-td-pinl" : "")} style={{ whiteSpace: "nowrap" }}>
                     {c.phone && !locked ? (
                       <div className="pvm-cell">
                         <PhoneVerifyButton verified={!!callForPhone(phoneVerify[j.id], c.phone, { own: true })}
@@ -642,15 +643,6 @@ export default function JobsTable({
                             (by its trailing 10 digits — also an inherited call from another job). */}
                         <PhoneVerifyBadge result={callForPhone(phoneVerify[j.id], c.phone)}
                           onEdit={() => setPhoneModal({ job: j, phone: c.phone, phoneSource: c.phoneParts[0]?.variant || "", pocName: c.pocName, pocKind: c.pocKind, email: c.email })} />
-                        <PhoneFlagTag flags={phoneFlags[c.phone]} phone={c.phone} onRemoved={isAdmin ? refreshPhoneVerifications : undefined} />
-                        <ApolloPhoneChip job={j} contact={c} />
-                      </div>
-                    ) : c.phone && locked && isAdmin ? (
-                      // Admin, job self-assigned by someone else: read-only tick / cross
-                      // for the assignee's latest call — no shield, no "Log call".
-                      <div className="pvm-cell">
-                        <div className="pvm-val"><DualContact parts={c.phoneParts} link="tel:" cls="ha-tel" /></div>
-                        <PhoneVerifyBadge mark result={callForPhone(phoneVerify[j.id], c.phone)} />
                         <PhoneFlagTag flags={phoneFlags[c.phone]} phone={c.phone} onRemoved={isAdmin ? refreshPhoneVerifications : undefined} />
                         <ApolloPhoneChip job={j} contact={c} />
                       </div>
@@ -736,7 +728,7 @@ export default function JobsTable({
                   <td className="ha-td"><SourceChip source={c.source} /></td>
                   <td className="ha-td" style={{ whiteSpace: "nowrap", color: C.textSoft }}>{j.postedDate || "—"}</td>
                   <td className="ha-td ajm-action">
-                    <AssignCell assignedTo={assignedTo} myEmail={myEmail} onOpen={() => setAssignModalJob(j)} />
+                    <AssignCell assignedTo={assignedTo} myEmail={myEmail} isAdmin={isAdmin} onOpen={() => setAssignModalJob(j)} />
                   </td>
                   </>)}
                 </tr>

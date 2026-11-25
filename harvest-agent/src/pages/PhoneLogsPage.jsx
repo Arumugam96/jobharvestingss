@@ -596,6 +596,10 @@ function PhonesPanel({ reloadKey, exportRef }) {
 
 /** "Self-assigned jobs" drill-down: every currently assigned job, called or not. */
 function AssignedJobsPanel({ reloadKey, exportRef }) {
+  const navigate = useNavigate();
+  // Admin-only panel: admins may open any self-assigned job (the lock exempts them),
+  // so a row click opens the job here, Ctrl/Cmd/middle-click in a new tab.
+  const jobHref = (row) => `/jobs/${encodeURIComponent(row.job_id)}`;
   const [page, setPage] = useState(1);
   const [query, setQuery, q] = useDebouncedSearch(() => setPage(1));
   const { data, loading, error } = usePagedFetch(
@@ -636,8 +640,11 @@ function AssignedJobsPanel({ reloadKey, exportRef }) {
               {loading && !data && <tr><td className="ha-td" colSpan={6} style={EMPTY_CELL}>Loading self-assigned jobs…</td></tr>}
               {!loading && items.length === 0 && <tr><td className="ha-td" colSpan={6} style={EMPTY_CELL}>No self-assigned jobs match.</td></tr>}
               {items.map((row) => (
-                <tr key={row.job_id} className="ha-row">
-                  <td className="ha-td"><CompanyJobCell company={row.company} title={row.job_title} /></td>
+                <tr key={row.job_id} className="ha-row ha-row-link"
+                  title="Open this job (Ctrl/middle-click for a new tab)"
+                  {...rowNav(jobHref(row), navigate, () => navigate(jobHref(row), { state: { from: "/phone-logs" } }))}>
+                  <td className="ha-td"><CompanyJobCell company={row.company} title={row.job_title}
+                    after={<OpenInNewTab href={jobHref(row)} label="Open this job in a new tab" style={{ color: C.textSoft, marginLeft: 4 }} />} /></td>
                   <td className="ha-td"><AssigneePill user={row.assigned_to} /></td>
                   <td className="ha-td" style={{ whiteSpace: "nowrap", color: C.textSoft }}>{fmtTime(row.assigned_at)}</td>
                   <td className="ha-td" style={{ whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>{row.phone || "—"}</td>

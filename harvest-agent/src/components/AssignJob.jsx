@@ -100,7 +100,7 @@ export function AssignJobStyles() {
  * (click to update/release), a grey lock chip with the owner's name otherwise.
  * The "You" chip only renders once `myEmail` is known (isAssignedToOther treats
  * an unknown user as "someone else"). */
-export function AssignCell({ assignedTo, myEmail, onOpen }) {
+export function AssignCell({ assignedTo, myEmail, onOpen, isAdmin = false }) {
   if (!assignedTo) {
     return (
       <button type="button" className="ajm-btn" onClick={onOpen}>
@@ -122,10 +122,12 @@ export function AssignCell({ assignedTo, myEmail, onOpen }) {
     );
   }
   return (
-    <span className="ajm-chip other" title={`${tip}\nOnly they can open or work on this job.`}>
+    <span className="ajm-chip other" title={isAdmin
+      ? `${tip}\nAdmin access: you can open and work on this job; only they can release it.`
+      : `${tip}\nOnly they can open or work on this job.`}>
       <span className="ajm-av" style={{ background: "#64748B" }}>{initials(assignedTo.name)}</span>
       <span className="nm">{assignedTo.name}</span>
-      <Lock size={12} style={{ flex: "none" }} />
+      {!isAdmin && <Lock size={12} style={{ flex: "none" }} />}
     </span>
   );
 }

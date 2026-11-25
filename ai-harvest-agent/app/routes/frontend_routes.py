@@ -700,7 +700,7 @@ async def get_job(
             status_code = 404,
             detail      = f"Job '{job_id}' not found. Run a harvest first or check the id.",
         )
-    # A job someone else has assigned to themselves is locked to them.
+    # A job someone else has assigned to themselves is locked to them (admins pass).
     ensure_job_access(job.get("assigned_to"), current_user)
     return job
 

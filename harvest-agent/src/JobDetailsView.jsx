@@ -7,6 +7,7 @@ import LiveBrowserView from "./components/LiveBrowserView";
 import { ContactTimeline } from "./components/ContactHistory";
 import { InheritedCallLine } from "./components/PhoneVerify";
 import { useCurrentUserEmail, isAssignedToOther } from "./components/AssignJob";
+import { useTenant } from "./TenantContext";
 import { GLASS, GLASS_BTN, PAGE_BG, GLASS_FALLBACK } from "./theme";
 import { copyText } from "./lib/clipboard";
 import { useNavigate } from "react-router-dom";
@@ -780,10 +781,12 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
   // Self-assign lock: a job held by someone else is view-locked — the backend
   // 403s its detail/outreach endpoints; mirror that here (defensive, for entries
   // that arrive via navigation state) with a banner and inert outreach actions.
+  // Admins are exempt from the lock (the backend lets them through too).
   const myEmail = useCurrentUserEmail();
+  const { isAdmin } = useTenant();
   const assignedTo = job.assignedTo || job.assigned_to || null;
   const [lockMsg, setLockMsg] = useState("");
-  const locked = !!lockMsg || isAssignedToOther(assignedTo, myEmail);
+  const locked = !!lockMsg || (!isAdmin && isAssignedToOther(assignedTo, myEmail));
   const lockText = lockMsg
     || (assignedTo ? `Assigned to ${assignedTo.name || assignedTo.email} — only they can open or work on this job.` : "");
   // Naukri recruiter login from a 'login needed' Resdex state — same global

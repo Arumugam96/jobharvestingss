@@ -616,10 +616,18 @@ class HarvestRunService:
         insert). replace_run_jobs passes False and assigns after its carry-over.
         Demand Search inserts pass ``assign_to_email`` (the searcher): their
         Demand rows go to that user if they are a Business Lead of the tenant,
-        never into the rotation."""
+        never into the rotation.
+
+        A job dict may carry its own ``tenant_id`` (the LinkedIn Feed harvest files
+        each lead under its market's client tenant); otherwise the row is owned by
+        the current tenant. Company overrides and auto-assignment follow each row's
+        own tenant (auto_assign_jobs groups by the stored tenant_id)."""
         if not jobs:
             return
-        tid = get_current_tenant_id()  # own every inserted job to the current tenant
+        tid = get_current_tenant_id()  # default owner of every inserted job
+
+        def _row_tid(j: dict[str, Any]) -> str:
+            return str(j.get("tenant_id") or "").strip() or tid
         # Company-level enrichment cache (app/services/company_service.py) — a
         # company's Apollo size/HQ-location, shared across ALL its jobs (recruiter
         # or not). Fetched once for the batch's companies.
@@ -631,9 +639,13 @@ class HarvestRunService:
         # and the cache's Apollo values (hiring_entity: see _override_hiring_entity).
         from app.services.company_classification_service import load_overrides_for_keys
 
-        overrides = await load_overrides_for_keys(
-            self._db, {normalize_company_key(j.get("company", "")) for j in jobs}, tid,
-        )
+        overrides_by_tenant: dict[str, dict[str, Any]] = {}
+        for row_tid in sorted({_row_tid(j) for j in jobs}):
+            overrides_by_tenant[row_tid] = await load_overrides_for_keys(
+                self._db,
+                {normalize_company_key(j.get("company", "")) for j in jobs if _row_tid(j) == row_tid},
+                row_tid,
+            )
         # Company+location HR-contact cache (app/services/company_location_contact_service.py)
         # — a location-specific contact discovered via Apollo for an email-less job's
         # (company, job-location). Attached below ONLY to jobs with no scraped/recruiter
@@ -709,7 +721,8 @@ class HarvestRunService:
                     cc_phone = _lc_row.hr_contact_phone or ""
                     cc_location = _lc_row.location or ""
                     cc_source = "apollo"
-            ov = overrides.get(normalize_company_key(j.get("company", "")))
+            row_tid = _row_tid(j)
+            ov = overrides_by_tenant[row_tid].get(normalize_company_key(j.get("company", "")))
             ov_size = (ov.company_size or "") if ov is not None else ""
             ov_domain = (ov.domain or "") if ov is not None else ""
             hiring_entity, is_gcc = _override_hiring_entity(
@@ -719,7 +732,7 @@ class HarvestRunService:
                 ScrapedJobORM(
                     id=str(uuid.uuid4()),
                     run_id=run_pk,
-                    tenant_id=tid,
+                    tenant_id=row_tid,
                     source=j.get("source", ""),
                     # Strip LinkedIn's "<Title> <Title> with verification" a11y artifact
                     # so new harvests store a clean title everywhere it's read.

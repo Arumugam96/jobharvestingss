@@ -15,6 +15,12 @@ drives the SAME persistent Chrome profile as the job harvest, so the two must ne
 run at once), a background asyncio task, incremental + final persistence into the
 shared harvest_runs / scraped_jobs / llm_calls tables (source="LinkedIn Feed"), and
 JobTracker for live status.
+
+Tenant routing: the run row (and its llm_calls) belongs to the tenant that started
+it, but each lead row is filed under its own market's client tenant — client_us /
+client_in by phone, then location, then the extraction LLM's `market` field — and
+falls back to the run's tenant when unclassifiable (app/services/feed_tenant_classifier.py).
+The lead writes bind the session all-access so RLS (when active) allows that.
 """
 from __future__ import annotations
 
@@ -31,8 +37,10 @@ from app.agents.linkedin_feed_agent import MODES, FeedAuthError, LinkedInFeedAge
 from app.config import get_settings
 from app.core.exceptions import DailyJobLimitExceededError, JobAlreadyRunningError, LLMUnavailableError
 from app.core.proactor import needs_proactor, run_in_proactor
+from app.core.tenant_context import bind_session_all_access, get_current_tenant_id
 from app.services import run_guard
 from app.services.config_service import ConfigService
+from app.services.feed_tenant_classifier import classify_feed_lead_tenant
 from app.services.harvest_run_service import (
     HarvestRunService,
     db_read,
@@ -52,6 +60,26 @@ _SETUP_HINT = (
     "LinkedIn session is not authenticated. Run POST /linkedin-setup-session, log in "
     "at linkedin.com, close the browser, then re-run the LinkedIn vendor-lead harvest."
 )
+
+
+def _lead_dicts(leads: list, fallback_tenant: str) -> list[dict[str, Any]]:
+    """ScrapedJobORM dicts for ``leads``, each stamped with its own ``tenant_id``:
+    the lead's market tenant (client_us / client_in — phone, then location, then the
+    extraction LLM's ``market``; app/services/feed_tenant_classifier.py), else
+    ``fallback_tenant`` (the tenant that started the run)."""
+    out: list[dict[str, Any]] = []
+    for lead in leads:
+        d = lead.to_scraped_job_dict()
+        d["tenant_id"], signal = classify_feed_lead_tenant(
+            fallback_tenant=fallback_tenant,
+            phone=lead.recruiter_phone,
+            location=lead.location,
+            llm_market=getattr(lead, "market", None),
+        )
+        logger.debug("linkedin_feed_lead_tenant", url=d.get("job_url"),
+                     tenant=d["tenant_id"], signal=signal)
+        out.append(d)
+    return out
 
 
 def _make_run_id() -> str:
@@ -91,6 +119,9 @@ async def _run_feed_background_impl(
     JobTracker.update(job_id, progress=10, message=f"Opening LinkedIn ({_MODE_LABELS.get(mode, mode)})…")
 
     agent = LinkedInFeedAgent(get_settings())
+    # The run (and its llm_calls) stay with the tenant that started it; each lead is
+    # filed under its own market's tenant (_lead_dicts), falling back to this one.
+    run_tenant = get_current_tenant_id()
 
     # Incremental persistence + live progress (mirrors run_harvest_agent). DB writes
     # from the proactor worker thread must be marshalled back to the main loop,
@@ -122,9 +153,10 @@ async def _run_feed_background_impl(
         if not run_pk or not leads:
             log.warning("linkedin_feed_batch_skipped", run_pk=run_pk, leads=len(leads or []))
             return
-        dicts = [lead.to_scraped_job_dict() for lead in leads]
+        dicts = _lead_dicts(leads, run_tenant)
 
         async def _insert(db) -> bool:
+            await bind_session_all_access(db)  # leads may belong to another tenant (RLS)
             await HarvestRunService(db).bulk_insert_scraped_jobs(run_pk, dicts)
             return True
 
@@ -217,14 +249,20 @@ async def _run_feed_background_impl(
     # ── Reconcile final set + persist LLM audit ───────────────────────────────
     stopped = run_guard.is_stop_requested()
     interrupted = agent.collection_error
-    final_dicts = [lead.to_scraped_job_dict() for lead in leads]
+    final_dicts = _lead_dicts(leads, run_tenant)
     log.info(
         "linkedin_feed_reconcile_start", run_pk=run_pk, leads=len(final_dicts),
         incrementally_saved=saved["n"], llm_calls=len(llm_calls),
         collection_error=interrupted or None,
     )
     if run_pk:
-        replaced = await db_write(lambda db: HarvestRunService(db).replace_run_jobs(run_pk, final_dicts))
+        async def _replace(db) -> bool:
+            # All-access: the run's incremental rows may sit in several tenants, and
+            # the delete + reinsert must see/write all of them when RLS is active.
+            await bind_session_all_access(db)
+            return await HarvestRunService(db).replace_run_jobs(run_pk, final_dicts)
+
+        replaced = await db_write(_replace)
         if replaced:
             log.info("linkedin_feed_reconcile_saved", run_pk=run_pk, leads=len(final_dicts))
         else:

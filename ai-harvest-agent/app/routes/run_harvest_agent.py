@@ -1451,11 +1451,23 @@ async def get_run_history_contact_match(
 
 @router.get("/run-history/{run_id}", status_code=status.HTTP_200_OK)
 async def get_run_history_entry(run_id: str) -> Any:
-    """Return a single run history entry by run_id."""
+    """Return a single run history entry by run_id.
+
+    GET /run-history lists orchestrator runs (source IS NULL) AND LinkedIn Home
+    Feed lead runs (source "LinkedIn Feed", run_id suffix "_feed"), so the detail
+    lookup must resolve both — otherwise opening a feed run 404s."""
     mode = data_source_mode()
+
+    async def _lookup(db: Any) -> Any:
+        svc = HarvestRunService(db)
+        run = await svc.get_by_run_id(run_id, source=None)
+        if run is None:
+            run = await svc.get_by_run_id(run_id, source="LinkedIn Feed")
+        return run
+
     run, source = await resolve_read(
         mode,
-        lambda: db_read(lambda db: HarvestRunService(db).get_by_run_id(run_id, source=None)),
+        lambda: db_read(_lookup),
         lambda: _history_svc.get(run_id),
     )
     if source == "database":

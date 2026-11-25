@@ -2,9 +2,9 @@
 
 A user claims a job for themselves, optionally with a note. Once claimed, the job
 is locked to that user: everyone can still see the row (and who owns it) in
-GET /jobs, but only the assignee can open its detail or run outreach on it —
-the routes call ensure_job_access() before doing either. The assignee can
-release the job again; nobody else can.
+GET /jobs, but only the assignee (or an admin) can open its detail or run
+outreach on it — the routes call ensure_job_access() before doing either. The
+assignee can release the job again; nobody else can (admins included).
 
 Identity is the user's email (users have no separate display name); the shown
 name is derived from it at claim time. Matching is case-insensitive.
@@ -54,8 +54,10 @@ def _same_user(email: str | None, user: AuthenticatedUser) -> bool:
 def ensure_job_access(assigned_to: dict[str, Any] | str | None, user: AuthenticatedUser) -> None:
     """Raise 403 when the job is assigned to someone other than `user`.
 
-    Accepts either an assignment_view() block or the raw assigned_to_email."""
-    if not assigned_to:
+    Accepts either an assignment_view() block or the raw assigned_to_email.
+    Admins bypass the lock: they can open and work on any assigned job (but
+    only the assignee can release it — see unassign_job)."""
+    if not assigned_to or user.is_admin:
         return
     email = assigned_to.get("email") if isinstance(assigned_to, dict) else assigned_to
     if _same_user(email, user):
