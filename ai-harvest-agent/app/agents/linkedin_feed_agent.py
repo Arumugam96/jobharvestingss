@@ -58,7 +58,7 @@ from __future__ import annotations
 import asyncio
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from urllib.parse import quote, urlencode
 
@@ -309,6 +309,76 @@ class FeedLead:
 # ══════════════════════════════════════════════════════════════════════════════
 # Candidate filter (deterministic, no LLM)
 # ══════════════════════════════════════════════════════════════════════════════
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Posting date (deterministic, no LLM)
+# ══════════════════════════════════════════════════════════════════════════════
+
+_URN_ID_RE = re.compile(r"urn:li:(?:activity|ugcPost|share):(\d+)")
+_URN_EPOCH_FLOOR = datetime(2010, 1, 1, tzinfo=timezone.utc)
+
+# Feed posts show their age as a bare short form with no "ago" ("3h •", "2d •",
+# "1w •", "3mo •", "1yr •"), which linkedin_agent._resolve_posted_date (built for
+# the Jobs page's "3 days ago") never matches. On the feed a bare "m" = minutes.
+_FEED_AGE_RE = re.compile(
+    r"(?<![\w])(?P<num>\d+)\s*(?P<unit>years?|yrs?|y|months?|mos?|weeks?|w|days?|d|"
+    r"hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b",
+    re.IGNORECASE,
+)
+
+
+def _date_from_urn(urn: str, harvest_date: datetime) -> str | None:
+    """Exact posting date (UTC, YYYY-MM-DD) decoded from a LinkedIn post URN.
+
+    LinkedIn post IDs are snowflake-style: the top 41 bits of the 64-bit ID are
+    the creation time in Unix milliseconds (id >> 22). Returns None when the URN
+    is missing or the decoded time is implausible (before 2010 / in the future)."""
+    m = _URN_ID_RE.search(urn or "")
+    if not m:
+        return None
+    try:
+        created = datetime.fromtimestamp((int(m.group(1)) >> 22) / 1000, tz=timezone.utc)
+    except (ValueError, OverflowError, OSError):
+        return None
+    if created < _URN_EPOCH_FLOOR or created > harvest_date + timedelta(days=1):
+        return None
+    return created.strftime("%Y-%m-%d")
+
+
+def _date_from_feed_age(timestamp: str, harvest_date: datetime) -> str | None:
+    """Convert a feed age label ("3h", "2d •", "1w • Edited", "3mo") to YYYY-MM-DD."""
+    m = _FEED_AGE_RE.search(timestamp or "")
+    if not m:
+        return None
+    num, unit = int(m.group("num")), m.group("unit").lower()
+    if unit.startswith("y"):
+        days = num * 365
+    elif unit.startswith("mo"):
+        days = num * 30
+    elif unit.startswith("w"):
+        days = num * 7
+    elif unit.startswith("d"):
+        days = num
+    else:  # hours / minutes / seconds → today
+        days = 0
+    return (harvest_date - timedelta(days=days)).strftime("%Y-%m-%d")
+
+
+def _resolve_feed_posted_date(raw: dict, text: str, harvest_date: datetime) -> str:
+    """Best available posting date for a feed post; never empty, so the date
+    filter (which compares YYYY-MM-DD strings) can always see the row.
+
+    Priority: URN-encoded creation time (exact) → the post's age label → a
+    relative/absolute phrase in the post text → the harvest date (when seen)."""
+    timestamp = _clean(raw.get("timestamp", ""))
+    return (
+        _date_from_urn(str(raw.get("urn") or ""), harvest_date)
+        or _date_from_feed_age(timestamp, harvest_date)
+        or _resolve_posted_date(timestamp, harvest_date)
+        or _resolve_posted_date(text, harvest_date)
+        or harvest_date.strftime("%Y-%m-%d")
+    )
+
 
 def _is_candidate(text: str) -> bool:
     """Cheap first-stage gate: keep a post if it uses a strong vendor phrase, or a
@@ -1495,9 +1565,7 @@ class LinkedInFeedAgent:
         profile_url = (raw.get("author_profile_url") or "").strip()
         mailto = _clean_mailto(raw.get("mailto"))
 
-        resolved_date = _resolve_posted_date(
-            _clean(raw.get("timestamp", "")), self._harvest_started_at
-        ) or _resolve_posted_date(text, self._harvest_started_at)
+        resolved_date = _resolve_feed_posted_date(raw, text, self._harvest_started_at)
 
         schema = (
             '{"hiring_company": str (the company that needs vendors or candidates: the end '
