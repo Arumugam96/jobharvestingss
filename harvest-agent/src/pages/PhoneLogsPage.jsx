@@ -12,6 +12,7 @@ import { ContactTimeline, callLabel, callTone, shortDate } from "../components/C
 import { downloadCsv, downloadJson, saveBlob, fetchAllPages } from "../lib/csv";
 import { getCached, setCached } from "../lib/pageCache";
 import { linkProps, rowNav, OpenInNewTab } from "../lib/openLink";
+import LogCallShield from "../components/LogCallShield";
 
 /* Phone logs (admins + Business Leads): admins see every call logged in
  * the tenant, including jobs self-assigned by someone else, and can narrow it to one
@@ -181,7 +182,7 @@ function ViewToggle({ value, onChange }) {
 /** "By contact" view: one row per number with its latest outcome, call / job counts and
  * last call; a row expands into the number's full timeline across jobs. Uses the call
  * log's filters (`params`) plus `latest` (an outcome or REVISIT_DUE). */
-function ContactsPanel({ params, latest, reloadKey, exportRef }) {
+function ContactsPanel({ params, latest, reloadKey, exportRef, onLogged }) {
   const [page, setPage] = useState(1);
   const [open, setOpen] = useState(null); // expanded row key
   const query = {
@@ -240,7 +241,11 @@ function ContactsPanel({ params, latest, reloadKey, exportRef }) {
                       </button>
                     </td>
                     <td className="ha-td"><JobCell title={row.contact_name || "—"} company={row.company} /></td>
-                    <td className="ha-td" style={{ whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>{row.phone}</td>
+                    <td className="ha-td" style={{ whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>
+                      {row.phone}
+                      <LogCallShield jobId={l.job_id} phone={row.phone} pocName={row.contact_name}
+                        company={row.company} called onLogged={onLogged} />
+                    </td>
                     <td className="ha-td">
                       <Chip tone={callTone(l.status, l.outcome)}>{callLabel(l.status, l.outcome)}</Chip>
                       {sub && <div style={SUBLINE}>{sub}</div>}
@@ -526,7 +531,7 @@ function usePagedFetch(fetcher, params, reloadKey, errorText) {
 }
 
 /** "Total phones" drill-down: every job poster / company HR / recruiter number held. */
-function PhonesPanel({ reloadKey, exportRef }) {
+function PhonesPanel({ reloadKey, exportRef, onLogged }) {
   const [source, setSource] = useState("");
   const [page, setPage] = useState(1);
   const [query, setQuery, q] = useDebouncedSearch(() => setPage(1));
@@ -573,7 +578,11 @@ function PhonesPanel({ reloadKey, exportRef }) {
                 const src = PHONE_SOURCES[row.source] || {};
                 return (
                   <tr key={`${row.source}-${row.job_id || row.recruiter_id}-${i}`} className="ha-row">
-                    <td className="ha-td" style={{ whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums", color: C.text }}>{row.phone}</td>
+                    <td className="ha-td" style={{ whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums", color: C.text }}>
+                      {row.phone}
+                      <LogCallShield jobId={row.job_id} phone={row.phone} phoneSource={row.source}
+                        pocName={row.name} company={row.company} onLogged={onLogged} />
+                    </td>
                     <td className="ha-td">
                       <span style={{ padding: "2px 9px", borderRadius: 6, fontSize: 12, fontWeight: 600, color: src.color, background: src.bg, whiteSpace: "nowrap" }}>
                         {src.label || row.source}
@@ -595,7 +604,7 @@ function PhonesPanel({ reloadKey, exportRef }) {
 }
 
 /** "Self-assigned jobs" drill-down: every currently assigned job, called or not. */
-function AssignedJobsPanel({ reloadKey, exportRef }) {
+function AssignedJobsPanel({ reloadKey, exportRef, onLogged }) {
   const navigate = useNavigate();
   // Admin-only panel: admins may open any self-assigned job (the lock exempts them),
   // so a row click opens the job here, Ctrl/Cmd/middle-click in a new tab.
@@ -647,7 +656,11 @@ function AssignedJobsPanel({ reloadKey, exportRef }) {
                     after={<OpenInNewTab href={jobHref(row)} label="Open this job in a new tab" style={{ color: C.textSoft, marginLeft: 4 }} />} /></td>
                   <td className="ha-td"><AssigneePill user={row.assigned_to} /></td>
                   <td className="ha-td" style={{ whiteSpace: "nowrap", color: C.textSoft }}>{fmtTime(row.assigned_at)}</td>
-                  <td className="ha-td" style={{ whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>{row.phone || "—"}</td>
+                  <td className="ha-td" style={{ whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>
+                    {row.phone || "—"}
+                    <LogCallShield jobId={row.job_id} phone={row.phone} company={row.company}
+                      called={!!row.calls} onLogged={onLogged} />
+                  </td>
                   <td className="ha-td" style={{ textAlign: "center", fontWeight: 600, color: row.calls ? C.text : "#94A3B8" }}>{row.calls}</td>
                   <td className="ha-td">
                     {row.last_call ? (
@@ -901,8 +914,8 @@ export default function PhoneLogsPage() {
           )}
         </div>
 
-        {!ownScope && view === "phones" && <PhonesPanel reloadKey={reloadKey} exportRef={exportRef} />}
-        {!ownScope && view === "assigned" && <AssignedJobsPanel reloadKey={reloadKey} exportRef={exportRef} />}
+        {!ownScope && view === "phones" && <PhonesPanel reloadKey={reloadKey} exportRef={exportRef} onLogged={() => setReloadKey((k) => k + 1)} />}
+        {!ownScope && view === "assigned" && <AssignedJobsPanel reloadKey={reloadKey} exportRef={exportRef} onLogged={() => setReloadKey((k) => k + 1)} />}
 
         {(view === "calls" || ownScope) && (
           <>
@@ -920,7 +933,8 @@ export default function PhoneLogsPage() {
             </div>
 
             {mode === "contacts" && (
-              <ContactsPanel params={{ ...logParams, q }} latest={latestOutcome} reloadKey={reloadKey} exportRef={exportRef} />
+              <ContactsPanel params={{ ...logParams, q }} latest={latestOutcome} reloadKey={reloadKey} exportRef={exportRef}
+                onLogged={() => setReloadKey((k) => k + 1)} />
             )}
             {mode === "calls" && (<>
             <div className="ha-card" style={{ overflow: "hidden" }}>
@@ -984,6 +998,9 @@ export default function PhoneLogsPage() {
                         <td className="ha-td" style={{ whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>
                           {row.phone}
                           <RepeatTag repeat={row.repeat} />
+                          <LogCallShield jobId={row.job_id} phone={row.phone} phoneSource={row.phone_source}
+                            pocName={row.contact_name} company={row.company} called
+                            onLogged={() => setReloadKey((k) => k + 1)} />
                         </td>
                         <td className="ha-td" style={{ color: C.text }}>{row.contact_name || "—"}</td>
                         <td className="ha-td"><OutcomeCell status={row.status} outcome={row.outcome} details={row.details} /></td>

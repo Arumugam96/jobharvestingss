@@ -12,6 +12,7 @@ import { GLASS, GLASS_BTN, PAGE_BG, GLASS_FALLBACK } from "./theme";
 import { copyText } from "./lib/clipboard";
 import { useNavigate } from "react-router-dom";
 import { linkProps } from "./lib/openLink";
+import LogCallShield from "./components/LogCallShield";
 import {
   ArrowLeft,
   MapPin,
@@ -786,6 +787,8 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
   const { isAdmin } = useTenant();
   const assignedTo = job.assignedTo || job.assigned_to || null;
   const [lockMsg, setLockMsg] = useState("");
+  // Bumped after a call is logged from a phone shield so the call history re-fetches.
+  const [callsKey, setCallsKey] = useState(0);
   const locked = !!lockMsg || (!isAdmin && isAssignedToOther(assignedTo, myEmail));
   const lockText = lockMsg
     || (assignedTo ? `Assigned to ${assignedTo.name || assignedTo.email} — only they can open or work on this job.` : "");
@@ -874,6 +877,21 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
   // Contact, shown only when one was discovered for this job. Kept separate from
   // the scraped/recruiter poster so provenance stays unambiguous.
   const cc = job.companyContact || {};
+  // Distinct POC numbers for the Mobile shields (scraped "job" first, then recruiter, else fallback).
+  const pocPhones = (() => {
+    const pc = job.posterContact || {};
+    const out = [];
+    const seen = new Set();
+    [[pc.mobileScraped, "job"], [pc.mobileRecruiter, "recruiter"], [pc.mobile, "contact"]].forEach(([p, source]) => {
+      const v = (p || "").trim();
+      const k = v.replace(/\D/g, "").slice(-10);
+      if (!v || !k || seen.has(k)) return;
+      if (source === "contact" && out.length) return; // fallback only when nothing else
+      seen.add(k);
+      out.push({ phone: v, source });
+    });
+    return out;
+  })();
   const hasCompanyContact = !!(cc.email || cc.phone || cc.name);
   const ccSourceLabel = cc.source
     ? `Inferred · ${CC_SOURCE_DISPLAY[cc.source.toLowerCase()] || `${cc.source.charAt(0).toUpperCase()}${cc.source.slice(1)}`}`
@@ -992,6 +1010,12 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
                     recruiter={job.posterContact?.mobileRecruiter}
                     fallback={job.posterContact?.mobile}
                   />
+                  {/* Shield per distinct number: logs a NEW call (never edits an old one). */}
+                  {!isDemand && !locked && job.id && pocPhones.map(({ phone, source }) => (
+                    <LogCallShield key={phone} jobId={job.id} phone={phone} phoneSource={source}
+                      pocName={job.posterName || ""} pocTitle={job.posterTitle || ""} company={job.company || ""}
+                      email={job.email || ""} onLogged={() => setCallsKey((k) => k + 1)} />
+                  ))}
                 </span>
               </div>
               <div className="ha-field">
@@ -1037,11 +1061,11 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
             )}
           </div>
           {!isDemand && (
-            <CallHistoryBlock jobId={job.id}
+            <CallHistoryBlock key={`calls-${callsKey}`} jobId={job.id}
               phones={[job.posterContact?.mobileScraped, job.posterContact?.mobileRecruiter, job.posterContact?.mobile]} />
           )}
           {/* No call of its own, but its contact was called on another job. */}
-          {!isDemand && job.id && <InheritedCallLine jobId={job.id} />}
+          {!isDemand && job.id && <InheritedCallLine key={`inh-${callsKey}`} jobId={job.id} />}
         </section>
 
         {!isDemand && hasCompanyContact && (
@@ -1066,7 +1090,14 @@ function JobDetailsView({ job = {}, onBack = () => {}, onEdit }) {
                 </div>
                 <div className="ha-field">
                   <span className="ha-key">Phone</span>
-                  <span className="ha-val">{cc.phone || <span className="ha-muted">—</span>}</span>
+                  <span className="ha-val">
+                    {cc.phone || <span className="ha-muted">—</span>}
+                    {cc.phone && !locked && job.id && (
+                      <LogCallShield jobId={job.id} phone={cc.phone} phoneSource="company"
+                        pocName={cc.name || ""} pocTitle={cc.title || ""} company={job.company || ""}
+                        email={cc.email || ""} onLogged={() => setCallsKey((k) => k + 1)} />
+                    )}
+                  </span>
                 </div>
                 <div className="ha-field">
                   <span className="ha-key">Location</span>

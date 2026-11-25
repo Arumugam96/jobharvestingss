@@ -42,6 +42,8 @@ const OUTCOMES = {
     { v: "position_closed", l: "Position already closed / filled", tone: "warn", panel: null, rem: false, proof: "optional" },
     { v: "language_barrier", l: "Language barrier", tone: "warn", panel: "lang", rem: true, proof: "optional", when: [1, "11:00"] },
     { v: "do_not_call", l: "Asked not to be contacted again", tone: "bad", panel: "dnc", rem: false, proof: "required", remLock: true, short: "Call log or recording of the request" },
+    // Free text for anything that doesn't fit — no automatic flags / reminders.
+    { v: "other", l: "Other", tone: "info", panel: "other", rem: false, proof: "optional" },
   ],
   unanswered: [
     { v: "no_answer", l: "Not answering — rang out", tone: "warn", panel: "retry", rem: true, proof: "from2", preset: "In 2 hours" },
@@ -51,12 +53,14 @@ const OUTCOMES = {
     { v: "invalid_number", l: "Invalid number / not in service", tone: "bad", panel: "invalid", rem: false, proof: "required", short: "“Not in service” message or call log" },
     { v: "disconnected", l: "Call disconnected mid-way", tone: "warn", panel: "retry", rem: true, proof: "from2", preset: "In 30 min" },
     { v: "voicemail", l: "Voicemail / IVR only", tone: "info", panel: "retry", rem: true, proof: "from2", preset: "Tomorrow 10 AM" },
+    { v: "other", l: "Other", tone: "info", panel: "other", rem: false, proof: "optional" },
   ],
 };
 /** Every outcome as { value, label, status, tone } (answered first) — e.g. Phone logs'
  * "Latest outcome" filter. */
 export const OUTCOME_OPTIONS = Object.entries(OUTCOMES).flatMap(([status, list]) =>
-  list.map((o) => ({ value: o.v, label: o.l, status, tone: o.tone })));
+  list.map((o) => ({ value: o.v, label: o.l, status, tone: o.tone })))
+  .filter((o, i, all) => all.findIndex((x) => x.value === o.value) === i);
 
 /** The OUTCOMES entry for a call's status + outcome, or null when either is unset/unknown. */
 const outcomeOf = (call) => (call?.status && call?.outcome ? OUTCOMES[call.status]?.find((o) => o.v === call.outcome) : null);
@@ -75,6 +79,7 @@ export function outcomeDetailText(d) {
   const list = (v) => (Array.isArray(v) ? v.filter(Boolean).join(", ") : "");
   const referral = [d.referredName, d.referredTeam].filter(Boolean).join(", ");
   return [
+    d.text,
     list(d.nextSteps) && `Next: ${list(d.nextSteps)}`,
     d.requirement && `Requirement: ${d.requirement}`,
     d.window && `Call back: ${d.window}`,
@@ -193,7 +198,7 @@ const styles = `
 .pvm-close:hover { background: #F1F5F9; color: #64748B; }
 
 .pvm-overlay { position: fixed; inset: 0; background: rgba(15,23,42,.45); -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px); display: flex; align-items: center; justify-content: center; padding: 20px 16px; z-index: 1000; }
-.pvm-card { width: 100%; max-width: 560px; max-height: calc(100vh - 40px); background: #fff; border-radius: 14px; box-shadow: 0 24px 60px rgba(15,23,42,.24); display: flex; flex-direction: column; position: relative; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Roboto, sans-serif; color: #1E293B; }
+.pvm-card { width: 100%; max-width: 760px; max-height: calc(100vh - 40px); background: #fff; border-radius: 14px; box-shadow: 0 24px 60px rgba(15,23,42,.24); display: flex; flex-direction: column; position: relative; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Roboto, sans-serif; color: #1E293B; }
 .pvm-head { display: flex; align-items: center; gap: 10px; padding: 13px 16px; border-bottom: 1px solid #EEF2F7; }
 .pvm-head h2 { margin: 0; font-size: 15.5px; font-weight: 700; letter-spacing: -.01em; }
 .pvm-head .pvm-org { font-size: 13px; color: #94A3B8; font-weight: 500; }
@@ -227,6 +232,20 @@ const styles = `
 .pvm-seg button.neg.on { border-color: #F59E0B; background: #FFFBEB; color: #B45309; }
 .pvm-seg button.neg.on .pvm-dot { border-color: #F59E0B; }
 
+.pvm-oc { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
+.pvm-oc-hint { font-size: 10.5px; font-weight: 500; color: #94A3B8; text-transform: none; letter-spacing: 0; margin-left: 4px; }
+.pvm-oc-group { border: 1px solid #E2E8F0; border-radius: 10px; padding: 8px 10px 10px; background: #FCFDFF; }
+.pvm-oc-head { display: flex; align-items: center; gap: 6px; font-size: 11.5px; font-weight: 700; margin-bottom: 7px; }
+.pvm-oc-group.answered .pvm-oc-head { color: #047857; }
+.pvm-oc-group.unanswered .pvm-oc-head { color: #B45309; }
+.pvm-oc-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.pvm-oc-btn { padding: 6px 10px; border-radius: 999px; border: 1px solid #E2E8F0; background: #fff; font-family: inherit; font-size: 12px; font-weight: 600; color: #475569; cursor: pointer; transition: .12s; text-align: left; }
+.pvm-oc-btn:hover { border-color: #93C5FD; background: #F5F8FF; color: #1E293B; }
+.pvm-oc-btn:focus-visible { outline: 2px solid #2563EB; outline-offset: 2px; }
+.pvm-oc-btn.on.t-good { border-color: #16A34A; background: #F0FDF4; color: #15803D; }
+.pvm-oc-btn.on.t-info { border-color: #2563EB; background: #EFF6FF; color: #1D4ED8; }
+.pvm-oc-btn.on.t-warn { border-color: #F59E0B; background: #FFFBEB; color: #B45309; }
+.pvm-oc-btn.on.t-bad { border-color: #DC2626; background: #FEF2F2; color: #B91C1C; }
 .pvm-sel { position: relative; }
 .pvm-sel select { width: 100%; appearance: none; -webkit-appearance: none; padding: 9px 30px 9px 11px; font-size: 13px; font-family: inherit; color: #1E293B; border: 1px solid #E2E8F0; border-radius: 9px; background: #fff; cursor: pointer; }
 .pvm-sel select:disabled { background: #F8FAFC; color: #94A3B8; cursor: not-allowed; }
@@ -588,6 +607,14 @@ const Req = () => <span className="pvm-req">*</span>;
 /* Outcome-specific fields — at most two rows each. `d` is the details object. */
 function OutcomePanel({ c, d, set, ctx, onPreset }) {
   switch (c.panel) {
+    case "other":
+      return (
+        <div><p className="pvm-flabel">What happened? <Req /></p>
+          <input type="text" autoFocus maxLength={255} placeholder="e.g. HR on leave till Monday, asked to call the manager"
+            value={d.text || ""} onChange={(e) => set({ text: e.target.value })} />
+          <span style={{ fontSize: 11, color: "#94A3B8" }}>Saved as “Other”. No flags or reminders are set automatically.</span>
+        </div>
+      );
     case "callback":
       return (
         <div><p className="pvm-flabel">Preferred window</p>
@@ -827,24 +854,25 @@ export default function PhoneVerifyModal({ jobId, phone: phoneProp, pocName: poc
   /** Merges `patch` into the outcome-specific details object. */
   const set = (patch) => setDetails((prev) => ({ ...prev, ...patch }));
 
-  /** Clears outcome details, proof files and the reminder. */
-  const resetOutcome = () => { setDetails({}); setFiles([]); setRemState({ on: false, date: "", time: "" }); };
-  /** Picks Answered/Unanswered and resets the outcome and everything that depends on it
-   * (re-clicking the selected status changes nothing). */
-  const setStatus = (s) => { if (s === status) return; setStatusRaw(s); setOutcomeRaw(null); resetOutcome(); };
   /**
    * Picks an outcome: seeds its retry preset into details, clears proof, and turns the
    * reminder on at the outcome's suggested time (or off if the outcome has none).
    */
-  const setOutcome = (v) => {
+  const setOutcome = (v, st = status) => {
     setOutcomeRaw(v || null);
-    const oc = v ? OUTCOMES[status].find((o) => o.v === v) : null;
+    const oc = v && st ? OUTCOMES[st].find((o) => o.v === v) : null;
     // An unticked "Also applies to…" survives switching the outcome.
     setDetails((prev) => ({ ...(oc?.preset ? { preset: oc.preset } : {}),
       ...(prev.applyToContact === false ? { applyToContact: false } : {}) }));
     setFiles([]);
     if (oc?.rem) { const [date, time] = suggestedWhen(oc); setRemState({ on: true, date, time }); }
     else setRemState({ on: false, date: "", time: "" });
+  };
+  /** One click on an outcome button: sets the call status from its group, then the outcome. */
+  const pickOutcome = (st, v) => {
+    if (st === status && v === outcome) return;
+    if (st !== status) setStatusRaw(st);
+    setOutcome(v, st);
   };
   // Switching the reminder off keeps the date/time, so nothing typed is lost.
   const toggleRem = () => {
@@ -915,6 +943,7 @@ export default function PhoneVerifyModal({ jobId, phone: phoneProp, pocName: poc
    */
   const save = async () => {
     if (!status || !c || !calledAtOk || busy) return;
+    if (outcome === "other" && !(details.text || "").trim()) return;
     const reminderAt = rem.on && rem.date ? new Date(`${rem.date}T${rem.time || "10:00"}`) : null;
     setBusy(true);
     setSaveError("");
@@ -981,26 +1010,28 @@ export default function PhoneVerifyModal({ jobId, phone: phoneProp, pocName: poc
             </div>
           </div>
 
-          <div className="pvm-top">
-            <div>
-              <p className="pvm-lbl">Call status <Req /></p>
-              <div className="pvm-seg" role="radiogroup" aria-label="Call status">
-                <button type="button" role="radio" aria-checked={status === "answered"} className={status === "answered" ? "on" : ""}
-                  onClick={() => setStatus("answered")}><span className="pvm-dot" /> Answered</button>
-                <button type="button" role="radio" aria-checked={status === "unanswered"} className={"neg" + (status === "unanswered" ? " on" : "")}
-                  onClick={() => setStatus("unanswered")}><span className="pvm-dot" /> Unanswered</button>
+          <div className="pvm-oc" role="radiogroup" aria-label="Call outcome">
+            <p className="pvm-lbl">Call outcome <Req /> <span className="pvm-oc-hint">one click — the call status follows</span></p>
+            {Object.entries(OUTCOMES).map(([st, list]) => (
+              <div key={st} className={"pvm-oc-group " + st}>
+                <div className="pvm-oc-head">
+                  {st === "answered" ? <PhoneIncoming size={13} /> : <PhoneMissed size={13} />}
+                  {st === "answered" ? "Answered" : "Not answered"}
+                </div>
+                <div className="pvm-oc-list">
+                  {list.map((o) => {
+                    const on = status === st && outcome === o.v;
+                    return (
+                      <button key={o.v} type="button" role="radio" aria-checked={on}
+                        className={"pvm-oc-btn t-" + o.tone + (on ? " on" : "")}
+                        onClick={() => pickOutcome(st, o.v)}>
+                        {o.v === "other" ? "Other…" : o.l}
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
-            </div>
-            <div>
-              <p className="pvm-lbl">{status === "unanswered" ? "Reason not answered" : "Call outcome"} <Req /></p>
-              <div className="pvm-sel">
-                <select className={outcome ? "" : "ph"} disabled={!status} value={outcome || ""} onChange={(e) => setOutcome(e.target.value)}>
-                  <option value="">{!status ? "Pick a call status first…" : status === "answered" ? "What came out of the call…" : "Why it did not connect…"}</option>
-                  {status && OUTCOMES[status].map((o) => <option key={o.v} value={o.v}>{o.l}</option>)}
-                </select>
-                <ChevronDown size={13} className="pvm-chev" />
-              </div>
-            </div>
+            ))}
           </div>
 
           {c?.panel && (
@@ -1108,7 +1139,8 @@ export default function PhoneVerifyModal({ jobId, phone: phoneProp, pocName: poc
 
         <div className="pvm-foot">
           <button className="pvm-fbtn" onClick={onClose} disabled={busy}>Cancel</button>
-          <button className="pvm-fbtn primary" onClick={save} disabled={!status || !c || !calledAtOk || busy}>
+          <button className="pvm-fbtn primary" onClick={save}
+            disabled={!status || !c || !calledAtOk || busy || (outcome === "other" && !(details.text || "").trim())}>
             {busy ? <RefreshCw size={14} className="pvm-spin" /> : <Check size={14} />} {busy ? "Saving…" : "Save"}
           </button>
         </div>

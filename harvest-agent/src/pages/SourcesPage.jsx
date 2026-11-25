@@ -11,6 +11,7 @@ import {
 } from "../api";
 import { C } from "../theme";
 import { StatusPill, PlainHeader, fmtDate } from "../components/ui";
+import LogCallShield from "../components/LogCallShield";
 
 /* ── Source Runs page (single-source trigger + results, per source) ─────── */
 const SOURCE_TABS = [
@@ -298,6 +299,10 @@ export default function SourceRunsPage({ harvestRunning, setHarvestRunning }) {
                         <td className="ha-td">{j.job_poster_name}</td>
                         <td className="ha-td" style={{ fontSize: 12.5 }}>
                           {[j.email_id, j.contact_number].filter(Boolean).join(" · ") || "—"}
+                          {j.contact_number && (
+                            <LogCallShield jobId={j.id} phone={j.contact_number} phoneSource="job"
+                              pocName={j.job_poster_name || ""} company={j.company || ""} email={j.email_id || ""} />
+                          )}
                         </td>
                         <td className="ha-td">{j.posted_date}</td>
                         <td className="ha-td" style={{ textAlign: "center" }}>

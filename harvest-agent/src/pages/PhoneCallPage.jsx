@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { useNavigate, useParams } from "react-router-dom";
 import { ArrowLeft, Briefcase, Paperclip, Pencil, RefreshCw, Trash2 } from "lucide-react";
 import { getPhoneCallLog, deletePhoneCallLog } from "../api";
+import LogCallShield from "../components/LogCallShield";
 import { useTenant } from "../TenantContext";
 import { C } from "../theme";
 import PhoneVerifyModal, { outcomeDetailText } from "../components/PhoneVerify";
@@ -159,6 +160,9 @@ export default function PhoneCallPage() {
             </Field>
             <Field label="Phone">
               <span style={{ fontVariantNumeric: "tabular-nums" }}>{call.phone || "—"}</span>
+              <LogCallShield jobId={call.job_id} phone={call.phone} phoneSource={call.phone_source}
+                pocName={call.contact_name} company={call.company} called
+                onLogged={() => setHistoryKey((k) => k + 1)} />
               {source && (
                 <span style={{ marginLeft: 8, padding: "2px 8px", borderRadius: 6, fontSize: 11.5, fontWeight: 600, color: source.color, background: source.bg }}>
                   {source.label}

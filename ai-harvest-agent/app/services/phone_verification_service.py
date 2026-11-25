@@ -83,13 +83,15 @@ CALL_STATUSES = ("answered", "unanswered")
 CALL_OUTCOMES = {
     "answered": frozenset({
         "good_response", "connect_back", "share_details", "not_interested", "wrong_number",
-        "not_right_poc", "position_closed", "language_barrier", "do_not_call",
+        "not_right_poc", "position_closed", "language_barrier", "do_not_call", "other",
     }),
     "unanswered": frozenset({
         "no_answer", "busy", "switched_off", "unreachable", "invalid_number",
-        "disconnected", "voicemail",
+        "disconnected", "voicemail", "other",
     }),
 }
+# "other": free text (details.text, required) for anything the list doesn't cover.
+# Valid under either status; it sets no flags, suppressions or reminders by itself.
 DETAILS_MAX_LEN = 4000
 PROOF_MAX_FILES = 3
 PROOF_SRC_MAX_LEN = 450_000  # a ~300 KB image as a base64 data: URL
@@ -115,6 +117,7 @@ _PANEL_FIELDS: dict[str, dict[str, str]] = {
     "dnc": {"dncConfirm": "bool"},
     "retry": {"preset": "str"},
     "invalid": {"markInvalid": "bool", "reenrich": "bool"},
+    "other": {"text": "str"},
 }
 # Kept for every outcome (and for calls without one): false = this call is for this
 # job only — it does not stand for the contact's other jobs (inheritable_call_cond).
@@ -126,6 +129,7 @@ _OUTCOME_PANEL: dict[str, str | None] = {
     "position_closed": None, "language_barrier": "lang", "do_not_call": "dnc",
     "no_answer": "retry", "busy": "retry", "switched_off": "retry", "unreachable": "retry",
     "invalid_number": "invalid", "disconnected": "retry", "voicemail": "retry",
+    "other": "other",
 }
 # Proof of call: always required for these; from the 2nd attempt on a job for the
 # unanswered retry outcomes (mirrors `proof` in PhoneVerify.jsx's OUTCOMES).
@@ -631,6 +635,8 @@ def _normalize_call_input(
         raise HTTPException(status_code=422, detail="Remarks are required for an answered call")
     # Calls without an outcome (older clients) keep their details as sent.
     details = _clean_details(outcome, details) if outcome else dict(details or {})
+    if outcome == "other" and not str(details.get("text") or "").strip():
+        raise HTTPException(status_code=422, detail="Describe what happened for an 'Other' outcome")
     if "applyToContact" in details:
         details["applyToContact"] = bool(details["applyToContact"])
     details_json = json.dumps(details, ensure_ascii=False)
