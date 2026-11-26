@@ -80,7 +80,7 @@ def join_terms(
     """Clean + cap selected category / custom-title terms, drop catch-all buckets,
     and join them with the board's `joiner`. Returns "" when nothing usable."""
     cleaned = [
-        t.strip() for t in (terms or [])
+        t for t in (terms or [])
         if t and t.strip() and not CATEGORY_CATCHALL_RE.match(t)
     ]
     if not cleaned:
@@ -97,7 +97,7 @@ def categories_cover_domain(domain: str, job_categories: list[str] | None) -> bo
     if not canonical or not job_categories:
         return False
     selected = {
-        c.strip().lower() for c in job_categories
+        c.lower() for c in job_categories
         if c and c.strip() and not CATEGORY_CATCHALL_RE.match(c)
     }
     return selected >= canonical

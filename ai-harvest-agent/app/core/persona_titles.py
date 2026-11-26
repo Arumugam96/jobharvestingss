@@ -99,7 +99,7 @@ def titles_for_persona(persona: str | None, custom_titles: list[str] | None = No
     & HR (HR_TITLES) for anything unknown or empty.
     """
     if custom_titles:
-        cleaned = [t.strip() for t in custom_titles if t and t.strip()]
+        cleaned = [t for t in custom_titles if t and t.strip()]
         if cleaned:
             return cleaned
     key = (persona or "").strip().lower()

@@ -75,11 +75,18 @@ from app.models.harvest_run import LlmCallType
 from app.services import run_guard
 from app.services.feed_tenant_classifier import normalize_market
 from app.agents.linkedin_agent import (
+    _LI_COMPANY_SLUG_RE,
     _clean,
+    _delay,
     _infer_work_mode,
+    _llm_extract_company_fields,
+    _resolve_company_url_from_links,
     _resolve_posted_date,
+    _scrape_linkedin_company_card_text,
     _wait_for_page_text_stable,
 )
+from app.core.company_size import normalize_company_size, parse_company_size_band
+from app.core.location import parse_location
 from app.agents.linkedin_lead_agent import _clean_mailto
 from app.agents.prospect_intelligence_agent import _HIRING_DOMAIN_MAP, _classify_hiring_domain
 
@@ -311,6 +318,15 @@ class FeedLead:
     recruiter_profile_url: str = ""
     recruiter_email:       str = ""        # only if verbatim in the post
     recruiter_phone:       str = ""        # only if verbatim in the post
+    # ── Hiring company details ────────────────────────────────────────────────
+    # LLM (only if stated in the post) first; gaps filled after extraction by
+    # _enrich_lead_companies (cache → LinkedIn About page → Apollo) when
+    # LINKEDIN_FEED_COMPANY_ENRICHMENT is on. Never guessed.
+    company_linkedin_url: str = ""         # https://www.linkedin.com/company/<slug>/ (grounded in the post's links)
+    company_size:         str = ""         # canonical "<band> employees"
+    company_country:      str = ""         # company HQ, not the job location
+    company_state:        str = ""
+    company_industry:     str = ""
     # ── Provenance / meta ─────────────────────────────────────────────────────
     post_url:        str = ""              # post permalink (from URN)
     post_urn:        str = ""
@@ -341,7 +357,10 @@ class FeedLead:
             "job_description_html":   self.description_html,
             "skills":                 self.skills,
             "work_mode":              self.work_mode,
-            "company_url":            "",
+            "company_url":            self.company_linkedin_url[:500],
+            "company_size":           self.company_size[:100],
+            "company_country":        self.company_country[:100],
+            "company_state":          self.company_state[:100],
             "employment_type":        self.employment_type[:100],
             "job_type":               self.opportunity_type,
             "domain":                 (self.domain or "IT")[:50],
@@ -471,6 +490,72 @@ def _ground_link(link: str | None, links: list[str], text: str) -> str:
     if key and key in (text or "").lower():
         return link if link.lower().startswith("http") else f"https://{link}"
     return ""
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Hiring-company details (deterministic, no LLM)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Fields that make up a lead's company details, in FeedLead / CompanyORM naming.
+_COMPANY_FIELDS = ("company_size", "company_country", "company_state", "company_industry")
+
+
+def _company_slug(url: str) -> str:
+    """Lower-cased slug of a linkedin.com/company/<slug> URL, or ""."""
+    if "linkedin.com" not in (url or "").lower():
+        return ""
+    m = _LI_COMPANY_SLUG_RE.search(url or "")
+    return m.group(1).strip().lower() if m else ""
+
+
+def _canonical_company_url(slug: str) -> str:
+    return f"https://www.linkedin.com/company/{slug}/" if slug else ""
+
+
+def _company_links(raw: dict) -> list[dict]:
+    """The post's LinkedIn company-page candidates ({text, href}) from the DOM."""
+    out = []
+    for c in raw.get("company_links") or []:
+        if isinstance(c, dict) and _company_slug(str(c.get("href") or "")):
+            out.append({"text": str(c.get("text") or ""), "href": str(c.get("href") or "")})
+    return out
+
+
+def _company_links_block(raw: dict) -> str:
+    """The company-page candidates as prompt lines ("Name — URL")."""
+    links = _company_links(raw)
+    return "\n".join(f"{c['text']} — {c['href']}" for c in links) if links else "(none)"
+
+
+def _ground_company_url(llm_url: str, company: str, raw: dict) -> str:
+    """The hiring company's LinkedIn page, only ever one linked in the post: the
+    LLM's pick when it is one of the post's company links, else a name match
+    against those links' text. Returned canonical (…/company/<slug>/) or ""."""
+    links = _company_links(raw)
+    if not links:
+        return ""
+    slugs = {_company_slug(c["href"]) for c in links}
+    picked = _company_slug(llm_url)
+    if picked and picked in slugs:
+        return _canonical_company_url(picked)
+    if company:
+        return _canonical_company_url(
+            _company_slug(_resolve_company_url_from_links(company, links))
+        )
+    return ""
+
+
+def _company_size_band(raw: str) -> str:
+    """A stated headcount mapped to the canonical "<band> employees" form, or ""
+    when it doesn't parse as an employee range (never guessed)."""
+    raw = (raw or "").strip()
+    if not raw:
+        return ""
+    band = parse_company_size_band(raw)
+    if band:
+        return band
+    norm = normalize_company_size(raw)
+    return f"{norm} employees" if norm else ""
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -651,6 +736,22 @@ _COLLECT_POSTS_JS = r"""() => {
                 if (links.length >= 10) break;
             }
 
+            // LinkedIn company pages linked in the post (author, @mentions, reshared
+            // company), as {text, href} candidates for the hiring company's page.
+            const companyLinks = [];
+            for (const a of el.querySelectorAll('a[href*="/company/"]')) {
+                const href = (a.href || '').split('?')[0].split('#')[0];
+                if (!/linkedin\.com\/company\/[^\/]+/i.test(href)) continue;
+                const name = ((a.innerText || '').trim().split('\n')[0].trim())
+                    || (a.getAttribute('aria-label') || '').trim();
+                if (!name || name.length > 120) continue;
+                const ctx = ((a.parentElement && a.parentElement.innerText) || '').slice(0, 200);
+                if (SOCIAL_RE.test(ctx) && !ctx.includes('•')) continue;
+                if (companyLinks.some(c => c.href === href)) continue;
+                companyLinks.push({ text: name, href: href });
+                if (companyLinks.length >= 8) break;
+            }
+
             const mailto = el.querySelector('a[href^="mailto:"]');
             var mailtoEmail = mailto
                 ? (mailto.href || '').replace(/^mailto:/i, '').split('?')[0].trim() : '';
@@ -668,6 +769,7 @@ _COLLECT_POSTS_JS = r"""() => {
                 is_repost: isRepost,
                 is_promoted: isPromoted,
                 links: links,
+                company_links: companyLinks,
                 mailto: mailtoEmail,
             });
         } catch (e) { /* skip malformed post */ }
@@ -739,6 +841,8 @@ class LinkedInFeedAgent:
         self._search_date      = str(s.linkedin_feed_search_date_posted or "").strip()
         self._search_scrolls   = int(s.linkedin_feed_search_max_scrolls)
         self._search_max_posts = int(s.linkedin_feed_search_max_posts_per_query)
+        self._company_enrich   = bool(s.linkedin_feed_company_enrichment)
+        self._company_page_max = max(0, int(s.linkedin_feed_company_page_max_visits))
 
         # Per-source collection counts ("feed", "search: <q>") for the diagnostic.
         self._source_counts: dict[str, int] = {}
@@ -803,20 +907,28 @@ class LinkedInFeedAgent:
 
         if storage_state_arg:
             logger.debug("linkedin_feed_using_session_file", session_file=storage_state_arg, account=account)
-            browser_ctx = BrowserManager(
-                headless=headless, slow_mo=slow_mo, storage_state=storage_state_arg,
-            )
         else:
-            account_profile = account_profile_dir(chrome_profile, account)
             logger.warning(
                 "linkedin_feed_no_session_file",
                 account=account,
                 hint=f"No session file at {sm.session_path} — falling back to Chrome profile "
-                     f"{account_profile}. Run POST /linkedin-setup-session to create it.",
+                     f"{account_profile_dir(chrome_profile, account)}. "
+                     "Run POST /linkedin-setup-session to create it.",
             )
-            browser_ctx = PersistentBrowserManager(
-                profile_dir=account_profile, headless=headless, slow_mo=slow_mo,
+
+        def _new_browser_ctx() -> Any:
+            """A fresh browser context on the same session (post collection, and
+            again for the company-page step after the browser was closed)."""
+            if storage_state_arg:
+                return BrowserManager(
+                    headless=headless, slow_mo=slow_mo, storage_state=storage_state_arg,
+                )
+            return PersistentBrowserManager(
+                profile_dir=account_profile_dir(chrome_profile, account),
+                headless=headless, slow_mo=slow_mo,
             )
+
+        browser_ctx = _new_browser_ctx()
 
         logger.info(
             "linkedin_feed_harvest_start",
@@ -878,6 +990,19 @@ class LinkedInFeedAgent:
 
         # ── Phase 2: classify + extract + persist (no browser needed) ──────────
         leads = await self._process_posts(raw_posts, on_status=on_status, on_batch=on_batch)
+
+        # ── Phase 3: fill company details the posts didn't state ───────────────
+        # Runs on accepted leads only. The mutated leads are what the route's final
+        # reconcile (replace_run_jobs) persists; batches flushed during Phase 2
+        # carry only the LLM's values until then.
+        if leads and self._company_enrich and not run_guard.is_stop_requested():
+            try:
+                await self._enrich_lead_companies(leads, _new_browser_ctx, on_status=on_status)
+            except Exception as exc:
+                logger.warning(
+                    "linkedin_feed_company_enrichment_failed",
+                    error_type=type(exc).__name__, error=str(exc)[:300], exc_info=True,
+                )
 
         logger.info(
             "linkedin_feed_harvest_completed",
@@ -1638,6 +1763,16 @@ class LinkedInFeedAgent:
         schema = (
             '{"hiring_company": str (the company that needs vendors or candidates: the end '
             "client if named, else the poster's company; empty if not stated — do NOT guess), "
+            '"hiring_company_linkedin_url": str or null (the LinkedIn company page of '
+            "hiring_company, copied EXACTLY from the LINKEDIN COMPANY PAGES list; null if "
+            "none of them is that company), "
+            '"company_size": str or null (hiring_company\'s employee count or range ONLY if '
+            'the post states it, e.g. "10,001+ employees", "a 500-member team"; never '
+            "estimate from brand recognition), "
+            '"company_industry": str or null (hiring_company\'s industry ONLY if stated), '
+            '"company_headquarters": str or null (hiring_company\'s headquarters as "city, '
+            "state, country\" ONLY if the post states where the company is headquartered "
+            "or based — NOT the job/work location), "
             '"requester_type": "end_client" | "staffing_firm" | "unknown" (end_client = the '
             "company itself needs the people/services; staffing_firm = a staffing firm or "
             "prime vendor passing on its client's requirement), "
@@ -1684,6 +1819,7 @@ class LinkedInFeedAgent:
         content = (
             f"{self._post_context(raw)}"
             f"---POSTER PROFILE URL---\n{profile_url or '(none)'}\n"
+            f"---LINKEDIN COMPANY PAGES---\n{_company_links_block(raw)}\n"
             f"---MAILTO LINK---\n{mailto or '(none)'}\n"
             f"---POSTING DATE (pre-calculated)---\n{resolved_date or 'unavailable'}\n\n"
             f"---POST TEXT---\n{text[:_POST_TEXT_MAX_CHARS]}"
@@ -1763,6 +1899,9 @@ class LinkedInFeedAgent:
         registration_link = _ground_link(extracted.get("registration_link"), links, f"{text} {source_text}")
 
         company = _s("hiring_company") or _s("company")
+        company_url = _ground_company_url(_s("hiring_company_linkedin_url"), company, raw)
+        hq = _s("company_headquarters")
+        _, company_state, company_country = parse_location(hq) if hq else ("", "", "")
         location = _s("location")
         skills = _list("skills", 20)
         engagement = _s("engagement_model")
@@ -1820,6 +1959,11 @@ class LinkedInFeedAgent:
             recruiter_profile_url=profile_url,
             recruiter_email=email,
             recruiter_phone=phone,
+            company_linkedin_url=company_url,
+            company_size=_company_size_band(_s("company_size")),
+            company_country=company_country,
+            company_state=company_state,
+            company_industry=_s("company_industry")[:200],
             post_url=self._permalink(raw.get("urn", "")),
             post_urn=str(raw.get("urn") or ""),
             is_repost=bool(raw.get("is_repost")),
@@ -1859,6 +2003,174 @@ class LinkedInFeedAgent:
         ]
         signal_fraction = sum(1 for s in signals if s) / len(signals)
         return round(0.5 * llm_conf + 0.5 * signal_fraction, 3)
+
+    # ── Stage 4: company details (size / HQ / industry) ─────────────────────────
+
+    async def _enrich_lead_companies(
+        self,
+        leads: list[FeedLead],
+        new_browser_ctx: Callable[[], Any],
+        on_status: StatusCallback | None = None,
+    ) -> dict:
+        """Fill each accepted lead's company size / HQ country+state / industry,
+        once per unique hiring company, stopping as soon as size AND country are
+        known. Order:
+          1. the extraction LLM's values (already on the leads, stated in the post);
+          2. the CompanyORM cache — a company already enriched (by any source, any
+             run) is never fetched again;
+          3. the company's LinkedIn About page, only when the post links it
+             (capped at LINKEDIN_FEED_COMPANY_PAGE_MAX_VISITS per run);
+          4. Apollo organization enrichment (DB-capped spend; also gated by
+             APOLLO_ENRICH_COMPANY + an API key inside run_company_waterfall).
+        Each step fills gaps only; nothing is guessed. Results are written back to
+        the cache and onto every lead of that company. Returns a counts summary."""
+        from app.core.company_domain import is_placeholder_company
+        from app.core.dependencies import get_session_factory
+        from app.services.company_enrichment_service import (
+            COMPANY_ENRICH_CAP,
+            run_company_waterfall,
+        )
+        from app.services.company_service import (
+            company_needs_enrichment,
+            get_companies_by_keys,
+            normalize_company_key,
+            upsert_company_enrichment,
+        )
+
+        # One entry per hiring company, seeded from its leads' LLM values.
+        groups: dict[str, list[FeedLead]] = {}
+        for lead in leads:
+            name = (lead.company or "").strip()
+            key = normalize_company_key(name) if name and not is_placeholder_company(name) else ""
+            if key:
+                groups.setdefault(key, []).append(lead)
+        if not groups:
+            return {"companies": 0}
+
+        info: dict[str, dict] = {}
+        for key, group in groups.items():
+            d: dict[str, Any] = {"name": group[0].company.strip(), "url": "", "domain": "",
+                                 "apollo_attempted": False, "sources": []}
+            d.update({f: "" for f in _COMPANY_FIELDS})
+            for lead in group:
+                d["url"] = d["url"] or lead.company_linkedin_url
+                for f in _COMPANY_FIELDS:
+                    d[f] = d[f] or getattr(lead, f)
+            if any(d[f] for f in _COMPANY_FIELDS):
+                d["sources"].append("llm")
+            info[key] = d
+
+        def _complete(d: dict) -> bool:
+            return bool(d["company_size"] and d["company_country"])
+
+        def _fill(d: dict, values: dict, source: str) -> None:
+            added = False
+            for f in _COMPANY_FIELDS:
+                v = str(values.get(f) or "").strip()
+                if v and not d[f]:
+                    d[f] = v
+                    added = True
+            if added:
+                d["sources"].append(source)
+
+        session_factory = get_session_factory(self._settings)
+        async with session_factory() as db:
+            cached = await get_companies_by_keys(db, set(groups))
+
+        todo: list[str] = []
+        for key, d in info.items():
+            row = cached.get(key)
+            if row is not None:
+                _fill(d, {f: getattr(row, f, "") or "" for f in _COMPANY_FIELDS}, "cache")
+            if not _complete(d) and company_needs_enrichment(row):
+                todo.append(key)
+        todo = todo[:COMPANY_ENRICH_CAP]
+
+        # LinkedIn About pages — only companies the post linked, one browser session.
+        visit = [k for k in todo if info[k]["url"]][: self._company_page_max]
+        visited = 0
+        if visit:
+            if on_status:
+                await on_status(f"Reading {len(visit)} company LinkedIn pages…")
+            llm = self._get_llm_service()
+            try:
+                async with new_browser_ctx() as bm:
+                    page = await bm.new_page()
+                    for i, key in enumerate(visit):
+                        if run_guard.is_stop_requested():
+                            break
+                        d = info[key]
+                        try:
+                            text = await _scrape_linkedin_company_card_text(page, d["url"])
+                            visited += 1
+                            if text and self._llm_calls_made < self._llm_max_calls:
+                                self._llm_calls_made += 1
+                                _fill(d, await _llm_extract_company_fields(llm, text, d["url"]), "linkedin")
+                            elif not text:
+                                logger.info("linkedin_feed_company_card_empty", url=d["url"])
+                        except Exception as exc:
+                            logger.warning("linkedin_feed_company_page_failed", url=d["url"],
+                                           error_type=type(exc).__name__, error=str(exc)[:300])
+                            if _is_browser_closed_error(exc):
+                                break
+                        if i < len(visit) - 1:
+                            await _delay(page, self._settings.linkedin_profile_visit_delay_min_ms,
+                                         self._settings.linkedin_profile_visit_delay_max_ms)
+            except Exception as exc:
+                logger.warning("linkedin_feed_company_browser_failed",
+                               error_type=type(exc).__name__, error=str(exc)[:300])
+
+        # Apollo — whatever is still missing size or country.
+        apollo_keys = [k for k in todo if not _complete(info[k])]
+        if apollo_keys and on_status:
+            await on_status(f"Enriching {len(apollo_keys)} companies via Apollo…")
+        for key in apollo_keys:
+            if run_guard.is_stop_requested():
+                break
+            d = info[key]
+            try:
+                data = await run_company_waterfall(self._settings, company_name=d["name"])
+            except Exception as exc:
+                logger.debug("linkedin_feed_company_apollo_failed", company=d["name"], error=str(exc))
+                continue
+            d["apollo_attempted"] = bool(data.get("apollo_attempted"))
+            d["domain"] = data.get("domain", "") or d["domain"]
+            _fill(d, data, "apollo")
+
+        # Cache what this run learned (stamps the company as enriched, so it is
+        # not re-fetched) — companies actually worked on, or fully stated by the LLM.
+        write = set(todo) | {k for k, d in info.items() if k not in cached and _complete(d)}
+        for key in write:
+            d = info[key]
+            try:
+                async with session_factory() as db:
+                    await upsert_company_enrichment(
+                        db, company_key=key, company_name=d["name"], domain=d["domain"],
+                        company_size=d["company_size"], company_country=d["company_country"],
+                        company_state=d["company_state"], company_industry=d["company_industry"],
+                        apollo_attempted=d["apollo_attempted"],
+                    )
+                    await db.commit()
+            except Exception as exc:
+                logger.warning("linkedin_feed_company_cache_write_failed", company=d["name"], error=str(exc))
+
+        filled = 0
+        for key, group in groups.items():
+            d = info[key]
+            for lead in group:
+                lead.company_linkedin_url = lead.company_linkedin_url or d["url"]
+                for f in _COMPANY_FIELDS:
+                    if not getattr(lead, f) and d[f]:
+                        setattr(lead, f, d[f])
+                filled += bool(lead.company_size)
+            logger.info("linkedin_feed_company_details", company=d["name"], sources=d["sources"],
+                        size=d["company_size"], country=d["company_country"],
+                        industry=d["company_industry"], linkedin_url=d["url"])
+
+        summary = {"companies": len(groups), "enriched": len(todo), "linkedin_pages": visited,
+                   "apollo": len(apollo_keys), "leads_with_size": filled}
+        logger.info("linkedin_feed_company_enrichment_done", **summary)
+        return summary
 
     @staticmethod
     def _permalink(urn: str) -> str:

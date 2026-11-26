@@ -189,6 +189,15 @@ class Settings(BaseSettings):
     linkedin_feed_search_date_posted:        str = "past-week"   # past-24h | past-week | past-month | "" (any)
     linkedin_feed_search_max_scrolls:        int = 10
     linkedin_feed_search_max_posts_per_query: int = 20
+    # Company details (size / HQ country+state / industry) for accepted feed leads.
+    # Values the extraction LLM reads straight from the post are always kept; this
+    # flag gates the extra steps run after extraction, in order: the company cache
+    # → the company's LinkedIn About page (only when the post links it) → Apollo
+    # organization enrichment (also needs APOLLO_ENRICH_COMPANY + an API key).
+    linkedin_feed_company_enrichment:        bool = True
+    # Max company LinkedIn About pages opened per feed run (each is a page view on
+    # the harvest account). 0 = skip the LinkedIn step, go straight to Apollo.
+    linkedin_feed_company_page_max_visits:   int = 10
 
     @property
     def linkedin_feed_search_query_list(self) -> list[str]:
