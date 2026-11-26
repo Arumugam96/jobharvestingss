@@ -22,7 +22,7 @@ from urllib.parse import urlparse
 
 import structlog
 
-from app.core.company_domain import infer_company_domain, is_placeholder_company
+from app.core.company_domain import is_placeholder_company, known_company_domain
 from app.core.dependencies import get_session_factory
 from app.services import run_guard
 from app.services.apollo_client import ApolloClient, ApolloOrgResult
@@ -91,7 +91,6 @@ async def resolve_apollo_org(
     *,
     company_name: str,
     domain: str = "",
-    guess_domain: bool = False,
     client: ApolloClient | None = None,
 ) -> OrgResolution:
     """The Apollo organization for a company — needed before any people search.
@@ -104,11 +103,10 @@ async def resolve_apollo_org(
 
     ``domain`` is the caller's known domain. When it disagrees with the cached row's
     domain the cache is bypassed (two companies whose names normalize alike) and the
-    fresh result is not written over the other company's id. ``guess_domain`` lets
-    the enrich lookup use a domain inferred from the name when none is known — never
-    used for that conflict check, and an org found on a GUESSED domain is only
-    accepted (and cached) when its name matches ``company_name`` after
-    normalize_company_key; otherwise it is discarded and the name search runs.
+    fresh result is not written over the other company's id. With no ``domain``, the
+    curated known-domain map (known_company_domain — exact names only) is used. A
+    domain GUESSED from the name ("Acme Tech" -> acme.com) is never sent to Apollo:
+    a wrong guess still costs a credit.
     Raises ApolloAPIError like the client, so callers keep their existing error
     handling."""
     from app.services import apollo_budget
@@ -120,7 +118,7 @@ async def resolve_apollo_org(
     )
 
     key = normalize_company_key(company_name)
-    dom = (domain or "").strip().lower()
+    dom = (domain or "").strip().lower() or known_company_domain(company_name)
 
     row = None
     if key:
@@ -149,16 +147,9 @@ async def resolve_apollo_org(
     if not await _budget_left():
         return OrgResolution(cap_reached=True)
 
-    lookup_dom = dom or (infer_company_domain(company_name)[0] if guess_domain else "")
-    org = await client.enrich_organization(lookup_dom) if lookup_dom else None
-    if org is not None and org.id and not dom and not _org_name_matches(org.name, company_name):
-        # A name-guessed domain can belong to another company — never trust or
-        # cache that hit unless Apollo's org name is this company's name.
-        logger.info("apollo_org_guessed_domain_mismatch", company=company_name,
-                    domain=lookup_dom, org_name=org.name)
-        org = None
+    org = await client.enrich_organization(dom) if dom else None
     if org is None or not org.id:
-        org = await client.search_organization(company_name, domain=lookup_dom)
+        org = await client.search_organization(company_name, domain=dom)
     if org is None or not org.id:
         org = None
         # A None can also be the cap denying the lookup — only a real miss is cached.
@@ -184,16 +175,6 @@ async def resolve_apollo_org(
             logger.warning("apollo_org_cache_write_failed", company=company_name, error=str(exc))
     logger.info("apollo_org_resolved", company=company_name, found=bool(org))
     return OrgResolution(org=org, attempted=True, size_band=size_band)
-
-
-def _org_name_matches(org_name: str | None, company_name: str) -> bool:
-    """True when an Apollo org's name is the same company as ``company_name``:
-    equal normalize_company_key values, compared with and without spaces."""
-    from app.services.company_service import normalize_company_key
-
-    a = normalize_company_key(org_name or "")
-    b = normalize_company_key(company_name or "")
-    return bool(a and b) and (a == b or a.replace(" ", "") == b.replace(" ", ""))
 
 
 async def run_company_waterfall(
@@ -222,13 +203,16 @@ async def run_company_waterfall(
 
     site_domain = domain_from_website(company_url)
     out["domain"] = site_domain
-    lookup_domain = site_domain or infer_company_domain(company_name)[0]
+    # Only a REAL domain (the company's website, or the curated known-domain map) is
+    # worth a credit. No domain → no Apollo call: name-guessed domains and bare name
+    # searches mostly return the wrong company or nothing, and still bill.
+    lookup_domain = site_domain or known_company_domain(company_name)
     if settings.apollo_enrich_company and settings.apollo_api_key and lookup_domain:
         try:
             # Shared, cached org resolve — a company already resolved by any feature
             # costs nothing here.
             res = await resolve_apollo_org(
-                settings, company_name=company_name, domain=site_domain, guess_domain=True,
+                settings, company_name=company_name, domain=lookup_domain,
             )
             out["apollo_attempted"] = not res.cap_reached
             org = res.org

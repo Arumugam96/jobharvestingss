@@ -7,7 +7,7 @@ import {
   getHarvestConfig, saveHarvestConfig, runHarvestAgent, getHarvestStatus,
   getRunHistory, getRunHistoryEntry, getActiveRun, setupLinkedinSession, ApiError, isTransientError,
   getNaukriRecruiterStatus, startNaukriRecruiterLogin, verifyNaukriRecruiter,
-  saveSchedule, getScheduleStatus,
+  saveSchedule, getScheduleStatus, setActiveLinkedinAccount, linkedinAccountErrorText,
 } from "./api";
 import { fmtNextRun } from "./lib/schedule";
 import LiveBrowserView from "./components/LiveBrowserView";
@@ -369,6 +369,26 @@ export default function RuleEngineConfig({
   const [sourceStatus, setSourceStatus] = useState(null);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
+  // Result of saving the active LinkedIn account ({ ok, text } or null).
+  const [accountMsg, setAccountMsg] = useState(null);
+
+  /** Save the active LinkedIn account immediately (it is used by every LinkedIn run,
+   * including the Feed page, which never saves this form); revert on failure. */
+  async function changeLinkedinAccount(id) {
+    const prev = linkedinAccount;
+    if (!id || id === prev) return;
+    setLinkedinAccount(id);
+    setAccountMsg({ ok: true, text: "Saving…" });
+    try {
+      await setActiveLinkedinAccount(id);
+      setLoadedConfig((c) => ({ ...c, sources: { ...c.sources, linkedin_account: id } }));
+      const label = LINKEDIN_ACCOUNTS.find((a) => a.id === id)?.label || `Account ${id}`;
+      setAccountMsg({ ok: true, text: `Saved: LinkedIn Jobs and Feed runs now use ${label}.` });
+    } catch (err) {
+      setLinkedinAccount(prev);
+      setAccountMsg({ ok: false, text: linkedinAccountErrorText(err) });
+    }
+  }
   const [dirty, setDirty] = useState(false);
   const [attempted, setAttempted] = useState(false);
 
@@ -1078,10 +1098,15 @@ export default function RuleEngineConfig({
                   <label>Active LinkedIn account (used for harvest runs)</label>
                   <Select
                     value={LINKEDIN_ACCOUNTS.find((a) => a.id === linkedinAccount)?.label || "Account 1"}
-                    onChange={(label) => { setLinkedinAccount(LINKEDIN_ACCOUNTS.find((a) => a.label === label).id); markDirty(); }}
+                    onChange={(label) => changeLinkedinAccount(LINKEDIN_ACCOUNTS.find((a) => a.label === label)?.id)}
                     ariaLabel="Active LinkedIn account"
                     options={LINKEDIN_ACCOUNTS.map((a) => a.label)}
                   />
+                  {accountMsg && (
+                    <span className={accountMsg.ok ? "rec-on" : "rec-validation"} style={{ display: "block", marginTop: 6, fontSize: 13 }}>
+                      {!accountMsg.ok && <AlertTriangle size={14} />} {accountMsg.text}
+                    </span>
+                  )}
                 </div>
 
                 {/* Two LinkedIn account cards — each connects/saves its own session */}

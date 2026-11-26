@@ -520,6 +520,20 @@ export function saveHarvestConfig(config) {
   return request("/harvest-config", { method: "PUT", body: JSON.stringify(config) });
 }
 
+/** PUT /harvest-config/linkedin-account — save ONLY the active LinkedIn account
+ * ("1" | "2") used by every LinkedIn run (Jobs + Feed). Admins only (403 otherwise). */
+export function setActiveLinkedinAccount(account) {
+  return request("/harvest-config/linkedin-account", {
+    method: "PUT", body: JSON.stringify({ account }),
+  });
+}
+
+/** Human message for a failed setActiveLinkedinAccount call. */
+export function linkedinAccountErrorText(err) {
+  if (err && err.status === 403) return "Only admins can change the active LinkedIn account.";
+  return `Could not save the LinkedIn account: ${(err && err.message) || err}`;
+}
+
 /** Persist ONLY the schedule block (re-read the latest config, merge, PUT) so the
  * "Automatic scheduled runs" toggle takes effect immediately — the backend re-applies
  * the APScheduler job on PUT — without also saving the page's other unsaved edits. */

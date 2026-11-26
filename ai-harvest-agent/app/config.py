@@ -123,7 +123,7 @@ class Settings(BaseSettings):
     # the email report shows remaining. <= 0 = unlimited / not tracked.
     apollo_monthly_cap: int = 0
     company_contact_fallback: bool = True
-    company_contact_reveal_cap: int = 5
+    company_contact_reveal_cap: int = 2
     # HR shortlist per (company, location) — free Apollo search, revealed lazily as
     # outreach rotates through it (one person per company+location per day).
     company_contact_shortlist_size: int = 10
@@ -198,6 +198,14 @@ class Settings(BaseSettings):
     # Max company LinkedIn About pages opened per feed run (each is a page view on
     # the harvest account). 0 = skip the LinkedIn step, go straight to Apollo.
     linkedin_feed_company_page_max_visits:   int = 10
+    # Apollo phone request (by the poster's LinkedIn URL) for saved feed leads with NO
+    # email and a KNOWN company size whose band starts at/above the minimum below
+    # (501 ⇒ "above 500": 501-1,000 and up). 8 credits per phone, delivered async via
+    # the phone webhook — also needs APOLLO_REVEAL_PHONE=true + APOLLO_WEBHOOK_URL.
+    # See app/services/feed_phone_service.py.
+    linkedin_feed_apollo_phone:               bool = True
+    linkedin_feed_apollo_phone_max:           int = 10     # phone requests per feed run
+    linkedin_feed_apollo_phone_min_employees: int = 501
 
     @property
     def linkedin_feed_search_query_list(self) -> list[str]:

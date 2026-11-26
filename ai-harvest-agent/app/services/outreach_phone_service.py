@@ -124,20 +124,32 @@ async def request_phone_after_outreach(
 ) -> str:
     """Request the recruiter's phone from Apollo after an initial outreach email was
     sent to them. Returns REQUESTED or a skip reason / ERROR. Never raises."""
+    return await request_phone(recruiter_id=recruiter_id, job_id=job_id, to_email=to_email,
+                               client=client, source="outreach")
+
+
+async def request_phone(
+    *, recruiter_id: str | None, job_id: str | None = None, to_email: str = "",
+    client: Any = None, source: str = "outreach",
+) -> str:
+    """Request a contact's phone from Apollo by LinkedIn URL (async webhook delivery),
+    with every check of the after-outreach path. ``source`` tags the request row
+    ("outreach", or "linkedin_feed" for app/services/feed_phone_service.py). Returns
+    REQUESTED or a skip reason / ERROR. Never raises."""
     try:
         return await _request(recruiter_id=recruiter_id, job_id=job_id, to_email=to_email,
-                              client=client)
+                              client=client, source=source)
     except Exception as exc:
         logger.warning("apollo_outreach_phone_failed", recruiter_id=recruiter_id, job_id=job_id,
-                       error=str(exc))
+                       source=source, error=str(exc))
         return ERROR
 
 
 async def _request(
     *, recruiter_id: str | None, job_id: str | None, to_email: str,
-    client: Any,
+    client: Any, source: str = "outreach",
 ) -> str:
-    """Core of ``request_phone_after_outreach``; may raise (the wrapper catches it).
+    """Core of ``request_phone`` / ``request_phone_after_outreach``; may raise (the wrapper catches it).
 
     Skips when phone reveal or the webhook is disabled, there is no LinkedIn URL, a
     phone is already known or requested, or the enrichment budget (minus the credits
@@ -148,7 +160,7 @@ async def _request(
     REQUESTED, a skip reason, a lowercased settle status, or ERROR.
     """
     settings = get_settings()
-    log = {"recruiter_id": recruiter_id, "job_id": job_id}
+    log = {"recruiter_id": recruiter_id, "job_id": job_id, "source": source}
     if not settings.apollo_reveal_phone or not settings.apollo_api_key:
         return _skip(DISABLED, **log)
     if client is None:
@@ -180,7 +192,7 @@ async def _request(
     ref = await apollo_phone_service.begin_request(
         tenant_id=ctx["tenant_id"], recruiter_id=recruiter_id,
         apollo_person_id=ctx["person_id"] or None,
-        purpose="enrichment", source="outreach", linkedin_url=ctx["linkedin_url"],
+        purpose="enrichment", source=source, linkedin_url=ctx["linkedin_url"],
         scraped_job_id=job_id,
     )
     if not ref:

@@ -63,7 +63,8 @@ class ApolloPhoneRequestORM(Base):
     # sub-cap only, never the Finder budget).
     purpose: Mapped[str] = mapped_column(String(20), nullable=False, default="finder", server_default="finder")
     # Which flow asked: contact_finder | linkedin_harvest | prospect_intel |
-    # recruiter_contact | apollo_sweep | csv_script | harvest | backfill | unsolicited.
+    # recruiter_contact | apollo_sweep | csv_script | harvest | backfill | unsolicited |
+    # outreach | linkedin_feed (app/services/feed_phone_service.py).
     source: Mapped[str] = mapped_column(
         String(40), nullable=False, default="contact_finder", server_default="contact_finder"
     )

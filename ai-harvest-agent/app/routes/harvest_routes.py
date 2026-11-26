@@ -263,6 +263,33 @@ async def update_harvest_config(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# PUT /harvest-config/linkedin-account
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.put(
+    "/harvest-config/linkedin-account", status_code=status.HTTP_200_OK,
+    dependencies=[Depends(require_admin)],
+)
+async def set_active_linkedin_account(body: dict[str, Any]) -> dict[str, str]:
+    """Set the active LinkedIn account (sources.linkedin_account) used by EVERY
+    LinkedIn run — Jobs, the orchestrator and the Feed. Writes only that field, so
+    other unsaved Rule Engine edits are not saved along with it. Admins only (it is
+    one global setting); an unknown account id is rejected with 422."""
+    config = _config_svc.load()
+    try:
+        updated = HarvestConfig.model_validate({
+            **config.model_dump(),
+            "sources": {**config.sources.model_dump(), "linkedin_account": body.get("account")},
+        })
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+    _config_svc.save(updated)
+    account = updated.sources.linkedin_account
+    logger.info("linkedin_active_account_set", account=account)
+    return {"status": "success", "linkedin_account": account}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # GET /harvest-schedule/status
 # ══════════════════════════════════════════════════════════════════════════════
 

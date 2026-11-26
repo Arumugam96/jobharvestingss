@@ -18,9 +18,25 @@
 #     5432 publicly; on EC2 keep the default and use an SSH tunnel.
 #   POSTGRES_HOST_PORT=5432 (default) — host port for the binding above.
 
+# Memory caps & log rotation (sized for the 3.7 GB EC2 instance + 2 GB swap).
+# Without caps a runaway Chromium tab (seen at 1.8 GB) exhausts host RAM and the
+# whole instance freezes (SSH included). With caps, the kernel OOM-kills inside
+# the api container only — normally a Chrome process (highest oom_score) — and
+# the host stays reachable. Override per host via the repo-root .env
+# (API_MEM_LIMIT / API_MEMSWAP_LIMIT / POSTGRES_MEM_LIMIT / FRONTEND_MEM_LIMIT).
+# memswap_limit is RAM + swap combined (must be >= mem_limit).
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "3"
+
 services:
   postgres:
     image: postgres:16-alpine
+    mem_limit: ${POSTGRES_MEM_LIMIT:-512m}
+    memswap_limit: ${POSTGRES_MEMSWAP_LIMIT:-768m}
+    logging: *default-logging
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-harvest_db}
       POSTGRES_USER: ${POSTGRES_USER:-harvest}
@@ -64,6 +80,9 @@ services:
         condition: service_healthy
     restart: unless-stopped
     shm_size: "1gb"   # Chromium under Xvfb needs more than Docker's 64MB default /dev/shm
+    mem_limit: ${API_MEM_LIMIT:-2560m}        # /dev/shm usage counts toward this too
+    memswap_limit: ${API_MEMSWAP_LIMIT:-3584m}  # up to ~1 GB of swap before OOM-kill
+    logging: *default-logging
 
   frontend:
     build: ./harvest-agent
@@ -72,6 +91,8 @@ services:
     depends_on:
       - api
     restart: unless-stopped
+    mem_limit: ${FRONTEND_MEM_LIMIT:-128m}
+    logging: *default-logging
 
 volumes:
   pgdata:

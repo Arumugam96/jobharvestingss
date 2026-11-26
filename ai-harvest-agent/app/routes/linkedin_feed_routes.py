@@ -116,7 +116,12 @@ async def _run_feed_background_impl(
     headless = config.browser.resolved_headless
     slow_mo  = config.browser.slow_mo_ms
 
-    JobTracker.update(job_id, progress=10, message=f"Opening LinkedIn ({_MODE_LABELS.get(mode, mode)})…")
+    account  = str(config.sources.linkedin_account or "1")
+    log.info("linkedin_feed_account", linkedin_account=account)
+    JobTracker.update(
+        job_id, progress=10,
+        message=f"Opening LinkedIn Account {account} ({_MODE_LABELS.get(mode, mode)})…",
+    )
 
     agent = LinkedInFeedAgent(get_settings())
     # The run (and its llm_calls) stay with the tenant that started it; each lead is
@@ -302,6 +307,16 @@ async def _run_feed_background_impl(
             completed_at=datetime.now(timezone.utc),
         ))
 
+    # Apollo phones for saved leads with no email at companies above 500 employees
+    # (app/services/feed_phone_service.py). Detached so its per-request pacing never
+    # delays the run's completion or holds the harvest slot. Skipped on a user stop.
+    if run_pk and leads and not stopped:
+        from app.services.feed_phone_service import schedule_feed_lead_phones
+        try:
+            schedule_feed_lead_phones(run_pk)
+        except Exception as exc:
+            log.warning("linkedin_feed_phone_schedule_failed", error=str(exc))
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # POST /run-linkedin-feed-agent
@@ -337,6 +352,9 @@ async def run_linkedin_feed_agent(
             detail=f"mode must be one of {list(MODES)}",
         )
     run_id = _make_run_id()
+    # The run uses the Rule Engine's active LinkedIn account (sources.linkedin_account);
+    # recorded on the run so the history shows which account harvested it.
+    account = str(ConfigService().load().sources.linkedin_account or "1")
 
     # Global daily cap — reject before claiming the single-flight slot.
     budget = await run_guard.daily_budget_conflict()
@@ -366,12 +384,14 @@ async def run_linkedin_feed_agent(
             sources=[_SOURCE],
             filters_snapshot={
                 "mode": mode,
+                "linkedin_account": account,
                 "search_queries": settings.linkedin_feed_search_query_list if mode != "feed" else [],
                 "search_date_posted": settings.linkedin_feed_search_date_posted if mode != "feed" else "",
             },
             started_at=datetime.now(timezone.utc),
         ))
-        logger.info("linkedin_feed_queued", job_id=job_id, run_id=run_id, mode=mode)
+        logger.info("linkedin_feed_queued", job_id=job_id, run_id=run_id, mode=mode,
+                    linkedin_account=account)
         asyncio.create_task(
             _run_feed_background(job_id, run_id, run_pk, mode),
             name=f"linkedin-feed-{job_id}",
@@ -388,9 +408,10 @@ async def run_linkedin_feed_agent(
             "run_id":  run_id,
             "source":  _SOURCE,
             "mode":    mode,
+            "linkedin_account": account,
             "status":  "running",
-            "message": f"LinkedIn vendor-lead harvest started ({_MODE_LABELS[mode]}) — "
-                       "poll GET /harvest-status/{job_id}",
+            "message": f"LinkedIn vendor-lead harvest started ({_MODE_LABELS[mode]}, "
+                       f"LinkedIn Account {account}) — poll GET /harvest-status/{{job_id}}",
         },
     )
 

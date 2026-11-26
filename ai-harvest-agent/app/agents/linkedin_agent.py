@@ -1850,7 +1850,7 @@ class LinkedInAgent:
             return
 
         from app.config import get_settings
-        from app.core.company_domain import infer_company_domain
+        from app.core.company_domain import known_company_domain
         from app.core.dependencies import get_session_factory
         from app.agents.prospect_intelligence_agent import _extract_linkedin_contact_info, _infer_department
         from app.services.apollo_enrichment import apollo_contact_fallback
@@ -2017,13 +2017,14 @@ class LinkedInAgent:
                         and apollo_result.matched
                         and not apollo_result.company_size_band
                     ):
-                        domain = apollo_result.company_domain or infer_company_domain(company_name)[0]
+                        # Only a real domain (Apollo's own, or the curated map) — never
+                        # a name-guessed one, which bills a credit for the wrong org.
+                        domain = apollo_result.company_domain or known_company_domain(company_name)
                         if domain:
                             org, size_band = None, ""
                             try:
                                 res = await resolve_apollo_org(
-                                    settings, company_name=company_name,
-                                    domain=apollo_result.company_domain, guess_domain=True,
+                                    settings, company_name=company_name, domain=domain,
                                 )
                                 org, size_band = res.org, res.size_band
                             except Exception as exc:

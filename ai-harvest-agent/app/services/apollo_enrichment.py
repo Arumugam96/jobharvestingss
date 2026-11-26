@@ -385,7 +385,7 @@ async def apollo_hr_shortlist(
     dom = (domain or "").strip()
     try:
         res = await resolve_apollo_org(
-            settings, company_name=company_name, domain=dom, guess_domain=True, client=client,
+            settings, company_name=company_name, domain=dom, client=client,
         )
     except ApolloAPIError as exc:
         logger.warning("apollo_hr_shortlist_org_failed", company=company_name, error=str(exc))

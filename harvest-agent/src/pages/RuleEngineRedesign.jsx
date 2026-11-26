@@ -6,7 +6,7 @@ import {
   getHarvestConfig, saveHarvestConfig, runHarvestAgent, getHarvestStatus, getActiveRun,
   getRunHistory, getRunHistoryEntry, setupLinkedinSession, ApiError, isTransientError,
   getNaukriRecruiterStatus, startNaukriRecruiterLogin, verifyNaukriRecruiter,
-  saveSchedule, getScheduleStatus,
+  saveSchedule, getScheduleStatus, setActiveLinkedinAccount, linkedinAccountErrorText,
 } from "../api";
 import { fmtNextRun } from "../lib/schedule";
 import LiveBrowserView from "../components/LiveBrowserView";
@@ -404,6 +404,25 @@ export default function RuleEngineRedesign() {
   const showErr = (k) => attempted && errors[k];
   /** Wrap a state setter so that setting a value also marks the form dirty. */
   const markDirty = (setter) => (v) => { setter(v); setDirty(true); };
+
+  // Result of saving the active LinkedIn account ({ ok, text } or null).
+  const [accountMsg, setAccountMsg] = useState(null);
+  /** Save the active LinkedIn account immediately (every LinkedIn run uses it,
+   * including the Feed page, which never saves this form); revert on failure. */
+  async function changeLinkedinAccount(id) {
+    const prev = linkedinAccount;
+    if (!id || id === prev) return;
+    setLinkedinAccount(id);
+    setAccountMsg({ ok: true, text: "Saving…" });
+    try {
+      await setActiveLinkedinAccount(id);
+      const label = LINKEDIN_ACCOUNTS.find((a) => a.id === id)?.label || `Account ${id}`;
+      setAccountMsg({ ok: true, text: `Saved: LinkedIn Jobs and Feed runs now use ${label}.` });
+    } catch (err) {
+      setLinkedinAccount(prev);
+      setAccountMsg({ ok: false, text: linkedinAccountErrorText(err) });
+    }
+  }
 
   const tzOptions = withSavedOption(TIMEZONES, timezone);
   const currencyOptions = withSavedOption(CURRENCIES, currency);
@@ -903,9 +922,14 @@ export default function RuleEngineRedesign() {
           <section className="rr-card rr-rise">
             <div className="rr-card-h"><span>Active LinkedIn Account</span></div>
             <p className="rr-desc">The harvester signs in with this account's saved session.</p>
-            <select className="rr-inp" value={linkedinAccount} onChange={(e) => markDirty(setLinkedinAccount)(e.target.value)}>
+            <select className="rr-inp" value={linkedinAccount} onChange={(e) => changeLinkedinAccount(e.target.value)}>
               {LINKEDIN_ACCOUNTS.map((a) => <option key={a.id} value={a.id}>{a.label}</option>)}
             </select>
+            {accountMsg && (
+              accountMsg.ok
+                ? <p className="rr-desc" style={{ marginTop: 8, color: "#15803D" }}>{accountMsg.text}</p>
+                : <div className="rr-err">{accountMsg.text}</div>
+            )}
             <div className="rr-info" style={{ marginTop: 14 }}>
               <Info size={14} />
               <span>Each account keeps its own saved session and Chrome profile on the server. Saved to <code>sources.linkedin_account</code>.</span>
