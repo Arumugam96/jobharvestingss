@@ -11,11 +11,24 @@ import {
 
 // Labels for the Run Detail classification cards / active-filter chip.
 const BUCKET_LABELS = {
-  verified: "Verified contacts",
+  // verification_status is the career-page check (job title found on the company's
+  // careers page) — not a verified email/phone, so don't call it "contacts".
+  verified: "Career-page verified",
   direct: "Direct clients",
   gcc: "GCC companies",
   staffing: "Staffing firms",
   ambiguous: "Needs review",
+};
+
+// One predicate per stat-card bucket (hiring_entity / verification_status). Used
+// both to filter the table (bucketPredicate) and to count the cards (cardCounts),
+// so a card's number always equals the rows shown when it is clicked.
+const BUCKET_PREDICATES = {
+  verified: (j) => j.verificationStatus === "verified",
+  direct: (j) => j.hiringEntity === "Direct Client",
+  gcc: (j) => j.hiringEntity === "GCC",
+  staffing: (j) => j.hiringEntity === "Staffing Firm",
+  ambiguous: (j) => j.hiringEntity === "Ambiguous",
 };
 
 // Last few runs' loaded data, so returning to a run (e.g. Back from one of its
@@ -113,17 +126,37 @@ export default function RunDetailView({ runId, onBack, onView }) {
   // for the stats + CSV export below.
   const [bucket, setBucket] = useState("all");
   const [filteredRows, setFilteredRows] = useState([]);
+  // Rows passing every JobsTable filter (source/company/contact/job/POC/size/
+  // country/job type/search) EXCEPT the card bucket — reported by the table via
+  // onBaseFilteredChange. null until its first emit.
+  const [baseRows, setBaseRows] = useState(null);
 
   const bucketPredicate = useCallback((j) => {
-    // Predicates mirror the backend run-summary counts (hiring_entity /
-    // verification_status), so a card's number matches the rows shown.
-    if (bucket === "verified" && j.verificationStatus !== "verified") return false;
-    if (bucket === "direct" && j.hiringEntity !== "Direct Client") return false;
-    if (bucket === "gcc" && j.hiringEntity !== "GCC") return false;
-    if (bucket === "staffing" && j.hiringEntity !== "Staffing Firm") return false;
-    if (bucket === "ambiguous" && j.hiringEntity !== "Ambiguous") return false;
-    return true;
+    const pred = BUCKET_PREDICATES[bucket];
+    return pred ? pred(j) : true;
   }, [bucket]);
+
+  // Card counts come from the run's loaded jobs narrowed by the table's own
+  // filters (baseRows), using the same predicates the table filters on — so each
+  // card equals the rows shown when it is clicked, under any table filter. Not
+  // the run row's counters (verified_jobs / direct_clients / …): those are a
+  // snapshot written once at run end (a PATCH /jobs reclassification never
+  // updates them, Home Feed runs never write the classification ones, failed runs
+  // keep zeros). The counters only fill in while the jobs load (or if that load
+  // failed). Before the table's first emit, fall back to all loaded jobs.
+  const cardCounts = useMemo(() => {
+    if (jobsLoading || jobsError) return null;
+    const rows = baseRows ?? jobs;
+    const count = (pred) => rows.reduce((n, j) => n + (pred(j) ? 1 : 0), 0);
+    return {
+      all: rows.length,
+      verified: count(BUCKET_PREDICATES.verified),
+      direct: count(BUCKET_PREDICATES.direct),
+      gcc: count(BUCKET_PREDICATES.gcc),
+      staffing: count(BUCKET_PREDICATES.staffing),
+      ambiguous: count(BUCKET_PREDICATES.ambiguous),
+    };
+  }, [baseRows, jobs, jobsLoading, jobsError]);
 
   // Header stats over the rows currently shown (card bucket + every table filter,
   // incl. Source). POCs / emails / contacts (phones) are UNIQUE (uniqueContactStats:
@@ -282,12 +315,13 @@ export default function RunDetailView({ runId, onBack, onView }) {
                   <div className="ha-runhead-stats-side">
                     <div className="ha-runstats">
                       {[
-                        { bucket: "all",       value: entry.jobsFound,     label: "Jobs found",        color: C.accent },
-                        { bucket: "verified",  value: entry.verifiedJobs,  label: "Verified contacts", color: "#059669" },
-                        { bucket: "direct",    value: entry.directClients, label: "Direct clients",    color: C.primary },
-                        { bucket: "gcc",       value: entry.gcc,           label: "GCC companies",     color: C.secondary },
-                        { bucket: "staffing",  value: entry.staffingFirms, label: "Staffing firms",    color: "#7C3AED" },
-                        { bucket: "ambiguous", value: entry.ambiguous,     label: "Needs review",      color: "#D97706" },
+                        { bucket: "all",       value: cardCounts?.all ?? entry.jobsFound,           label: "Jobs found",        color: C.accent },
+                        { bucket: "verified",  value: cardCounts?.verified ?? entry.verifiedJobs,   label: BUCKET_LABELS.verified, color: "#059669",
+                          hint: "Jobs whose title was found on the company's careers page" },
+                        { bucket: "direct",    value: cardCounts?.direct ?? entry.directClients,    label: "Direct clients",    color: C.primary },
+                        { bucket: "gcc",       value: cardCounts?.gcc ?? entry.gcc,                 label: "GCC companies",     color: C.secondary },
+                        { bucket: "staffing",  value: cardCounts?.staffing ?? entry.staffingFirms,  label: "Staffing firms",    color: "#7C3AED" },
+                        { bucket: "ambiguous", value: cardCounts?.ambiguous ?? entry.ambiguous,     label: "Needs review",      color: "#D97706" },
                       ].map((card) => {
                         const active = bucket === card.bucket;
                         return (
@@ -296,7 +330,8 @@ export default function RunDetailView({ runId, onBack, onView }) {
                             type="button"
                             className={"ha-runstat ha-runstat-btn" + (active ? " ha-runstat-active" : "")}
                             aria-pressed={active}
-                            title={card.bucket === "all" ? "Show all jobs" : `Filter this run's jobs to ${card.label}`}
+                            title={(card.bucket === "all" ? "Show all jobs" : `Filter this run's jobs to ${card.label}`)
+                              + (card.hint ? ` (${card.hint})` : "")}
                             onClick={() => setBucket((b) => b === card.bucket ? "all" : card.bucket)}
                             style={active ? { boxShadow: `inset 0 0 0 2px ${card.color}` } : undefined}
                           >
@@ -351,6 +386,7 @@ export default function RunDetailView({ runId, onBack, onView }) {
                     loading={jobsLoading}
                     preFilter={bucketPredicate}
                     onFilteredChange={setFilteredRows}
+                    onBaseFilteredChange={setBaseRows}
                     minWidth={1410}
                     pageSize={Number(pageSizeSel)}
                     resdexAvailable={resdexAvailable}

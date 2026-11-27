@@ -140,6 +140,8 @@ export { isPlainLeftClick };
  * @param {(job: object) => void} props.onView Opens a job's detail view.
  * @param {((job: object) => boolean)|null} [props.preFilter] Extra client-side filter.
  * @param {(rows: object[]) => void} [props.onFilteredChange] Receives the filtered rows.
+ * @param {(rows: object[]) => void} [props.onBaseFilteredChange] Client mode: receives the
+ *   rows passing every table filter except `preFilter`.
  */
 export default function JobsTable({
   jobs,
@@ -172,6 +174,13 @@ export default function JobsTable({
   // horizontal scroll, and show the latest call's outcome + comments beside it so
   // the caller needn't open each job to see how their calls went.
   workspace = false,
+  // Called after an in-place change that moves a row between the page's stat-card
+  // buckets (unassign/assign, a call logged/edited/deleted) so the parent can
+  // refetch its counts and rows — otherwise the cards drift from the table.
+  onDataChanged = null,
+  // Client mode only: receives the rows passing every table filter except
+  // `preFilter` (fires only when that set changes). Unused in server mode.
+  onBaseFilteredChange = null,
 }) {
   // When `urlState`, the filter/search/sort/page state is mirrored to the URL
   // query string (so /jobs?company=…&page=2 is shareable and survives a refresh).
@@ -279,10 +288,11 @@ export default function JobsTable({
     try {
       await unassignJob(j.id);
       setAssignOverrides((prev) => ({ ...prev, [j.id]: null }));
+      onDataChanged?.();
     } catch (err) {
       setReleaseError({ jobId: j.id, text: err?.message || "Couldn't unassign this job." });
     }
-  }, []);
+  }, [onDataChanged]);
   const noDataTimer = useRef(null);
   const showRowMsg = useCallback((jobId, text) => {
     setNoDataMsg({ jobId, text });
@@ -335,10 +345,14 @@ export default function JobsTable({
     [serverMode, facets, jobs]
   );
 
-  const filtered = useMemo(() => {
-    // Server mode: rows arrive already filtered/sorted/paginated by the backend.
-    if (serverMode) return jobs;
-    const rows = jobs.filter((j) => {
+  // Client mode: rows passing every table filter (source/company/job/POC/country/
+  // size/job type/contact/search) but NOT the parent's `preFilter`, unsorted. The
+  // parent gets these via onBaseFilteredChange so its bucket cards can count under
+  // the table's filters (each card == rows shown when it is clicked). Server mode:
+  // null — rows arrive already filtered by the backend.
+  const baseFiltered = useMemo(() => {
+    if (serverMode) return null;
+    return jobs.filter((j) => {
       const c = jobContact(j);
       if (filters.source !== "all" && c.source !== filters.source) return false;
       if (filters.company !== "all" && j.company !== filters.company) return false;
@@ -357,7 +371,6 @@ export default function JobsTable({
         if ((j.jobTypeClass || "") !== want) return false;
       }
       if (!jobMatchesContact(j, filters.contact)) return false;
-      if (preFilter && !preFilter(j)) return false;
       if (query.trim()) {
         const q = query.toLowerCase();
         const hay = [j.title, j.company, c.source, c.pocName, ...c.emailParts.map((p) => p.val), ...c.phoneParts.map((p) => p.val)];
@@ -365,6 +378,16 @@ export default function JobsTable({
       }
       return true;
     });
+  }, [serverMode, jobs, filters, query]);
+
+  useEffect(() => {
+    if (baseFiltered && onBaseFilteredChange) onBaseFilteredChange(baseFiltered);
+  }, [baseFiltered, onBaseFilteredChange]);
+
+  const filtered = useMemo(() => {
+    // Server mode: rows arrive already filtered/sorted/paginated by the backend.
+    if (serverMode) return jobs;
+    const rows = preFilter ? baseFiltered.filter(preFilter) : baseFiltered;
     const dir = sort.dir === "asc" ? 1 : -1;
     return [...rows].sort((a, b) => {
       switch (sort.col) {
@@ -376,7 +399,7 @@ export default function JobsTable({
         default: return 0;
       }
     });
-  }, [serverMode, jobs, filters, query, sort, preFilter]);
+  }, [serverMode, jobs, baseFiltered, sort, preFilter]);
 
   useEffect(() => { if (onFilteredChange) onFilteredChange(filtered); }, [filtered, onFilteredChange]);
 
@@ -465,6 +488,9 @@ export default function JobsTable({
   const totalPages = Math.max(1, Math.ceil(effectiveTotal / pageSize));
   const currentPage = Math.min(page, totalPages);
   const pageRows = serverMode ? filtered : filtered.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  // My Workspace hides a row the moment it's unassigned here (before the refetch
+  // lands) — the empty state must count only the rows actually drawn.
+  const visibleRowCount = workspace ? pageRows.filter((j) => assignOverrides[j.id] !== null).length : pageRows.length;
 
   // Fetch outreach status for just the visible rows (keeps the query small vs.
   // the whole dataset). Merged into prior results so paged-away rows stay marked.
@@ -833,7 +859,7 @@ export default function JobsTable({
                 </tr>
                 );
               })}
-              {!loading && filtered.length === 0 && (
+              {!loading && visibleRowCount === 0 && (
                 <tr><td className="ha-td" colSpan={colCount} style={{ textAlign: "center", padding: "48px 16px", color: "#94A3B8" }}>
                   {emptyMessage}
                 </td></tr>
@@ -871,7 +897,7 @@ export default function JobsTable({
         <AssignJobModal
           job={assignModalJob}
           assignedTo={assignedOf(assignModalJob)}
-          onChange={(next) => setAssignOverrides((prev) => ({ ...prev, [assignModalJob.id]: next }))}
+          onChange={(next) => { setAssignOverrides((prev) => ({ ...prev, [assignModalJob.id]: next })); onDataChanged?.(); }}
           onClose={() => setAssignModalJob(null)}
         />
       )}
@@ -897,6 +923,7 @@ export default function JobsTable({
             await deletePhoneCallLog(call.id);
             setCommentModalJob(null);
             refreshPhoneVerifications();
+            onDataChanged?.();
           } : undefined}
           onChanged={refreshJobComments}
           onClose={() => setCommentModalJob(null)}
@@ -910,7 +937,7 @@ export default function JobsTable({
           phone={editCallModal.row.phone}
           pocName={editCallModal.row.contact_name}
           company={editCallModal.job.company}
-          onSave={async () => { refreshPhoneVerifications(); }}
+          onSave={async () => { refreshPhoneVerifications(); onDataChanged?.(); }}
           onClose={() => setEditCallModal(null)}
         />
       )}
@@ -927,6 +954,7 @@ export default function JobsTable({
             await savePhoneResult(phoneModal, result);
             // The call may now stand for this contact's other jobs on the page too.
             refreshPhoneVerifications();
+            onDataChanged?.();
           }}
           onClose={() => setPhoneModal(null)}
         />

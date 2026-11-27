@@ -544,6 +544,7 @@ async def outreach_history(
     date_from: str = Query(default="", description="List branch: sent on/after (YYYY-MM-DD)."),
     date_to: str = Query(default="", description="List branch: sent on/before (YYYY-MM-DD)."),
     engagement: str = Query(default="", description="List branch: one engagement-card bucket (replied/auto_replied/opened/clicked/unsubscribed/blocked/bounced)."),
+    tz_offset_min: int = Query(default=0, description="List branch: caller's JS Date.getTimezoneOffset() (UTC minus local, minutes; IST = -330) so date_from/date_to are local days. Clamped to -840..840."),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=100, ge=1, le=500),
     current_user: AuthenticatedUser = Depends(get_current_user),
@@ -598,6 +599,7 @@ async def outreach_history(
         db, search=search or None, company=company or None,
         date_from=date_from or None, date_to=date_to or None,
         engagement=engagement or None, page=page, page_size=page_size,
+        tz_offset_min=tz_offset_min,
     )
     names = await contact_names_for_rows(db, rows)
     auto_ids = await auto_replied_outreach_ids(db, [r.id for r in rows])
@@ -625,6 +627,7 @@ async def outreach_stats(
     company: str = Query(default=""),
     date_from: str = Query(default=""),
     date_to: str = Query(default=""),
+    tz_offset_min: int = Query(default=0, description="Caller's JS Date.getTimezoneOffset() (UTC minus local, minutes) so date_from/date_to are local days. Clamped to -840..840."),
     current_user: AuthenticatedUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
 ) -> dict:
@@ -634,7 +637,7 @@ async def outreach_stats(
         search=search or None, company=company or None,
         date_from=date_from or None, date_to=date_to or None,
     )
-    stats = await outreach_list_stats(db, **filters)
+    stats = await outreach_list_stats(db, tz_offset_min=tz_offset_min, **filters)
     # Tab badges for the Replies / Auto-replies views (reply rows, not sends).
     stats["views"] = await reply_view_counts(db, **filters)
     return stats

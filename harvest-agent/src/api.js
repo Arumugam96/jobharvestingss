@@ -959,6 +959,8 @@ export function getOutreachHistory({ job_id, recruiter_id, reply_id, limit, sear
   if (engagement) qs.set("engagement", engagement);
   if (page) qs.set("page", String(page));
   if (page_size) qs.set("page_size", String(page_size));
+  // date_from/date_to are LOCAL calendar days; tell the API our offset (UTC − local, minutes).
+  qs.set("tz_offset_min", String(new Date().getTimezoneOffset()));
   const q = qs.toString();
   return request(`/outreach/history${q ? `?${q}` : ""}`);
 }
@@ -977,6 +979,8 @@ export function getOutreachStats({ search, company, date_from, date_to } = {}) {
   if (company) qs.set("company", company);
   if (date_from) qs.set("date_from", date_from);
   if (date_to) qs.set("date_to", date_to);
+  // date_from/date_to are LOCAL calendar days; tell the API our offset (UTC − local, minutes).
+  qs.set("tz_offset_min", String(new Date().getTimezoneOffset()));
   const q = qs.toString();
   return request(`/outreach/stats${q ? `?${q}` : ""}`);
 }

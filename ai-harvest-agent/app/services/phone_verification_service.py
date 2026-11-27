@@ -1658,15 +1658,22 @@ def _is_assigned():
 
 
 async def count_assigned_jobs(db: AsyncSession, email: str | None = None,
-                              since: datetime | None = None) -> int:
+                              since: datetime | None = None, *, called: bool = False) -> int:
     """Jobs currently self-assigned in the tenant, whether or not anyone has called them
     (only those assigned to `email` when given — one person's count; only those
-    assigned on or after `since` when given — the Phone logs Date filter)."""
+    assigned on or after `since` when given — the Phone logs Date filter). With
+    `called`, only those with at least one non-cleared call (count_calls > 0), so the
+    result is always a subset of the plain count."""
     conds = [_is_assigned()]
     if email is not None:
         conds.append(func.lower(ScrapedJobORM.assigned_to_email) == email.lower())
     if since is not None:
         conds.append(ScrapedJobORM.assigned_at >= since)
+    if called:
+        conds.append(select(PhoneCallLogORM.id).where(
+            PhoneCallLogORM.job_id == ScrapedJobORM.id,
+            PhoneCallLogORM.cleared_at.is_(None),
+        ).exists())
     stmt = apply_tenant(
         select(func.count(ScrapedJobORM.id)).where(*conds), ScrapedJobORM.tenant_id,
     )
@@ -1675,12 +1682,21 @@ async def count_assigned_jobs(db: AsyncSession, email: str | None = None,
 
 async def list_assigned_jobs(
     db: AsyncSession, *, q: str = "", page: int = 1, page_size: int = 50,
+    owner_id: str | None = None, since: datetime | None = None,
 ) -> dict[str, Any]:
     """The Phone logs "Self-assigned jobs" drill-down: every job currently assigned in
     the tenant (called or not), most recently assigned first, with its number, call
-    count and latest call. `q` matches job title, company and assignee."""
+    count and latest call. `q` matches job title, company and assignee. `owner_id`
+    (the Assignee filter) and `since` (the Date filter) narrow it exactly like the
+    tile's count (list_logs -> count_assigned_jobs), so the tile equals the rows."""
     J, R = ScrapedJobORM, RecruiterORM
     conds = [_is_assigned()]
+    if owner_id is not None:
+        email = (await db.execute(
+            select(UserORM.email).where(UserORM.id == owner_id))).scalar_one_or_none() or ""
+        conds.append(func.lower(J.assigned_to_email) == email.lower())
+    if since is not None:
+        conds.append(J.assigned_at >= since)
     term = (q or "").strip().lower()
     if term:
         like = f"%{term}%"
@@ -2008,11 +2024,14 @@ async def list_logs(
     """Every non-cleared call in the tenant, newest first, with its job's title,
     company and assignee, its outcome and its reminder (the admin Phone logs page).
     Jobs since deleted still list (outer join) and count as unassigned. `summary`'s
-    call counts apply every filter except `status` and `reminder`, so the
-    answered / unanswered split stays visible.
+    call counts (total / answered / unanswered and `repeat_calls`) apply every filter
+    except `status` — including `reminder` — so the answered / unanswered split stays
+    visible yet never counts calls the table cannot show.
     `summary.assigned_jobs` (jobs currently self-assigned, called or not — assigned
-    within `since` and, with `owner_id`, to that user), `called_assigned_jobs` (those
-    with a call matching the filters) and `total_phones` (every phone entry held —
+    within `since` and, with `owner_id`, to that user), `called_assigned_jobs` (the
+    subset of those with at least one non-cleared call, any time — same assignee and
+    `since` conditions, so it never exceeds `assigned_jobs`; neither follows `q`,
+    `assignment` or `reminder`) and `total_phones` (every phone entry held —
     count_phone_entries, workspace-wide) fill the tiles.
 
     `owner_id` keeps only the calls owned by that user (assigned_to_user_id) — the
@@ -2022,7 +2041,6 @@ async def list_logs(
     `viewer` (the caller) sets each item's `can_edit` (see can_edit_log); without
     one every item reads `can_edit: false`. Items are shaped by _log_item."""
     now = _now()
-    is_assigned = _is_assigned()
     conds = _log_filter_conds(owner_id=owner_id, since=since, assignment=assignment, q=q)
 
     def scoped(stmt, *extra):
@@ -2031,29 +2049,29 @@ async def list_logs(
         """
         return apply_tenant(_log_joins(stmt).where(*conds, *extra), PhoneCallLogORM.tenant_id)
 
+    # The call cards follow every filter but `status` — the Reminder filter included,
+    # so a card never counts calls the table cannot show.
+    rem = [_reminder_cond(reminder, now)] if reminder in REMINDER_STATES else []
     by_status = dict((await db.execute(scoped(
-        select(PhoneCallLogORM.call_status, func.count(PhoneCallLogORM.id))
+        select(PhoneCallLogORM.call_status, func.count(PhoneCallLogORM.id)), *rem
     ).group_by(PhoneCallLogORM.call_status))).all())
     # The self-assigned card: an admin's follows the Assignee and Date filters like the
     # call cards; a business lead's is all-time (it opens My Workspace, which lists every
-    # job assigned to them), and so is its "N called" line.
+    # job assigned to them), and so is its "N called" line — the subset of those jobs
+    # with a non-cleared call, counted under the very same conditions.
     assigned_since = since if own_email is None else None
-    called_conds = conds if own_email is None else _log_filter_conds(
-        owner_id=owner_id, assignment=assignment, q=q)
-    called_assigned_jobs = (await db.execute(apply_tenant(_log_joins(
-        select(func.count(func.distinct(PhoneCallLogORM.job_id)))).where(*called_conds, is_assigned),
-        PhoneCallLogORM.tenant_id))).scalar_one()
     assignee_email = own_email
     if assignee_email is None and owner_id is not None:
         assignee_email = (await db.execute(
             select(UserORM.email).where(UserORM.id == owner_id))).scalar_one_or_none() or ""
     assigned_jobs = await count_assigned_jobs(db, assignee_email, assigned_since)
+    called_assigned_jobs = await count_assigned_jobs(
+        db, assignee_email, assigned_since, called=True)
     total_phones = None if own_email is not None else await count_phone_entries(db)
     answered, unanswered = int(by_status.get("answered", 0)), int(by_status.get("unanswered", 0))
 
     row_conds = [PhoneCallLogORM.call_status == status] if status in CALL_STATUSES else []
-    if reminder in REMINDER_STATES:
-        row_conds.append(_reminder_cond(reminder, now))
+    row_conds += rem
     total = (await db.execute(scoped(
         select(func.count(PhoneCallLogORM.id)), *row_conds))).scalar_one()
     page = max(1, int(page))
@@ -2070,7 +2088,7 @@ async def list_logs(
     if own_email is None:  # admin-only figure
         repeat_ids = await _repeat_call_ids(db)
         repeat_calls = int((await db.execute(scoped(
-            select(func.count(PhoneCallLogORM.id)), PhoneCallLogORM.id.in_(repeat_ids),
+            select(func.count(PhoneCallLogORM.id)), PhoneCallLogORM.id.in_(repeat_ids), *rem,
         ))).scalar_one() or 0) if repeat_ids else 0
     return {
         "items": items,

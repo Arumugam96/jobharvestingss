@@ -79,7 +79,11 @@ export default function DemandBatchView({ runId, onBack, onOpenJob }) {
       if (!alive.current) return;
       ticks.current += 1;
       const live = res && (res.status === "running" || (res.rows || []).some(isActiveRow));
-      if (ticks.current === 1 || (live && ticks.current % 3 === 0)) loadUsage();
+      // Also refresh the quota once on the last tick (batch just ended): otherwise the
+      // "Today's shared quota" line keeps the figure from up to two ticks before the end
+      // while the batch's own "Searches" count above it is already final.
+      const justEnded = !live && res && ticks.current > 1;
+      if (ticks.current === 1 || (live && ticks.current % 3 === 0) || justEnded) loadUsage();
       if (live || !res) timer.current = setTimeout(tick, POLL_MS);
     };
     tick();

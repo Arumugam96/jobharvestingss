@@ -603,19 +603,22 @@ function PhonesPanel({ reloadKey, exportRef, onLogged }) {
   );
 }
 
-/** "Self-assigned jobs" drill-down: every currently assigned job, called or not. */
-function AssignedJobsPanel({ reloadKey, exportRef, onLogged }) {
+/** "Self-assigned jobs" drill-down: every currently assigned job, called or not —
+ *  within the page's Date (`days`) and Assignee filters, the same scope as the tile. */
+function AssignedJobsPanel({ days, assignee, reloadKey, exportRef, onLogged }) {
   const navigate = useNavigate();
   // Admin-only panel: admins may open any self-assigned job (the lock exempts them),
   // so a row click opens the job here, Ctrl/Cmd/middle-click in a new tab.
   const jobHref = (row) => `/jobs/${encodeURIComponent(row.job_id)}`;
   const [page, setPage] = useState(1);
   const [query, setQuery, q] = useDebouncedSearch(() => setPage(1));
+  useEffect(() => { setPage(1); }, [days, assignee]);
   const { data, loading, error } = usePagedFetch(
-    getAssignedJobs, { q, page, page_size: PAGE_SIZE }, reloadKey, "Couldn't load self-assigned jobs.");
+    getAssignedJobs, { q, days, assignee, page, page_size: PAGE_SIZE }, reloadKey, "Couldn't load self-assigned jobs.");
   const items = data?.items || [];
+  const daysLabel = DAYS_OPTIONS.find((o) => o.value === String(days))?.label;
   exportRef.current = async () => {
-    const all = await fetchAllPages(getAssignedJobs, { q });
+    const all = await fetchAllPages(getAssignedJobs, { q, days, assignee });
     return {
       name: `self-assigned-jobs-${today()}`, sheet: "Self-assigned jobs",
       head: ["Job title", "Company", "Assigned to", "Assigned on", "Phone", "Calls", "Last call status", "Last call outcome", "Last call at"],
@@ -631,6 +634,12 @@ function AssignedJobsPanel({ reloadKey, exportRef, onLogged }) {
       {error && <div className="ha-errbanner">{error}</div>}
       <div className="ha-card ha-filterbar" style={{ padding: "11px 14px", gridTemplateColumns: "minmax(0, 1fr)" }}>
         <SearchBox value={query} onChange={setQuery} placeholder="Search job, company, assignee…" label="Search self-assigned jobs" />
+        {(days !== "0" || assignee) && (
+          <div style={SUBLINE}>
+            Assigned {days !== "0" ? `in the ${(daysLabel || "").toLowerCase()}` : "any time"}
+            {assignee ? " to the picked assignee" : ""} (the Date / Assignee filters on the Calls view).
+          </div>
+        )}
       </div>
       <div className="ha-card" style={{ overflow: "hidden" }}>
         <div className="ha-table-scroll">
@@ -766,16 +775,24 @@ export default function PhoneLogsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filters, isAdmin, q, page, reloadKey]);
 
-  /** Re-fetch only the summary tiles for the current filters, keeping the rows on screen
-   * (no loading state, errors ignored — the next normal load surfaces them). */
-  const refreshSummaryQuietly = () => {
-    getPhoneLogs({ ...logParams, q, page, page_size: PAGE_SIZE })
+  // The cache key of the params on screen now, so a quiet refresh that lands after the
+  // filters / page changed doesn't overwrite the newer list.
+  const currentLogsKey = useRef(logsCacheKey);
+  currentLogsKey.current = logsCacheKey;
+  /** Re-fetch the rows, total and tiles for the current filters together, without a
+   * loading state (errors ignored — the next normal load surfaces them). Rows and tiles
+   * must come from one response: an edited call can drop out of the Status / Reminder
+   * filter, and a delete must refill the page, or the tiles stop matching the table. */
+  const refreshQuietly = () => {
+    const key = logsCacheKey;
+    getPhoneLogs(requestParams)
       .then((res) => {
-        if (res?.summary) setData((prev) => (prev ? { ...prev, summary: res.summary } : prev));
+        setCached(key, res);
+        if (res && currentLogsKey.current === key) setData(res);
       })
       .catch(() => {});
   };
-  /** Admins: delete one call log, drop it from the current page, refresh the tiles. */
+  /** Admins: delete one call log, drop it from the current page, then refetch the page + tiles. */
   const deleteCall = async (row) => {
     if (!window.confirm("Delete this call log? It is removed from Phone logs and the job's history, and any flag it alone set on the number (invalid, do-not-call, warm) is lifted.")) return;
     try {
@@ -785,12 +802,13 @@ export default function PhoneLogsPage() {
         items: (prev.items || []).filter((r) => String(r.id) !== String(row.id)),
         total: Math.max(0, (prev.total || 0) - 1),
       } : prev));
-      refreshSummaryQuietly();
+      refreshQuietly();
     } catch (err) {
       window.alert(err?.message || "Couldn't delete this call log.");
     }
   };
-  /** After an edit: swap the updated call into the current page in place, then refresh the tiles. */
+  /** After an edit: swap the updated call into the current page in place, then refetch
+   *  the page + tiles (the call may no longer match the filters). */
   const onCallEdited = (updated) => {
     if (updated && updated.id != null) {
       setData((prev) => (prev ? {
@@ -798,7 +816,7 @@ export default function PhoneLogsPage() {
         items: (prev.items || []).map((r) => (String(r.id) === String(updated.id) ? { ...r, ...updated } : r)),
       } : prev));
     }
-    refreshSummaryQuietly();
+    refreshQuietly();
   };
 
   const items = data?.items || [];
@@ -915,7 +933,7 @@ export default function PhoneLogsPage() {
         </div>
 
         {!ownScope && view === "phones" && <PhonesPanel reloadKey={reloadKey} exportRef={exportRef} onLogged={() => setReloadKey((k) => k + 1)} />}
-        {!ownScope && view === "assigned" && <AssignedJobsPanel reloadKey={reloadKey} exportRef={exportRef} onLogged={() => setReloadKey((k) => k + 1)} />}
+        {!ownScope && view === "assigned" && <AssignedJobsPanel days={filters.days} assignee={filters.assignee} reloadKey={reloadKey} exportRef={exportRef} onLogged={() => setReloadKey((k) => k + 1)} />}
 
         {(view === "calls" || ownScope) && (
           <>

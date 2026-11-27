@@ -481,14 +481,24 @@ async def phone_inventory_list(
             summary="Every self-assigned job in the tenant (admins only)")
 async def assigned_jobs_list(
     q: str = Query(default="", max_length=200),
+    days: int = Query(default=0, ge=0, le=3650,
+                      description="Only jobs assigned in the last N days; 0 = all."),
+    assignee: str = Query(default="", max_length=36,
+                          description="Only jobs assigned to this user id."),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=200),
     current_user: AuthenticatedUser = Depends(require_admin),
     db: AsyncSession = Depends(get_db_session),
 ) -> dict:
     """The Phone logs "Self-assigned jobs" drill-down: every currently assigned job,
-    called or not, with its call count and latest call. Admins only."""
-    return await pvs.list_assigned_jobs(db, q=q, page=page, page_size=page_size)
+    called or not, with its call count and latest call. `days` / `assignee` match the
+    tile's Date / Assignee scope (GET /phone-verifications/logs summary.assigned_jobs).
+    Admins only."""
+    days = days if isinstance(days, int) else 0  # direct (non-HTTP) calls get Query()
+    assignee = assignee.strip() if isinstance(assignee, str) else ""
+    since = datetime.now(timezone.utc) - timedelta(days=days) if days else None
+    return await pvs.list_assigned_jobs(db, q=q, page=page, page_size=page_size,
+                                        owner_id=assignee or None, since=since)
 
 
 @router.get(

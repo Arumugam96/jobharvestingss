@@ -140,10 +140,16 @@ function StatsPanel({ stats, engagement, onToggle }) {
     <div className="ha-stats">
       <style>{STATS_CSS}</style>
       <div className="ha-stats-head">
-        <span className="big">{base}</span>
-        <span className="cap">emails delivered</span>
+        {/* `sent` = accepted by the relay (status 'sent'); it still includes bounced /
+            blocked mail and sends with no delivery event yet, so it is not "delivered".
+            Failed sends are listed in the table too, so show them to reconcile the row count. */}
+        <span className="big" title="Accepted by the mail relay (includes bounced / blocked)">{base}</span>
+        <span className="cap">emails sent</span>
+        {(stats.failed || 0) > 0 && (
+          <span className="cap" title="Rejected by the relay at send time — listed in the table, not in the percentages">· {stats.failed} failed</span>
+        )}
         <span className="sep" />
-        <span className="big rep">{replies}</span>
+        <span className="big rep" title="Sends with at least one matched reply">{replies}</span>
         <span className="cap">replies received</span>
         <span className="sep" />
         <span className="big auto">{stats.auto_replied || 0}</span>
@@ -304,9 +310,18 @@ export default function OutreachHistoryPage() {
     // The Replies / Auto-replies views list inbound reply rows over the same filters.
     const filters = { search: dq, company: dCompany, ...dateParams };
     const listCall = getOutreachHistory({ ...filters, engagement, page, page_size: PAGE_SIZE });
+    let repaging = false;
     try {
       const [res, st] = await Promise.all([listCall, getOutreachStats(filters)]);
       if (seq !== seqRef.current) return; // a newer request superseded this one
+      // A page restored from the URL (or left behind after the set shrank) can be past
+      // the end: the list comes back empty while the cards still count rows. Jump to
+      // the last real page instead of showing an empty table under non-zero cards.
+      if (page > 1 && !(res.items || []).length && (res.total || 0) > 0) {
+        repaging = true; // keep "Loading…" up until the re-run for the new page lands
+        setPage(Math.max(1, Math.min(page - 1, res.total_pages || 1)));
+        return;
+      }
       setItems(res.items || []);
       setTotal(res.total || 0);
       setTotalPages(res.total_pages || 1);
@@ -316,7 +331,7 @@ export default function OutreachHistoryPage() {
       setError(err instanceof ApiError ? `Could not load mail logs: ${err.message}` : "Could not reach the harvest backend.");
       setItems([]); setTotal(0); setTotalPages(1); setStats(EMPTY_STATS);
     } finally {
-      if (seq === seqRef.current) setLoading(false);
+      if (seq === seqRef.current && !repaging) setLoading(false);
     }
   }, [page, dq, dCompany, dateParams, engagement]);
 

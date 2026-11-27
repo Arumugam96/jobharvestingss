@@ -123,7 +123,7 @@ export default function JobsPage({ onNavigate, onBack, onView, pageSizeSel, onPa
   useEffect(() => () => clearTimeout(statsTimerRef.current), []);
 
   // The facets params that carry no user filter for this page mode — the
-  // unfiltered dropdown fetch uses `facetBase`; `statsBase` is what the stats
+  // base facets fetch (global dropdowns + the page scope's stats) uses `statsBase`, which is also what the stats
   // params reduce to when the user hasn't filtered anything.
   const facetBase = useMemo(() => (demand ? { source: DEMAND_SOURCE } : {}), [demand]);
   const statsBase = useMemo(
@@ -152,8 +152,8 @@ export default function JobsPage({ onNavigate, onBack, onView, pageSizeSel, onPa
     setFiltersActive(active);
     clearTimeout(statsTimerRef.current);
     const seq = ++statsSeqRef.current;
-    // Same params as the unfiltered facets fetch → its stats already cover it.
-    if (sig === JSON.stringify(Object.fromEntries(Object.entries(facetBase).sort()))) {
+    // Same params as the base facets fetch → its stats already cover it.
+    if (sig === JSON.stringify(Object.fromEntries(Object.entries(statsBase).sort()))) {
       setFilteredStats(null);
       jobsViewRef.current = { ...(jobsViewRef.current || {}), filteredStats: { sig, data: null, active } };
       return;
@@ -170,14 +170,16 @@ export default function JobsPage({ onNavigate, onBack, onView, pageSizeSel, onPa
         if (seq === statsSeqRef.current) statsSigRef.current = null; // retry next change
       }
     }, 300);
-  }, [jobsViewRef, facetBase, statsBase]);
+  }, [jobsViewRef, statsBase]);
 
-  const handleParamsChange = useCallback(async (params) => {
+  const handleParamsChange = useCallback(async (params, { background = false } = {}) => {
     lastParamsRef.current = params;
     updateStats(params);
     const seq = ++seqRef.current;
     const paramsSig = JSON.stringify(params);
-    const quiet = seedSigRef.current !== null && paramsSig === seedSigRef.current;
+    // `background`: a refetch of the same view after an in-place change — keep the
+    // rows on screen instead of flashing "Loading".
+    const quiet = background || (seedSigRef.current !== null && paramsSig === seedSigRef.current);
     if (!quiet) seedSigRef.current = null;
     setPageLoading(!quiet);
     setPageError("");
@@ -224,9 +226,17 @@ export default function JobsPage({ onNavigate, onBack, onView, pageSizeSel, onPa
     }
   }, [jobsViewRef, updateStats]);
 
+  // Dropdown distincts are global either way; the base stats must cover the page's
+  // own scope (My Workspace → only my assigned jobs), or the cards would show the
+  // whole dataset until the filtered stats land.
+  // Seq-guarded like the stats: back-to-back refreshes (two quick unassigns) must
+  // not let an older response land last and put stale counts over fresh rows.
+  const facetsSeqRef = useRef(0);
   const fetchFacets = useCallback(async () => {
+    const seq = ++facetsSeqRef.current;
     try {
-      const f = await getJobsFacets(facetBase);
+      const f = await getJobsFacets(statsBase);
+      if (seq !== facetsSeqRef.current) return; // superseded by a newer fetch
       setFacets(f);
       // Unfiltered facets (dropdown options + whole-dataset stats) are
       // filter-independent, so cache them globally.
@@ -235,15 +245,16 @@ export default function JobsPage({ onNavigate, onBack, onView, pageSizeSel, onPa
       // Dropdowns fall back to "All"-only and stats render as 0; the jobs
       // fetch's own error banner covers a backend outage.
     }
-  }, [jobsViewRef, facetBase]);
+  }, [jobsViewRef, statsBase]);
   useEffect(() => { fetchFacets(); }, [fetchFacets]);
 
-  // eslint-disable-next-line no-unused-vars
+  // Re-read counts and rows after a change made in the table (unassign, call
+  // logged…) so the stat cards keep matching the rows below them.
   const refresh = useCallback(() => {
     fetchFacets();
     if (lastParamsRef.current) {
       updateStats(lastParamsRef.current, true);
-      handleParamsChange(lastParamsRef.current);
+      handleParamsChange(lastParamsRef.current, { background: true });
     }
   }, [fetchFacets, handleParamsChange, updateStats]);
 
@@ -465,6 +476,7 @@ export default function JobsPage({ onNavigate, onBack, onView, pageSizeSel, onPa
           serverExtraParams={serverExtraParams}
           minWidth={library ? 1300 : 1410}
           workspace={library}
+          onDataChanged={refresh}
           pageSize={Number(pageSizeSel)}
           urlState={urlState}
           lockedSource={demand ? DEMAND_SOURCE : ""}

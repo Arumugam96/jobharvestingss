@@ -407,15 +407,37 @@ async def emails_for_job(
     return list((await db.execute(stmt)).scalars().all())
 
 
-def _parse_day(raw: str | None, *, end: bool = False) -> datetime | None:
-    """Parse a 'YYYY-MM-DD' filter value to a UTC datetime — start-of-day, or the
-    start of the NEXT day when `end` (so `created_at < end` is inclusive)."""
+# Bounds for a client-supplied timezone offset (minutes). Real-world offsets span
+# UTC-12:00..UTC+14:00; anything outside +/-14h is clamped.
+_TZ_OFFSET_MIN_LIMIT = 840
+
+
+def _clamp_tz_offset(tz_offset_min: int | None) -> int:
+    """Coerce a JS `Date.getTimezoneOffset()` value into -840..840 (0 when absent/bad)."""
+    try:
+        v = int(tz_offset_min or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(-_TZ_OFFSET_MIN_LIMIT, min(_TZ_OFFSET_MIN_LIMIT, v))
+
+
+def _parse_day(
+    raw: str | None, *, end: bool = False, tz_offset_min: int | None = 0
+) -> datetime | None:
+    """Parse a 'YYYY-MM-DD' filter value as a LOCAL calendar day and return its
+    boundary as a UTC datetime: local start-of-day, or the start of the NEXT local
+    day when `end` (so `created_at < end` is inclusive).
+
+    `tz_offset_min` uses JS `Date.getTimezoneOffset()` semantics — minutes of
+    UTC minus local (IST = -330, US Eastern = 300). Local midnight + offset = UTC
+    instant, so 0 (the default) keeps the old UTC-day behaviour exactly."""
     if not raw:
         return None
     try:
         d = datetime.fromisoformat(str(raw)[:10]).replace(tzinfo=timezone.utc)
     except (TypeError, ValueError):
         return None
+    d = d + timedelta(minutes=_clamp_tz_offset(tz_offset_min))
     return d + timedelta(days=1) if end else d
 
 
@@ -454,11 +476,15 @@ def _has_auto_reply():
     )
 
 
-def _apply_list_filters(stmt, *, search=None, company=None, date_from=None, date_to=None, engagement=None):
+def _apply_list_filters(
+    stmt, *, search=None, company=None, date_from=None, date_to=None, engagement=None,
+    tz_offset_min=0,
+):
     """Apply the Mail-logs list filters to a base `select(EmailOutreachORM)`:
       * `search` (point of contact) → joined poster/recruiter name OR recipient email
       * `company` → EmailOutreachORM.company (real column)
-      * `date_from`/`date_to` → created_at range (end is inclusive)
+      * `date_from`/`date_to` → created_at range (end is inclusive), read as the
+        caller's local calendar days via `tz_offset_min` (JS getTimezoneOffset)
       * `engagement` → one engagement-card bucket (opened/clicked/unsubscribed/blocked/bounced)
     Outerjoins to scraped_jobs/recruiters are 1:1 on the PK, so no row multiplication.
     Tenant-scoped first (belt-and-suspenders alongside RLS) so both the list and the
@@ -480,8 +506,8 @@ def _apply_list_filters(stmt, *, search=None, company=None, date_from=None, date
         )
     if company:
         stmt = stmt.where(EmailOutreachORM.company.ilike(f"%{company.strip()}%"))
-    df = _parse_day(date_from)
-    dt = _parse_day(date_to, end=True)
+    df = _parse_day(date_from, tz_offset_min=tz_offset_min)
+    dt = _parse_day(date_to, end=True, tz_offset_min=tz_offset_min)
     if df is not None:
         stmt = stmt.where(EmailOutreachORM.created_at >= df)
     if dt is not None:
@@ -502,6 +528,7 @@ async def recent_outreach(
     engagement: str | None = None,
     page: int = 1,
     page_size: int = 100,
+    tz_offset_min: int = 0,
 ) -> tuple[list[EmailOutreachORM], int]:
     """Server-side paginated + filtered recent-outreach list for the Mail logs page.
     Returns `(rows, total)` where `total` is the whole filtered count (across pages),
@@ -509,6 +536,7 @@ async def recent_outreach(
     base = _apply_list_filters(
         select(EmailOutreachORM), search=search, company=company,
         date_from=date_from, date_to=date_to, engagement=engagement,
+        tz_offset_min=tz_offset_min,
     )
     total = (await db.execute(select(func.count()).select_from(base.subquery()))).scalar_one()
     stmt = (
@@ -527,6 +555,7 @@ async def outreach_list_stats(
     company: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
+    tz_offset_min: int = 0,
 ) -> dict[str, int]:
     """Whole-dataset engagement counts over the *filtered* Mail-logs set (so the stat
     panel stays accurate under pagination). Each count is a subquery over the shared
@@ -545,7 +574,8 @@ async def outreach_list_stats(
       * auto_replied — sends that received at least one auto-reply (OOO etc.)
     """
     base = _apply_list_filters(
-        select(EmailOutreachORM), search=search, company=company, date_from=date_from, date_to=date_to
+        select(EmailOutreachORM), search=search, company=company, date_from=date_from,
+        date_to=date_to, tz_offset_min=tz_offset_min,
     )
 
     async def _count(stmt) -> int:

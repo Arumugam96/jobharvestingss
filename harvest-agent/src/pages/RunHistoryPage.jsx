@@ -34,6 +34,15 @@ export default function RunHistoryPage({ runs, runsTotal, runsAggStats, loading,
     runHistoryViewRef.current = { filters, startDate, endDate, query, sort, contact };
   }, [runHistoryViewRef, filters, startDate, endDate, query, sort, contact]);
 
+  // The run list lives in context and is otherwise loaded once at app start (plus
+  // the live poll while a run is running and the Rule Engine's post-run refresh),
+  // so a scheduled run or a LinkedIn Feed run started since would be missing from
+  // the cards and table. Revalidate on every visit; current rows stay on screen.
+  useEffect(() => {
+    onRefresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Matching display run_ids for the current selection (null = no contact filter).
   const [contactMatch, setContactMatch] = useState(null);
   const [contactLoading, setContactLoading] = useState(false);
